@@ -58,6 +58,79 @@ enum ToolState {
     Ended,
 }
 
+/// 13.38（A-2）：命令输出边执行边落库的节流间隔。只节流「只带输出块」的更新；
+/// 状态变化、结束、取消时总是立刻写出。
+pub const TOOL_OUTPUT_THROTTLE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// 每张工具卡保留的已产生输出上限（只保留末尾）。超过时 `outputTruncated` 为真。
+pub const TOOL_OUTPUT_RETAIN_BYTES: usize = 64 * 1024;
+
+/// 一张运行中工具卡已经收到的输出（`_meta.terminal_output` / `terminal_output_delta`
+/// 的增量块，或 `content` 文本的最新快照）和节流状态。
+#[derive(Debug, Default)]
+struct ToolProgress {
+    output: String,
+    truncated: bool,
+    exit_code: Option<Value>,
+    last_status: Option<String>,
+    last_emit: Option<std::time::Instant>,
+    /// 节流期间压下的最新一次更新（还没写出）。
+    pending: Option<Value>,
+}
+
+impl ToolProgress {
+    fn append(&mut self, chunk: &str) {
+        self.output.push_str(chunk);
+        self.trim();
+    }
+
+    fn replace(&mut self, text: &str) {
+        if text.len() >= self.output.len() || !self.output.ends_with(text) {
+            self.output = text.to_owned();
+            self.trim();
+        }
+    }
+
+    fn trim(&mut self) {
+        if self.output.len() <= TOOL_OUTPUT_RETAIN_BYTES {
+            return;
+        }
+        let mut cut = self.output.len() - TOOL_OUTPUT_RETAIN_BYTES;
+        while !self.output.is_char_boundary(cut) {
+            cut += 1;
+        }
+        self.output.drain(..cut);
+        self.truncated = true;
+    }
+
+    /// 工具卡结果里带上已产生的输出（`text`）。原结果已有文本时不覆盖。
+    fn decorate(&self, result: &mut Value) {
+        let Some(map) = result.as_object_mut() else { return };
+        if !self.output.is_empty() {
+            map.entry("text").or_insert_with(|| json!(self.output));
+            map.insert("streamedOutput".into(), json!(true));
+        }
+        if self.truncated {
+            map.insert("outputTruncated".into(), json!(true));
+        }
+        if let Some(code) = &self.exit_code {
+            map.entry("exitCode").or_insert_with(|| code.clone());
+        }
+    }
+}
+
+/// 一次 ACP 工具更新里的输出块：Zed 约定的 `_meta.terminal_output`（pi-acp、Codex 声明能力时）
+/// 与 `_meta.terminal_output_delta`（codex-acp 默认）都是「追加」，返回 `(追加的数据, true)`；
+/// 都没有时，`content` 里的文本是整段快照，返回 `(快照, false)`。
+fn output_chunk(update: &Value) -> Option<(String, bool)> {
+    for key in ["terminal_output", "terminal_output_delta"] {
+        if let Some(data) = update.pointer(&format!("/_meta/{key}/data")).and_then(Value::as_str) {
+            return Some((data.to_owned(), true));
+        }
+    }
+    tool_content_summary(update.get("content")).map(|text| (text, false))
+}
+
 /// Turns one turn's ACP updates into Fox runtime events. One projector per
 /// run (a new turn starts a new projector).
 #[derive(Debug, Default)]
@@ -65,6 +138,7 @@ pub struct AcpProjector {
     message_started: bool,
     message_completed: bool,
     tools: BTreeMap<String, ToolState>,
+    progress: BTreeMap<String, ToolProgress>,
     /// Backend status lines taken out of the answer ([`backend_notice_kind`]).
     notices: Vec<Value>,
     delivered: bool,
@@ -266,6 +340,10 @@ impl AcpProjector {
     }
 
     fn tool(&mut self, update: &Value, first_seen_as_call: bool, out: &mut Vec<Value>) {
+        self.tool_at(update, first_seen_as_call, std::time::Instant::now(), out)
+    }
+
+    fn tool_at(&mut self, update: &Value, first_seen_as_call: bool, now: std::time::Instant, out: &mut Vec<Value>) {
         let Some(id) = update.get("toolCallId").and_then(Value::as_str) else {
             return;
         };
@@ -287,24 +365,77 @@ impl AcpProjector {
                     "input": tool_input(update),
                 }));
                 self.tools.insert(id.to_owned(), ToolState::Running);
+                let progress = self.progress.entry(id.to_owned()).or_default();
+                progress.last_status = status.map(str::to_owned);
+                progress.last_emit = Some(now);
+                if let Some((chunk, append)) = output_chunk(update) {
+                    if append { progress.append(&chunk) } else { progress.replace(&chunk) }
+                }
                 if !matches!(status, Some("completed" | "failed")) {
                     return;
                 }
             }
         }
+        // 13.38（A-2）：输出块（pi-acp / codex-acp 的 `_meta.terminal_output[_delta]`）累积到这张卡上，
+        // 退出码（`_meta.terminal_exit.exit_code`）一起记下。
+        let chunk = output_chunk(update);
+        let progress = self.progress.entry(id.to_owned()).or_default();
+        let had_chunk = chunk.is_some();
+        if let Some((chunk, append)) = chunk {
+            if append { progress.append(&chunk) } else { progress.replace(&chunk) }
+        }
+        if let Some(code) = update.pointer("/_meta/terminal_exit/exit_code").filter(|code| !code.is_null()) {
+            progress.exit_code = Some(code.clone());
+        }
         match status {
             Some("completed" | "failed") => {
                 if status == Some("completed") { self.delivered = true; }
+                let mut result = tool_result(update);
+                progress.decorate(&mut result);
+                progress.pending = None;
                 out.push(json!({
                     "type": "tool.completed",
                     "toolCallId": id,
                     "isError": status == Some("failed"),
-                    "result": tool_result(update),
+                    "result": result,
                 }));
                 self.tools.insert(id.to_owned(), ToolState::Ended);
             }
-            _ => out.push(json!({ "type": "tool.updated", "toolCallId": id, "update": tool_result(update) })),
+            _ => {
+                let mut result = tool_result(update);
+                progress.decorate(&mut result);
+                let status_changed = status.is_some() && status.map(str::to_owned) != progress.last_status;
+                let only_output = had_chunk && !status_changed;
+                let due = progress.last_emit.is_none_or(|at| now.saturating_duration_since(at) >= TOOL_OUTPUT_THROTTLE);
+                if status.is_some() {
+                    progress.last_status = status.map(str::to_owned);
+                }
+                if only_output && !due {
+                    // 节流：只记下最新一次，到期、结束或取消时再写出。
+                    progress.pending = Some(result);
+                    return;
+                }
+                progress.pending = None;
+                progress.last_emit = Some(now);
+                out.push(json!({ "type": "tool.updated", "toolCallId": id, "update": result }));
+            }
         }
+    }
+
+    /// 13.38（A-2）：把节流期间压下的输出立刻写出（取消请求、本轮结束前调用），
+    /// 已产生的输出不会因为节流而丢掉。
+    pub fn flush_pending(&mut self) -> Vec<Value> {
+        let mut out = Vec::new();
+        for (id, progress) in self.progress.iter_mut() {
+            if self.tools.get(id) != Some(&ToolState::Running) {
+                continue;
+            }
+            if let Some(result) = progress.pending.take() {
+                progress.last_emit = Some(std::time::Instant::now());
+                out.push(json!({ "type": "tool.updated", "toolCallId": id, "update": result }));
+            }
+        }
+        out
     }
 
     /// Project one ACP `SessionUpdate` (the JSON of `session/update`'s
@@ -365,11 +496,12 @@ impl AcpProjector {
     /// Events that close the turn before its terminal: the assistant message
     /// (when one was started) is completed. Idempotent.
     pub fn finish(&mut self) -> Vec<Value> {
+        let mut out = self.flush_pending();
         if self.message_started && !self.message_completed {
             self.message_completed = true;
-            return vec![json!({ "type": "message.completed" })];
+            out.push(json!({ "type": "message.completed" }));
         }
-        Vec::new()
+        out
     }
 
     /// Tool cards still running (the terminal projection interrupts them).

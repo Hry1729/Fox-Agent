@@ -1792,7 +1792,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         let Some(session) = self.find_by_run(run_id) else {
             return CancelOutcome::NotActive;
         };
-        let (connection, native, generation) = {
+        let (connection, native, generation, flushed) = {
             let mut state = lock(&session.state);
             let generation = state.generation;
             let connection = state.connection.clone();
@@ -1804,8 +1804,13 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             turn.cancel_requested_at.get_or_insert_with(std::time::Instant::now);
             turn.arbiter.request_cancel();
             turn.approvals.clear();
-            (connection.filter(|_| turn.prompt_sent), native, generation)
+            // 13.38（A-2）：节流期间压下的命令输出先落库，再发 session/cancel。
+            let flushed = turn.projector.flush_pending();
+            (connection.filter(|_| turn.prompt_sent), native, generation, flushed)
         };
+        for event in flushed {
+            self.emit(&session, run_id, event);
+        }
         let answered = match (connection, native) {
             (Some(connection), Some(native)) => connection.cancel(&native),
             _ => Vec::new(),
@@ -1928,7 +1933,16 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             "noBaseline": outcome.no_baseline,
             "outsideJob": { "count": outcome.outside_job.len(), "pids": outcome.outside_job },
             "outsideJobUnverified": { "count": outcome.outside_job_unverified.len(), "pids": outcome.outside_job_unverified },
+            "accessDenied": { "count": outcome.access_denied.len(), "processes": outcome.access_denied },
         });
+        if !outcome.access_denied.is_empty() {
+            // 13.38（R1-2）：Job 外、拒绝访问、按父进程链也没结束的本轮进程。单独一条审计，取消照常完成。
+            self.inner.sink.audit(&session.conversation_id, session.backend, "agent_backend.cancel_sweep_access_denied", &json!({
+                "runId": run_id,
+                "processes": outcome.access_denied,
+                "note": "这些进程不在 Fox 的 Job 里，且 Fox 无权结束（多为沙箱账户或受限令牌下由服务代为创建）；取消已完成，进程可能仍在运行",
+            }));
+        }
         if outcome.no_baseline || !outcome.failed.is_empty() {
             let reason = outcome.failed.join("; ");
             details["reason"] = json!(if reason.is_empty() { "没有本轮进程基线".to_owned() } else { reason });
@@ -1950,7 +1964,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         self.emit(session, run_id, event);
         self.inner.sink.audit(&session.conversation_id, session.backend, "agent_backend.cancel_swept", &details);
         eprintln!(
-            "fox.external conversation={} agent_backend={} cancel_swept killed={} failed={} no_baseline={} outside_job={} outside_job_unverified={}{}",
+            "fox.external conversation={} agent_backend={} cancel_swept killed={} failed={} no_baseline={} outside_job={} outside_job_unverified={} access_denied={}{}",
             session.conversation_id,
             session.backend.as_str(),
             outcome.killed.len(),
@@ -1958,6 +1972,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             outcome.no_baseline,
             outcome.outside_job.len(),
             outcome.outside_job_unverified.len(),
+            outcome.access_denied.len(),
             timing_line.unwrap_or_default()
         );
     }

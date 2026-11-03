@@ -247,6 +247,41 @@ pub fn outside_job_descendants(members: &[u32], table: &[SystemProcess], since: 
     found
 }
 
+/// 13.38（R1-2）：结束进程时被拒绝访问（Win32 5 / ERROR_ACCESS_DENIED）。
+pub fn is_access_denied(reason: &str) -> bool {
+    reason.contains("(Win32 5)") || reason.contains("（Win32 5）")
+}
+
+/// 13.38（R1-2）：`row` 的父进程链上、Job 之外、本轮（`since` 之后）创建的祖先，从最靠近 Job
+/// 成员的一层到 `row` 的直接父进程。拒绝访问时按这条链兜底清扫：持有子进程 kill-on-close
+/// Job 的往往是这一层。每一环都做 pid 复用检查（子进程不比父进程老）。
+pub fn outside_job_ancestors(row: &SystemProcess, table: &[SystemProcess], members: &[u32], since: u64) -> Vec<SystemProcess> {
+    use std::collections::HashMap;
+    let by_pid: HashMap<u32, &SystemProcess> = table.iter().map(|item| (item.pid, item)).collect();
+    let mut chain = Vec::new();
+    let mut child = row;
+    for _ in 0..32 {
+        if child.parent == 0 || child.parent == child.pid {
+            break;
+        }
+        let Some(parent) = by_pid.get(&child.parent) else { break };
+        if let (Some(child_created), Some(parent_created)) = (child.created, parent.created) {
+            if child_created < parent_created {
+                break;
+            }
+        }
+        if members.contains(&parent.pid) || parent.pid == row.pid || chain.iter().any(|item: &SystemProcess| item.pid == parent.pid) {
+            break;
+        }
+        if parent.created.is_some_and(|created| created >= since) {
+            chain.push((*parent).clone());
+        }
+        child = parent;
+    }
+    chain.reverse();
+    chain
+}
+
 /// Windows: the current time as FILETIME (100 ns since 1601), comparable with
 /// process creation times.
 #[cfg(windows)]
@@ -580,6 +615,22 @@ mod tests {
         let found = outside_job_descendants(&[10, 11], &table, 400);
         assert_eq!(found.targets.iter().map(|row| row.pid).collect::<Vec<_>>(), vec![20, 21, 22]);
         assert_eq!(found.unverifiable.iter().map(|row| row.pid).collect::<Vec<_>>(), vec![60]);
+    }
+
+    #[test]
+    fn outside_job_ancestors_walk_up_to_the_job_member_and_skip_older_processes() {
+        use super::{is_access_denied, outside_job_ancestors};
+        // 10 在 Job 里；20（本轮）→ 30（本轮）→ 40（本轮，被拒绝访问的 pwsh）；15 是本轮之前就有的服务进程。
+        let table = vec![row(10, 1, Some(100)), row(20, 10, Some(500)), row(30, 20, Some(510)), row(40, 30, Some(520)), row(15, 10, Some(50)), row(41, 15, Some(600))];
+        let chain = outside_job_ancestors(&table[3], &table, &[10], 400);
+        assert_eq!(chain.iter().map(|item| item.pid).collect::<Vec<_>>(), [20, 30], "从靠近 Job 成员的一层到直接父进程");
+        // 挂在本轮之前的服务进程下：那一层不在链上（不归本轮，不杀）。
+        assert!(outside_job_ancestors(&table[5], &table, &[10], 400).is_empty());
+        // pid 复用：父进程比子进程新，链断开。
+        let reused = vec![row(10, 1, Some(100)), row(20, 10, Some(900)), row(40, 20, Some(520))];
+        assert!(outside_job_ancestors(&reused[2], &reused, &[10], 400).is_empty());
+        assert!(is_access_denied("TerminateProcess(32040) 失败 (Win32 5)"));
+        assert!(!is_access_denied("TerminateProcess(32040) 失败 (Win32 6)"));
     }
 
     #[test]

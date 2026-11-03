@@ -726,6 +726,34 @@ pub mod win_job {
             Ok(job)
         }
 
+        /// 13.38（R1-2）：Job 的限制里没有 `JOB_OBJECT_LIMIT_BREAKAWAY_OK` /
+        /// `JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK`：成员带 `CREATE_BREAKAWAY_FROM_JOB` 创建进程会失败，
+        /// 也不会静默脱离。读回实际生效的限制核对，不只相信自己设过什么。
+        pub fn verify_no_breakaway(&self) -> Result<(), String> {
+            use windows_sys::Win32::System::JobObjects::{JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK};
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    self.0,
+                    JobObjectExtendedLimitInformation,
+                    &mut limits as *mut _ as *mut core::ffi::c_void,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                return Err(format!("QueryInformationJobObject(limits) failed (Win32 error {})", last_error()));
+            }
+            let flags = limits.BasicLimitInformation.LimitFlags;
+            if flags & (JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK) != 0 {
+                return Err(format!("backend Job Object allows breakaway (LimitFlags=0x{flags:08x})"));
+            }
+            if flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE == 0 {
+                return Err(format!("backend Job Object lost KILL_ON_JOB_CLOSE (LimitFlags=0x{flags:08x})"));
+            }
+            Ok(())
+        }
+
         pub fn assign(&self, process: RawHandle) -> Result<(), String> {
             if unsafe { AssignProcessToJobObject(self.0, process as HANDLE) } == 0 {
                 return Err(format!("AssignProcessToJobObject failed (Win32 error {})", last_error()));
@@ -965,11 +993,15 @@ pub(crate) struct SweepOutcome {
     /// Windows：挂在后端进程下、不在 Job 中、读不到创建时间（多为其他账户的进程）。
     /// 无法判断是否本轮进程，只记录不结束，也不因此停掉后端。
     pub outside_job_unverified: Vec<u32>,
+    /// 13.38（R1-2）：Job 外、本轮创建、结束时被拒绝访问（Win32 5，多为沙箱账户 / 其他令牌的进程），
+    /// 按父进程链兜底也没结束的进程。只写审计，不算清扫失败：停掉后端也结束不了它们，
+    /// 取消照常完成。每项带 pid、映像名、父进程链和原因。
+    pub access_denied: Vec<serde_json::Value>,
 }
 
 impl SweepOutcome {
     fn fail(reason: impl Into<String>) -> Self {
-        Self { killed: Vec::new(), failed: vec![reason.into()], no_baseline: false, outside_job: Vec::new(), outside_job_unverified: Vec::new() }
+        Self { killed: Vec::new(), failed: vec![reason.into()], no_baseline: false, outside_job: Vec::new(), outside_job_unverified: Vec::new(), access_denied: Vec::new() }
     }
 
     pub(crate) fn stop_required(&self) -> bool {
@@ -1124,6 +1156,12 @@ impl AcpConnection {
                 let job = win_job::Job::new()?;
                 let handle = child.raw_handle().ok_or("backend exited before it could be placed in a Job Object")?;
                 job.assign(handle)?;
+                // 13.38（R1-2）：后端必须在一个不允许 breakaway 的 Job 里，且确实已经进去；
+                // 任何一条不成立都不让它运行（它还挂起着）。
+                job.verify_no_breakaway()?;
+                if job.contains(handle) != Some(true) {
+                    return Err("backend is not a member of its Job Object after assignment".to_owned());
+                }
                 let pid = child.id().ok_or("backend has no pid")?;
                 win_job::resume_process(pid)?;
                 Ok::<_, String>(job)
@@ -1822,7 +1860,7 @@ impl AcpConnection {
 
     fn sweep_blocking(&self, baseline: &ProcessBaseline, later_of: impl FnMut() -> Option<ProcessBaseline>) -> SweepOutcome {
         if let ProcessBaseline::Unavailable { reason } = baseline {
-            return SweepOutcome { killed: Vec::new(), failed: vec![reason.clone()], no_baseline: true, outside_job: Vec::new(), outside_job_unverified: Vec::new() };
+            return SweepOutcome { killed: Vec::new(), failed: vec![reason.clone()], no_baseline: true, outside_job: Vec::new(), outside_job_unverified: Vec::new(), access_denied: Vec::new() };
         }
         #[cfg(windows)]
         {
@@ -1877,6 +1915,7 @@ impl AcpConnection {
         }
         let mut outside_job = Vec::new();
         let mut outside_job_unverified = Vec::new();
+        let mut access_denied = Vec::new();
         match table {
             Err(reason) => failed.push(format!("读取系统进程表失败，无法检查 Job 外的本轮进程：{reason}")),
             Ok(table) => {
@@ -1894,6 +1933,37 @@ impl AcpConnection {
                             outside_job.push(row.pid);
                         }
                         Ok(false) => {}
+                        Err(reason) if crate::proctree::is_access_denied(&reason) => {
+                            // 13.38（R1-2）：拒绝访问（多为沙箱账户 / 受限令牌下由服务代为创建的进程）。
+                            // 按父进程链兜底：结束它在 Job 外、本轮创建的祖先（持有它的 kill-on-close Job
+                            // 的那一层），再看它是否随之结束。仍在就写审计，不算清扫失败，不卡住取消。
+                            let chain = crate::proctree::outside_job_ancestors(row, &table, &current, since);
+                            let mut chain_killed = Vec::new();
+                            for ancestor in &chain {
+                                let Some(ancestor_created) = ancestor.created else { continue };
+                                if let Ok(true) = crate::proctree::terminate_verified(ancestor.pid, ancestor_created, SWEEP_KILL_WAIT) {
+                                    chain_killed.push(ancestor.pid);
+                                    killed.push(ancestor.pid);
+                                    outside_job.push(ancestor.pid);
+                                }
+                            }
+                            if !chain_killed.is_empty() {
+                                std::thread::sleep(std::time::Duration::from_millis(200));
+                            }
+                            if !chain_killed.is_empty() && crate::proctree::process_ended(row.pid) {
+                                killed.push(row.pid);
+                                outside_job.push(row.pid);
+                            } else {
+                                access_denied.push(serde_json::json!({
+                                    "pid": row.pid,
+                                    "name": row.name,
+                                    "parent": row.parent,
+                                    "parentChain": chain.iter().map(|item| serde_json::json!({ "pid": item.pid, "name": item.name })).collect::<Vec<_>>(),
+                                    "parentChainKilled": chain_killed,
+                                    "reason": reason,
+                                }));
+                            }
+                        }
                         Err(reason) => failed.push(format!("{}（{}，不在 Job 中）", reason, row.name)),
                     }
                 }
@@ -1903,7 +1973,7 @@ impl AcpConnection {
         killed.sort_unstable();
         killed.dedup();
         outside_job.sort_unstable();
-        SweepOutcome { killed, failed, no_baseline: false, outside_job, outside_job_unverified }
+        SweepOutcome { killed, failed, no_baseline: false, outside_job, outside_job_unverified, access_denied }
     }
 
     #[cfg(unix)]
@@ -1923,7 +1993,7 @@ impl AcpConnection {
         let (mut killed, failed) = crate::proctree::kill_sweep_targets(&targets);
         killed.sort_unstable();
         killed.dedup();
-        SweepOutcome { killed, failed, no_baseline: false, outside_job: Vec::new(), outside_job_unverified: Vec::new() }
+        SweepOutcome { killed, failed, no_baseline: false, outside_job: Vec::new(), outside_job_unverified: Vec::new(), access_denied: Vec::new() }
     }
 
     #[cfg(unix)]

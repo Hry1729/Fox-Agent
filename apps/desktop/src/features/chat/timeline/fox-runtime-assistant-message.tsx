@@ -93,7 +93,9 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
   const runActive = useMemo(() => runtimeProcessActivity(processEvents, running).running, [processEvents, running])
   const completed = !running && ['completed', 'interrupted', 'failed', 'cancelled'].includes(message.status)
   const canToggleTurn = processGroupCount > 0
-  const turnProcessCollapsed = canToggleTurn && turnProcessChoice !== 'open'
+  // 13.38（A-2）：取消的这一轮默认展开过程，工具卡和取消前的输出直接可见，不只剩一行「过程已取消」。
+  const turnDefaultOpen = Boolean(cancelled || message.status === 'cancelled')
+  const turnProcessCollapsed = canToggleTurn && (turnProcessChoice === null ? !turnDefaultOpen : turnProcessChoice !== 'open')
   // The current trailing reply stays readable while the process is folded,
   // including when it is still streaming. Earlier replies remain in the fold.
   const visibleResponseIndex = orderedGroups?.reduce((last, group, index) =>

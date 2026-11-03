@@ -1712,8 +1712,19 @@ fn run_contained(
     let mut stderr = attach_output(stderr, MAX_COMMAND_OUTPUT_BYTES);
     let started = Instant::now();
     let mut wait_failure = None;
+    let live = live_output_attached();
+    let mut live_at = Instant::now();
+    let mut live_total = 0u64;
     let outcome = loop {
+        if live && live_at.elapsed() >= LIVE_OUTPUT_INTERVAL {
+            live_at = Instant::now();
+            publish_live_output(stdout.as_ref(), stderr.as_ref(), &mut live_total);
+        }
         if let Err(error) = check() {
+            if live {
+                // 取消前已产生的输出先落库，再停进程树。
+                publish_live_output(stdout.as_ref(), stderr.as_ref(), &mut live_total);
+            }
             containment.terminate(&mut child);
             break CommandOutcome::Cancelled(error);
         }
@@ -2015,6 +2026,65 @@ struct StreamProgress {
 struct OutputStream {
     progress: std::sync::Arc<Mutex<StreamProgress>>,
     reader: Option<thread::JoinHandle<()>>,
+}
+
+/// 13.38（A-2）：前台 `run_command` 边执行边落库。调用方用 [`with_live_output`] 在当前线程
+/// 挂一个接收器，`run_contained` 的等待循环按 [`LIVE_OUTPUT_INTERVAL`] 节流，把到目前为止
+/// 已产生的输出（stdout，再加 `[stderr]` 段）交给它。没有挂接收器时什么都不做。
+pub(crate) const LIVE_OUTPUT_INTERVAL: Duration = Duration::from_millis(1000);
+
+thread_local! {
+    static LIVE_OUTPUT_SINK: std::cell::RefCell<Option<Box<dyn Fn(&str)>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// 在 `f` 执行期间，把本线程上前台命令的已产生输出交给 `sink`（节流）。返回 `f` 的结果；
+/// 结束后接收器一定被摘掉，嵌套调用恢复外层接收器。
+pub(crate) fn with_live_output<R>(sink: impl Fn(&str) + 'static, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<Box<dyn Fn(&str)>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            LIVE_OUTPUT_SINK.with(|slot| *slot.borrow_mut() = previous);
+        }
+    }
+    let previous = LIVE_OUTPUT_SINK.with(|slot| slot.borrow_mut().replace(Box::new(sink)));
+    let _restore = Restore(previous);
+    f()
+}
+
+fn live_output_attached() -> bool {
+    LIVE_OUTPUT_SINK.with(|slot| slot.borrow().is_some())
+}
+
+fn stream_snapshot(stream: Option<&OutputStream>) -> (Vec<u8>, u64) {
+    stream
+        .and_then(|stream| stream.progress.lock().ok().map(|progress| (progress.kept.clone(), progress.total_bytes)))
+        .unwrap_or_default()
+}
+
+/// 已产生输出的文本快照（与最终结果同一套解码），交给接收器。
+fn publish_live_output(stdout: Option<&OutputStream>, stderr: Option<&OutputStream>, last_total: &mut u64) {
+    let (out, out_total) = stream_snapshot(stdout);
+    let (err, err_total) = stream_snapshot(stderr);
+    let total = out_total.saturating_add(err_total);
+    if total == *last_total {
+        return;
+    }
+    *last_total = total;
+    let (out_text, _) = decode_child_bytes(&out);
+    let (err_text, _) = decode_child_bytes(&err);
+    let text = if err_text.trim().is_empty() {
+        out_text
+    } else if out_text.trim().is_empty() {
+        err_text
+    } else {
+        format!("{out_text}\n\n[stderr]\n{err_text}")
+    };
+    LIVE_OUTPUT_SINK.with(|slot| {
+        if let Some(sink) = slot.borrow().as_ref() {
+            sink(&text);
+        }
+    });
 }
 
 fn stream_finished(stream: &OutputStream) -> bool {

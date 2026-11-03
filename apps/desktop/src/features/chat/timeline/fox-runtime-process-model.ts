@@ -17,6 +17,61 @@ export type RuntimeToolStep = {
   isError: boolean
   completed: boolean
   awaitingUser: boolean
+  /** 13.38（A-2）：执行中已经落库的输出（`tool.updated` 的 update，或 Host 工具卡定格时的结果）。 */
+  partialOutput?: unknown
+  /** 13.38（A-2）：工具没有结束、这一轮先结束了：定格为「已取消」或「已中断」。 */
+  settled?: 'cancelled' | 'interrupted'
+}
+
+/** Host 工具卡定格事件：前端把数据库里已取消 / 已中断的工具卡（含已产生的输出）补进事件流时用。 */
+export const TOOL_HOST_SETTLED_EVENT = 'tool.host_settled'
+
+/**
+ * 13.38（A-2）：把数据库里已定格（cancelled / interrupted）的工具卡补进这一轮的事件流。
+ * 事件流里已有结束事件的卡不补；Host 执行的命令（Fox 原生）边执行边写进工具卡的输出，
+ * 取消后只在这里出现。补进来的事件 seq 取这一轮的最后一个 seq，不改变任何版本号。
+ */
+export function withSettledToolCalls(events: RunEventRecord[], toolCalls: readonly ToolCallLike[] | undefined): RunEventRecord[] {
+  if (!toolCalls?.length || !events.length) return events
+  const runId = events[0].runId
+  const ended = new Set(events.filter(item => item.eventType === 'tool.completed' || item.eventType === 'tool.failed')
+    .map(item => item.event.toolCallId).filter((id): id is string => typeof id === 'string'))
+  const settled = toolCalls.filter(call => call.runId === runId && (call.status === 'cancelled' || call.status === 'interrupted')
+    && !ended.has(call.runtimeToolCallId))
+  if (!settled.length) return events
+  const lastSeq = events.reduce((latest, item) => Math.max(latest, item.seq), 0)
+  const lastAt = events.reduce((latest, item) => Math.max(latest, item.createdAt), 0)
+  return [...events, ...settled.map((call): RunEventRecord => ({
+    runId, seq: lastSeq, eventType: TOOL_HOST_SETTLED_EVENT, createdAt: lastAt,
+    event: { type: TOOL_HOST_SETTLED_EVENT, toolCallId: call.runtimeToolCallId, tool: call.toolName, input: call.input,
+      status: call.status, result: call.result, errorMessage: call.errorMessage },
+  }))]
+}
+
+/** `ToolCallRecord` 里补事件用到的字段。 */
+export interface ToolCallLike {
+  runId: string
+  runtimeToolCallId: string
+  toolName: string
+  input: unknown
+  status: string
+  result: unknown | null
+  errorMessage: string | null
+}
+
+/** 已产生输出的可读文本：`{ text }`、`{ content: [{ text }] }`、纯字符串，取不到时为空串。 */
+export function toolPartialOutputText(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return ''
+  const record = value as Record<string, unknown>
+  if (typeof record.text === 'string') return record.text
+  if (Array.isArray(record.content)) {
+    return record.content
+      .map(part => part && typeof part === 'object' && typeof (part as Record<string, unknown>).text === 'string' ? (part as Record<string, unknown>).text as string : '')
+      .filter(Boolean).join('\n')
+  }
+  if (typeof record.output === 'string') return record.output
+  return ''
 }
 
 export type RuntimeSource = {
@@ -302,8 +357,23 @@ export function runtimeProcess(events: RunEventRecord[]) {
       completed: false,
       awaitingUser: false,
     }
+    if (item.eventType === TOOL_HOST_SETTLED_EVENT) {
+      // 数据库里这张卡已定格（Host 工具卡、或 Runtime 卡在取消时）；事件流里没有结束事件时以它为准。
+      if (!current.completed) {
+        current.settled = item.event.status === 'cancelled' ? 'cancelled' : 'interrupted'
+        const settledText = toolPartialOutputText(item.event.result)
+        if (settledText) current.partialOutput = item.event.result
+        else if (typeof item.event.errorMessage === 'string' && item.event.errorMessage && current.partialOutput === undefined) current.partialOutput = { text: item.event.errorMessage }
+      }
+      tools.set(toolCallId, current)
+      continue
+    }
     current.lastSeq = item.seq
     if (item.event.input !== undefined) current.input = item.event.input
+    if (item.eventType === 'tool.updated') {
+      const update = item.event.update ?? item.event.output
+      if (update !== undefined && update !== null && toolPartialOutputText(update)) current.partialOutput = update
+    }
     if (item.eventType === 'tool.completed') {
       current.output = item.event.result
       current.isError = item.event.isError === true
@@ -315,6 +385,13 @@ export function runtimeProcess(events: RunEventRecord[]) {
       )
     }
     tools.set(toolCallId, current)
+  }
+  // 13.38（A-2）：这一轮先于工具结束（取消、失败、中断）时，没结束的工具卡定格，不再显示为进行中。
+  const terminal = events.find(item => item.eventType === 'run.cancelled' || item.eventType === 'run.failed' || item.eventType === 'run.interrupted')
+  if (terminal) {
+    for (const tool of tools.values()) {
+      if (!tool.completed && !tool.awaitingUser && !tool.settled) tool.settled = terminal.eventType === 'run.cancelled' ? 'cancelled' : 'interrupted'
+    }
   }
   const reasoningItems = reasoningGroups
     .map((group) => group.text.trim())

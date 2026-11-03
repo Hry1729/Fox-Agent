@@ -4520,6 +4520,24 @@ impl Database {
         .map(|(record, _)| record)
     }
 
+    /// 13.38（A-2）：Host 执行中的前台命令把已产生的输出写进它那一行（节流由调用方负责）。
+    /// 只改仍在运行的 Host 工具卡；结束后的最终结果照常由结算覆盖。取消时 run.cancelled
+    /// 把这一行定格为 cancelled，这里写下的输出原样保留，界面可以展开查看。
+    pub(crate) fn update_host_tool_live_output(&self, run_id: &str, runtime_tool_call_id: &str, text: &str) -> Result<bool, String> {
+        let result = json!({ "status": "running", "text": text, "streamedOutput": true });
+        let result_json = crate::canonical_json::to_string(&result).map_err(|error| error.to_string())?;
+        let now = now_ms();
+        self.with_connection(|connection| {
+            let changed = connection.execute(
+                "UPDATE tool_calls SET result_json = ?3, updated_at = ?4
+                 WHERE run_id = ?1 AND runtime_tool_call_id = ?2
+                   AND execution_location = 'host' AND status = 'running'",
+                params![run_id, runtime_tool_call_id, result_json, now],
+            )?;
+            Ok(changed == 1)
+        })
+    }
+
     pub(crate) fn create_host_tool_call_once(
         &self,
         run_id: &str,
@@ -7294,7 +7312,12 @@ impl Database {
             // turn-process sweep after a confirmed cancel. It is written while
             // the Run is still cancelling, before its terminal (13.35), so
             // it is kept here instead of being dropped.
+            // 13.38（A-2）：取消宽限期里工具卡的输出与结束照常落库（取消前已产生的输出不能丢）。
+            // 只对 Runtime 自己的工具卡生效；PiNative 的工具卡由 Host 结算，不经这里。
+            let cancelling_tool_output = writer_route != native_route::WriterRoute::PiNative
+                && matches!(event_type, "tool.updated" | "tool.completed");
             if run_status == "cancelling"
+                && !cancelling_tool_output
                 && !matches!(
                     event_type,
                     "usage.updated"
@@ -9227,7 +9250,7 @@ fn project_tool_updated(
            AND (?5 IS NULL OR tool_name = ?5)
            AND EXISTS(
                SELECT 1 FROM runs
-               WHERE runs.id = tool_calls.run_id AND runs.status = 'running'
+               WHERE runs.id = tool_calls.run_id AND runs.status IN ('running', 'cancelling')
            )",
         params![
             run_id,
@@ -9295,7 +9318,7 @@ fn project_tool_completed(
            AND (?8 IS NULL OR tool_name = ?8)
            AND EXISTS(
                SELECT 1 FROM runs
-               WHERE runs.id = tool_calls.run_id AND runs.status = 'running'
+               WHERE runs.id = tool_calls.run_id AND runs.status IN ('running', 'cancelling')
            )",
         params![
             run_id,

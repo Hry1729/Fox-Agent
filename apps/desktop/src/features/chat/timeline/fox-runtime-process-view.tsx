@@ -16,7 +16,7 @@ import { AlertTriangle, Bot, Brain, Check, ChevronRight, CircleHelp, Database, F
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { MarkdownResponse } from '../fox-shared'
 import { type RuntimeGroupHelpers } from './fox-runtime-assistant-message'
-import { type RuntimeToolStep, runtimeProcess, stepSlotsText, toolActivity, toolIcon, toolRowSlots } from './fox-runtime-process-model'
+import { type RuntimeToolStep, runtimeProcess, stepSlotsText, toolActivity, toolIcon, toolPartialOutputText, toolRowSlots } from './fox-runtime-process-model'
 
 function RuntimeReasoningItem({ detail, running = false, preview = true }: { detail: string; running?: boolean; preview?: boolean }) {
   const summary = preview ? reasoningSummary(detail) : ''
@@ -76,7 +76,19 @@ function RuntimeToolItem({ tool, active, attemptState, attachmentNames, onOpenFi
   // A path is interactive because the row *has* a path and a handler — the
   // decision never reads the rendered string, so gaining a source cannot take the
   // click away and the visible order can never change underneath the reader.
-  const slots = toolRowSlots(tool, attachmentNames)
+  // 13.38（A-2）：这一轮先结束、工具没结束：卡片定格（动词用完成式，后面标「已取消 / 已中断」），
+  // 已经产生的输出放进结果里，展开可看。
+  const frozen = !tool.completed && Boolean(tool.settled)
+  const slots = toolRowSlots(frozen ? { ...tool, completed: true } : tool, attachmentNames)
+  const partialText = frozen || (!tool.completed && active) ? toolPartialOutputText(tool.partialOutput) : ''
+  const settledLabel = frozen ? tool.settled === 'cancelled' ? '已取消' : '已中断' : ''
+  const outputView = tool.completed
+    ? (failure
+      ? { 说明: failure.summary, ...(failure.hint ? { 处理建议: failure.hint } : {}), ...(failure.target ? { 对象: failure.target } : {}) }
+      : tool.output)
+    : partialText
+      ? (frozen ? `${partialText}${partialText.endsWith('\n') ? '' : '\n'}[${settledLabel}，以上是${settledLabel === '已取消' ? '取消' : '中断'}前已经产生的输出]` : partialText)
+      : undefined
   const { ref: tailRef, overflowing: tailOverflowing } = useOverflowFade<HTMLSpanElement>(`${slots.source} ${slots.summary}`, Boolean(slots.source || slots.summary))
   const pathIsInteractive = Boolean(slots.path && (onOpenFileInSidebar || onRevealFileInExplorer))
   const openPathInSidebar = () => onOpenFileInSidebar?.(slots.path)
@@ -118,14 +130,12 @@ function RuntimeToolItem({ tool, active, attemptState, attachmentNames, onOpenFi
       : tool.isError
         ? attemptContext ?? failure?.summary ?? '工具调用未成功'
         : undefined
-  const action = <span className="fox-run-step-action">{slots.action}</span>
-  return <ToolCall className="fox-element-tool-call fox-runtime-step-row max-w-none" open={open} onOpenChange={setOpen} running={active} completed={tool.completed && !tool.awaitingUser} label={action} activeLabel={action} ariaLabel={stepSlotsText(slots)}
+  const action = <span className="fox-run-step-action">{slots.action}{settledLabel && <span className="fox-run-step-settled" data-settled={tool.settled}>{` · ${settledLabel}`}</span>}</span>
+  return <ToolCall className="fox-element-tool-call fox-runtime-step-row max-w-none" open={open} onOpenChange={setOpen} running={active && !frozen} completed={tool.completed && !tool.awaitingUser} label={action} activeLabel={action} ariaLabel={settledLabel ? `${stepSlotsText(slots)} · ${settledLabel}` : stepSlotsText(slots)}
     icon={<ToolIcon className="fox-runtime-step-icon-glyph" />}
     query={<><span className="fox-run-step-path-slot">{pathContent}</span>{(slots.source || slots.summary) && <><span aria-hidden="true"> · </span><span ref={tailRef} className={`fox-run-step-tail${tailOverflowing ? ` ${OVERFLOW_CLASS}` : ''}`}>{slots.source && <span className="fox-run-step-source">{slots.source}</span>}{slots.source && slots.summary && <span aria-hidden="true"> · </span>}{slots.summary && <span className="fox-run-step-summary">{slots.summary}</span>}</span></>}</>}
     request={!tool.isError ? <AIToolInput className="fox-runtime-tool-detail" input={tool.input as never} /> : undefined}
-    result={tool.completed ? <AIToolOutput className="fox-runtime-tool-detail" output={(failure
-      ? { 说明: failure.summary, ...(failure.hint ? { 处理建议: failure.hint } : {}), ...(failure.target ? { 对象: failure.target } : {}) }
-      : tool.output) as never} errorText={undefined} /> : undefined} error={executionError} />
+    result={outputView !== undefined ? <AIToolOutput className="fox-runtime-tool-detail" output={outputView as never} errorText={undefined} /> : undefined} error={executionError} />
 }
 
 /** A step row is exactly one line tall, however long the thought grows. Plain text
@@ -260,7 +270,8 @@ export function useLiveNow(active: boolean) {
 }
 
 export function RuntimeProcess({ events, process: preparedProcess, groupHelpers, displayMode = 'standard', runInProgress = false, running: runtimeRunning, answerStarted = false, leading, grouped = false, outcome, attachmentNames, onOpenFileInSidebar, onRevealFileInExplorer, phaseTitle }: { events: RunEventRecord[]; process?: ReturnType<typeof runtimeProcess>; groupHelpers?: RuntimeGroupHelpers | null; displayMode?: ProcessDisplayMode; runInProgress?: boolean; running: boolean; answerStarted?: boolean; leading?: ReactNode; grouped?: boolean; outcome?: 'failed' | 'cancelled'; attachmentNames?: ReadonlyMap<string, string>; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void; /** Stage label for the whole Run, computed where its full event list is known. */ phaseTitle?: string }) {
-  const [open, setOpen] = useState(false)
+  // 13.38（A-2）：取消的这一轮默认展开，工具卡直接可见；用户自己收起 / 展开后以用户为准。
+  const [openChoice, setOpen] = useState<boolean | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const process = useMemo(() => preparedProcess ?? runtimeProcess(events), [events, preparedProcess])
@@ -271,7 +282,7 @@ export function RuntimeProcess({ events, process: preparedProcess, groupHelpers,
   ))
   const processStepCount = process.steps.length
   const lifecycleOnly = processStepCount === 0 && hasLifecycle
-  const groupOpen = open
+  const groupOpen = openChoice ?? (outcome === 'cancelled' || terminalEvent?.eventType === 'run.cancelled')
   const { edges: scrollEdges, events: scrollEvents, initialize: initializeScroll } = useProcessScroll(
     scrollRef, contentRef, groupOpen, true, events,
   )

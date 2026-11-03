@@ -99,7 +99,9 @@ test('summary counts proven success, distinct file paths and distinct commands; 
   events.push(event(events.length + 1, 'tool.started', { toolCallId: 'pending', tool: 'write_file', input: { path: 'new.txt' } }))
   const summary = summarizeRunSteps([...events, ...events].reverse(), true, 'r')
   expect(summary).toBe('已读取 1 个文件 · 已查看 1 个目录 · 已执行 1 次命令 · 完成 1 次工具调用 · 1 次调用失败 · 1 项进行中')
-  expect(summarizeRunSteps([...events, event(30, 'run.cancelled')], false)).toContain('1 项未完成')
+  // 13.38（A-2）：取消的这一轮里没结束的工具卡定格为「已取消」；失败 / 中断仍是「未完成」。
+  expect(summarizeRunSteps([...events, event(30, 'run.cancelled')], false)).toContain('1 项已取消')
+  expect(summarizeRunSteps([...events, event(30, 'run.failed')], false)).toContain('1 项未完成')
   expect(summarizeRunSteps(events, true, 'other')).toBe('')
 })
 

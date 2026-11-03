@@ -9986,6 +9986,13 @@ fn execute_host_tool_request(
                     input, root, version, &cancellation, budget);
             }
             command_jobs::execute(database,run_id,input,root,&cancellation,budget)
+        } else if matches!(prepared, crate::tool_host::PreparedToolAction::RunCommand { .. }) {
+            // 13.38（A-2）：前台命令边执行边把已产生的输出写进这张工具卡（每秒最多一次）。
+            let (live_db, live_run, live_call) = (database.clone(), run_id.to_owned(), tool_call_id.to_owned());
+            crate::tool_host::with_live_output(
+                move |text| { let _ = live_db.update_host_tool_live_output(&live_run, &live_call, text); },
+                || crate::tool_host::execute_with_cancellation(prepared, Some(&cancellation)),
+            )
         } else {
             crate::tool_host::execute_with_cancellation(prepared, Some(&cancellation))
         }

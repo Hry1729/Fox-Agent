@@ -91,7 +91,7 @@ export function summarizeRunSteps(events: readonly RunEventRecord[], active: boo
   const failed = facts.tools.filter(tool => tool.failed).length
   if (failed) fields.push(`${failed} 次调用失败`)
   const unfinished = facts.tools.filter(tool => !tool.completed).length
-  if (unfinished) fields.push(`${unfinished} 项${active && !facts.terminal ? '进行中' : '未完成'}`)
+  if (unfinished) fields.push(`${unfinished} 项${active && !facts.terminal ? '进行中' : facts.terminal?.eventType === 'run.cancelled' ? '已取消' : '未完成'}`)
   return fields.join(' · ')
 }
 
