@@ -120,6 +120,11 @@ function sameRoot(left: string | null | undefined, right: string | null | undefi
   return Boolean(left && right) && normalize(left) === normalize(right)
 }
 
+/** 「更换项目」子菜单的项目列表：当前项目标出来且不可选（路径大小写、分隔符、末尾斜杠不敏感）。 */
+export function changeProjectEntries(projects: readonly ProjectRecord[], currentRoot: string | null | undefined) {
+  return projects.map((project) => ({ project, current: sameRoot(project.rootPath, currentRoot) }))
+}
+
 export function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onRightSidebarCollapse, onOpenRightMode, conversation, detail, modelName, state, onPinConversation, onRenameConversation, onResetContext, onArchiveConversation, projects = [], onChangeProject, onPickProjectFolder }: { rightSidebarCollapsed: boolean; onRightSidebarExpand: () => void; onRightSidebarCollapse: () => void; onOpenRightMode: (mode: RightMode) => void; conversation?: ConversationSummary | null; detail: ConversationDetail | null; modelName: string; state: ChatState; onPinConversation: (conversation: ConversationSummary) => void; onRenameConversation: (conversation: ConversationSummary) => void; onResetContext: (conversation: ConversationSummary) => void; onArchiveConversation: (conversation: ConversationSummary) => void; /** 「更换项目」子菜单里列出的项目。 */ projects?: readonly ProjectRecord[]; onChangeProject?: (conversation: ConversationSummary, projectRoot: string | null, permissionMode?: ProjectRecord['permissionMode']) => void; onPickProjectFolder?: (conversation: ConversationSummary) => void }) {
   const [projectPopoverOpen, setProjectPopoverOpen] = useState(false)
   const waiting = detail && detail.conversation.id === conversation?.id
@@ -165,8 +170,7 @@ export function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onRigh
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger data-testid="change-project"><FolderInput />更换项目</DropdownMenuSubTrigger>
                   <DropdownMenuSubContent className="fox-top-menu fox-change-project-menu">
-                    {projects.map((project) => {
-                      const current = sameRoot(project.rootPath, conversation?.projectRoot)
+                    {changeProjectEntries(projects, conversation?.projectRoot).map(({ project, current }) => {
                       return <DropdownMenuItem key={project.id} disabled={current} title={project.rootPath}
                         onSelect={() => conversation && !current && onChangeProject?.(conversation, project.rootPath, project.permissionMode)}>
                         <Folder /><span className="fox-change-project-name">{project.name}</span>{current ? <Check className="ml-auto" aria-label="当前项目" /> : null}
