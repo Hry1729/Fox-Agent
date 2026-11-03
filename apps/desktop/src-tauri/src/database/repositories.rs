@@ -7333,8 +7333,20 @@ impl Database {
             // it is kept here instead of being dropped.
             // 13.38（A-2）：取消宽限期里工具卡的输出与结束照常落库（取消前已产生的输出不能丢）。
             // 只对 Runtime 自己的工具卡生效；PiNative 的工具卡由 Host 结算，不经这里。
-            let cancelling_tool_output = writer_route != native_route::WriterRoute::PiNative
-                && matches!(event_type, "tool.updated" | "tool.completed");
+            // 只接受这一轮已经在跑的 Runtime 工具卡（取消期间新开的卡仍然丢弃，不会因为找不到卡而报投影错误）。
+            let cancelling_tool_output = run_status == "cancelling"
+                && writer_route != native_route::WriterRoute::PiNative
+                && matches!(event_type, "tool.updated" | "tool.completed")
+                && payload.get("toolCallId").and_then(Value::as_str).is_some_and(|tool_call_id| {
+                    transaction
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM tool_calls WHERE run_id = ?1 AND runtime_tool_call_id = ?2
+                               AND execution_location = 'runtime' AND status = 'running')",
+                            params![run_id, tool_call_id],
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .unwrap_or(false)
+                });
             if run_status == "cancelling"
                 && !cancelling_tool_output
                 && !matches!(
@@ -11683,9 +11695,10 @@ mod tests {
         let applied = database.apply_runtime_event(&run, 3, &serde_json::json!({ "type": "tool.updated", "toolCallId": "p1",
             "update": { "status": "in_progress", "text": "来自 127.0.0.1 的回复\n", "output": "来自 127.0.0.1 的回复\n", "streamedOutput": true } })).expect("tool.updated while cancelling");
         assert!(applied, "cancelling 期间的工具输出不再被丢弃");
-        // 其它事件在 cancelling 期间照旧被丢弃。
+        // 其它事件、以及取消期间才出现的卡，在 cancelling 期间照旧被丢弃（不报投影错误）。
         assert!(!database.apply_runtime_event(&run, 4, &serde_json::json!({ "type": "message.delta", "delta": "late" })).expect("late delta"));
-        database.apply_runtime_event(&run, 5, &serde_json::json!({ "type": "run.cancelled" })).expect("run.cancelled");
+        assert!(!database.apply_runtime_event(&run, 6, &serde_json::json!({ "type": "tool.updated", "toolCallId": "never-started", "update": { "text": "x" } })).expect("unknown tool while cancelling"));
+        database.apply_runtime_event(&run, 7, &serde_json::json!({ "type": "run.cancelled" })).expect("run.cancelled");
         let (status, result): (String, String) = database.with_connection(|connection| connection.query_row(
             "SELECT status, result_json FROM tool_calls WHERE run_id = ?1 AND runtime_tool_call_id = 'p1'", [&run],
             |row| Ok((row.get(0)?, row.get(1)?)))).expect("tool row");
