@@ -38,7 +38,7 @@ use crate::{
         MemoryRevisionRecord, ModelConnectionTest, ModelProviderIdRequest, ModelProviderRecord,
         ModelServiceRecord, ObservabilityStatistics, OpenDownloadedFileRequest, ProjectFileEntry,
         ProjectFilePreview, ProjectFileReadRequest, ProjectFilesRequest, ProjectIdRequest,
-        ProjectRecord, ProviderModelRecord, RecordUiMetricRequest, RenameConversationRequest,
+        ProjectRecord, ProviderModelRecord, RecordUiMetricRequest, RenameConversationRequest, ChangeConversationProjectRequest,
         ResolveApprovalRequest, ResolveMemoryConflictRequest, RestoreBackupRequest,
         ResumeYuxiRunRequest, RewindRunRequest, RuntimeInitialization, SaveAgentRequest,
         SaveAttachmentsRequest, SaveKnowledgeDocumentAnnotationRequest,
@@ -2023,6 +2023,55 @@ pub async fn conversation_rename(
     }
 }
 
+/// 13.38 R2-4：会话头部「更多 → 更换项目」，以及还没回复的会话在托盘里改项目。
+/// 运行中不能换；外部 Agent 的对话一旦有过完整的一轮或已经打开过原生会话，也不能换
+/// （它的私有 HOME 和原生会话都跟着原项目），这时请新建对话。
+#[tauri::command]
+pub fn conversation_change_project(
+    state: State<'_, AppState>,
+    request: ChangeConversationProjectRequest,
+) -> ApiResponse<ConversationSummary> {
+    let project_root = match normalize_project_root(request.project_root.as_deref()) {
+        Ok(project_root) => project_root,
+        Err(error) => return ApiResponse::failure("conversation.invalid_project_root", error, false),
+    };
+    let permission_mode = request.permission_mode.as_deref().unwrap_or("ask");
+    if !matches!(permission_mode, "read_only" | "ask" | "allow") {
+        return ApiResponse::failure("project.invalid_permission_mode", "项目权限模式不合法", false);
+    }
+    match state.database.conversation_has_active_run(&request.conversation_id) {
+        Ok(true) => return ApiResponse::failure("conversation.run_active", "这个对话正在运行：等它结束或先停止，再更换项目", true),
+        Ok(false) => {}
+        Err(error) => return storage_error(error),
+    }
+    let backend = match state.database.conversation_agent_backend(&request.conversation_id) {
+        Ok(Some(backend)) => backend,
+        Ok(None) => return ApiResponse::failure("conversation.not_found", "未找到对话", false),
+        Err(error) => return storage_error(error),
+    };
+    if backend != fox_agent_backend::port::AgentBackend::Fox.as_str() {
+        let started = match (
+            state.database.conversation_has_completed_run(&request.conversation_id),
+            state.database.latest_native_session(&request.conversation_id),
+        ) {
+            (Ok(completed), Ok(session)) => completed || session.is_some(),
+            (Err(error), _) | (_, Err(error)) => return storage_error(error),
+        };
+        if started {
+            return ApiResponse::failure(
+                "conversation.project_locked",
+                "这个 Agent 的对话已经开始，它的会话跟着原项目，不能再换项目；请新建一个对话",
+                false,
+            );
+        }
+    }
+    match state.database.change_conversation_project(&request.conversation_id, project_root.as_deref(), permission_mode) {
+        Ok(Some(conversation)) => ApiResponse::success(conversation),
+        Ok(None) => ApiResponse::failure("conversation.not_found", "未找到对话", false),
+        Err(error) => storage_error(error),
+    }
+}
+
 #[tauri::command]
 pub fn conversation_pin(
     state: State<'_, AppState>,
@@ -2743,8 +2792,16 @@ pub fn run_start(
     // any Run or message is written, with the code the UI already maps to
     // 「去模型服务」.
     if runtime.runtime_type != "yuxi" {
-        if let Some(refusal) = fox_model_service_refusal(state.database.get_model_service().map(|service| service.is_some())) {
+        let service = state.database.get_model_service();
+        if let Some(refusal) = fox_model_service_refusal(service.as_ref().map(|service| service.is_some()).map_err(Clone::clone)) {
             return refusal;
+        }
+        // 13.38 B4-5: an address that cannot be reached (refused, DNS, timeout)
+        // is refused here, before any Run or message exists, so the draft stays.
+        if let Ok(Some(service)) = &service {
+            if let Some((code, message)) = crate::model_reachability::send_refusal(&service.base_url) {
+                return ApiResponse::failure(code, message, true);
+            }
         }
     }
     let started = match state.database.create_run_checked(

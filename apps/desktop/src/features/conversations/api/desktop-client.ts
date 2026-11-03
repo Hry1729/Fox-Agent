@@ -724,6 +724,9 @@ export const desktopClient = {
     command<ConversationContextReset>('conversation_reset_context', { conversationId }),
   renameConversation: (conversationId: string, title: string) =>
     command<ConversationSummary>('conversation_rename', { conversationId, title }),
+  /** 13.38 R2-4：在原对话里换项目（null = 不绑定项目）。运行中、外部会话已开始时 Host 会拒绝。 */
+  changeConversationProject: (conversationId: string, projectRoot: string | null, permissionMode?: string | null) =>
+    command<ConversationSummary>('conversation_change_project', { conversationId, projectRoot, permissionMode: permissionMode ?? null }),
   setConversationPinned: (conversationId: string, pinned: boolean) =>
     command<ConversationSummary>('conversation_pin', { conversationId, pinned }),
   archiveConversation: (conversationId: string) =>

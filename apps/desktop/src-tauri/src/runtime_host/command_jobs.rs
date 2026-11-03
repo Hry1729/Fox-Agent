@@ -388,7 +388,12 @@ fn execute_inner(
         };
         // A1: the command goes straight to the shell inside a Fox Job; no
         // script file, no sandbox session.
-        let spawn_spec = crate::tool_host::command_spawn_spec(&command, &cwd);
+        let mut spawn_spec = crate::tool_host::command_spawn_spec(&command, &cwd);
+        // 13.38 B5-2: 自动 / 完全访问 also give background commands the system proxy.
+        let proxy_environment = super::command_proxy_environment(database, run_id);
+        if !proxy_environment.is_empty() {
+            spawn_spec.env = crate::process_jobs::EnvMode::InheritWith(proxy_environment);
+        }
         let requested = unsigned(input, "timeoutSeconds", 600, 3600)?;
         let duration = Duration::from_secs(requested)
             .min(Duration::from_millis(credential.budget_ceiling_ms.max(0) as u64))

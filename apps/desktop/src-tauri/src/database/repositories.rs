@@ -3335,6 +3335,59 @@ impl Database {
         })
     }
 
+    /// 13.38 R2-4：在不重建对话的前提下更换项目（`None` = 不绑定项目）。
+    /// 已有的项目只引用、不改它的默认权限；新文件夹按 `new_project_mode` 建项目。
+    /// 会话的完全访问随项目确认，换项目后清掉；执行策略版本 +1，换之前签发的执行凭据作废。
+    /// 是否允许更换（运行中、外部会话已开始）由调用方先判断。
+    pub fn change_conversation_project(
+        &self,
+        id: &str,
+        project_root: Option<&str>,
+        new_project_mode: &str,
+    ) -> Result<Option<ConversationSummary>, String> {
+        if !matches!(new_project_mode, "read_only" | "ask" | "allow") {
+            return Err("invalid project permission mode".to_owned());
+        }
+        let now = now_ms();
+        self.with_connection(|connection| {
+            let project_id = match project_root {
+                Some(root) => {
+                    let existing = connection
+                        .query_row("SELECT id FROM projects WHERE root_path = ?1", [root], |row| row.get::<_, String>(0))
+                        .optional()?;
+                    Some(match existing {
+                        Some(id) => id,
+                        None => upsert_project(connection, root, new_project_mode, now)?,
+                    })
+                }
+                None => None,
+            };
+            let updated = connection.execute(
+                "UPDATE conversations SET project_id = ?2, project_root = ?3, full_access = 0, updated_at = ?4 WHERE id = ?1",
+                params![id, project_id, project_root, now],
+            )?;
+            if updated == 0 {
+                return Ok(None);
+            }
+            connection.execute(
+                "UPDATE kernel_execution_policies SET version = version + 1 WHERE conversation_id = ?1",
+                [id],
+            )?;
+            query_conversation(connection, id).optional()
+        })
+    }
+
+    /// 这个对话有没有完整结束过的一轮（第一轮回复完成后 Agent 和外部会话的项目才锁定）。
+    pub fn conversation_has_completed_run(&self, id: &str) -> Result<bool, String> {
+        self.with_connection(|connection| {
+            connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runs WHERE conversation_id = ?1 AND status = 'completed')",
+                [id],
+                |row| row.get(0),
+            )
+        })
+    }
+
     pub fn set_conversation_pinned(
         &self,
         id: &str,
@@ -14706,6 +14759,55 @@ mod tests {
 
         drop(database);
         let _ = std::fs::remove_file(path);
+    }
+
+    /// 13.38 R2-4：在原对话里换项目（不新建对话），已有项目的默认权限不被改动。
+    #[test]
+    fn a_conversation_can_change_its_project_in_place() {
+        let (database, path) = test_database();
+        let first = std::env::temp_dir().join(format!("fox-r24-a-{}", Uuid::new_v4()));
+        let second = std::env::temp_dir().join(format!("fox-r24-b-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let first_root = first.to_string_lossy().into_owned();
+        let second_root = second.to_string_lossy().into_owned();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, Some(&first_root), Some("ask"))
+            .expect("create conversation");
+        let before = conversation.project_id.clone().expect("first project");
+        let _ = database.create_run(&conversation.id, "列出目录", None).expect("run");
+        assert!(!database.conversation_has_completed_run(&conversation.id).unwrap(), "还没有完成的一轮");
+
+        let moved = database
+            .change_conversation_project(&conversation.id, Some(&second_root), "allow")
+            .expect("change")
+            .expect("conversation");
+        assert_eq!(moved.id, conversation.id, "仍是同一个对话");
+        assert_eq!(moved.project_root.as_deref(), Some(second_root.as_str()));
+        assert_ne!(moved.project_id.as_deref(), Some(before.as_str()));
+        let access = database.conversation_access(&conversation.id).unwrap();
+        assert_eq!(access.project_root.as_deref(), Some(second_root.as_str()));
+        assert!(!access.full_access);
+
+        // 换回已有项目：只引用，不改它的默认权限。
+        let back = database
+            .change_conversation_project(&conversation.id, Some(&first_root), "allow")
+            .unwrap()
+            .unwrap();
+        assert_eq!(back.project_id.as_deref(), Some(before.as_str()));
+        let mode: String = database
+            .with_connection(|connection| connection.query_row("SELECT permission_mode FROM projects WHERE id = ?1", [&before], |row| row.get(0)))
+            .unwrap();
+        assert_eq!(mode, "ask");
+        let cleared = database.change_conversation_project(&conversation.id, None, "ask").unwrap().unwrap();
+        assert!(cleared.project_root.is_none() && cleared.project_id.is_none());
+        assert!(database.change_conversation_project("missing", None, "ask").unwrap().is_none());
+        assert!(database.change_conversation_project(&conversation.id, None, "full").is_err());
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(first);
+        let _ = std::fs::remove_dir_all(second);
     }
 
     #[test]

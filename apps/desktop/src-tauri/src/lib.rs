@@ -31,11 +31,14 @@ mod maintenance;
 mod mcp;
 mod mcp_openapi;
 mod office;
+mod model_reachability;
 mod model_service;
 mod runtime_host;
 mod resource_gateway;
+mod script_encoding;
 mod skills;
 mod startup_failure;
+mod system_proxy;
 mod tool_guard;
 mod tool_host;
 mod html_preview;
@@ -412,6 +415,7 @@ pub fn run() {
             commands::conversation_history,
             commands::conversations_search,
             commands::conversation_rename,
+            commands::conversation_change_project,
             commands::conversation_pin,
             commands::conversation_archive,
             commands::conversation_unarchive,

@@ -139,6 +139,9 @@ type ComposerReplyDetail = {
   conversation?: { id?: string | null } | null
   messages?: Array<{ role?: string; content?: string | null }>
   toolCalls?: readonly unknown[] | null
+  lastRun?: { status?: string | null } | null
+  runs?: ReadonlyArray<{ status?: string | null }> | null
+  hasEarlierMessages?: boolean
 } | null | undefined
 
 /**
@@ -156,8 +159,24 @@ export function conversationHasModelReply(detail: ComposerReplyDetail) {
 }
 
 /**
- * 桌面运行时：没有开始回复才用新对话高输入框。已选中会话但 detail 还不是这一条
- * （null，或仍是上一条）时先保持已有对话形态，避免切换时闪出托盘。未选中不受影响。
+ * 13.38 R2-4：第一轮回复是否已经完成。有一轮 Run 以 completed 结束才算；被取消、失败、
+ * 中断的一轮都不算（即使它已经调过工具、出过半截正文）。更早的消息没加载时按已完成处理；
+ * 没有任何 Run 记录的老会话退回「模型是否回复过」。
+ */
+export function conversationFirstReplyCompleted(detail: ComposerReplyDetail) {
+  if (!detail) return false
+  if (detail.hasEarlierMessages) return true
+  const runs = [...(detail.runs ?? []), ...(detail.lastRun ? [detail.lastRun] : [])]
+  if (runs.some((run) => run?.status === 'completed')) return true
+  if (runs.length === 0) return conversationHasModelReply(detail)
+  return false
+}
+
+/**
+ * 桌面运行时：第一轮回复完成之前用新对话高输入框（项目 / Agent 托盘）。正在回复时
+ * （本轮还在跑且模型已经开始输出）收成窄样式；这一轮被取消或失败后托盘回来，项目和
+ * Agent 还能换（13.38 R2-4）。第一轮完成后一直是窄样式。
+ * 已选中会话但 detail 还不是这一条（null，或仍是上一条）时先保持已有对话形态，避免切换时闪出托盘。
  * 未启用桌面运行时仍按时间线是否为空。
  */
 export function composerUsesNewConversation(input: {
@@ -165,16 +184,20 @@ export function composerUsesNewConversation(input: {
   timelineEmpty: boolean
   selectedConversationId?: string | null
   detail?: ComposerReplyDetail
+  /** 这个会话当前有没有进行中的 Run。 */
+  running?: boolean
 }) {
   if (!input.desktopEnabled) return input.timelineEmpty
   const selectedId = input.selectedConversationId
   if (selectedId && input.detail?.conversation?.id !== selectedId) return false
-  return !conversationHasModelReply(input.detail)
+  if (conversationFirstReplyCompleted(input.detail)) return false
+  if (input.running && conversationHasModelReply(input.detail)) return false
+  return true
 }
 
 /**
- * 13.37：托盘上的项目和 Agent 什么时候不能再换。只有模型已经开始回复（不再是新对话形态）
- * 的已选中会话才冻结；新对话、发送失败后恢复的草稿、已选中但还没回复过的会话都能改。
+ * 13.37 / 13.38：托盘上的项目和 Agent 什么时候不能再换。只有不再是新对话形态（第一轮已完成，
+ * 或正在回复）的已选中会话才冻结；新对话、发送失败后恢复的草稿、第一轮被取消或失败的会话都能改。
  */
 export function composerEntryFrozen(input: { desktopEnabled: boolean; selectedConversationId?: string | null; newConversation: boolean }) {
   return Boolean(input.desktopEnabled && input.selectedConversationId && !input.newConversation)

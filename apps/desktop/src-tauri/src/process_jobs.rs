@@ -608,6 +608,9 @@ impl StartOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EnvMode {
     Inherit,
+    /// The platform allowlist plus these entries (13.38 B5-2: the system
+    /// proxy that 自动 / 完全访问 commands receive).
+    InheritWith(Vec<(String, String)>),
     /// Exactly these entries. Used by tests to prove isolation is achievable.
     Replace(Vec<(String, String)>),
 }
@@ -696,6 +699,15 @@ impl StartRequest {
         push_field(&mut out, "cwd", &cwd);
         match &self.spec.env {
             EnvMode::Inherit => out.push_str("env=inherit\n"),
+            EnvMode::InheritWith(entries) => {
+                let mut sorted = entries.clone();
+                sorted.sort();
+                out.push_str(&format!("env=inherit+{}\n", sorted.len()));
+                for (k, v) in sorted {
+                    push_field(&mut out, "env-k", &k);
+                    push_field(&mut out, "env-v", &v);
+                }
+            }
             EnvMode::Replace(entries) => {
                 let mut sorted = entries.clone();
                 sorted.sort();
@@ -1319,6 +1331,10 @@ fn spawn_system_child(
     apply_spawn_arguments(&mut command, spec);
     match &spec.env {
         EnvMode::Inherit => command_environment::apply_inherited(&mut command),
+        EnvMode::InheritWith(entries) => {
+            command_environment::apply_inherited(&mut command);
+            command.envs(entries.iter().map(|(key, value)| (key, value)));
+        }
         EnvMode::Replace(entries) => command_environment::apply_explicit(&mut command, entries)?,
     }
     #[cfg(windows)]

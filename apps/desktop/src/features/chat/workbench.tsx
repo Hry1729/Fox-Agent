@@ -45,7 +45,7 @@ import { useNavigationHistory } from '@/features/workspace/use-navigation-histor
 import { File, ShieldAlert, ShieldCheck } from 'lucide-react'
 import { type KeyboardEvent, type ReactNode, Profiler, Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { needsLocalKnowledgeNames } from './composer/knowledge-chip-name'
-import { MemoizedComposer, composerEntryFrozen, composerUsesNewConversation, conversationHasModelReply, isChangeOrCommandTool, readStoredSeenChanges } from './composer/fox-composer'
+import { MemoizedComposer, composerEntryFrozen, composerUsesNewConversation, conversationFirstReplyCompleted, isChangeOrCommandTool, readStoredSeenChanges } from './composer/fox-composer'
 import { ComposerEntryContext } from './composer/composer-entry-context'
 import { ConversationManagementDialogs, KnowledgeBindingDialog, ProjectDeleteDialog } from './conversation-dialogs'
 import { type AssistantMode, CONVERSATION_FORK_EVENT, type ChatState, type ChildAgentSelection, ComposerRuntimeContext, type ComposerRuntimeContextValue, EMPTY_CONVERSATION_ATTACHMENTS, EMPTY_CONVERSATION_MESSAGES, EMPTY_RUNTIME_APPROVALS, type OpenFileTab, type RightMode, TimelineRuntimeContext, type TimelineRuntimeContextValue, layoutStorage, readDefaultProjectPermission, readStoredBoolean, readStoredNumber, readStoredRightMode, readStoredRightTabs, recordRegionRender, useStableCallback } from './fox-shared'
@@ -1296,17 +1296,33 @@ export function Workbench() {
   const handleComposerProject = useStableCallback(() => {
     void addProject()
   })
-  // 13.37 (B2-5p): a selected conversation that has no reply yet keeps the
-  // new-conversation tray, and its project and Agent can still be changed
-  // (UI 1103 had locked them). A change turns it back into a draft with that
-  // choice; once the model has replied, both are fixed.
+  // 13.37 (B2-5p) / 13.38 (R2-4): a selected conversation whose first reply
+  // has not completed (nothing yet, or the first round was cancelled / failed)
+  // keeps the new-conversation tray, and its project and Agent can still be
+  // changed. Once a round has completed, both are fixed in the tray.
   const unrepliedSelection = (): boolean => Boolean(desktopConversation.selectedConversationId)
     && desktopConversation.detail?.conversation.id === desktopConversation.selectedConversationId
-    && !conversationHasModelReply(desktopConversation.detail)
+    && !conversationFirstReplyCompleted(desktopConversation.detail)
+    && !desktopBusy
+  // 13.38 R2-4: the project changes in place (the conversation and its message
+  // stay). An external Agent's conversation whose native session already
+  // exists cannot move (Host: conversation.project_locked); that one still
+  // turns back into a draft with the new project, as in 13.37.
+  const changeUnrepliedProject = async (projectRoot: string, permissionMode: ProjectRecord['permissionMode']) => {
+    const conversationId = desktopConversation.selectedConversationId
+    if (!conversationId) return
+    const changed = await desktopConversation.changeConversationProject(conversationId, projectRoot, permissionMode)
+    if (changed.ok) return
+    if (changed.error?.code === 'conversation.project_locked') {
+      void desktopConversation.detachUnrepliedConversation({ projectRoot, permissionMode })
+      return
+    }
+    toast.error('没有更换项目', { description: changed.error?.message ?? '请稍后再试' })
+  }
   const handleEntryProjectSelect = useStableCallback((project: ProjectRecord) => {
     const root = canonicalProjectRoot(project.rootPath)
     if (desktopConversation.selectedConversationId) {
-      if (unrepliedSelection()) void desktopConversation.detachUnrepliedConversation({ projectRoot: root, permissionMode: project.permissionMode })
+      if (unrepliedSelection()) void changeUnrepliedProject(root, project.permissionMode)
       return
     }
     desktopConversation.selectProject(root, project.permissionMode)
@@ -1317,19 +1333,42 @@ export function Workbench() {
     if (!selected) return
     const selection = selectProjectRoot(selected, projects, readDefaultProjectPermission())
     if (desktopConversation.selectedConversationId) {
-      if (unrepliedSelection()) void desktopConversation.detachUnrepliedConversation({ projectRoot: selection.path, permissionMode: selection.permissionMode })
+      if (unrepliedSelection()) void changeUnrepliedProject(selection.path, selection.permissionMode)
       return
     }
     desktopConversation.selectProject(selection.path, selection.permissionMode)
   })
   const handleEntryAgentSelect = useStableCallback((backend: AgentBackendId) => {
     if (desktopConversation.selectedConversationId) {
-      if (unrepliedSelection() && desktopConversation.detail && conversationAgentBackend(desktopConversation.detail.conversation) !== backend) {
-        void desktopConversation.detachUnrepliedConversation({ backend })
+      const detail = desktopConversation.detail
+      if (unrepliedSelection() && detail && conversationAgentBackend(detail.conversation) !== backend) {
+        // The Agent of a conversation is fixed once created (Host), so a new
+        // Agent starts a new draft. The unanswered message comes along in the
+        // composer, so the user only has to press send.
+        const unanswered = [...detail.messages].reverse().find((message) => message.role === 'user')?.content?.trim() ?? ''
+        void desktopConversation.detachUnrepliedConversation({ backend }).then((detached) => {
+          if (detached && unanswered) setComposerDraft((draft) => draft.trim() ? draft : unanswered)
+        })
       }
       return
     }
     desktopConversation.setDraftAgentBackend(backend)
+  })
+  // 13.38 R2-4: 会话头部「更多 → 更换项目」。
+  const handleTopbarChangeProject = useStableCallback(async (conversation: ConversationSummary, projectRoot: string | null, permissionMode?: ProjectRecord['permissionMode']) => {
+    const changed = await desktopConversation.changeConversationProject(conversation.id, projectRoot, permissionMode ?? readDefaultProjectPermission())
+    if (changed.ok) {
+      const name = projectRoot ? projectRoot.replace(/[\\/]+$/, '').split(/[\\/]/).at(-1) : null
+      toast.success(name ? `已换到项目「${name}」` : '已取消绑定项目')
+      return
+    }
+    toast.error('没有更换项目', { description: changed.error?.message ?? '请稍后再试' })
+  })
+  const handleTopbarPickProject = useStableCallback(async (conversation: ConversationSummary) => {
+    const selected = await pickProjectFolder()
+    if (!selected) return
+    const selection = selectProjectRoot(selected, projects, readDefaultProjectPermission())
+    await handleTopbarChangeProject(conversation, selection.path, selection.permissionMode)
   })
   const handleViewDefaultExpert = useStableCallback(() => {
     if (activeAgent) setExpertDetailId(activeAgent.id)
@@ -1619,6 +1658,7 @@ export function Workbench() {
     timelineEmpty,
     selectedConversationId: desktopConversation.selectedConversationId,
     detail: desktopConversation.detail,
+    running: desktopBusy,
   })
   // 13.37：模型开始回复后项目和 Agent 才冻结；新对话、发送失败后恢复的草稿、
   // 已选中但还没回复过的会话都能改（改动会把它变回草稿，见 handleEntryProjectSelect）。
@@ -1697,7 +1737,7 @@ export function Workbench() {
           /></Suspense>}
           <TimelineRuntimeContext.Provider value={timelineRuntimeContextValue}>
           <ComposerRuntimeContext.Provider value={composerRuntimeContextValue}>
-          {workspacePage ?? <>{!timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onRightSidebarCollapse={collapseRightSidebar} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || modelService.service?.modelId || (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) || '未配置模型'} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onResetContext={(conversation) => void resetManagedConversation(conversation)} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} />}
+          {workspacePage ?? <>{!timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onRightSidebarCollapse={collapseRightSidebar} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || modelService.service?.modelId || (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) || '未配置模型'} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onResetContext={(conversation) => void resetManagedConversation(conversation)} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} projects={projects} onChangeProject={(conversation, root, mode) => void handleTopbarChangeProject(conversation, root, mode)} onPickProjectFolder={(conversation) => void handleTopbarPickProject(conversation)} />}
 <div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''} ${activeView === 'chat' && activeExpert ? 'has-expert-lanyard' : ''}`}>
   {activeView === 'chat' && activeExpert && <Suspense fallback={null}><ExpertLanyard expertId={activeExpert.id} name={activeExpert.name} description={activeExpert.description || activeExpert.category} frontImage={asAgentCard(activeExpert).image} autoCollapseKey={timelineEmpty ? 0 : pendingUserMessage?.createdAt ?? desktopUserMessage?.createdAt ?? 1} /></Suspense>}
   {assistantUiThreadPanel}

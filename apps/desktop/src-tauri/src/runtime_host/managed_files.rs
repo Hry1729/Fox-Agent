@@ -549,7 +549,7 @@ pub(crate) fn execute_admitted_file(
     };
     let expected_after_version = match &prepared {
         crate::tool_host::PreparedToolAction::WriteFile { content, .. } => crate::tool_host::file_version(content),
-        crate::tool_host::PreparedToolAction::EditFile { content, .. } => crate::tool_host::file_version(content.as_bytes()),
+        crate::tool_host::PreparedToolAction::EditFile { content, .. } => crate::tool_host::file_version(content),
         _ => return (Err("file admission cannot execute a non-file action".into()), ExecutionEvidence::NotStarted),
     };
     let mut hooks = Hooks { context, tool, tool_call_id, credential, before: None,

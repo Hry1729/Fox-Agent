@@ -1973,6 +1973,16 @@ pub struct CreateConversationRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ChangeConversationProjectRequest {
+    pub conversation_id: String,
+    /// `None` / 空 = 不绑定项目。
+    pub project_root: Option<String>,
+    /// 新文件夹第一次成为项目时的默认权限；已有项目不受影响。
+    pub permission_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RenameConversationRequest {
     pub conversation_id: String,
     pub title: String,

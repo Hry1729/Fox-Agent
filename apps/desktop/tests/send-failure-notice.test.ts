@@ -35,6 +35,21 @@ describe('sendNotStartedNotice', () => {
     expect(created.description).not.toContain('run.create_failed')
   })
 
+  test('13.38 B4-5：模型服务地址连不上，Fox 和外部 Agent 都是「连不上模型服务」，按钮去模型服务', () => {
+    const raw = '连不上模型服务（http://127.0.0.1:9/v1）：这个地址拒绝了连接，服务可能没有启动。'
+    for (const backend of ['fox', 'pi', 'deepseek'] as const) {
+      const notice = sendNotStartedNotice('model.connection_unreachable', raw, { backend, developerUi: false })
+      expect(notice.title).toBe('连不上模型服务')
+      expect(notice.workspaceView).toBe('model-service')
+      expect(notice.description).toContain('草稿已保留')
+      expect(notice.description).not.toContain('127.0.0.1')
+      expect(notice.description).not.toContain('model.connection_unreachable')
+    }
+    const developer = sendNotStartedNotice('model.connection_unreachable', raw, { developerUi: true })
+    expect(developer.description).toContain('model.connection_unreachable')
+    expect(developer.description).toContain('http://127.0.0.1:9/v1')
+  })
+
   test('UI 1103：外部 Agent 没配好只弹一条通知，带后端名，按钮去 设置 → Agent', () => {
     const named = sendNotStartedNotice('agent_backend_missing_credentials', '未登录', { backend: 'deepseek', conversationId: 'c-1', developerUi: false })
     expect(named.title).toBe('dsh 还没配置好')

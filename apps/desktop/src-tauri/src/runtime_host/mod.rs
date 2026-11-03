@@ -5190,8 +5190,13 @@ fn handle_capability_tool_request(
     stdin: &Arc<Mutex<ChildStdin>>,
     envelope: RuntimeEnvelope,
 ) {
+    // 13.38 B5-3: a tagged refusal (`[tool.permission_denied] …`, e.g. web_read's
+    // network protection) carries its code, so the UI shows its own sentence.
     let response = execute_capability_tool_request(app, database, state, &envelope)
-        .unwrap_or_else(|error| json!({ "isError": true, "error": error }));
+        .unwrap_or_else(|error| match crate::tool_host::ToolErrorCode::classify(&error) {
+            Some(code) => json!({ "isError": true, "error": error, "errorCode": code.as_str() }),
+            None => json!({ "isError": true, "error": error }),
+        });
     let response_type = if response
         .get("isError")
         .and_then(Value::as_bool)
@@ -6521,6 +6526,28 @@ fn ensure_expert_tool_allowed(
 struct ToolApprovalPolicy {
     decision: approval_policy::PolicyDecision,
     has_project: bool,
+}
+
+/// 13.38 B5-2: in 自动 and 完全访问 a command gets the system proxy
+/// (HTTP_PROXY / HTTPS_PROXY / NO_PROXY / ALL_PROXY from Fox's own
+/// environment, the Windows user environment, or the WinINET system proxy).
+/// 只读 and 询问 keep the plain allowlisted environment.
+pub(crate) fn command_proxy_environment_for_mode(mode: approval_policy::AccessMode) -> Vec<(String, String)> {
+    match mode {
+        approval_policy::AccessMode::Auto | approval_policy::AccessMode::FullAccess => {
+            crate::system_proxy::detect().command_environment()
+        }
+        approval_policy::AccessMode::ReadOnly | approval_policy::AccessMode::Ask => Vec::new(),
+    }
+}
+
+/// The same, for a command that only knows its Run (background jobs).
+pub(crate) fn command_proxy_environment(database: &Database, run_id: &str) -> Vec<(String, String)> {
+    let Ok(Some(conversation_id)) = database.run_conversation(run_id) else { return Vec::new() };
+    match database.conversation_access(&conversation_id) {
+        Ok(access) => command_proxy_environment_for_mode(access.mode),
+        Err(_) => Vec::new(),
+    }
 }
 
 fn decide_tool_approval(
@@ -10049,6 +10076,7 @@ fn execute_host_tool_request(
                 || crate::tool_host::execute_with_cancellation(prepared, Some(&cancellation)),
             )
         } else {
+            let prepared = prepared.with_command_environment(command_proxy_environment_for_mode(policy.decision.mode));
             crate::tool_host::execute_with_cancellation(prepared, Some(&cancellation))
         }
     })();
@@ -10320,6 +10348,11 @@ fn execute_capability_tool_request(
             claim_approved_tool_call_for_execution(database, run_id, tool_call_id)?;
         } else {
             policy.audit_auto_allow(database, conversation_id, run_id, tool_call_id, tool, prepared.preview())?;
+        }
+        // 13.38 B5-3: a proxy fake-ip address let through leaves its own audit row.
+        if let Some(allowance) = prepared.network_allowance() {
+            database.record_network_allowance_audit(conversation_id, Some(run_id), Some(tool_call_id), tool,
+                policy.decision.mode.as_str(), "proxy_fake_ip", allowance)?;
         }
 
         capability_tools::execute(prepared)

@@ -163,7 +163,9 @@ pub enum PreparedToolAction {
     EditFile {
         root: PathBuf,
         path: PathBuf,
-        content: String,
+        /// The exact bytes the edit writes (13.38 B5-1: a Windows batch file
+        /// is already CRLF + ANSI code page here, so versions hash disk bytes).
+        content: Vec<u8>,
         expected_version: String,
         preview: ToolPreview,
     },
@@ -173,10 +175,26 @@ pub enum PreparedToolAction {
         cwd: PathBuf,
         timeout: Duration,
         preview: ToolPreview,
+        /// 13.38 B5-2: entries added on top of the allowlisted environment
+        /// (the system proxy in 自动 / 完全访问). Set by the Host after its
+        /// policy decision; `prepare` always leaves it empty.
+        extra_env: Vec<(String, String)>,
     },
 }
 
 impl PreparedToolAction {
+    /// 13.38 B5-2: add entries to a synchronous command's environment (the
+    /// Host passes the system proxy in 自动 / 完全访问). Other actions are
+    /// returned unchanged.
+    pub fn with_command_environment(self, entries: Vec<(String, String)>) -> Self {
+        match self {
+            Self::RunCommand { root, command, cwd, timeout, preview, .. } => {
+                Self::RunCommand { root, command, cwd, timeout, preview, extra_env: entries }
+            }
+            other => other,
+        }
+    }
+
     pub fn preview(&self) -> &ToolPreview {
         match self {
             Self::CommandJob { preview, .. }
@@ -378,7 +396,7 @@ pub(crate) fn execute_file_with_context(
     let (root, path, content, create_directories, binary) = match action {
         PreparedToolAction::WriteFile { root, path, content, create_directories, binary, .. } =>
             (root, path, content, create_directories, binary),
-        PreparedToolAction::EditFile { root, path, content, .. } => (root, path, content.into_bytes(), false, false),
+        PreparedToolAction::EditFile { root, path, content, .. } => (root, path, content, false, false),
         _ => return Err("file admission cannot execute a non-file action".into()),
     };
     check_cancellation(cancellation)?;
@@ -455,10 +473,10 @@ pub fn execute_with_cancellation(
         } => {
             revalidate_target(&root, &path, Some(false))?;
             check_cancellation(cancellation)?;
-            atomic_write(&root, &path, content.as_bytes(), &expected_version, cancellation)?;
+            atomic_write(&root, &path, &content, &expected_version, cancellation)?;
             Ok(text_result(
                 format!("Updated {}", path.display()),
-                json!({ "path": path, "bytes": content.len(), "operation": "modified", "readVersion": file_version(content.as_bytes()) }),
+                json!({ "path": path, "bytes": content.len(), "operation": "modified", "readVersion": file_version(&content) }),
             ))
         }
         PreparedToolAction::RunCommand {
@@ -466,6 +484,7 @@ pub fn execute_with_cancellation(
             command,
             cwd,
             timeout,
+            extra_env,
             ..
         } => {
             // A1: Fox runs its own commands directly, in a Fox Job (Windows
@@ -475,7 +494,7 @@ pub fn execute_with_cancellation(
             // session id exists. What may run is decided by the approval policy
             // before this point.
             revalidate_target(&root, &cwd, Some(true))?;
-            execute_command(&command, &cwd, timeout, cancellation)
+            execute_command_with_env(&command, &cwd, timeout, cancellation, &extra_env)
         }
     }
 }
@@ -486,8 +505,10 @@ pub(crate) fn file_version(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
-fn write_precondition(input: &Value, current: Option<&str>) -> Result<String, String> {
-    let version = current.map(|s| file_version(s.as_bytes())).unwrap_or_else(|| "missing".into());
+/// `current_version` is the version of the bytes on disk (`file_version`),
+/// or `None` for a missing file.
+fn write_precondition(input: &Value, current_version: Option<&str>) -> Result<String, String> {
+    let version = current_version.map(str::to_owned).unwrap_or_else(|| "missing".into());
     let expected = match input.get("expectedVersion") {
         None if current.is_none() => "missing",
         Some(Value::String(value)) => value.as_str(),
@@ -1378,8 +1399,15 @@ fn prepare_write(input: &Value, root: &Path) -> Result<PreparedToolAction, Strin
         .unwrap_or(true);
     enforce_content_size(&content)?;
     let target = resolve_write_target(root, &path)?;
-    let old = read_optional_text(&target)?;
-    let expected_version = write_precondition(input, old.as_deref())?;
+    let old = read_optional_text_versioned(&target)?;
+    let expected_version = write_precondition(input, old.as_ref().map(|(_, version)| version.as_str()))?;
+    // 13.38 B5-1: a Windows batch file is written CRLF in the ANSI code page.
+    let batch_code_page = crate::script_encoding::batch_code_page_for(&target);
+    let content = match batch_code_page {
+        Some(_) => content.replace("\r\n", "\n"),
+        None => content,
+    };
+    let old = old.map(|(text, _)| text);
     let diff = line_diff(old.as_deref().unwrap_or_default(), &content, &target);
     let summary = if old.is_some() {
         format!("Replace the contents of {}", target.display())
@@ -1399,10 +1427,14 @@ fn prepare_write(input: &Value, root: &Path) -> Result<PreparedToolAction, Strin
         command: None,
         cwd: None,
     };
+    let content = match batch_code_page {
+        Some(code_page) => crate::script_encoding::encode_batch(&content, code_page).bytes,
+        None => content.into_bytes(),
+    };
     Ok(PreparedToolAction::WriteFile {
         root: root.to_path_buf(),
         path: target,
-        content: content.into_bytes(),
+        content,
         binary: false,
         expected_version,
         create_directories,
@@ -1421,7 +1453,14 @@ fn prepare_edit(input: &Value, root: &Path) -> Result<PreparedToolAction, String
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let target = resolve_existing_target(root, &path, false)?;
-    let current = read_text(&target)?;
+    let (current, current_version) = read_text_versioned(&target)?;
+    // 13.38 B5-1: a batch file reads back with LF line endings, so the match
+    // text is compared the same way; the write turns it into CRLF again.
+    let batch_code_page = crate::script_encoding::batch_code_page_for(&target);
+    let (old_text, new_text) = match batch_code_page {
+        Some(_) => (old_text.replace("\r\n", "\n"), new_text.replace("\r\n", "\n")),
+        None => (old_text, new_text),
+    };
     if old_text.is_empty() {
         return Err(ToolErrorCode::InvalidInput.error("oldText cannot be empty"));
     }
@@ -1429,7 +1468,7 @@ fn prepare_edit(input: &Value, root: &Path) -> Result<PreparedToolAction, String
     // file changed since the caller read it, so a missing `oldText` is a
     // symptom of that change, not a malformed request.
     if input.get("expectedVersion").is_some_and(Value::is_string) {
-        write_precondition(input, Some(&current))?;
+        write_precondition(input, Some(&current_version))?;
     }
     let occurrences = current.matches(&old_text).count();
     if occurrences == 0 {
@@ -1441,7 +1480,7 @@ fn prepare_edit(input: &Value, root: &Path) -> Result<PreparedToolAction, String
             "oldText occurs {occurrences} times; set replaceAll to true or provide a more specific match"
         )));
     }
-    let expected_version = write_precondition(input, Some(&current))?;
+    let expected_version = write_precondition(input, Some(&current_version))?;
     let content = if replace_all {
         current.replace(&old_text, &new_text)
     } else {
@@ -1459,6 +1498,10 @@ fn prepare_edit(input: &Value, root: &Path) -> Result<PreparedToolAction, String
         diff: Some(line_diff(&current, &content, &target)),
         command: None,
         cwd: None,
+    };
+    let content = match batch_code_page {
+        Some(code_page) => crate::script_encoding::encode_batch(&content, code_page).bytes,
+        None => content.into_bytes(),
     };
     Ok(PreparedToolAction::EditFile {
         root: root.to_path_buf(),
@@ -1511,6 +1554,7 @@ fn prepare_command(input: &Value, root: &Path) -> Result<PreparedToolAction, Str
         cwd,
         timeout: Duration::from_secs(seconds),
         preview,
+        extra_env: Vec::new(),
     })
 }
 
@@ -1654,6 +1698,10 @@ fn run_contained(
     match &spawn_spec.env {
         crate::process_jobs::EnvMode::Inherit => {
             command_environment::apply_inherited(&mut process)
+        }
+        crate::process_jobs::EnvMode::InheritWith(entries) => {
+            command_environment::apply_inherited(&mut process);
+            process.envs(entries.iter().map(|(key, value)| (key, value)));
         }
         crate::process_jobs::EnvMode::Replace(entries) => {
             command_environment::apply_explicit(&mut process, entries)
@@ -1823,7 +1871,17 @@ pub(crate) fn run_contained_program(
 }
 
 fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: Option<&crate::kernel::CancellationToken>) -> Result<Value, String> {
-    execute_spawn_spec(command_spawn_spec(command, cwd), cwd, timeout, cancellation)
+    execute_command_with_env(command, cwd, timeout, cancellation, &[])
+}
+
+/// `run_command` with entries added on top of the allowlisted environment
+/// (13.38 B5-2: the system proxy in 自动 / 完全访问).
+fn execute_command_with_env(command: &str, cwd: &Path, timeout: Duration, cancellation: Option<&crate::kernel::CancellationToken>, extra_env: &[(String, String)]) -> Result<Value, String> {
+    let mut spec = command_spawn_spec(command, cwd);
+    if !extra_env.is_empty() {
+        spec.env = crate::process_jobs::EnvMode::InheritWith(extra_env.to_vec());
+    }
+    execute_spawn_spec(spec, cwd, timeout, cancellation)
 }
 
 fn execute_spawn_spec(
@@ -2775,6 +2833,35 @@ fn read_optional_text(path: &Path) -> Result<Option<String>, String> {
     }
 }
 
+/// Text plus the version of the bytes on disk. An ordinary file must be UTF-8
+/// (its text bytes are its disk bytes). A Windows batch file (13.38 B5-1) is
+/// decoded from the ANSI code page with LF line endings, and its version is
+/// still taken from the raw bytes, the same value the read tool reports.
+fn read_text_versioned(path: &Path) -> Result<(String, String), String> {
+    if let Some(code_page) = crate::script_encoding::batch_code_page_for(path) {
+        let metadata = fs::metadata(path)
+            .map_err(|error| ToolErrorCode::InvalidInput.error(format!("failed to inspect file: {error}")))?;
+        if metadata.len() > MAX_FILE_BYTES {
+            return Err(ToolErrorCode::InvalidInput.error(format!("file exceeds the {} byte limit", MAX_FILE_BYTES)));
+        }
+        let bytes = fs::read(path)
+            .map_err(|error| ToolErrorCode::InvalidInput.error(format!("failed to read file: {error}")))?;
+        let (text, _, _) = crate::script_encoding::decode_batch(&bytes, code_page);
+        return Ok((text, file_version(&bytes)));
+    }
+    let text = read_text(path)?;
+    let version = file_version(text.as_bytes());
+    Ok((text, version))
+}
+
+fn read_optional_text_versioned(path: &Path) -> Result<Option<(String, String)>, String> {
+    if path.exists() {
+        read_text_versioned(path).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 /// The version the commit critical section compares against. `binary` hashes the
 /// raw bytes so a snapshot that is not valid UTF-8 still gets an exact,
 /// non-lossy precondition instead of a decode failure. Both modes return the
@@ -2783,7 +2870,7 @@ fn current_version_of(path: &Path, binary: bool) -> Result<Option<String>, Strin
     if !path.exists() {
         return Ok(None);
     }
-    if binary {
+    if binary || crate::script_encoding::batch_code_page_for(path).is_some() {
         let bytes = fs::read(path).map_err(|error| error.to_string())?;
         Ok(Some(file_version(&bytes)))
     } else {
@@ -5055,5 +5142,117 @@ mod tx5_recovery_material_tests {
         assert_eq!(fs::read(&path).unwrap(), b"body");
         assert_eq!(names(&root), vec!["created.txt".to_owned()]);
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// 13.38 B5-1 / B5-2：批处理编码与命令里的代理变量。
+#[cfg(test)]
+mod b5_1338_tests {
+    use super::*;
+
+    fn project() -> PathBuf {
+        let root = std::env::temp_dir().join(format!("fox-b5-1338-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        root.canonicalize().unwrap()
+    }
+
+    fn text(result: &Value) -> String {
+        result["content"][0]["text"].as_str().unwrap_or_default().to_owned()
+    }
+
+    /// 实测 B5-1：Fox 写出「测试.bat」，再执行「测试.bat 参数一」。
+    #[cfg(windows)]
+    #[test]
+    fn b5_1_chinese_batch_is_written_crlf_in_the_ansi_code_page_and_runs_with_its_parameter() {
+        let root = project();
+        let script = "@echo off\necho 参数是 %1\n";
+        let action = prepare("write_file", &json!({ "path": "测试.bat", "content": script }), root.to_str().unwrap()).unwrap();
+        let written = execute(action).unwrap();
+        let bytes = fs::read(root.join("测试.bat")).unwrap();
+        let code_page = crate::script_encoding::batch_code_page().expect("Windows 有 ANSI 代码页");
+        assert_eq!(bytes, crate::script_encoding::encode_batch(script, code_page).bytes);
+        assert!(!bytes.windows(2).any(|pair| pair[0] != b'\r' && pair[1] == b'\n'), "全部是 CRLF");
+        assert!(!bytes.starts_with(&[0xEF, 0xBB, 0xBF]), "不带 BOM");
+        assert_eq!(written["details"]["readVersion"], json!(file_version(&bytes)), "版本按磁盘字节");
+        let result = execute_command("测试.bat 参数一", &root, Duration::from_secs(30), None).unwrap();
+        assert_eq!(result["details"]["exitCode"], 0, "{result}");
+        assert!(text(&result).contains("参数是 参数一"), "{}", text(&result));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 编辑 .bat：按读回的文本（LF）匹配，写回仍是 CRLF + 同一编码；版本前提按磁盘字节。
+    #[cfg(windows)]
+    #[test]
+    fn b5_1_editing_a_batch_file_keeps_its_encoding() {
+        let root = project();
+        let code_page = crate::script_encoding::batch_code_page().unwrap();
+        let original = crate::script_encoding::encode_batch("@echo off\necho 参数是 %1\n", code_page).bytes;
+        fs::write(root.join("run.cmd"), &original).unwrap();
+        let action = prepare(
+            "edit_file",
+            &json!({ "path": "run.cmd", "oldText": "echo 参数是 %1\r\n", "newText": "echo 收到 %1\n", "expectedVersion": file_version(&original) }),
+            root.to_str().unwrap(),
+        )
+        .unwrap();
+        execute(action).unwrap();
+        let bytes = fs::read(root.join("run.cmd")).unwrap();
+        assert_eq!(bytes, crate::script_encoding::encode_batch("@echo off\necho 收到 %1\n", code_page).bytes);
+        let result = execute_command("run.cmd 参数一", &root, Duration::from_secs(30), None).unwrap();
+        assert!(text(&result).contains("收到 参数一"), "{}", text(&result));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 非 Windows：.bat 照常按 UTF-8 原样写（行为不变）。
+    #[cfg(not(windows))]
+    #[test]
+    fn b5_1_batch_files_are_unchanged_elsewhere() {
+        let root = project();
+        let script = "@echo off\necho 参数是 %1\n";
+        execute(prepare("write_file", &json!({ "path": "测试.bat", "content": script }), root.to_str().unwrap()).unwrap()).unwrap();
+        assert_eq!(fs::read(root.join("测试.bat")).unwrap(), script.as_bytes());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 实测 B5-2：代理变量进入命令环境，大写和小写的名字都能读到。
+    #[test]
+    fn b5_2_proxy_entries_reach_the_command_in_both_cases() {
+        let root = project();
+        let settings = crate::system_proxy::ProxySettings::merge(&[(
+            crate::system_proxy::ProxySource::SystemProxy,
+            vec![
+                ("HTTPS_PROXY".to_owned(), "http://127.0.0.1:7890".to_owned()),
+                ("NO_PROXY".to_owned(), "localhost".to_owned()),
+            ],
+        )]);
+        #[cfg(windows)]
+        let command = "echo [%HTTPS_PROXY%] [%https_proxy%] [%NO_PROXY%] [%no_proxy%]";
+        #[cfg(not(windows))]
+        let command = "echo \"[$HTTPS_PROXY] [$https_proxy] [$NO_PROXY] [$no_proxy]\"";
+        let result = execute_command_with_env(command, &root, Duration::from_secs(30), None, &settings.command_environment()).unwrap();
+        assert!(
+            text(&result).contains("[http://127.0.0.1:7890] [http://127.0.0.1:7890] [localhost] [localhost]"),
+            "{}",
+            text(&result)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 只读、询问档不加代理变量（其余档位保持现状）。
+    #[test]
+    fn b5_2_only_auto_and_full_access_get_the_system_proxy() {
+        use crate::runtime_host::approval_policy::AccessMode;
+        assert!(crate::runtime_host::command_proxy_environment_for_mode(AccessMode::ReadOnly).is_empty());
+        assert!(crate::runtime_host::command_proxy_environment_for_mode(AccessMode::Ask).is_empty());
+        assert_eq!(
+            crate::runtime_host::command_proxy_environment_for_mode(AccessMode::Auto),
+            crate::system_proxy::detect().command_environment()
+        );
+        assert_eq!(
+            crate::runtime_host::command_proxy_environment_for_mode(AccessMode::FullAccess),
+            crate::system_proxy::detect().command_environment()
+        );
+        let action = prepare("run_command", &json!({ "command": "echo hi" }), std::env::temp_dir().to_str().unwrap()).unwrap();
+        let PreparedToolAction::RunCommand { extra_env, .. } = action.with_command_environment(vec![("HTTP_PROXY".into(), "http://p:1".into())]) else { panic!() };
+        assert_eq!(extra_env, vec![("HTTP_PROXY".to_owned(), "http://p:1".to_owned())]);
     }
 }

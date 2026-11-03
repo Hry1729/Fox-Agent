@@ -2,7 +2,8 @@ import { RunStatusText } from '../components/FoxAssistantAvatar'
 import { executionReceiptPresentation } from '../execution-receipt'
 import { type ProcessDisplayMode } from '../process-display-mode'
 import { OVERFLOW_CLASS, useOverflowFade } from '../row-overflow'
-import { toolFailurePresentation } from '../run-status-facts'
+import { toolFailureRawText, toolFailurePresentation } from '../run-status-facts'
+import { useDeveloperUi } from '../developer-ui'
 import { runtimeProcessActivity } from '../runtime-process-activity'
 import { TOOL_ATTEMPT_REASON_LABELS, TOOL_ATTEMPT_STATE_LABELS, type ToolAttemptState, toolAttemptReason, toolAttemptState } from '../tool-attempt-status'
 import { useProcessScroll } from '../use-process-scroll'
@@ -65,8 +66,11 @@ function rawReasoningSummary(window: string) {
 
 function RuntimeToolItem({ tool, active, attemptState, attachmentNames, onOpenFileInSidebar, onRevealFileInExplorer }: { tool: RuntimeToolStep; active: boolean; attemptState?: ToolAttemptState; attachmentNames?: ReadonlyMap<string, string>; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void }) {
   const [open, setOpen] = useState(false)
+  const developerUi = useDeveloperUi()
   const execution = executionReceiptPresentation(tool.output)
   const failure = tool.isError ? toolFailurePresentation(tool.name, tool.output) : null
+  // 13.38 B5-3: the tool's own error text is a diagnostic; only developer mode shows it.
+  const failureRaw = failure && developerUi ? toolFailureRawText(tool.output) : null
   const ToolIcon = tool.isError || execution?.requiresAttention
     ? AlertTriangle
     : tool.awaitingUser
@@ -84,7 +88,7 @@ function RuntimeToolItem({ tool, active, attemptState, attachmentNames, onOpenFi
   const settledLabel = frozen ? tool.settled === 'cancelled' ? '已取消' : '已中断' : ''
   const outputView = tool.completed
     ? (failure
-      ? { 说明: failure.summary, ...(failure.hint ? { 处理建议: failure.hint } : {}), ...(failure.target ? { 对象: failure.target } : {}) }
+      ? { 说明: failure.summary, ...(failure.hint ? { 处理建议: failure.hint } : {}), ...(failure.target ? { 对象: failure.target } : {}), ...(failureRaw ? { 原文: failureRaw } : {}) }
       : tool.output)
     : partialText
       ? (frozen ? `${partialText}${partialText.endsWith('\n') ? '' : '\n'}[${settledLabel}，以上是${settledLabel === '已取消' ? '取消' : '中断'}前已经产生的输出]` : partialText)

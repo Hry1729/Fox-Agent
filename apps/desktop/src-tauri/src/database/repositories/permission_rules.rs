@@ -222,6 +222,23 @@ impl Database {
         })
     }
 
+    /// 13.38 B5-3：网络保护放行的审计（例如代理 fake-ip 段）。同一张 permission_audit 表，
+    /// class 为 network，reason 为放行原因码，summary 是给人看的原因。
+    pub fn record_network_allowance_audit(&self, conversation_id: &str, run_id: Option<&str>, tool_call_id: Option<&str>,
+        tool: &str, mode: &str, reason: &str, summary: &str) -> Result<(), String> {
+        let summary: String = summary.chars().take(500).collect();
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO permission_audit(conversation_id, run_id, tool_call_id, tool, mode, class, risk,
+                                              reason, rule_ids_json, findings_json, summary, created_at)
+                 VALUES(?1, ?2, ?3, ?4, ?5, 'network', 'low', ?6, '[]', ?7, ?8, ?9)",
+                params![conversation_id, run_id, tool_call_id, tool, mode, reason,
+                        json!([reason]).to_string(), summary, now_ms()],
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn approval_record(&self, approval_id: &str) -> Result<crate::database::ApprovalRecord, String> {
         self.with_connection(|connection| super::query_approval(connection, approval_id))
     }

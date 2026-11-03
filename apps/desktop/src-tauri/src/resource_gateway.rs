@@ -557,19 +557,29 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
         // replacement (REV-05).
         let extracted = crate::local_knowledge_import::extract_office_text(&bytes, &path.to_string_lossy())?;
         // Office 抽取保持原样。普通字节按 BOM / UTF-8 / GB18030 解码；version 仍按原始字节计算。
+        // 13.38 B5-1：Windows 批处理按系统 ANSI 代码页解码、换行显示成 LF；edit_file 能直接改它
+        // （写回时重新转成 CRLF + 同一代码页），所以不加「不能直接修改」的说明。
+        let batch_code_page = crate::script_encoding::batch_code_page_for(&path);
         let (text, decoded_encoding) = if let Some(text) = extracted.clone() {
             (text, None)
+        } else if let Some(code_page) = batch_code_page {
+            let (text, encoding, lossy) = crate::script_encoding::decode_batch(&bytes, code_page);
+            (text, Some((encoding, lossy)))
         } else {
             let (text, encoding, lossy) = decode_text_bytes(&bytes);
-            (text, Some((encoding, lossy)))
+            (text, Some((encoding.to_owned(), lossy)))
         };
-        let encoding_notice = decoded_encoding.and_then(|(encoding, _)| model_encoding_notice(encoding));
+        let encoding_notice = if batch_code_page.is_some() {
+            None
+        } else {
+            decoded_encoding.as_ref().and_then(|(encoding, _)| model_encoding_notice(encoding))
+        };
         let notice_units = encoding_notice
             .as_ref()
             .map(|notice| notice.encode_utf16().count())
             .unwrap_or(0);
         let with_encoding = |mut details: Value| -> Value {
-            if let Some((encoding, lossy)) = decoded_encoding {
+            if let Some((encoding, lossy)) = &decoded_encoding {
                 details["encoding"] = json!(encoding);
                 details["lossyDecode"] = json!(lossy);
             }

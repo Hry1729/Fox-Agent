@@ -100,6 +100,8 @@ pub enum PreparedCapabilityTool {
         format: WebReadFormat,
         max_chars: usize,
         preview: ToolPreview,
+        /// 13.38 B5-3: why a proxy fake-ip address was let through (audited).
+        network_allowance: Option<String>,
     },
     HttpRequest {
         method: Method,
@@ -109,6 +111,8 @@ pub enum PreparedCapabilityTool {
         body: Option<Vec<u8>>,
         timeout: Duration,
         preview: ToolPreview,
+        /// 13.38 B5-3: why a proxy fake-ip address was let through (audited).
+        network_allowance: Option<String>,
     },
     SystemInfo {
         include_processes: bool,
@@ -170,6 +174,15 @@ pub enum PreparedCapabilityTool {
 }
 
 impl PreparedCapabilityTool {
+    /// 13.38 B5-3: the audit sentence for a proxy fake-ip address this call
+    /// was allowed to reach, if any.
+    pub fn network_allowance(&self) -> Option<&str> {
+        match self {
+            Self::WebRead { network_allowance, .. } | Self::HttpRequest { network_allowance, .. } => network_allowance.as_deref(),
+            _ => None,
+        }
+    }
+
     pub fn preview(&self) -> &ToolPreview {
         match self {
             Self::WebSearch { preview, .. }
@@ -479,7 +492,7 @@ fn prepare_web_search(input: &Value) -> Result<PreparedCapabilityTool, String> {
 fn prepare_web_read(input: &Value) -> Result<PreparedCapabilityTool, String> {
     let raw_url = required_string(input, "url")?;
     let url = Url::parse(&raw_url).map_err(|error| format!("invalid URL: {error}"))?;
-    validate_public_url(&url)?;
+    let network_allowance = check_public_url(&url)?.allowance;
     let format = match optional_string(input, "format")
         .as_deref()
         .unwrap_or("markdown")
@@ -504,13 +517,14 @@ fn prepare_web_read(input: &Value) -> Result<PreparedCapabilityTool, String> {
         url,
         format,
         max_chars,
+        network_allowance,
     })
 }
 
 fn prepare_http_request(input: &Value) -> Result<PreparedCapabilityTool, String> {
     let raw_url = required_string(input, "url")?;
     let url = Url::parse(&raw_url).map_err(|error| format!("invalid URL: {error}"))?;
-    validate_public_url(&url)?;
+    let network_allowance = check_public_url(&url)?.allowance;
     let host = url
         .host_str()
         .ok_or_else(|| "HTTP URL is missing a host".to_owned())?
@@ -593,6 +607,7 @@ fn prepare_http_request(input: &Value) -> Result<PreparedCapabilityTool, String>
         headers,
         body,
         timeout,
+        network_allowance,
     })
 }
 
@@ -2157,6 +2172,38 @@ fn fetch_public_url(mut url: Url) -> Result<(String, String, Vec<u8>), String> {
 }
 
 fn validate_public_url(url: &Url) -> Result<Vec<IpAddr>, String> {
+    check_public_url(url).map(|checked| checked.addresses)
+}
+
+/// The addresses a public URL resolved to, plus the audit sentence when a
+/// proxy fake-ip address was let through.
+struct PublicUrl {
+    addresses: Vec<IpAddr>,
+    allowance: Option<String>,
+}
+
+/// 13.38 B5-3: 198.18.0.0/15 is a benchmarking range, but proxy software in
+/// fake-ip mode (Clash / mihomo / sing-box) answers DNS with it and carries the
+/// connection itself. When a system proxy or proxy variables are configured,
+/// that range is not treated as private; every other private, local and
+/// reserved address is still refused.
+fn is_proxy_fake_ip(address: IpAddr) -> bool {
+    let address = match address {
+        IpAddr::V4(address) => address,
+        IpAddr::V6(address) => match address.to_ipv4_mapped() {
+            Some(mapped) => mapped,
+            None => return false,
+        },
+    };
+    let [a, b, _, _] = address.octets();
+    a == 198 && (b == 18 || b == 19)
+}
+
+fn check_public_url(url: &Url) -> Result<PublicUrl, String> {
+    check_public_url_with(url, || crate::system_proxy::detect())
+}
+
+fn check_public_url_with(url: &Url, proxy: impl FnOnce() -> crate::system_proxy::ProxySettings) -> Result<PublicUrl, String> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err("web URL must use http or https".to_owned());
     }
@@ -2175,12 +2222,29 @@ fn validate_public_url(url: &Url) -> Result<Vec<IpAddr>, String> {
     if addresses.is_empty() {
         return Err("webpage host resolved to no addresses".to_owned());
     }
-    if addresses.iter().any(|address| !is_public_ip(*address)) {
-        return Err(
-            "web_read blocks private, local, reserved, and link-local addresses".to_owned(),
-        );
+    classify_addresses(host, addresses, proxy)
+}
+
+fn classify_addresses(host: &str, addresses: Vec<IpAddr>, proxy: impl FnOnce() -> crate::system_proxy::ProxySettings) -> Result<PublicUrl, String> {
+    let blocked: Vec<IpAddr> = addresses.iter().copied().filter(|address| !is_public_ip(*address)).collect();
+    if blocked.is_empty() {
+        return Ok(PublicUrl { addresses, allowance: None });
     }
-    Ok(addresses)
+    if blocked.iter().all(|address| is_proxy_fake_ip(*address)) {
+        let settings = proxy();
+        if settings.proxy_in_use() {
+            let shown = blocked.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+            let allowance = format!(
+                "代理 fake-ip 放行：{host} 解析到 {shown}（198.18.0.0/15，代理软件 fake-ip 模式使用的地址段）；检测到代理设置（来源：{}），按公网地址处理",
+                settings.sources().join("、")
+            );
+            return Ok(PublicUrl { addresses, allowance: Some(allowance) });
+        }
+    }
+    let shown = blocked.first().map(ToString::to_string).unwrap_or_default();
+    Err(crate::tool_host::ToolErrorCode::PermissionDenied.error(format!(
+        "网络保护拦截了这次访问：{host} 解析到 {shown}，这是内网、本机或保留地址，Fox 不会从这类地址读取内容。请换一个公网网址；如果你在用代理的 fake-ip 模式，请开启系统代理或设置 HTTP_PROXY 等代理环境变量后再试。"
+    )))
 }
 
 fn is_public_ip(address: IpAddr) -> bool {
@@ -4064,6 +4128,43 @@ mod tests {
         assert!(!is_public_ip("::1".parse().unwrap()));
         assert!(is_public_ip("1.1.1.1".parse().unwrap()));
         assert!(is_public_ip("2606:4700:4700::1111".parse().unwrap()));
+    }
+
+    fn with_proxy() -> crate::system_proxy::ProxySettings {
+        crate::system_proxy::ProxySettings::merge(&[(
+            crate::system_proxy::ProxySource::SystemProxy,
+            vec![("HTTPS_PROXY".to_owned(), "http://127.0.0.1:7890".to_owned())],
+        )])
+    }
+
+    fn ips(list: &[&str]) -> Vec<IpAddr> {
+        list.iter().map(|ip| ip.parse().unwrap()).collect()
+    }
+
+    /// 13.38 B5-3：检测到代理时 198.18.0.0/15（fake-ip）按公网处理，并给出审计说明。
+    #[test]
+    fn proxy_fake_ip_is_allowed_only_with_a_proxy_and_is_audited() {
+        let allowed = classify_addresses("example.com", ips(&["198.18.0.7"]), with_proxy).expect("fake-ip with proxy");
+        let allowance = allowed.allowance.expect("audit sentence");
+        assert!(allowance.contains("example.com") && allowance.contains("198.18.0.7") && allowance.contains("wininet"), "{allowance}");
+        assert!(classify_addresses("example.com", ips(&["198.19.255.1"]), with_proxy).unwrap().allowance.is_some(), "整个 /15");
+        assert!(classify_addresses("example.com", ips(&["::ffff:198.18.0.7"]), with_proxy).unwrap().allowance.is_some(), "IPv4 映射");
+        let refused = classify_addresses("example.com", ips(&["198.18.0.7"]), crate::system_proxy::ProxySettings::default)
+            .err().expect("no proxy: still private");
+        assert!(refused.starts_with("[tool.permission_denied] 网络保护拦截了这次访问"), "{refused}");
+        let public = classify_addresses("example.com", ips(&["93.184.215.14"]), || panic!("public addresses never read the proxy")).unwrap();
+        assert!(public.allowance.is_none());
+    }
+
+    /// 本机和私有地址在有代理时照样拦截；混着私有地址的 fake-ip 结果也拦截。
+    #[test]
+    fn private_and_local_addresses_stay_blocked_with_a_proxy() {
+        for address in ["127.0.0.1", "10.1.2.3", "192.168.1.5", "172.16.0.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "fe80::1", "fd00::1", "198.51.100.1"] {
+            let error = classify_addresses("internal.example", ips(&[address]), with_proxy).err().unwrap_or_else(|| panic!("{address} must stay blocked"));
+            assert!(error.contains("内网、本机或保留地址"), "{address}: {error}");
+            assert!(!error.contains("web_read blocks"), "普通提示不带英文原文");
+        }
+        assert!(classify_addresses("mixed.example", ips(&["198.18.0.7", "127.0.0.1"]), with_proxy).is_err());
     }
 
     #[test]

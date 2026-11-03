@@ -6,7 +6,7 @@ import { agentBackendFailureHint } from '@/features/conversations/model/agent-ba
 import { notify } from '@/features/notifications'
 import { readDeveloperUi } from '@/features/chat/developer-ui'
 
-const MODEL_CONNECTION_CODES = new Set(['model.connection_required', 'model.connection_failed', 'model.connection_choose_address', 'model.connection_unverified'])
+const MODEL_CONNECTION_CODES = new Set(['model.connection_required', 'model.connection_failed', 'model.connection_choose_address', 'model.connection_unverified', 'model.connection_unreachable'])
 // An external Agent that is not set up yet (UI 1103: no login card above the
 // composer any more; one notice with「去设置」 to 设置 → Agent).
 const NOT_SET_UP_CODES = new Set([
@@ -20,6 +20,9 @@ const NOT_SET_UP_CODES = new Set([
 /** 13.37: Fox's refusal without a model service, as the Host words it (`FOX_MODEL_SERVICE_MISSING`). */
 export const FOX_MODEL_SERVICE_MISSING_TITLE = '还没有配置模型服务'
 export const FOX_MODEL_SERVICE_MISSING_BODY = '请先到「设置 → 模型服务」添加并测试一个供应商，再发送。'
+/** 13.38 B4-5：模型服务地址连不上（拒绝连接、找不到地址、超时），发送前就拒绝，不建 Run。 */
+export const MODEL_UNREACHABLE_TITLE = '连不上模型服务'
+export const MODEL_UNREACHABLE_BODY = '模型服务的地址现在连不上：请到「设置 → 模型服务」检查地址，或确认服务已经启动，再发送。草稿已保留。'
 export interface SendNotStartedNotice {
   title: string
   description: string
@@ -83,6 +86,12 @@ export function sendNotStartedNotice(
     title = 'Pi 的配置来源需要确认'
     description = '到设置里的 Pi 选择用 Fox 模型服务还是本机 ~/.pi，再发送。'
     workspaceView = 'settings-ai'
+  } else if (normalized === 'model.connection_unreachable') {
+    // 13.38 B4-5: the address cannot be reached at all, for Fox and every
+    // external Agent alike. The address itself only shows in developer mode.
+    title = MODEL_UNREACHABLE_TITLE
+    description = MODEL_UNREACHABLE_BODY
+    workspaceView = 'model-service'
   } else if (normalized === 'model.connection_unverified') {
     // 13.37 B3-1: an edited provider (e.g. a new Anthropic address) needs a
     // new connection test. This is the model service's step, for Fox and for

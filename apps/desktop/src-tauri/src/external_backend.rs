@@ -456,6 +456,13 @@ impl ExternalBackendHost {
             Err(error) => return failure("model.connection_failed", error, true),
             _ => {}
         }
+        // 13.38 B4-5: the model service address this Agent gets from 模型服务
+        // must be reachable before a Run is created (refused / DNS / timeout).
+        if let Some(login) = self.unified_login(backend) {
+            if let Some((code, message)) = crate::model_reachability::send_refusal(&login.base_url) {
+                return failure(code, message, true);
+            }
+        }
         // A storage error here is not "no earlier session": starting a new
         // native session would silently drop the conversation's history.
         let stored = match self.database.latest_native_session(&request.conversation_id) {

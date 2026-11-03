@@ -1,16 +1,16 @@
 import { activeModelWaiting, modelWaitingTitle } from '../run-status-facts'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger, runAfterMenuClose } from '@/components/ui/dropdown-menu'
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Toggle } from '@/components/animate-ui/components/radix/toggle'
 import { AnimatedIconTrigger, PanelRight } from '@/components/fox-ui/animated-icons'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
 import { conversationRunState } from '@/features/conversations/model/kernel-snapshot'
-import { type ConversationDetail, type ConversationSummary } from '@/features/conversations/model/types'
+import { type ConversationDetail, type ConversationSummary, type ProjectRecord } from '@/features/conversations/model/types'
 import { notify as toast } from '@/features/notifications'
-import { Activity, AlertTriangle, Archive, BookOpen, Bot, ChevronRight, CircleHelp, CircleStop, FileEdit, FileText, Folder, FolderOpen, ListTodo, MoreHorizontal, Pin, PinOff, RotateCcw, Settings, ShieldCheck, Terminal } from 'lucide-react'
+import { Activity, AlertTriangle, Archive, BookOpen, Bot, Check, ChevronRight, CircleHelp, CircleStop, FileEdit, FileText, Folder, FolderInput, FolderOpen, FolderPlus, FolderX, ListTodo, MoreHorizontal, Pin, PinOff, RotateCcw, Settings, ShieldCheck, Terminal } from 'lucide-react'
 import { type ReactNode, useId, useRef, useState } from 'react'
 import { type ChatState, type RightMode } from '../fox-shared'
 import { runtimeProcess } from '../timeline/fox-runtime-process-model'
@@ -108,11 +108,25 @@ function resetContextItemState(
   return { available: true, reason: null }
 }
 
-export function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onRightSidebarCollapse, onOpenRightMode, conversation, detail, modelName, state, onPinConversation, onRenameConversation, onResetContext, onArchiveConversation }: { rightSidebarCollapsed: boolean; onRightSidebarExpand: () => void; onRightSidebarCollapse: () => void; onOpenRightMode: (mode: RightMode) => void; conversation?: ConversationSummary | null; detail: ConversationDetail | null; modelName: string; state: ChatState; onPinConversation: (conversation: ConversationSummary) => void; onRenameConversation: (conversation: ConversationSummary) => void; onResetContext: (conversation: ConversationSummary) => void; onArchiveConversation: (conversation: ConversationSummary) => void }) {
+/** 13.38 R2-4：「更换项目」什么时候能用。运行中不能换（Host 同样会拒绝）。 */
+export function changeProjectItemState(state: ChatState, conversation: ConversationSummary | null | undefined): { available: boolean; reason: string | null } {
+  if (!conversation) return { available: false, reason: '先打开一个对话' }
+  if (state === 'running') return { available: false, reason: '对话正在运行，请先停止' }
+  return { available: true, reason: null }
+}
+
+function sameRoot(left: string | null | undefined, right: string | null | undefined) {
+  const normalize = (value: string | null | undefined) => (value ?? '').trim().replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase()
+  return Boolean(left && right) && normalize(left) === normalize(right)
+}
+
+export function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onRightSidebarCollapse, onOpenRightMode, conversation, detail, modelName, state, onPinConversation, onRenameConversation, onResetContext, onArchiveConversation, projects = [], onChangeProject, onPickProjectFolder }: { rightSidebarCollapsed: boolean; onRightSidebarExpand: () => void; onRightSidebarCollapse: () => void; onOpenRightMode: (mode: RightMode) => void; conversation?: ConversationSummary | null; detail: ConversationDetail | null; modelName: string; state: ChatState; onPinConversation: (conversation: ConversationSummary) => void; onRenameConversation: (conversation: ConversationSummary) => void; onResetContext: (conversation: ConversationSummary) => void; onArchiveConversation: (conversation: ConversationSummary) => void; /** 「更换项目」子菜单里列出的项目。 */ projects?: readonly ProjectRecord[]; onChangeProject?: (conversation: ConversationSummary, projectRoot: string | null, permissionMode?: ProjectRecord['permissionMode']) => void; onPickProjectFolder?: (conversation: ConversationSummary) => void }) {
   const [projectPopoverOpen, setProjectPopoverOpen] = useState(false)
   const waiting = detail && detail.conversation.id === conversation?.id
     ? activeModelWaiting(detail.runtimeEvents, { runId: detail.lastRun?.id, runState: conversationRunState(detail) }) : null
   const resetContextItem = resetContextItemState(detail, state, conversation)
+  const changeProjectItem = changeProjectItemState(state, conversation)
+  const canChangeProject = Boolean(onChangeProject)
   const projectRoot = conversation?.projectRoot?.trim() ?? ''
   const normalizedProjectRoot = projectRoot.replace(/[\\/]+$/, '')
   const projectName = normalizedProjectRoot.split(/[\\/]/).at(-1) || '未绑定项目'
@@ -147,6 +161,26 @@ export function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onRigh
               <DropdownMenuLabel>当前对话</DropdownMenuLabel>
               <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onPinConversation(conversation)}>{conversation?.pinned ? <PinOff /> : <Pin />}{conversation?.pinned ? '取消置顶' : '置顶对话'}</DropdownMenuItem>
               <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onRenameConversation(conversation)}><FileEdit />重命名</DropdownMenuItem>
+              {canChangeProject && (changeProjectItem.available ? (
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger data-testid="change-project"><FolderInput />更换项目</DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent className="fox-top-menu fox-change-project-menu">
+                    {projects.map((project) => {
+                      const current = sameRoot(project.rootPath, conversation?.projectRoot)
+                      return <DropdownMenuItem key={project.id} disabled={current} title={project.rootPath}
+                        onSelect={() => conversation && !current && onChangeProject?.(conversation, project.rootPath, project.permissionMode)}>
+                        <Folder /><span className="fox-change-project-name">{project.name}</span>{current ? <Check className="ml-auto" aria-label="当前项目" /> : null}
+                      </DropdownMenuItem>
+                    })}
+                    {projects.length > 0 && <DropdownMenuSeparator />}
+                    <DropdownMenuItem onSelect={() => conversation && runAfterMenuClose(() => onPickProjectFolder?.(conversation))}><FolderPlus />选择文件夹…</DropdownMenuItem>
+                    {projectRoot && <DropdownMenuItem onSelect={() => conversation && onChangeProject?.(conversation, null)}><FolderX />不绑定项目</DropdownMenuItem>}
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
+              ) : (
+                <DropdownMenuItem disabled data-testid="change-project" title={changeProjectItem.reason ?? undefined}
+                  aria-label={`更换项目（不可用：${changeProjectItem.reason ?? ''}）`}><FolderInput />更换项目{changeProjectItem.reason ? <span className="fox-menu-hint">{changeProjectItem.reason}</span> : null}</DropdownMenuItem>
+              ))}
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 disabled={!resetContextItem.available}

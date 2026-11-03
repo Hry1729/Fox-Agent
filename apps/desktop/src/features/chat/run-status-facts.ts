@@ -215,6 +215,12 @@ const remoteFailureCopy: Record<string, FailureCopy> = {
   'mcp.remote_failure': { summary: '连接器调用未成功', hint: '请重试' },
 }
 
+/** 13.38 B5-3：web_read / http_request 被网络保护拦下时的说法（Host 用 tool.permission_denied）。 */
+const NETWORK_TOOLS = new Set(['web_read', 'http_request'])
+const networkFailureCopy: Record<string, FailureCopy> = {
+  'tool.permission_denied': { summary: '网络保护拦截了这个地址', hint: '这个网址指向内网、本机或保留地址，Fox 不会访问；请换一个公网网址' },
+}
+
 /** No trusted category: a real but deliberately limited sentence. */
 const unknownFailureCopy: FailureCopy = { summary: '本次操作未能完成', hint: '可以稍后重试' }
 
@@ -288,9 +294,31 @@ export function toolFailurePresentation(tool: string, result: unknown): ToolFail
     return { operation, target, summary: copy.summary, hint: copy.hint ?? null }
   }
   const copy = (localCategory && isWriteOperation(tool, details) ? writeFailureCopy[localCategory] : undefined)
+    ?? (localCategory && NETWORK_TOOLS.has(tool) ? networkFailureCopy[localCategory] : undefined)
     ?? (localCategory ? localFailureCopy[localCategory] : undefined)
     ?? unknownFailureCopy
   return { operation, target, summary: copy.summary, hint: copy.hint ?? null }
+}
+
+/**
+ * 13.38 B5-3：失败工具调用的原始文字（Host / 执行器原话）。只在开发者模式的工具卡里显示，
+ * 普通模式只给 toolFailurePresentation 的中文句子。
+ */
+export function toolFailureRawText(result: unknown): string | null {
+  if (typeof result === 'string') return result.trim() || null
+  const output = record(result)
+  if (!output) return null
+  const content = Array.isArray(output.content) ? output.content : []
+  const texts = content
+    .map((part) => record(part))
+    .map((part) => (part && typeof part.text === 'string' ? part.text : ''))
+    .filter(Boolean)
+  if (texts.length) return texts.join('\n').slice(0, 4000)
+  for (const key of ['error', 'errorMessage', 'message'] as const) {
+    const value = output[key]
+    if (typeof value === 'string' && value.trim()) return value.trim().slice(0, 4000)
+  }
+  return null
 }
 
 /** A planned retry is not an executed retry; a later dispatch is separate evidence. */
