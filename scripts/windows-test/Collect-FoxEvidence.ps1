@@ -5,7 +5,8 @@
     plus a short text summary (Windows PowerShell 5.1 and PowerShell 7).
 
 .DESCRIPTION
-    Runs Get-FoxProcessTree.ps1, Search-FoxLog.ps1 and Get-FoxDbReport.ps1 from this folder
+    Runs Get-FoxIntegrity.ps1, Get-FoxProcessTree.ps1, Search-FoxLog.ps1 and Get-FoxDbReport.ps1
+    from this folder
     and writes
         <OutDir>\<Label>-<yyyyMMdd-HHmmss>.json   everything
         <OutDir>\<Label>-<yyyyMMdd-HHmmss>.txt    the summary to paste back
@@ -70,7 +71,7 @@ $evidence = [ordered]@{
         user = $(try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { [string]$env:USERNAME })
         runtimes = @()
     }
-    process = $null; log = $null; db = $null; errors = [ordered]@{}
+    integrity = $null; process = $null; log = $null; db = $null; errors = [ordered]@{}
 }
 try {
     $programFiles = $env:ProgramW6432
@@ -95,6 +96,13 @@ if ($Baseline) {
         $evidence['baseline'] = $match[0].FullName
     }
 }
+
+# 0. Integrity level of Fox (must be Medium, not elevated)
+try {
+    $intOut = Join-Path $work 'integrity.json'
+    & (Join-Path $here 'Get-FoxIntegrity.ps1') -OutPath $intOut -FoxProcessName $FoxProcessName 6>$null | Out-Null
+    $evidence.integrity = Read-FoxJson $intOut
+} catch { $evidence.errors['integrity'] = $_.Exception.Message }
 
 # 1. Process tree
 try {
@@ -132,6 +140,11 @@ $lines = New-Object System.Collections.Generic.List[string]
 $lines.Add("Fox evidence: $Label  ($($evidence.localTime), $($evidence.machine.os), PowerShell $($evidence.machine.psVersion))")
 $lines.Add("file: $([System.IO.Path]::GetFileName($base + '.json'))")
 if ($evidence.machine.runtimes) { $lines.Add("runtime packages: " + (@($evidence.machine.runtimes) -join ', ')) }
+$i = $evidence.integrity
+if ($i) {
+    foreach ($f in @($i.fox)) { if ($f) { $lines.Add(("[integrity] Fox pid={0} {1} integrity={2} elevated={3}" -f $f.pid, $f.name, $f.integrity, $f.elevated)) } }
+    $lines.Add("[integrity] ok=$($i.ok)  $($i.note)")
+}
 $p = $evidence.process
 if ($p) {
     $lines.Add('')
@@ -157,6 +170,7 @@ if ($l) {
     foreach ($s in @($l.cancelSwept | Select-Object -Last 10)) { if ($s) { $lines.Add("  " + $s.text) } }
     foreach ($o in @($l.outsideJob | Select-Object -Last 10)) { if ($o) { $lines.Add("  OUTSIDE " + $o.text) } }
     foreach ($e in @($l.errorCodes | Select-Object -First 15)) { if ($e) { $lines.Add(("  code {0} x{1}" -f $e.code, $e.hits)) } }
+    foreach ($t in @($l.foxExternalTail | Where-Object { $_ -and ([string]$_) -match 'cancel_settled_ms' } | Select-Object -Last 5)) { $lines.Add("  SETTLED " + [string]$t) }
 }
 $d = $evidence.db
 if ($d) {
@@ -167,6 +181,31 @@ if ($d) {
     if ($tables -and $null -ne $tables.PSObject.Properties['runs']) {
         foreach ($r in @($tables.runs | Select-Object -First 8)) {
             if ($r) { $lines.Add(("  run {0} {1} {2} status={3} error={4} {5}" -f $r.created_utc, $r.agent_backend, $r.id, $r.status, $r.error_code, $r.error_message)) }
+        }
+    }
+    if ($tables -and $null -ne $tables.PSObject.Properties['toolCalls']) {
+        foreach ($t in @($tables.toolCalls | Select-Object -First 8)) {
+            if ($t) { $lines.Add(("  tool {0} run={1} {2} status={3} resultLen={4} streamedOutput={5} truncated={6}" -f $t.started_utc, $t.run_id, $t.tool_name, $t.status, $t.result_len, $t.streamed_output, $t.output_truncated)) }
+        }
+    }
+    if ($tables -and $null -ne $tables.PSObject.Properties['backendAudit']) {
+        foreach ($a in @($tables.backendAudit | Where-Object { $_ -and $_.event -match 'cancel_swept|cancel_sweep_access_denied|pi_source_defaulted_to_fox|full_access|workspace_acl' } | Select-Object -First 8)) {
+            $lines.Add(("  audit {0} {1} {2} {3}" -f $a.created_utc, $a.agent_backend, $a.event, $a.details_json))
+        }
+    }
+    if ($tables -and $null -ne $tables.PSObject.Properties['permissionAudit']) {
+        foreach ($a in @($tables.permissionAudit | Select-Object -First 6)) {
+            if ($a) { $lines.Add(("  permission {0} tool={1} mode={2} class={3} reason={4} {5}" -f $a.created_utc, $a.tool, $a.mode, $a.class, $a.reason, $a.summary)) }
+        }
+    }
+    if ($tables -and $null -ne $tables.PSObject.Properties['jobs']) {
+        foreach ($j in @($tables.jobs | Select-Object -First 4)) {
+            if ($j) {
+                $jState = $(if ($null -ne $j.PSObject.Properties['state']) { $j.state } else { '?' })
+                $jId = $(if ($null -ne $j.PSObject.Properties['job_id']) { $j.job_id } else { '?' })
+                $jRun = $(if ($null -ne $j.PSObject.Properties['run_id']) { $j.run_id } else { '?' })
+                $lines.Add(("  job {0} run={1} state={2}" -f $jId, $jRun, $jState))
+            }
         }
     }
     if ($tables -and $null -ne $tables.PSObject.Properties['cancelSwept']) {

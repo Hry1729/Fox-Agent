@@ -1,13 +1,19 @@
 # Windows 测试取证脚本
 
-给工程师实测用，Windows PowerShell 5.1 和 PowerShell 7 都能跑。脚本只读：不改 Fox 数据，不结束任何进程。全部是 ASCII 文本，5.1 下不会出现编码问题。
+给工程师实测用，Windows PowerShell 5.1 和 PowerShell 7 都能跑。取证脚本不改 Fox 数据，不结束任何进程。全部是 ASCII 文本，5.1 下不会出现编码问题。除 `Start-FoxBatch.ps1`、`New-FoxTestFixture.ps1`（会建目录、改名文件，见各自说明）外，脚本只读。
 
 | 脚本 | 作用 |
 |---|---|
-| `Collect-FoxEvidence.ps1` | 一键收集。依次调用下面三个脚本，输出 `<标签>-<时间>.json`（全部数据）和 `.txt`（摘要，直接贴回即可）。某一部分失败只记进 `errors`，不影响其他部分。 |
+| `Collect-FoxEvidence.ps1` | 一键收集。依次调用 `Get-FoxIntegrity.ps1`、`Get-FoxProcessTree.ps1`、`Search-FoxLog.ps1`、`Get-FoxDbReport.ps1`，输出 `<标签>-<时间>.json`（全部数据）和 `.txt`（摘要，直接贴回即可）。某一部分失败只记进 `errors`，不影响其他部分。 |
 | `Get-FoxProcessTree.ps1` | 进程树快照，每个进程记录 pid、ppid、创建时间、账户、受限令牌、是否在任意 Job 中、是否在 Fox Job 中。 |
 | `Search-FoxLog.ps1` | 搜索 Fox 日志里的 `cancel_swept`、`outside_job`/`outsideJob` 和错误码。 |
-| `Get-FoxDbReport.ps1` | 查询 `fox.db` 的副本，包括最近的 runs、各 Run 的事件、`cancel_swept` 事件、`agent_backend_audit_log`、`permission_audit` 和 `kernel_jobs`。 |
+| `Get-FoxDbReport.ps1` | 查询 `fox.db` 的副本，包括最近的 runs、各 Run 的事件、`cancel_swept` 事件、`agent_backend_audit_log`、`permission_audit`、`kernel_jobs`，以及这些 Run 的工具卡 `tool_calls`（状态、输出长度、`streamedOutput` / `outputTruncated`、结果头尾）。 |
+| `Get-FoxIntegrity.ps1` | 读 Fox 进程令牌：完整性级别（必须是 Medium）和是否提权。`Collect-FoxEvidence.ps1` 每次都会顺带记录。 |
+| `Start-FoxBatch.ps1` | 在**普通** PowerShell 里复位并启动一批：复制基线数据目录、用备份还原测试项目、清掉 `FOX_DEV_UI`、设 `FOX_DATA_DIR`、stderr 写日志，启动后检查完整性。在管理员 PowerShell 里会拒绝运行。 |
+| `Test-FoxTextFile.ps1` | 看一个文件的编码和换行：BOM、CRLF / 单独 LF、是否合法 UTF-8、能否按 GBK（936）往返、首行是否 `chcp 65001`。用于 `.bat` 编码检查。 |
+| `Get-FoxProxyInfo.ps1` | Fox 能看到的代理来源（进程环境、用户环境、WinINET 系统代理）和 DNS 是否返回 fake-ip（198.18.0.0/15），给出能否复现 fake-ip 放行的结论。代理地址里的用户名密码会打码。 |
+| `New-FoxTestFixture.ps1` | 准备 / 撤销特殊测试环境：`AclTest`（管理员，造一个所有者是 Administrators 的目录）、`Skills`（三个坏技能）、`Junction` / `DeleteSub` / `SubRestore`、`Fsmonitor`、`Hide` / `RestoreHidden`（临时改名运行时文件或模型文件）、`Find`（找这些文件的位置）。 |
+| `Compress-FoxEvidence.ps1` | 把结果文件、证据文件夹和截图打成一个 zip（UTF-8 文件名），输出 SHA256，并列出结果文件里还没有记录的编号。 |
 
 ## 判断「是否在 Fox Job 中」
 

@@ -11,7 +11,9 @@
       cancelSwept     every agent_backend.cancel_swept event (killed / outsideJob counts);
       backendAudit    the last 100 rows of agent_backend_audit_log;
       permissionAudit the last 50 rows of permission_audit;
-      jobs            the last 20 kernel_jobs rows (background run_command and other jobs).
+      jobs            the last 20 kernel_jobs rows (background run_command and other jobs);
+      toolCalls       the tool cards of those runs (status, output length, streamedOutput /
+                      outputTruncated flags, head and tail of result_json) - 13.39 A-2.
 
     Query engine, first one that works:
       1. sqlite3(.exe) on PATH (or -Sqlite3Path), needs -json (sqlite3 3.33+);
@@ -77,6 +79,7 @@ $queries = [ordered]@{
     backendAudit = "SELECT conversation_id, agent_backend, event, substr(details_json, 1, 2000) AS details_json, $(Ts 'created_at') AS created_utc FROM agent_backend_audit_log ORDER BY created_at DESC LIMIT 100"
     permissionAudit = "SELECT conversation_id, run_id, tool, mode, class, risk, reason, summary, $(Ts 'created_at') AS created_utc FROM permission_audit ORDER BY created_at DESC LIMIT 50"
     jobs = "SELECT * FROM kernel_jobs ORDER BY rowid DESC LIMIT 20"
+    toolCalls = "SELECT t.run_id, t.tool_name, t.status, t.execution_location, t.error_message, substr(t.input_json, 1, 300) AS input_head, length(t.result_json) AS result_len, CASE WHEN instr(replace(t.result_json, ': ', ':'), char(34) || 'streamedOutput' || char(34) || ':true') > 0 THEN 1 ELSE 0 END AS streamed_output, CASE WHEN instr(replace(t.result_json, ': ', ':'), char(34) || 'outputTruncated' || char(34) || ':true') > 0 THEN 1 ELSE 0 END AS output_truncated, substr(t.result_json, 1, 1500) AS result_head, CASE WHEN length(t.result_json) > 1500 THEN substr(t.result_json, -600) ELSE NULL END AS result_tail, $(Ts 't.started_at') AS started_utc, $(Ts 't.completed_at') AS completed_utc FROM tool_calls t WHERE t.run_id IN (SELECT id FROM runs ORDER BY created_at DESC LIMIT $Limit) ORDER BY t.started_at DESC LIMIT 60"
 }
 
 $sqlFile = Join-Path $OutDir 'fox-queries.sql'
