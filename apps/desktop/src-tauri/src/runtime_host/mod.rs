@@ -6533,12 +6533,7 @@ struct ToolApprovalPolicy {
 /// environment, the Windows user environment, or the WinINET system proxy).
 /// 只读 and 询问 keep the plain allowlisted environment.
 pub(crate) fn command_proxy_environment_for_mode(mode: approval_policy::AccessMode) -> Vec<(String, String)> {
-    match mode {
-        approval_policy::AccessMode::Auto | approval_policy::AccessMode::FullAccess => {
-            crate::system_proxy::detect().command_environment()
-        }
-        approval_policy::AccessMode::ReadOnly | approval_policy::AccessMode::Ask => Vec::new(),
-    }
+    crate::system_proxy::command_environment_for_mode(mode, crate::system_proxy::detect)
 }
 
 /// The same, for a command that only knows its Run (background jobs).

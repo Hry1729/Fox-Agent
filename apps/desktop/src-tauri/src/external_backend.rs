@@ -444,7 +444,7 @@ impl ExternalBackendHost {
                 return retype(refusal);
             }
         }
-        match self.model_login_context(&target) {
+        let native_login_present = match self.model_login_context(&target) {
             Ok((_, false)) if self.unified_login(backend).is_none() => {
                 // 13.35: say which step is missing. An edited provider (e.g. an
                 // added Anthropic address) needs a new connection test before a
@@ -454,12 +454,17 @@ impl ExternalBackendHost {
                 return failure(code, message, true);
             }
             Err(error) => return failure("model.connection_failed", error, true),
-            _ => {}
-        }
+            Ok((_, present)) => present,
+        };
         // 13.38 B4-5: the model service address this Agent gets from 模型服务
         // must be reachable before a Run is created (refused / DNS / timeout).
-        if let Some(login) = self.unified_login(backend) {
-            if let Some((code, message)) = crate::model_reachability::send_refusal(&login.base_url) {
+        // Only when this turn really logs in through 模型服务: an Agent on its
+        // own native config (a login of the user's in its private HOME, or a
+        // Host environment key) talks to its own endpoint, which Fox does not
+        // probe.
+        let unified = self.unified_login(backend);
+        if let Some(base_url) = reachability_probe_target(native_login_present, unified.as_ref().map(|login| login.base_url.as_str())) {
+            if let Some((code, message)) = crate::model_reachability::send_refusal(base_url) {
                 return failure(code, message, true);
             }
         }
@@ -1055,6 +1060,17 @@ pub(crate) fn credential_gate(backend: AgentBackend, existing_conversation: bool
         .map_err(|refusal| failure(refusal.code(), refusal.message(), refusal.retryable()))
 }
 
+/// 13.38 B4-5: the address to probe before an external send, if any. The
+/// probe is for the 模型服务 login only: when the Agent already has its own
+/// native login (`native_login_present`), the generated login is not used
+/// (`unified_login::apply` reports `ExistingLogin`) and nothing is probed.
+pub(crate) fn reachability_probe_target(native_login_present: bool, unified_base_url: Option<&str>) -> Option<&str> {
+    if native_login_present {
+        return None;
+    }
+    unified_base_url
+}
+
 #[cfg(test)]
 mod tests {
     use super::{approval_outcome_label, authorized_root, external_permission_request, import_home_targets};
@@ -1267,5 +1283,16 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&data);
         let _ = std::fs::remove_dir_all(&blocked);
+    }
+
+    /// 13.38 B4-5：外部 Agent 用自己的原生配置时不做模型地址预检；只有用「模型服务」登录时才预检。
+    #[test]
+    fn b4_5_reachability_probe_only_for_the_model_service_login() {
+        use super::reachability_probe_target;
+        let url = "http://127.0.0.1:9/v1";
+        assert_eq!(reachability_probe_target(true, Some(url)), None, "私有 HOME 里已有用户自己的登录：不预检");
+        assert_eq!(reachability_probe_target(true, None), None);
+        assert_eq!(reachability_probe_target(false, Some(url)), Some(url), "用模型服务生成的登录：预检这个地址");
+        assert_eq!(reachability_probe_target(false, None), None, "没有模型服务登录：不预检（前面已按缺登录拒绝）");
     }
 }

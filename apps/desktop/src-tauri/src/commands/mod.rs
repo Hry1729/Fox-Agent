@@ -2039,37 +2039,55 @@ pub fn conversation_change_project(
     if !matches!(permission_mode, "read_only" | "ask" | "allow") {
         return ApiResponse::failure("project.invalid_permission_mode", "项目权限模式不合法", false);
     }
-    match state.database.conversation_has_active_run(&request.conversation_id) {
-        Ok(true) => return ApiResponse::failure("conversation.run_active", "这个对话正在运行：等它结束或先停止，再更换项目", true),
-        Ok(false) => {}
+    let run_active = match state.database.conversation_has_active_run(&request.conversation_id) {
+        Ok(active) => active,
         Err(error) => return storage_error(error),
-    }
+    };
     let backend = match state.database.conversation_agent_backend(&request.conversation_id) {
         Ok(Some(backend)) => backend,
         Ok(None) => return ApiResponse::failure("conversation.not_found", "未找到对话", false),
         Err(error) => return storage_error(error),
     };
-    if backend != fox_agent_backend::port::AgentBackend::Fox.as_str() {
-        let started = match (
+    // Only an external Agent's conversation can be locked to its project, so
+    // the run history and native session are read for those alone.
+    let external_started = if backend != fox_agent_backend::port::AgentBackend::Fox.as_str() && !run_active {
+        match (
             state.database.conversation_has_completed_run(&request.conversation_id),
             state.database.latest_native_session(&request.conversation_id),
         ) {
             (Ok(completed), Ok(session)) => completed || session.is_some(),
             (Err(error), _) | (_, Err(error)) => return storage_error(error),
-        };
-        if started {
-            return ApiResponse::failure(
-                "conversation.project_locked",
-                "这个 Agent 的对话已经开始，它的会话跟着原项目，不能再换项目；请新建一个对话",
-                false,
-            );
         }
+    } else {
+        false
+    };
+    if let Some((code, message, retryable)) = change_project_refusal(run_active, &backend, external_started) {
+        return ApiResponse::failure(code, message, retryable);
     }
     match state.database.change_conversation_project(&request.conversation_id, project_root.as_deref(), permission_mode) {
         Ok(Some(conversation)) => ApiResponse::success(conversation),
         Ok(None) => ApiResponse::failure("conversation.not_found", "未找到对话", false),
         Err(error) => storage_error(error),
     }
+}
+
+/// 13.38 R2-4: why `conversation_change_project` refuses, if it does.
+/// `external_started` = an external Agent's conversation has a completed
+/// round or an open native session (its private HOME and session follow the
+/// original project). Fox's own conversations can change project whenever
+/// no Run is active.
+pub(crate) fn change_project_refusal(run_active: bool, backend: &str, external_started: bool) -> Option<(&'static str, &'static str, bool)> {
+    if run_active {
+        return Some(("conversation.run_active", "这个对话正在运行：等它结束或先停止，再更换项目", true));
+    }
+    if backend != fox_agent_backend::port::AgentBackend::Fox.as_str() && external_started {
+        return Some((
+            "conversation.project_locked",
+            "这个 Agent 的对话已经开始，它的会话跟着原项目，不能再换项目；请新建一个对话",
+            false,
+        ));
+    }
+    None
 }
 
 #[tauri::command]
@@ -6628,5 +6646,37 @@ mod e2e1101_send_refusal_tests {
         let busy = configuration_saved_but_busy(crate::runtime_host::CONFIGURATION_BUSY);
         assert!(busy.starts_with("配置已保存"), "{busy}");
         assert!(configuration_saved_but_busy("worker stop failed").starts_with("配置已保存"));
+    }
+}
+
+/// 13.38 R2-4：「更换项目」的两条校验（run_active / project_locked）。
+#[cfg(test)]
+mod r2_4_change_project_tests {
+    use super::change_project_refusal;
+
+    #[test]
+    fn a_running_conversation_cannot_change_project() {
+        for backend in ["fox", "pi", "deepseek", "codex"] {
+            let (code, message, retryable) = change_project_refusal(true, backend, false).expect("运行中拒绝");
+            assert_eq!(code, "conversation.run_active");
+            assert!(retryable, "停止后可以再换");
+            assert!(message.contains("正在运行"), "{message}");
+        }
+    }
+
+    #[test]
+    fn an_external_agent_conversation_is_locked_once_started() {
+        for backend in ["pi", "deepseek", "codex"] {
+            let (code, _, retryable) = change_project_refusal(false, backend, true).expect("已开始的外部会话锁定");
+            assert_eq!(code, "conversation.project_locked");
+            assert!(!retryable);
+            assert_eq!(change_project_refusal(false, backend, false), None, "第一轮被取消、没有原生会话：可以换");
+        }
+    }
+
+    #[test]
+    fn fox_conversations_change_project_whenever_idle() {
+        assert_eq!(change_project_refusal(false, "fox", true), None);
+        assert_eq!(change_project_refusal(false, "fox", false), None);
     }
 }

@@ -295,6 +295,20 @@ mod registry {
     }
 }
 
+/// 13.38 B5-2: the proxy entries a command gets in an access mode. 自动 and
+/// 完全访问 get the detected proxy; 只读 and 询问 keep the plain allowlisted
+/// environment (and do not even detect).
+pub(crate) fn command_environment_for_mode(
+    mode: crate::runtime_host::approval_policy::AccessMode,
+    settings: impl FnOnce() -> ProxySettings,
+) -> Vec<(String, String)> {
+    use crate::runtime_host::approval_policy::AccessMode;
+    match mode {
+        AccessMode::Auto | AccessMode::FullAccess => settings().command_environment(),
+        AccessMode::ReadOnly | AccessMode::Ask => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,5 +380,20 @@ mod tests {
         assert_eq!(socks_only.iter().filter(|(key, _)| key.ends_with("_PROXY") && key != "NO_PROXY").count(), 1);
         assert!(wininet_environment("", "localhost").is_empty(), "没有代理地址时什么都不给");
         assert_eq!(wininet_environment("http://proxy.corp:3128", "")[0].1, "http://proxy.corp:3128", "已带协议的保持原样");
+    }
+
+    /// 13.38 B5-2：只有「自动」和「完全访问」把代理变量带进命令；「只读」「询问」不带，也不去检测。
+    #[test]
+    fn proxy_reaches_commands_only_in_auto_and_full_access() {
+        use crate::runtime_host::approval_policy::AccessMode;
+        let settings = || ProxySettings::merge(&[(ProxySource::SystemProxy, pairs(&[("HTTPS_PROXY", "http://127.0.0.1:7890")]))]);
+        for mode in [AccessMode::Auto, AccessMode::FullAccess] {
+            let entries = command_environment_for_mode(mode, settings);
+            assert!(entries.iter().any(|(name, value)| name == "HTTPS_PROXY" && value == "http://127.0.0.1:7890"), "{entries:?}");
+        }
+        for mode in [AccessMode::ReadOnly, AccessMode::Ask] {
+            let entries = command_environment_for_mode(mode, || -> ProxySettings { panic!("只读 / 询问不检测代理") });
+            assert!(entries.is_empty());
+        }
     }
 }

@@ -510,7 +510,7 @@ pub(crate) fn file_version(bytes: &[u8]) -> String {
 fn write_precondition(input: &Value, current_version: Option<&str>) -> Result<String, String> {
     let version = current_version.map(str::to_owned).unwrap_or_else(|| "missing".into());
     let expected = match input.get("expectedVersion") {
-        None if current.is_none() => "missing",
+        None if current_version.is_none() => "missing",
         Some(Value::String(value)) => value.as_str(),
         _ => return Err(ToolErrorCode::Conflict.error(
             "Existing files require expectedVersion from read. Read the file, revise the change against that content, and retry; no additional authorization is needed.")),
