@@ -135,9 +135,15 @@ test('failed and cancelled turns keep a clear status and an accessible process t
   fireEvent.click(view.getByRole('button', { name: /展开过程.*过程未完成/ }))
   assert.ok(view.getByRole('button', { name: /收起过程.*过程未完成/ }))
   cleanup()
+  // 13.38（A-2）：取消的这一轮默认展开过程，工具卡定格为「已取消」并保留取消前的输出，
+  // 所以开关一开始就是「收起过程」；状态词仍是「过程已取消」，可以照常折叠。
   const cancelled = render(timeline([...events.slice(0, -1), event(7, 'run.cancelled')]))
   await waitFor(() => assert.equal(stages(cancelled).length, 2))
-  assert.ok(cancelled.getByRole('button', { name: /展开过程.*过程已取消/ }))
+  const open = cancelled.getByRole('button', { name: /收起过程.*过程已取消/ })
+  assert.equal(open.getAttribute('aria-expanded'), 'true')
+  assert.equal(stages(cancelled).filter(stage => stage.hidden).length, 0)
+  fireEvent.click(open)
+  assert.equal(cancelled.getByRole('button', { name: /展开过程.*过程已取消/ }).getAttribute('aria-expanded'), 'false')
 })
 
 test('a recoverable tool error stays in the process while a completed run has no failure count', async () => {
@@ -252,7 +258,9 @@ test('failed, cancelled and interrupted turns keep their own status as the first
   for (const item of cases) {
     const view = render(item.messages ? timeline(item.events, { messages: item.messages }) : timeline(item.events))
     await waitFor(() => assert.equal(stages(view).length, 2))
-    fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
+    // 13.38（A-2）：只有取消的这一轮默认展开；失败、中断仍默认折叠。
+    if (item.name === 'cancelled') assert.equal(toggle(view).getAttribute('aria-expanded'), 'true', item.name)
+    else fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
     const toggleLabel = toggleText(view)
     // Exactly one state word, never prefixed by a separator of its own.
     assert.equal(toggleLabel, `已读取 1 个文件 · ${item.status}`, item.name)
