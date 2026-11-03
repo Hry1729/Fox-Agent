@@ -1,7 +1,8 @@
 import { useAui } from '@assistant-ui/react'
 import { ErrorState } from '@/components/assistant-ui/elements/error-state'
 import type { DataMessagePartProps } from '@assistant-ui/react'
-import { hasRunFailureDiagnostic, runFailureDetailText, type RunFailure } from '../../../conversations/model/run-failure'
+import { runFailureDetailText, runFailureUserMessage, type RunFailure } from '../../../conversations/model/run-failure'
+import { useDeveloperUi } from '@/features/chat/developer-ui'
 
 /**
  * The `data-fox-error` part renderer: one quiet failure line per run — what
@@ -10,7 +11,12 @@ import { hasRunFailureDiagnostic, runFailureDetailText, type RunFailure } from '
  */
 export function FoxErrorPart(part: DataMessagePartProps<RunFailure>) {
   const aui = useAui()
+  const developerUi = useDeveloperUi()
   const failure = part.data
   if (!failure) return null
-  return <ErrorState className="fox-thread-error" title={failure.kind === 'interrupted' ? '运行中断' : '运行失败'} detail={failure.message} diagnostic={hasRunFailureDiagnostic(failure) ? runFailureDetailText(failure) : undefined} onRetry={() => aui.message.reload()} />
+  // 13.38（R1-3 / B4-2）：普通模式只显示按错误码映射的中文提示；错误码、英文原文和后端诊断
+  // 只在开发者模式的「查看错误详情」里。
+  return <ErrorState className="fox-thread-error" title={failure.kind === 'interrupted' ? '运行中断' : '运行失败'}
+    detail={developerUi ? failure.message : runFailureUserMessage(failure)}
+    diagnostic={developerUi ? runFailureDetailText(failure) : undefined} onRetry={() => aui.message.reload()} />
 }

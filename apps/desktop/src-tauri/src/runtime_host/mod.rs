@@ -40,6 +40,8 @@ mod native_isolation_tests;
 mod search_knowledge_agent_tests;
 #[cfg(test)]
 mod cx2_shutdown_tests;
+#[cfg(test)]
+mod released_terminal_tests;
 pub(crate) mod process_identity;
 pub(crate) use process_identity::process_start_marker;
 pub(crate) use process_identity::owner_is_gone as job_owner_is_gone;
@@ -354,6 +356,30 @@ fn structured_runtime_error(message: &str) -> (&str, &str) {
         return ("runtime.start_failed", message);
     }
     (code, detail.trim_start())
+}
+
+
+/// 13.38（R1-3 / B4-2）：Pi 没有写下终态就释放了 Run 时写什么。这一轮出现过模型重试或
+/// 模型服务失败：`provider.request_failed`（失败，可重试）；否则仍是「释放时没有终态」（中断）。
+/// 返回 `(code, message, 写成 failed 而不是 interrupted)`。
+pub(crate) fn released_without_terminal_outcome(had_provider_trouble: bool) -> (&'static str, &'static str, bool) {
+    if had_provider_trouble {
+        ("provider.request_failed", "模型服务连接中断，可重试。", true)
+    } else {
+        ("runtime.released_without_terminal", "Pi released its Run before a terminal result was recorded.", false)
+    }
+}
+
+/// 13.38（R1-3 / B4-2）：被拒的事件本身就是失败终态（`run.failed` / `run.interrupted`）时，
+/// 它的 code 和 message；其它事件为 None。
+pub(crate) fn rejected_terminal_outcome(payload: &Value) -> Option<(String, String)> {
+    let event_type = payload.get("type").and_then(Value::as_str)?;
+    if !matches!(event_type, "run.failed" | "run.interrupted") {
+        return None;
+    }
+    let code = payload.get("code").and_then(Value::as_str).filter(|code| !code.trim().is_empty())?;
+    let message = payload.get("message").and_then(Value::as_str).filter(|message| !message.trim().is_empty()).unwrap_or(code);
+    Some((code.to_owned(), message.to_owned()))
 }
 
 fn event_projection_failure_code(error: &str) -> &'static str {
@@ -4048,7 +4074,12 @@ impl RuntimeHost {
                             if native {
                                 let terminal = database.with_connection(|connection| connection.query_row("SELECT status FROM runs WHERE id=?1",[run],|row|row.get::<_,String>(0)))
                                     .is_ok_and(|status| run_status_is_terminal(&status));
-                                if !terminal { let _ = database.mark_run_interrupted(run, "runtime.released_without_terminal", "Pi released its Run before a terminal result was recorded."); }
+                                if !terminal {
+                                    // 13.38（R1-3 / B4-2）：这一轮出现过模型重试或模型服务失败时，释放前没写下的终态
+                                    // 就是模型服务那一次失败：写 provider.request_failed（中文、可重试）。
+                                    let (code, message, failed) = released_without_terminal_outcome(database.run_had_provider_trouble(run).unwrap_or(false));
+                                    let _ = if failed { database.mark_run_failed(run, code, message) } else { database.mark_run_interrupted(run, code, message) };
+                                }
                                 runtime_host.mark_run_ready(run);
                             }
                         }
@@ -4230,7 +4261,16 @@ impl RuntimeHost {
                                 );
                                 continue;
                             }
-                            runtime_host.reject_runtime_run_event(&run_id, event_projection_failure_code(&error), &error);
+                            // 13.38（R1-3 / B4-2）：被拒的是 run.failed / run.interrupted 时，失败终态沿用它自己的
+                            // code 和 message（例如 provider.request_failed），投影错误只进日志。
+                            let projection_code = event_projection_failure_code(&error);
+                            let (code, message) = rejected_terminal_outcome(&payload)
+                                .filter(|_| projection_code == "storage.event_projection_failed")
+                                .unwrap_or_else(|| (projection_code.to_owned(), error.clone()));
+                            if code != projection_code {
+                                eprintln!("fox.runtime run={run_id} terminal projection rejected ({code}): {error}");
+                            }
+                            runtime_host.reject_runtime_run_event(&run_id, &code, &message);
                             continue;
                         }
                     }
@@ -4255,23 +4295,26 @@ impl RuntimeHost {
         if !known || self.database.with_connection(|connection| connection.query_row(
             "SELECT status FROM runs WHERE id=?1", [run_id], |row| row.get::<_,String>(0)))
             .is_ok_and(|status| run_status_is_terminal(&status)) { return; }
-        let host = self.clone();
-        let (run, code, message) = (run_id.to_owned(), code.to_owned(), message.to_owned());
-        thread::spawn(move || {
-            match host.database.mark_run_failed(&run, &code, &message) {
-                Ok(()) => {
-                    let session = host.state.lock().ok().and_then(|state|
-                        state.worker.as_ref().and_then(|worker| worker.sessions.by_run(&run).cloned()));
-                    if let Some(session) = session {
-                        let _ = host.app.emit("fox://runtime-event", RuntimeEventNotification {
-                            conversation_id: session.conversation_id, runtime_session_id: Some(session.runtime_session_id),
-                            run_id: run.clone(), seq: host.database.next_run_seq(&run).unwrap_or(1), timestamp: protocol::timestamp(),
-                            event: json!({"type":"run.failed","code":code,"message":message}),
-                        });
-                    }
+        // 13.38（R1-3 / B4-2）：失败终态在这里同步写下。之前在后台线程里写，和随后内联处理的
+        // run_released 竞争：run_released 先写下 released_without_terminal，真正的失败原因就丢了。
+        match self.database.mark_run_failed(run_id, code, message) {
+            Ok(()) => {
+                let session = self.state.lock().ok().and_then(|state|
+                    state.worker.as_ref().and_then(|worker| worker.sessions.by_run(run_id).cloned()));
+                if let Some(session) = session {
+                    let _ = self.app.emit("fox://runtime-event", RuntimeEventNotification {
+                        conversation_id: session.conversation_id, runtime_session_id: Some(session.runtime_session_id),
+                        run_id: run_id.to_owned(), seq: self.database.next_run_seq(run_id).unwrap_or(1), timestamp: protocol::timestamp(),
+                        event: json!({"type":"run.failed","code":code,"message":message}),
+                    });
                 }
-                Err(error) => eprintln!("runtime event rejection could not settle {run}: {error}"),
             }
+            Err(error) => eprintln!("runtime event rejection could not settle {run_id}: {error}"),
+        }
+        // 停止 runtime 里的这一轮可能要等，放到后台；终态已经落库。
+        let host = self.clone();
+        let run = run_id.to_owned();
+        thread::spawn(move || {
             let _ = host.cancel_run(&run);
             if !host.database.run_control_binding(&run).ok().flatten().is_some_and(|binding| binding.executor_route.is_some()) {
                 host.mark_run_ready(&run);

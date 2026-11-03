@@ -139,12 +139,22 @@ export function sendNotStartedNotice(
 /** 错误码、环境变量、绝对路径、网关名。普通模式碰到这些就改用人话。 */
 const INTERNAL_SURFACE = /(?:\b[a-z][a-z0-9]*(?:[._][a-z0-9_]+){1,}\b)|(?:\b[A-Z][A-Z0-9]+_[A-Z0-9_]+\b)|(?:[A-Za-z]:\\)|(?:\/(?:home|Users|usr|var|tmp)\/)|(?:\.(?:dsh|pi)\/)|(?:\bMagpie\b)|(?:api\.deepseek)|(?:localhost:\d)|(?:127\.0\.0\.1:\d)|(?:\bECONN[A-Z]+\b)/
 
-/** 开发者模式保留原文；普通模式只在看起来像调试信息时换成 fallback。 */
+/**
+ * 13.38（R1-3 / B4-2）：没有一个汉字、却有成句英文（三个以上英文单词）的文字是内部原文
+ * （例如「Pi released its Run before a terminal result was recorded.」），普通模式不直接显示。
+ */
+const CJK = /[\u3400-\u9fff\uf900-\ufaff]/
+const ENGLISH_WORDS = /[A-Za-z]{2,}(?:[^A-Za-z\u3400-\u9fff]+[A-Za-z]{2,}){2,}/
+export function isInternalRawText(value: string): boolean {
+  return INTERNAL_SURFACE.test(value) || (!CJK.test(value) && ENGLISH_WORDS.test(value))
+}
+
+/** 开发者模式保留原文；普通模式遇到调试信息或英文内部原文时换成 fallback。 */
 export function userFacingError(text: string | null | undefined, developerUi: boolean, fallback: string): string {
   const value = text?.trim() ?? ''
   if (!value) return fallback
   if (developerUi) return value
-  return INTERNAL_SURFACE.test(value) ? fallback : value
+  return isInternalRawText(value) ? fallback : value
 }
 
 /** 捕获到的异常转成界面文字：开发者模式原文，普通模式遇到调试信息改用 fallback。 */

@@ -4538,6 +4538,25 @@ impl Database {
         })
     }
 
+    /// 13.38（R1-3 / B4-2）：这一轮是否出现过模型重试（`run.retrying` / `run.retry.completed`）
+    /// 或模型服务失败（事件里带 `provider.*` 错误码）。Run 没有终态就被释放时，据此把它写成
+    /// `provider.request_failed`（模型服务连接中断，可重试），而不是笼统的「释放时没有终态」。
+    pub(crate) fn run_had_provider_trouble(&self, run_id: &str) -> Result<bool, String> {
+        self.with_connection(|connection| {
+            connection.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM run_events WHERE run_id = ?1 AND (
+                        event_type IN ('run.retrying', 'run.retry.completed')
+                        OR (event_type IN ('run.failed', 'run.interrupted', 'message.failed', 'agent_backend.diagnostic')
+                            AND event_json LIKE '%\"provider.%')
+                    )
+                 )",
+                [run_id],
+                |row| row.get::<_, bool>(0),
+            )
+        })
+    }
+
     pub(crate) fn create_host_tool_call_once(
         &self,
         run_id: &str,
@@ -11647,6 +11666,59 @@ mod tests {
         );
 
         drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cancelling_run_still_records_runtime_tool_output_and_keeps_it_on_cancel() {
+        // 13.38（A-2）：取消宽限期（cancelling）里，外部后端工具卡的输出与结束照常落库；
+        // run.cancelled 把没结束的卡定格为 cancelled，已写下的输出原样保留。
+        let (database, path) = test_database();
+        let conversation = database.create_conversation(DEFAULT_AGENT_ID, None, None, None).expect("create conversation");
+        let started = database.create_run(&conversation.id, "ping", None).expect("create run");
+        let run = started.run.id.clone();
+        database.apply_runtime_event(&run, 1, &serde_json::json!({ "type": "run.started" })).expect("run.started");
+        database.apply_runtime_event(&run, 2, &serde_json::json!({ "type": "tool.started", "toolCallId": "p1", "tool": "bash", "input": { "command": "ping -n 60 127.0.0.1" } })).expect("tool.started");
+        database.mark_run_cancelling(&run).expect("cancelling");
+        let applied = database.apply_runtime_event(&run, 3, &serde_json::json!({ "type": "tool.updated", "toolCallId": "p1",
+            "update": { "status": "in_progress", "text": "来自 127.0.0.1 的回复\n", "output": "来自 127.0.0.1 的回复\n", "streamedOutput": true } })).expect("tool.updated while cancelling");
+        assert!(applied, "cancelling 期间的工具输出不再被丢弃");
+        // 其它事件在 cancelling 期间照旧被丢弃。
+        assert!(!database.apply_runtime_event(&run, 4, &serde_json::json!({ "type": "message.delta", "delta": "late" })).expect("late delta"));
+        database.apply_runtime_event(&run, 5, &serde_json::json!({ "type": "run.cancelled" })).expect("run.cancelled");
+        let (status, result): (String, String) = database.with_connection(|connection| connection.query_row(
+            "SELECT status, result_json FROM tool_calls WHERE run_id = ?1 AND runtime_tool_call_id = 'p1'", [&run],
+            |row| Ok((row.get(0)?, row.get(1)?)))).expect("tool row");
+        assert_eq!(status, "cancelled");
+        assert!(result.contains("来自 127.0.0.1 的回复"), "取消前的输出保留：{result}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn host_tool_live_output_only_touches_running_host_cards() {
+        let (database, path) = test_database();
+        let conversation = database.create_conversation(DEFAULT_AGENT_ID, None, None, None).expect("create conversation");
+        let started = database.create_run(&conversation.id, "ping", None).expect("create run");
+        let run = started.run.id.clone();
+        database.apply_runtime_event(&run, 1, &serde_json::json!({ "type": "run.started" })).expect("run.started");
+        database.create_host_tool_call(&run, "host-1", "run_command", &serde_json::json!({ "command": "ping" }), "running", false).expect("host tool call");
+        assert!(database.update_host_tool_live_output(&run, "host-1", "正在 Ping\n").expect("live output"));
+        assert!(!database.update_host_tool_live_output(&run, "missing", "x").expect("unknown card"), "不存在的卡不写");
+        let result: String = database.with_connection(|connection| connection.query_row(
+            "SELECT result_json FROM tool_calls WHERE run_id = ?1 AND runtime_tool_call_id = 'host-1'", [&run], |row| row.get(0))).expect("row");
+        assert!(result.contains("正在 Ping") && result.contains("streamedOutput"), "{result}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn provider_trouble_is_detected_from_retry_and_provider_failure_events() {
+        let (database, path) = test_database();
+        let conversation = database.create_conversation(DEFAULT_AGENT_ID, None, None, None).expect("create conversation");
+        let quiet = database.create_run(&conversation.id, "quiet", None).expect("create run");
+        database.apply_runtime_event(&quiet.run.id, 1, &serde_json::json!({ "type": "run.started" })).expect("run.started");
+        assert!(!database.run_had_provider_trouble(&quiet.run.id).expect("query"));
+        database.apply_runtime_event(&quiet.run.id, 2, &serde_json::json!({ "type": "run.retrying", "attempt": 1, "maxAttempts": 3, "message": "socket hang up" })).expect("run.retrying");
+        assert!(database.run_had_provider_trouble(&quiet.run.id).expect("query"), "模型重试算模型服务问题");
         let _ = std::fs::remove_file(path);
     }
 

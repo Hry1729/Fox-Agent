@@ -107,7 +107,12 @@ impl ToolProgress {
     fn decorate(&self, result: &mut Value) {
         let Some(map) = result.as_object_mut() else { return };
         if !self.output.is_empty() {
-            map.entry("text").or_insert_with(|| json!(self.output));
+            // `content` 里只有终端占位（`[terminal] <id>`）时，真正的输出在流里：用它作为卡片文本。
+            let placeholder_only = map.get("text").and_then(Value::as_str).is_none_or(is_terminal_placeholder);
+            if placeholder_only {
+                map.insert("text".into(), json!(self.output));
+            }
+            map.insert("output".into(), json!(self.output));
             map.insert("streamedOutput".into(), json!(true));
         }
         if self.truncated {
@@ -128,7 +133,12 @@ fn output_chunk(update: &Value) -> Option<(String, bool)> {
             return Some((data.to_owned(), true));
         }
     }
-    tool_content_summary(update.get("content")).map(|text| (text, false))
+    tool_content_summary(update.get("content")).filter(|text| !is_terminal_placeholder(text)).map(|text| (text, false))
+}
+
+/// `tool_content_summary` 给终端块写的占位行（`[terminal] <id>`），不是输出本身。
+fn is_terminal_placeholder(text: &str) -> bool {
+    text.lines().all(|line| line.starts_with("[terminal] "))
 }
 
 /// Turns one turn's ACP updates into Fox runtime events. One projector per
@@ -339,10 +349,6 @@ impl AcpProjector {
         out.push(json!({ "type": "message.delta", "delta": text }));
     }
 
-    fn tool(&mut self, update: &Value, first_seen_as_call: bool, out: &mut Vec<Value>) {
-        self.tool_at(update, first_seen_as_call, std::time::Instant::now(), out)
-    }
-
     fn tool_at(&mut self, update: &Value, first_seen_as_call: bool, now: std::time::Instant, out: &mut Vec<Value>) {
         let Some(id) = update.get("toolCallId").and_then(Value::as_str) else {
             return;
@@ -441,6 +447,11 @@ impl AcpProjector {
     /// Project one ACP `SessionUpdate` (the JSON of `session/update`'s
     /// `update` field) into zero or more Fox runtime events.
     pub fn project(&mut self, update: &Value) -> Vec<Value> {
+        self.project_at(update, std::time::Instant::now())
+    }
+
+    /// [`Self::project`] at a given instant (the output throttle's clock; tests pass their own).
+    pub fn project_at(&mut self, update: &Value, now: std::time::Instant) -> Vec<Value> {
         let mut out = Vec::new();
         let kind = update.get("sessionUpdate").and_then(Value::as_str).unwrap_or("");
         if update.pointer("/_meta/fox/kind").and_then(Value::as_str) == Some("backend_status") {
@@ -462,8 +473,8 @@ impl AcpProjector {
                     }
                 }
             }
-            "tool_call" => self.tool(update, true, &mut out),
-            "tool_call_update" => self.tool(update, false, &mut out),
+            "tool_call" => self.tool_at(update, true, now, &mut out),
+            "tool_call_update" => self.tool_at(update, false, now, &mut out),
             "plan" => out.push(json!({ "type": "plan.updated", "entries": update.get("entries").cloned().unwrap_or(json!([])) })),
             // History replay of the user's own text: already a Fox message.
             "user_message_chunk" => {}
@@ -771,6 +782,73 @@ mod tests {
         assert!(projector.running_tools().is_empty());
         let late = projector.project(&json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed" }));
         assert_eq!(types(&late), ["agent_backend.update"], "nothing reopens an ended card");
+    }
+
+    fn output_update(id: &str, key: &str, data: &str) -> Value {
+        json!({ "sessionUpdate": "tool_call_update", "toolCallId": id,
+            "content": [{ "type": "terminal", "terminalId": "term-1" }],
+            "_meta": { key: { "terminal_id": "term-1", "data": data } } })
+    }
+
+    #[test]
+    fn terminal_output_meta_accumulates_on_the_card_and_is_throttled() {
+        let t0 = std::time::Instant::now();
+        let mut projector = AcpProjector::new();
+        let call = json!({ "sessionUpdate": "tool_call", "toolCallId": "p1", "kind": "execute", "status": "in_progress",
+            "rawInput": { "command": "ping -n 60 127.0.0.1" } });
+        assert_eq!(types(&projector.project_at(&call, t0)), ["tool.started"]);
+        // pi-acp：`_meta.terminal_output` 是追加块；节流窗口内只记下，不写出。
+        let first = projector.project_at(&output_update("p1", "terminal_output", "正在 Ping 127.0.0.1\n"), t0 + std::time::Duration::from_millis(10));
+        assert!(first.is_empty(), "250ms 内只带输出的更新被节流：{first:?}");
+        let second = projector.project_at(&output_update("p1", "terminal_output", "来自 127.0.0.1 的回复\n"), t0 + TOOL_OUTPUT_THROTTLE);
+        assert_eq!(types(&second), ["tool.updated"]);
+        let update = &second[0]["update"];
+        assert_eq!(update["text"], "正在 Ping 127.0.0.1\n来自 127.0.0.1 的回复\n", "终端占位不覆盖真实输出");
+        assert_eq!(update["output"], update["text"]);
+        assert_eq!(update["streamedOutput"], true);
+        // codex-acp：`terminal_output_delta` 同样追加；被节流后由 flush_pending 立刻写出。
+        let held = projector.project_at(&output_update("p1", "terminal_output_delta", "第三行\n"), t0 + TOOL_OUTPUT_THROTTLE + std::time::Duration::from_millis(1));
+        assert!(held.is_empty());
+        let flushed = projector.flush_pending();
+        assert_eq!(types(&flushed), ["tool.updated"]);
+        assert!(flushed[0]["update"]["text"].as_str().unwrap().ends_with("第三行\n"));
+        assert!(projector.flush_pending().is_empty(), "flush 只写一次");
+        // 状态变化不受节流。
+        let status = projector.project_at(&json!({ "sessionUpdate": "tool_call_update", "toolCallId": "p1", "status": "pending" }), t0 + TOOL_OUTPUT_THROTTLE + std::time::Duration::from_millis(2));
+        assert_eq!(types(&status), ["tool.updated"]);
+        // 结束：结果带完整输出与退出码。
+        let done = projector.project_at(&json!({ "sessionUpdate": "tool_call_update", "toolCallId": "p1", "status": "completed",
+            "content": [{ "type": "terminal", "terminalId": "term-1" }], "_meta": { "terminal_exit": { "exit_code": 0 } } }), t0 + std::time::Duration::from_secs(1));
+        assert_eq!(types(&done), ["tool.completed"]);
+        assert!(done[0]["result"]["text"].as_str().unwrap().starts_with("正在 Ping"));
+        assert_eq!(done[0]["result"]["exitCode"], 0);
+        assert!(projector.flush_pending().is_empty(), "结束的卡没有待写出的更新");
+    }
+
+    #[test]
+    fn tool_output_keeps_only_the_tail_and_finish_flushes_pending_output() {
+        let t0 = std::time::Instant::now();
+        let mut projector = AcpProjector::new();
+        projector.project_at(&json!({ "sessionUpdate": "tool_call", "toolCallId": "big", "kind": "execute", "status": "in_progress" }), t0);
+        let line = "数".repeat(1000); // 3000 字节
+        for index in 0..30 {
+            projector.project_at(&output_update("big", "terminal_output", &format!("{index:02}{line}\n")), t0 + std::time::Duration::from_millis(1));
+        }
+        let flushed = projector.finish();
+        assert_eq!(types(&flushed), ["tool.updated"], "finish 先写出节流中的输出");
+        let text = flushed[0]["update"]["text"].as_str().unwrap();
+        assert!(text.len() <= TOOL_OUTPUT_RETAIN_BYTES, "只保留末尾 64KiB：{}", text.len());
+        assert!(text.ends_with(&format!("29{line}\n")), "末尾是最新的输出");
+        assert!(!text.contains(&format!("00{line}")), "最早的输出被裁掉");
+        assert_eq!(flushed[0]["update"]["outputTruncated"], true);
+        // 没有 _meta 时，content 文本是整段快照（替换，不重复累加）。
+        let mut snapshot = AcpProjector::new();
+        snapshot.project_at(&json!({ "sessionUpdate": "tool_call", "toolCallId": "s", "kind": "execute", "status": "in_progress" }), t0);
+        let text_update = |text: &str| json!({ "sessionUpdate": "tool_call_update", "toolCallId": "s",
+            "content": [{ "type": "content", "content": { "type": "text", "text": text } }] });
+        snapshot.project_at(&text_update("1\n"), t0 + TOOL_OUTPUT_THROTTLE);
+        let events = snapshot.project_at(&text_update("1\n2\n"), t0 + TOOL_OUTPUT_THROTTLE * 2);
+        assert_eq!(events[0]["update"]["text"], "1\n2\n");
     }
 
     #[test]

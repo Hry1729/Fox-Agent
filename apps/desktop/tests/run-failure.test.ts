@@ -12,8 +12,11 @@ import {
   diagnosticTitle,
   hasRunFailureDiagnostic,
   runFailureDetailText,
+  runFailureUserMessage,
+  RUN_FAILURE_GENERIC_MESSAGE,
   type RunFailureInput,
 } from '../src/features/conversations/model/run-failure'
+import { isInternalRawText, userFacingError } from '../src/features/chat/send-failure-notice'
 
 function persistedRun(overrides: Partial<{
   id: string
@@ -275,7 +278,8 @@ describe('error detail rendering of long stderr tails', () => {
     expect(errorState).toContain('<pre className={ERROR_DIAGNOSTIC_CLASS} style={ERROR_DIAGNOSTIC_STYLE}')
     expect(errorState.match(/<pre\b/g)?.length).toBe(1)
     expect(src('src/features/chat/demo/fox-demo-prompts.tsx')).toMatch(/<ErrorState [^>]*diagnostic=\{diagnostic \|\| presentation\.detail\}/)
-    expect(src('src/features/chat/thread/parts/fox-error.tsx')).toMatch(/<ErrorState [^>]*diagnostic=\{hasRunFailureDiagnostic\(failure\) \? runFailureDetailText\(failure\)/)
+    // 13.38（R1-3 / B4-2）：诊断（含错误码与英文原文）只在开发者模式给出。
+    expect(src('src/features/chat/thread/parts/fox-error.tsx')).toMatch(/<ErrorState [^>]*diagnostic=\{developerUi \? runFailureDetailText\(failure\) : undefined\}/)
     expect(src('src/features/chat/thread/fox-assistant-message.tsx')).toMatch(/<ErrorPrompt [^>]*diagnostic=\{hasRunFailureDiagnostic\(foxMessage\.failure\) \? runFailureDetailText/)
     expect(src('src/features/chat/timeline/fox-runtime-assistant-message.tsx')).toMatch(/<ErrorPrompt [^>]*diagnostic=\{hasRunFailureDiagnostic\(failureReason\) \? runFailureDetailText/)
   })
@@ -347,5 +351,32 @@ describe('A0 retired Kernel execution path', () => {
       persistedRuns: [persistedRun({ id: 'run-kernel', status: 'interrupted', errorCode: 'executor_route_retired', errorMessage: null })],
     })
     expect(failures.get('run-kernel')?.message).toBe('执行路径已退役。已中断，可在新 Run 中继续')
+  })
+})
+
+describe('13.38 R1-3 / B4-2: no English internal text in normal mode', () => {
+  test('error codes map to Chinese hints; the English release message never shows', () => {
+    expect(runFailureUserMessage({ kind: 'failed', code: 'provider.request_failed', message: 'socket hang up' })).toBe('模型服务连接中断，可重试。')
+    expect(runFailureUserMessage({ kind: 'interrupted', code: 'runtime.released_without_terminal', message: 'Pi released its Run before a terminal result was recorded.' }))
+      .toBe('运行在得到结果之前中断了，可重试。')
+    expect(runFailureUserMessage({ kind: 'failed', code: 'provider.timeout', message: 'timeout' })).toBe('模型服务连接中断，可重试。')
+    expect(runFailureUserMessage({ kind: 'failed', code: 'something.new', message: 'The model request failed.' })).toBe(RUN_FAILURE_GENERIC_MESSAGE)
+    expect(runFailureUserMessage({ kind: 'interrupted', code: 'unknown', message: 'Some English text here' })).toBe('运行中断了，可重试。')
+    expect(runFailureUserMessage({ kind: 'failed', code: 'unknown', message: '超过 10 分钟执行上限' })).toBe('超过 10 分钟执行上限')
+  })
+
+  test('userFacingError hides English sentences in normal mode and keeps them for developers', () => {
+    const raw = 'Pi released its Run before a terminal result was recorded.'
+    expect(userFacingError(raw, false, '兜底')).toBe('兜底')
+    expect(userFacingError(raw, true, '兜底')).toBe(raw)
+    expect(userFacingError('web_read blocks private, local, reserved, and link-local addresses', false, '兜底')).toBe('兜底')
+    expect(userFacingError('模型服务连接中断，可重试。', false, '兜底')).toBe('模型服务连接中断，可重试。')
+    expect(userFacingError('请检查 Codex 登录', false, '兜底')).toBe('请检查 Codex 登录')
+    expect(isInternalRawText('OK')).toBe(false)
+  })
+
+  test('the thread error card passes the mapped message in normal mode', () => {
+    const part = readFileSync(join(import.meta.dir, '..', 'src/features/chat/thread/parts/fox-error.tsx'), 'utf8')
+    expect(part).toContain('detail={developerUi ? failure.message : runFailureUserMessage(failure)}')
   })
 })

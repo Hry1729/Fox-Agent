@@ -100,6 +100,34 @@ export function runFailureDetailText(failure: Pick<RunFailure, 'code' | 'message
   return lines.join('\n')
 }
 
+/**
+ * 13.38（R1-3 / B4-2）：按错误码给普通模式的中文提示。英文内部原文（例如
+ * 「Pi released its Run before a terminal result was recorded.」）只在开发者模式的详情里出现。
+ */
+const RUN_FAILURE_USER_MESSAGES: Record<string, string> = {
+  'provider.request_failed': '模型服务连接中断，可重试。',
+  'provider.rate_limited': '模型服务暂时限流，请稍后重试。',
+  'provider.auth_failed': '模型服务认证没有通过，请到「设置 → 模型服务」检查后重试。',
+  'runtime.released_without_terminal': '运行在得到结果之前中断了，可重试。',
+  'runtime.crashed': '运行进程意外退出，可重试。',
+  'runtime.event_rejected': '运行过程中遇到了问题，可重试。',
+  'runtime.native_refusal_uncommitted': '运行过程中遇到了问题，可重试。',
+  'agent_backend_exited': 'Agent 中途退出了，可重试。',
+  'agent_backend_prompt_failed': 'Agent 没有完成这一轮请求，可重试。',
+}
+
+export const RUN_FAILURE_GENERIC_MESSAGE = '运行过程中遇到了问题，可重试。'
+
+/** 普通模式下失败卡片的正文：先按错误码映射；没有映射时，原文含中文且不像调试信息才直接用。 */
+export function runFailureUserMessage(failure: Pick<RunFailure, 'code' | 'message' | 'kind'>): string {
+  const mapped = RUN_FAILURE_USER_MESSAGES[failure.code]
+    ?? (failure.code.startsWith('provider.') ? RUN_FAILURE_USER_MESSAGES['provider.request_failed'] : undefined)
+  if (mapped) return mapped
+  const message = failure.message.trim()
+  if (message && /[\u3400-\u9fff]/.test(message) && !/(?:\b[a-z][a-z0-9]*(?:[._][a-z0-9_]+){1,}\b)|(?:[A-Za-z]:\\)/.test(message)) return message
+  return failure.kind === 'interrupted' ? '运行中断了，可重试。' : RUN_FAILURE_GENERIC_MESSAGE
+}
+
 export interface RunFailureInput {
   /** Persisted run rows loaded with the conversation; authoritative facts. */
   persistedRuns?: ReadonlyArray<Pick<RunRecord, 'id' | 'status' | 'errorCode' | 'errorMessage'>> | null
