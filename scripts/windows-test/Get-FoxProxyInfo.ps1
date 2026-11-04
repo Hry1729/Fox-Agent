@@ -23,7 +23,8 @@
     JSON file to write. Without it the result object is returned.
 
 .EXAMPLE
-    .\Get-FoxProxyInfo.ps1 -OutPath .\fox-evidence\B5-3-proxy.json
+    $R = (Resolve-Path ..\..\docs\windows-test\run-1339).Path
+    .\Get-FoxProxyInfo.ps1 -OutPath "$R\fox-evidence\B5-3-proxy.json"
 #>
 [CmdletBinding()]
 param(

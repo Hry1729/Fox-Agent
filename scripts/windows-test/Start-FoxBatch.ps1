@@ -9,6 +9,9 @@
     elevated, because Fox started from an elevated shell runs at High integrity.
 
       1. checks that no Fox process is running (close Fox first);
+    TestRoot defaults to <repo>\docs\windows-test\run-<Version> (derived from this script's
+    folder, git-ignored; prepare it once with Initialize-FoxTestEnv.ps1).
+
       2. data directory <TestRoot>\data-<Batch>: copied from -BaseDataDir unless it exists
          already (-Fresh: start from an empty directory instead; -Reset: delete and copy again);
       3. project: -ProjectDir is mirrored from -ProjectBackup (robocopy /MIR) unless -KeepProject;
@@ -23,7 +26,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)] [string] $Batch,
-    [string] $TestRoot = 'D:\fox-test',
+    [string] $TestRoot,
     [string] $Version = '1339',
     [string] $BaseDataDir,
     [string] $ProjectDir,
@@ -38,6 +41,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+if (-not $TestRoot) { $TestRoot = [System.IO.Path]::GetFullPath((Join-Path $here "..\..\docs\windows-test\run-$Version")) }
 
 $principal = New-Object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())
 if ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -60,7 +64,7 @@ if (-not $Exe) {
         if (Test-Path -LiteralPath $p) { $Exe = $p; break }
     }
 }
-if (-not $Exe) { throw "No exe found in $TestRoot\Fox-app (pass -Exe)." }
+if (-not $Exe) { throw "No exe found in $TestRoot\Fox-app (run Initialize-FoxTestEnv.ps1 after installing Fox, or pass -Exe)." }
 
 $dataDir = Join-Path $TestRoot "data-$Batch"
 if ($Reset -and (Test-Path -LiteralPath $dataDir)) { Remove-Item -LiteralPath $dataDir -Recurse -Force }

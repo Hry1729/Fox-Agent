@@ -9,7 +9,7 @@
     -OutPath when given. Close Fox first for Skills / Junction / DeleteSub / Hide /
     RestoreHidden (the script refuses while Fox is running, unless -Force).
 
-      AclTest          (ADMIN shell) R2-1: create -Path (default D:\fox-test\acl-test), set its
+      AclTest          (ADMIN shell) R2-1: create -Path (default <TestRoot>\acl-test), set its
                        owner to BUILTIN\Administrators and grant -User (default: the signed-in
                        user) Modify with inheritance. Reports the owner read back.
       AclTestOwnerFix  (ADMIN shell) R2-1 second half: set the owner of -Path back to -User.
@@ -17,27 +17,32 @@
                        bad-gbk (Chinese text saved as GBK) and num-ver (version: 1.0).
       SkillsRemove     B5-4: remove those three folders again.
       Junction         B5-6: in -ProjectRoot replace the folder "sub" with a junction to
-                       -OutsideDir (default D:\fox-test\outside). The real "sub" is moved to
+                       -OutsideDir (default <TestRoot>\outside). The real "sub" is moved to
                        sub.fox-backup first.
       DeleteSub        B5-6: remove "sub" (junction or folder) from -ProjectRoot.
       SubRestore       B5-6: remove "sub" and move sub.fox-backup back.
       Fsmonitor        B5-8: make -ProjectRoot a git repo if needed and set
-                       core.fsmonitor = cmd /c echo pwned > D:\fox-test\pwned.txt
-                       (deletes an old pwned.txt first).
+                       core.fsmonitor = cmd /c echo pwned > <TestRoot>\pwned.txt
+                       (deletes an old pwned.txt first). Refuses when the git repo found
+                       there is not -ProjectRoot itself (e.g. the Fox checkout above it).
       FsmonitorRestore B5-8: unset core.fsmonitor and report whether pwned.txt exists.
       Hide             B4-13 / B6-2 / B6-3: rename -Path to <Path>.fox-hidden and remember it
-                       in D:\fox-test\hidden-files.json (Program Files paths need ADMIN).
+                       in <TestRoot>\hidden-files.json (Program Files paths need ADMIN).
       RestoreHidden    Rename everything in hidden-files.json back.
       Find             List candidate files for Hide: dsh / codex-acp / pi launchers under
                        %ProgramFiles%\Fox\sandbox-runtime, auth.json files in the private
                        HOMEs under %ProgramData%\Fox\sandbox (ADMIN to see them all), and
                        *.onnx model files under -DataDir.
 
+.PARAMETER TestRoot
+    Test root. Default <repo>\docs\windows-test\run-<Version>, derived from this script's
+    folder (git-ignored; prepared by Initialize-FoxTestEnv.ps1).
+
 .EXAMPLE
     # admin PowerShell
     .\New-FoxTestFixture.ps1 -Action AclTest -User $env:USERNAME
-    .\New-FoxTestFixture.ps1 -Action Skills -DataDir D:\fox-test\data-B5
-    .\New-FoxTestFixture.ps1 -Action Find -DataDir D:\fox-test\data-B6
+    .\New-FoxTestFixture.ps1 -Action Skills -DataDir ..\..\docs\windows-test\run-1339\data-1339-8
+    .\New-FoxTestFixture.ps1 -Action Find -DataDir ..\..\docs\windows-test\run-1339\data-1339-9
 #>
 [CmdletBinding()]
 param(
@@ -49,14 +54,18 @@ param(
     [string] $User,
     [string] $DataDir,
     [string] $ProjectRoot,
-    [string] $OutsideDir = 'D:\fox-test\outside',
-    [string] $TestRoot = 'D:\fox-test',
+    [string] $OutsideDir,
+    [string] $TestRoot,
+    [string] $Version = '1339',
     [string] $OutPath,
     [switch] $Force
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+if (-not $TestRoot) { $TestRoot = [System.IO.Path]::GetFullPath((Join-Path $here "..\..\docs\windows-test\run-$Version")) }
+if (-not $OutsideDir) { $OutsideDir = Join-Path $TestRoot 'outside' }
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 $record = [ordered]@{ kind = 'fox-fixture'; action = $Action; takenAt = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'); ok = $false; details = [ordered]@{} }
 
@@ -84,6 +93,13 @@ function Get-FoxDataDir {
     if ($DataDir) { return $DataDir }
     if ($env:FOX_DATA_DIR) { return $env:FOX_DATA_DIR }
     return (Join-Path $env:APPDATA 'com.fox.agent')
+}
+# The test root sits inside the Fox checkout: never let git -C fall through to that repo.
+function Assert-FoxOwnRepo([string] $Root) {
+    # At a repo's top level "rev-parse --git-dir" prints ".git"; below another repo it prints that
+    # repo's absolute path (ASCII-only check, so console code pages do not matter).
+    $gd = Invoke-FoxNative 'git' @('-C', $Root, 'rev-parse', '--git-dir')
+    if (-not $gd -or $gd.Trim() -ne '.git') { throw "git repo for $Root is not $Root itself (git-dir: '$gd'); refusing to touch it." }
 }
 function Get-FoxOwner([string] $Target) { return (Get-Acl -LiteralPath $Target).Owner }
 function Write-FoxBytes([string] $File, [byte[]] $Bytes) {
@@ -184,6 +200,7 @@ switch ($Action) {
         $pwned = Join-Path $TestRoot 'pwned.txt'
         Remove-Item -LiteralPath $pwned -Force -ErrorAction SilentlyContinue
         if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot '.git'))) { [void](Invoke-FoxNative 'git' @('-C', $ProjectRoot, 'init', '-q')) }
+        Assert-FoxOwnRepo $ProjectRoot
         [void](Invoke-FoxNative 'git' @('-C', $ProjectRoot, 'config', 'core.fsmonitor', "cmd /c echo pwned > $pwned"))
         $record.details.projectRoot = $ProjectRoot
         $record.details.fsmonitor = Invoke-FoxNative 'git' @('-C', $ProjectRoot, 'config', '--get', 'core.fsmonitor')
@@ -194,7 +211,10 @@ switch ($Action) {
         if (-not $ProjectRoot) { throw '-ProjectRoot is required' }
         $pwned = Join-Path $TestRoot 'pwned.txt'
         $record.details.pwnedExists = Test-Path -LiteralPath $pwned
-        [void](Invoke-FoxNative 'git' @('-C', $ProjectRoot, 'config', '--unset', 'core.fsmonitor'))
+        if (Test-Path -LiteralPath (Join-Path $ProjectRoot '.git')) {
+            Assert-FoxOwnRepo $ProjectRoot
+            [void](Invoke-FoxNative 'git' @('-C', $ProjectRoot, 'config', '--unset', 'core.fsmonitor'))
+        } else { $record.details.note = 'no .git in ProjectRoot (project restored from backup); nothing to unset' }
         $record.details.projectRoot = $ProjectRoot
         $record.ok = $true
     }

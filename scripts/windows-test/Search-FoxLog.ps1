@@ -7,7 +7,7 @@
 .DESCRIPTION
     Fox writes its diagnostics (lines starting with "fox.external", "fox." ...) to stderr, so
     the log is whatever file stderr was redirected to, e.g.
-        & "$env:LOCALAPPDATA\Programs\Fox\Fox.exe" 2> D:\fox-test\fox-stderr.log
+        <repo>\docs\windows-test\run-1339\logs\fox-<Batch>.log  (written by Start-FoxBatch.ps1)
     -Path accepts files and directories (directories are searched for *.log / *.txt).
 
     Reported:

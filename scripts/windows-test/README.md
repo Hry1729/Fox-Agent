@@ -1,6 +1,15 @@
 # Windows 测试取证脚本
 
-给工程师实测用，Windows PowerShell 5.1 和 PowerShell 7 都能跑。取证脚本不改 Fox 数据，不结束任何进程。全部是 ASCII 文本，5.1 下不会出现编码问题。除 `Start-FoxBatch.ps1`、`New-FoxTestFixture.ps1`（会建目录、改名文件，见各自说明）外，脚本只读。
+给工程师实测用，Windows PowerShell 5.1 和 PowerShell 7 都能跑。取证脚本不改 Fox 数据，不结束任何进程。全部是 ASCII 文本（中文用字符码拼出来），5.1 下不会出现编码问题。除 `Initialize-FoxTestEnv.ps1`、`Start-FoxBatch.ps1`、`New-FoxTestFixture.ps1`（会建目录、改名文件，见各自说明）外，脚本只读。
+
+脚本直接在仓库里运行，不用复制到别处。**测试根目录**默认是 `<仓库>\docs\windows-test\run-<版本>\`（例如 `run-1339`，由脚本所在目录推出来，和当前目录无关；已被 `.gitignore` 的 `/docs/windows-test/run-*/` 忽略）。数据目录 `data-*`、测试项目、`logs\`、`fox-evidence\`、`shots-*\`、`Fox-app\`、结果文件都在这里。各脚本的 `-TestRoot` / `-OutDir` 等参数仍可覆盖。
+
+一条命令准备环境（`git pull`、安装 Fox 之后，**普通** PowerShell）：
+
+```powershell
+cd <仓库>\scripts\windows-test
+.\Initialize-FoxTestEnv.ps1
+```
 
 | 脚本 | 作用 |
 |---|---|
@@ -9,6 +18,7 @@
 | `Search-FoxLog.ps1` | 搜索 Fox 日志里的 `cancel_swept`、`outside_job`/`outsideJob` 和错误码。 |
 | `Get-FoxDbReport.ps1` | 查询 `fox.db` 的副本，包括最近的 runs、各 Run 的事件、`cancel_swept` 事件、`agent_backend_audit_log`、`permission_audit`、`kernel_jobs`，以及这些 Run 的工具卡 `tool_calls`（状态、输出长度、`streamedOutput` / `outputTruncated`、结果头尾）。 |
 | `Get-FoxIntegrity.ps1` | 读 Fox 进程令牌：完整性级别（必须是 Medium）和是否提权。`Collect-FoxEvidence.ps1` 每次都会顺带记录。 |
+| `Initialize-FoxTestEnv.ps1` | 在**普通** PowerShell 里一次建好测试根目录：中文名测试项目（`readme.txt`、`sub\`）和它的备份 `backup\project-<版本>\`、`project2\`、`shots-<版本>\`、`logs\`、`outside\`、`fox-evidence\`，把 `C:\Program Files\Fox` 复制到 `Fox-app\`（不含 `sandbox-runtime`），没有结果文件时写文件头模板。可重复运行：已有的项目、备份、结果文件不动，只刷新 `Fox-app`。最后逐项打印 ok / created / missing 和下一步。 |
 | `Start-FoxBatch.ps1` | 在**普通** PowerShell 里复位并启动一批：复制基线数据目录、用备份还原测试项目、清掉 `FOX_DEV_UI`、设 `FOX_DATA_DIR`、stderr 写日志，启动后检查完整性。在管理员 PowerShell 里会拒绝运行。 |
 | `Test-FoxTextFile.ps1` | 看一个文件的编码和换行：BOM、CRLF / 单独 LF、是否合法 UTF-8、能否按 GBK（936）往返、首行是否 `chcp 65001`。用于 `.bat` 编码检查。 |
 | `Get-FoxProxyInfo.ps1` | Fox 能看到的代理来源（进程环境、用户环境、WinINET 系统代理）和 DNS 是否返回 fake-ip（198.18.0.0/15），给出能否复现 fake-ip 放行的结论。代理地址里的用户名密码会打码。 |
@@ -32,14 +42,16 @@ suspect 的后代也会一并标为 suspect。
 ## 用法
 
 ```powershell
-# Fox 从终端启动，stderr 写到文件（日志就是这个文件）
-& 'C:\Program Files\Fox\Fox.exe' 2> D:\fox-test\fox-stderr.log
+cd <仓库>\scripts\windows-test
+$R = (Resolve-Path ..\..\docs\windows-test\run-1339).Path
+# 普通 PowerShell：复位并启动一批（stderr 写到 $R\logs\fox-1339-2.log）
+.\Start-FoxBatch.ps1 -Batch 1339-2
 
-# 取消测试：先拍一张基线
-.\scripts\windows-test\Collect-FoxEvidence.ps1 -Label b2-before -ProcessOnly
+# 管理员 PowerShell：取消测试，先拍一张基线（输出默认在 $R\fox-evidence\）
+.\Collect-FoxEvidence.ps1 -Label b2-before -ProcessOnly
 # 开始这一轮，等子进程出现后点停止，再等 3 秒
-.\scripts\windows-test\Collect-FoxEvidence.ps1 -Label b2-after -Baseline .\fox-evidence\b2-before-*.json `
-    -LogPath D:\fox-test\fox-stderr.log -DataDir D:\fox-test\data-1336
+.\Collect-FoxEvidence.ps1 -Label b2-after -Baseline "$R\fox-evidence\b2-before-*.json" `
+    -LogPath "$R\logs\fox-1339-2.log" -DataDir "$R\data-1339-2"
 ```
 
 `.txt` 摘要里：

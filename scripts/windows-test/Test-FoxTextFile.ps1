@@ -20,7 +20,8 @@
     JSON file to write (array). Without it the result objects are returned.
 
 .EXAMPLE
-    .\Test-FoxTextFile.ps1 -Path 'D:\fox-test\<project>\<file>.bat' -OutPath .\fox-evidence\B5-1-file.json
+    $R = (Resolve-Path ..\..\docs\windows-test\run-1339).Path
+    .\Test-FoxTextFile.ps1 -Path "$R\<project>\<file>.bat" -OutPath "$R\fox-evidence\B5-1-file.json"
 #>
 [CmdletBinding()]
 param(

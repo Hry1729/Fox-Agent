@@ -46,6 +46,10 @@ apps/desktop/src-tauri/resources/sandbox-installer/
 # Reusable tests and release scripts belong in test/ and scripts/.
 /output/
 
+# Windows tester run roots (test project, data dirs, logs, evidence, Fox-app copy, results).
+# Initialize-FoxTestEnv.ps1 creates them; the tester agent may only write inside the checkout.
+/docs/windows-test/run-*/
+
 # migration-work/ is a frozen history directory: the summaries already tracked
 # stay tracked; new evidence, handoff notes and candidate builds live outside
 # the repo (for example D:\fox-archive\). Untracked new files there are ignored.

@@ -5,7 +5,8 @@
     which test items have no result line yet (Windows PowerShell 5.1 and PowerShell 7).
 
 .DESCRIPTION
-    Writes <TestRoot>\fox-evidence-<Version>.zip (UTF-8 entry names, so Chinese file names
+    TestRoot defaults to <repo>\docs\windows-test\run-<Version> (derived from this script's
+    folder). Writes <TestRoot>\fox-evidence-<Version>.zip (UTF-8 entry names, so Chinese file names
     survive) with:
         results-<Version>.md      from -Results
         fox-evidence\...          from -EvidenceDir (database snapshots *.parts are skipped)
@@ -22,7 +23,7 @@
 [CmdletBinding()]
 param(
     [string] $Version = '1339',
-    [string] $TestRoot = 'D:\fox-test',
+    [string] $TestRoot,
     [string] $Results,
     [string] $EvidenceDir,
     [string] $ShotsDir,
@@ -43,8 +44,9 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+if (-not $TestRoot) { $TestRoot = [System.IO.Path]::GetFullPath((Join-Path $here "..\..\docs\windows-test\run-$Version")) }
 if (-not $Results) { $Results = Join-Path $TestRoot "results-$Version.md" }
-if (-not $EvidenceDir) { $EvidenceDir = Join-Path $here 'fox-evidence' }
+if (-not $EvidenceDir) { $EvidenceDir = Join-Path $TestRoot 'fox-evidence' }
 if (-not $ShotsDir) { $ShotsDir = Join-Path $TestRoot "shots-$Version" }
 if (-not $OutZip) { $OutZip = Join-Path $TestRoot "fox-evidence-$Version.zip" }
 

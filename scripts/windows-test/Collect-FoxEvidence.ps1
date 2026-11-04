@@ -15,13 +15,18 @@
     Typical cancel test (Codex / Pi / dsh):
         .\Collect-FoxEvidence.ps1 -Label b2-before -ProcessOnly
         # start the turn, wait for the child process, press Stop, wait 3 s
-        .\Collect-FoxEvidence.ps1 -Label b2-after -Baseline .\fox-evidence\b2-before-*.json -LogPath D:\fox-test\fox-stderr.log
+        $R = (Resolve-Path ..\..\docs\windows-test\run-1339).Path
+        .\Collect-FoxEvidence.ps1 -Label b2-after -Baseline "$R\fox-evidence\b2-before-*.json" -LogPath "$R\logs\fox-1339-2.log"
 
 .PARAMETER Label
     Short name for the test item, used in the file names (e.g. b2-codex-cancel).
 
 .PARAMETER OutDir
-    Default: .\fox-evidence under the current directory.
+    Default: <TestRoot>\fox-evidence, i.e. <repo>\docs\windows-test\run-<Version>\fox-evidence
+    (derived from this script's folder, so it does not depend on the current directory).
+
+.PARAMETER TestRoot
+    Test root. Default <repo>\docs\windows-test\run-<Version>.
 
 .PARAMETER LogPath
     Fox stderr log file(s) or folder(s). Without it the log part is skipped.
@@ -39,7 +44,9 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)] [string] $Label,
-    [string] $OutDir = (Join-Path (Get-Location).Path 'fox-evidence'),
+    [string] $OutDir,
+    [string] $TestRoot,
+    [string] $Version = '1339',
     [string[]] $LogPath,
     [string] $DataDir,
     [string] $Baseline,
@@ -51,6 +58,8 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+if (-not $TestRoot) { $TestRoot = [System.IO.Path]::GetFullPath((Join-Path $here "..\..\docs\windows-test\run-$Version")) }
+if (-not $OutDir) { $OutDir = Join-Path $TestRoot 'fox-evidence' }
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
