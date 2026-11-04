@@ -386,28 +386,45 @@ Fox 完整性：Medium、未提权（Get-FoxIntegrity ok=True）
 
 ## 附：给测试机上 dsh 的提示词
 
-测试人员可以让测试机上的 dsh 帮忙按批推进、读证据、写结果。把下面整段发给 dsh（dsh 的工作目录设为**仓库根目录**，例如 `D:\python\projects\Fox\Fox`，档位用「工作区完全修改」）：
+测试人员可以让测试机上的 dsh 自主推进批次 1～9：它自己跑能跑的脚本、读证据、写结果，只把必须由人做的界面操作和管理员命令每批合并成一张清单交给测试人员。把下面整段发给 dsh。dsh 的工作目录设为**仓库根目录**（例如 `D:\python\projects\Fox\Fox`），档位用「**完全权限**」：「工作区完全修改」档下 dsh 的命令在受限令牌 + Low 完整性的沙箱里执行，由它启动的 Fox 会是 Low 完整性（`ok=False`），它建的文件也会带 Low 标签，测试结果不算数。
 
 ```text
-你在一台 Windows 测试机上协助我做 Fox 13.39 的实测。全程用简体中文。
+你在 Windows 测试机上自主完成 Fox 13.39 实测（批次 1～9），全程简体中文。目标是尽量少打扰我：能自己做的全部自己做，不要停下来问。
 
 位置（<仓库> 是你的工作目录，例如 D:\python\projects\Fox\Fox）：
 - 测试说明：<仓库>\docs\windows-test\Fox-13.39-测试说明.md（先完整读一遍）。
-- 取证脚本：<仓库>\scripts\windows-test\（说明见同目录 README.md）。脚本直接在这里运行，不复制。
-- 运行根：<仓库>\docs\windows-test\run-1339\（git 已忽略）。测试项目、数据目录、logs、截图 shots-1339、证据 fox-evidence 都在这里。
-- 结果文件：<仓库>\docs\windows-test\run-1339\results-1339.md。
+- 脚本：<仓库>\scripts\windows-test\（说明见同目录 README.md），在这里直接运行，不复制。
+- 运行根 $R = <仓库>\docs\windows-test\run-1339\（git 已忽略）：测试项目、数据目录、logs、fox-evidence、shots-1339、Fox-app 都在这里。
+- 结果文件：$R\results-1339.md。
 
-规则：
-1. 按批执行。每次只做我指定的一个批次（例如「做批次 3」）；没指定时，按 1、2、3、4、5、6、7、8、9 的顺序，从结果文件里还没有记录的第一批开始。一批开始前先把这一批的前置条件、准备步骤、要执行的完整命令（绝对路径，并标明在「普通 PowerShell」还是「管理员 PowerShell」里执行）和每一项的步骤列给我，等我确认后再开始。
-2. 不要由你启动或关闭 Fox，也不要在你的环境里运行 Initialize-FoxTestEnv.ps1、Start-FoxBatch.ps1、Collect-FoxEvidence.ps1、New-FoxTestFixture.ps1 或任何需要管理员的脚本。所有脚本和界面操作都由我来执行：Fox 由我在普通 PowerShell 里用 Start-FoxBatch.ps1 启动（Medium 完整性），取证由我在管理员 PowerShell 里跑。你把要执行的完整命令写给我，我执行后告诉你，或者你直接读 run-1339\fox-evidence 里新生成的 .txt / .json。
-3. 界面操作（点按钮、看提示、截图）由我来做。每一步告诉我要点什么、要看什么、截图存成什么文件名（run-1339\shots-1339\<编号>-<内容>.png），然后等我回报看到的现象。
-4. 判定只看说明里的「期望」列和证据，不要放宽也不要加码。证据摘要里重点看：[integrity] 的 ok 必须是 True；tool 行的 status / resultLen / streamedOutput；audit 行（cancel_swept、cancel_sweep_access_denied、pi_source_defaulted_to_fox）；permission 行（proxy_fake_ip、自动放行）；job 行的 state；run 行的 status 和 error；ALIVE 行（取消后不能有 ping / pwsh 残留）；cancel_swept 和 SETTLED 行里的四个耗时。[integrity] 不是 ok=True 时，这一批作废，提醒我从普通 PowerShell 重新启动 Fox。说明里写的步骤或期望和实际界面对不上（按钮名、菜单位置等）时，按最接近的理解判定，并在备注里写「说明偏差：…」。
-5. 每做完一项，立刻把结果追加到结果文件，严格用这个格式，一项一行：
-   <编号> 通过|失败|未触达  证据：<文件名>[, <文件名>]  备注：<一句话；失败或未触达必填>
-   停止类的项在备注里加：耗时 confirm=<ms> grace=<ms> sweep=<ms> settled=<ms> 体感=<秒>。
-   文件头缺的值（机器型号、Windows 版本、提交 sha、安装包和运行时 SHA256、Fox 完整性）问我后补上。
+开始时（不用问我）：
+1. 检查你自己命令的完整性级别：whoami /groups | findstr /i "Mandatory"。必须是 Medium 且不是管理员；如果是 Low 或 High，在结果文件头备注里写明，之后把 Start-FoxBatch.ps1 和 Initialize-FoxTestEnv.ps1 放进给我的清单里由我在普通 PowerShell 执行，其余照常。
+2. 在 <仓库> 执行 git pull --ff-only（除此之外不执行任何 git 命令）。然后在 scripts\windows-test 里运行 .\Initialize-FoxTestEnv.ps1，读汇总；有 missing / FAILED 就记进结果文件头备注，能继续的继续。
+3. 如果 <仓库>\.fox-test-1339\results-1339.md 存在，把它移到 $R\results-1339.md（覆盖 Initialize 建的空模板），不留副本。文件头缺的值（例如安装包 SHA256），能自己查的自己查（Get-FileHash、git log -1、systeminfo、winver 信息），查不到的写「待补」，不要为此停下来。
+4. 通用准备里还没做的（例如基线 data-1339-base），并到批次 1 的清单里一起交给我。
+
+你自己执行（普通 PowerShell 能做的都由你做）：
+- Initialize-FoxTestEnv.ps1、Start-FoxBatch.ps1（启动后必须看到 ok=True；ok=False 或 Fox 在你的命令结束后跟着退出，就改为放进清单由我在普通 PowerShell 启动，并在备注写明）。
+- Collect-FoxEvidence.ps1（不需要管理员的取证、动作前的 -ProcessOnly 基线、动作后补采）、Test-FoxTextFile.ps1、Get-FoxProxyInfo.ps1、Get-FoxIntegrity.ps1、Search-FoxLog.ps1、Get-FoxDbReport.ps1、Compress-FoxEvidence.ps1。
+- New-FoxTestFixture.ps1 不需要管理员的动作：Skills、SkillsRemove、Junction、DeleteSub、SubRestore、Fsmonitor、FsmonitorRestore、Find。
+- 关闭 Fox（Get-Process fox-desktop,Fox -ErrorAction SilentlyContinue | ForEach-Object { $_.CloseMainWindow() }，等它退出；10 秒内没退出再 Stop-Process），以及读 fox-evidence 里的 .txt / .json、日志和截图文件。
+
+只有这两类交给我：
+- 界面操作：点按钮、输入消息、看提示、截图（存成 $R\shots-1339\<编号>-<内容>.png）。
+- 管理员 PowerShell 命令：AclTest、AclTestOwnerFix、Hide、RestoreHidden、Get-FoxProcessTree 残留检查，以及需要读其他账户进程的取证（Codex 沙箱账户等）和必须紧跟某个界面动作的取证（例如「点停止 3 秒后采集」）。
+每批只给我一张合并清单，然后只等我一次回复：
+- 清单按执行顺序编号，把这一批所有界面操作和所有管理员命令（含必须穿插其中的普通 PowerShell 命令，例如中途重启 Fox）放在一起；命令写完整（绝对路径或先 cd 到 scripts\windows-test，并在每条前标明【普通】或【管理员】）；每一步写清要点什么、要看什么、要记下什么（文案、秒数、截图文件名）。
+- 清单开头写一次管理员窗口要先执行的 cd 和 $R / $B / $D / $L 变量行。
+- 我回复后（可能只说「好了」加观察到的现象），你自己补采证据、读证据、判定、写结果，关闭 Fox，直接进入下一批。不要问「要不要继续」「是否开始」「确认一下」之类的话。
+
+判定与记录：
+1. 判定严格只看说明里的「期望」列和证据，不放宽也不加码。[integrity] 必须是 ok=True，否则这一批作废，记「未触达」并写明，下一批开头重新启动。
+2. 信息不全或说明有歧义时，按最合理的理解做，在备注写明你的选择（说明和实际界面对不上时写「说明偏差：…」），继续，不要问我。
+3. 缺少前置条件（例如本机没有原生 pi、代理不是 fake-ip、没有无 reasoning 字段的模型），或某一项卡住超过 5 分钟，记「未触达」并写明原因；失败的记「失败」。然后自动做下一项、下一批，不要停，也不要自己换一种做法。我回复里没给到的观察，按证据判定；证据也判断不了的记「未触达」。
+4. 每做完一项立刻追加一行到结果文件：
+   <编号> 通过|失败|未触达  证据：<文件>[, <文件>]  备注：<一句；失败或未触达必填>
+   停止类的项备注里加：耗时 confirm=<ms> grace=<ms> sweep=<ms> settled=<ms> 体感=<秒>（体感取我回复里的数，没有就写「未记」）。
    每批开头写一行「批次 N：<标题>」，结尾写一行「批次 N 完成（<失败和未触达的编号>）」。
-6. 你只能写 run-1339\ 下的 results-1339.md 和你自己的草稿。不要修改仓库里任何被 git 跟踪的文件，不要 git add / commit / push / checkout / pull；不要修改 Fox 的数据目录、测试项目和脚本。需要改名文件、建目录时，用说明里给的 New-FoxTestFixture.ps1 命令，交给我执行。临时改名过的文件（Hide），这一批结束前提醒我执行 RestoreHidden。
-7. 某一项缺少前置条件（例如本机没有原生 pi、代理不是 fake-ip），或卡住超过 5 分钟，记「未触达」并写明原因，继续下一项，不要自行换一种做法。
-8. 全部批次做完或我说收工时，提醒我在 <仓库>\scripts\windows-test 里运行 .\Compress-FoxEvidence.ps1，把它打印的缺项和 zip 的 SHA256 写进结果文件末尾的「总结」，总结里列出：失败项、未触达项、取消耗时的典型值、最严重的问题。
+5. 写入范围：只写 $R 下的文件（结果文件、你的草稿、脚本生成的证据和数据目录），以及开始时第 3 步的移动。不修改仓库里任何被 git 跟踪的文件，不 add / commit / push / checkout。用过 Hide 的批次，必须把 RestoreHidden 放进同一张清单的最后一步，并在下一批开头用 Find 确认已经恢复。
+6. 批次 9 做完后自动收尾（批次 10 可选，不做）：运行 .\Compress-FoxEvidence.ps1，把它打印的缺项和 zip 路径、SHA256 写进结果文件末尾的「总结」。总结里列出：失败项、未触达项（含原因）、取消耗时的典型值、最严重的问题、你在备注里做过的假设。最后只给我一段简短的完成说明。
 ```
