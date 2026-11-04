@@ -1,0 +1,45 @@
+你在 Hry1729/Fox-Agent 仓库里实现 Fox UI 评审第 09 项「模型服务与 Agent 配置」。
+实现依据：同一压缩包里的 09-方案.md（以它为准）和 09-样式稿.html（在浏览器里打开，用顶部工具条切换场景、明暗、配色和开发者模式；screenshots/ 里是各场景的截图）。方案基于 main 0168302c 编写，开工前先 git fetch，对照 origin/main 核对方案里引用的文件路径、命令名和类型。如果有出入，以实际代码为准，并在回报里列出差异。
+
+【范围】
+按 09-方案.md 第 7 节分三个批次做，每个批次单独开一个临时分支：
+  批次 A：feat/09a-agent-config-host（Host 只读检测、绑定、导入预览、验证第 1–2 层；前端只做能编译的最小改动）
+  批次 B：feat/09b-model-agent-page（「模型与 Agent」页重做：服务列表 + Agent 匹配标签、页内添加/编辑表单、Agent 使用配置列表、绑定表单、导入预览、验证阶梯）
+  批次 C：feat/09c-agent-verify（验证第 3–4 层：真实起一次 Agent；停止；Windows 测试说明）
+做完一个批次、全部检查通过后再开始下一个。批次 B 从批次 A 的分支（或 A 合入后的 main）切出，C 同理。
+方案第 9 节「本期不做」里的内容一律不做。第 10 节的待确认项按方案里的默认做法实现，并在回报里提醒用户确认。
+
+【硬性要求】
+1. 只读和副作用分开：agent_config_overview 和 agent_import_preview 不能联网、不能写任何文件或数据库、不能改 model_providers.updated_at。打开设置页、窗口重新获得焦点时只调 overview。只有用户点「验证」「保存」「导入」时才执行对应的副作用命令。要写测试证明这一点（方案 8.1、8.2）。
+2. 删除 agent_backend_model_connection（以及 external_model::resolve、ConnectionRequest、ConnectionState）、agent_backend_choose_fox_source、agent_backend_import_candidates、agent_backend_import_credentials，前端调用一起删掉。
+3. 外部 Agent 改为按 agent_bindings 选服务（external_login 读绑定），不再固定用默认供应商。Pi 没有绑定时，沿用「默认用 Fox 模型服务」并记审计。
+4. 验证结果的记录方式沿用 13.37：按「协议 + 地址 + 模型 + Key（凭据引用 + revision）」记，app_settings 里的 model.verified.* 不变。Agent 级的分层结果另写到 agent_verifications 表。
+5. 非开发者模式（readDeveloperUi() 为假）下，界面上不能出现错误码、文件路径、环境变量名、原始 JSON 或英文报错原文。文案全部走 agent-config-copy.ts 的映射，没有映射的码显示「操作没有完成，请重试」。开发者模式下才显示错误码、路径和脱敏后的详情。Host 在非开发者模式下不返回路径（ImportPreview.items[].devPath 为 null）。
+6. 不做旧数据兼容：新表从 schema v105 开始；不读 pi-login-sources.json，不迁移 ProtocolProfile.backends 和 localStorage 里的启用状态，直接删掉。
+7. 界面用现有的 SettingsPageLayout / SettingsGroup / SettingsRow（组标题在圆角框外，框内各行用浅分隔线）。颜色、圆角、间距、字号只用 --fox-* 和主题 token，不写裸色值。浅色和深色都要检查，三套配色（graphite / paper / mist）至少截一张图。
+8. 不能编造服务商的协议地址：预设里只放仓库中已经有的地址（deepseek、openai）。
+
+【Git 纪律】
+- 只在上面的临时 feat 分支上提交和推送。不推 main，不 force push，不改写已推送的历史，不开 PR（除非用户另外要求）。
+- 按路径提交：git add <具体路径>，不用 git add -A 或 git add .；每个提交只放一个主题，提交信息写清楚改了什么。
+- 不提交本地调试文件、日志、截图或临时目录（截图放在仓库外，例如 D:\fox-archive\09\ 或 /tmp）。migration-work/ 是冻结目录，不能动。
+
+【每个批次推送前必须本地跑通】
+- 从仓库根目录：bun test --isolate（前端全部测试）
+- pnpm --dir apps/desktop build（包含 tsc 类型检查）
+- cargo test -p fox-agent-backend
+- 桌面 crate：cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml（Linux 上桌面 crate 跑不了时，至少用 windows-gnu 目标做类型检查，并在回报里写明）
+- 推送后看 Windows CI（.github/workflows/windows-ci.yml），desktop-build、rust-host 等相关 job 都要是绿的。红了就在同一个分支上修，不要绕过。
+- 旧行为对应的测试（tests/agent-backend-settings-batch.test.tsx、tests/settings-add-service-dialog-dom.test.tsx、settings-provider-*-dom.test.tsx 等）按方案 8.2 改写或删除，不能简单跳过（skip）。
+
+【截图】
+批次 B、C 完成后，用 Playwright 或 Tauri 开发模式，给样式稿里的每个场景截图：列表（常见 / 异常 / 全新电脑）、添加第一步、添加第二步 + 高级设置、编辑、绑定、导入预览、验证进行中、验证失败。浅色和深色各一张，异常状态和验证失败再各补一张开发者模式的图。截完自己逐张看一遍，确认没有文字溢出、意外换行、被截断或对比度不够。
+
+【回报内容】
+每个批次结束时回报：
+1. 分支名、最终 commit sha、本批提交列表（sha + 一句话）
+2. 本地测试结果：bun test --isolate 通过/失败数，build/tsc，cargo 各包的结果；CI run 链接和结论
+3. 与 09-方案.md 不一致的地方（代码现状不同、改了设计的、没做的），每条说明原因
+4. 截图（文件名对应场景）
+5. 需要用户在 Windows 上实测的项目（对照方案 8.4，标出本批新增的）
+6. 待用户确认的问题
