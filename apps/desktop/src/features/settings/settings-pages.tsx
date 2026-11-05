@@ -365,12 +365,12 @@ function providerPresetForm(preset: ProviderPreset, isDefault: boolean): Provide
     baseUrl: preset.baseUrl,
     apiType: preset.apiType,
     protocolProfiles: preset.id === 'deepseek' ? [
-      { id: 'primary', presetId: 'deepseek-official', apiType: preset.apiType, baseUrl: preset.baseUrl, modelId: '', separateCredential: false, backends: [] },
-      { id: crypto.randomUUID(), presetId: 'deepseek-official', apiType: 'anthropic-messages', baseUrl: 'https://api.deepseek.com/anthropic', modelId: '', separateCredential: false, backends: [] },
-      { id: crypto.randomUUID(), presetId: 'deepseek-official', apiType: 'openai-responses', baseUrl: 'https://api.deepseek.com', modelId: '', separateCredential: false, backends: [] },
+      { id: 'primary', presetId: 'deepseek-official', apiType: preset.apiType, baseUrl: preset.baseUrl, modelId: '', separateCredential: false },
+      { id: crypto.randomUUID(), presetId: 'deepseek-official', apiType: 'anthropic-messages', baseUrl: 'https://api.deepseek.com/anthropic', modelId: '', separateCredential: false },
+      { id: crypto.randomUUID(), presetId: 'deepseek-official', apiType: 'openai-responses', baseUrl: 'https://api.deepseek.com', modelId: '', separateCredential: false },
     ] : preset.id === 'openai' ? [
-      { id: 'primary', presetId: 'openai', apiType: preset.apiType, baseUrl: preset.baseUrl, modelId: '', separateCredential: false, backends: [] },
-      { id: crypto.randomUUID(), presetId: 'openai', apiType: 'openai-responses', baseUrl: 'https://api.openai.com/v1', modelId: '', separateCredential: false, backends: [] },
+      { id: 'primary', presetId: 'openai', apiType: preset.apiType, baseUrl: preset.baseUrl, modelId: '', separateCredential: false },
+      { id: crypto.randomUUID(), presetId: 'openai', apiType: 'openai-responses', baseUrl: 'https://api.openai.com/v1', modelId: '', separateCredential: false },
     ] : [],
     isDefault,
     apiKey: '',
@@ -390,7 +390,7 @@ function providerForm(provider?: ModelProviderRecord): ProviderForm {
   return provider ? {
     id: provider.id, name: provider.name, icon: provider.icon, baseUrl: provider.baseUrl, apiType: provider.apiType,
     isDefault: provider.isDefault, apiKey: '', clearApiKey: false,
-    protocolProfiles: (provider.protocolProfiles ?? []).map(profile => ({ ...profile, backends: [...profile.backends] })), protocolKeys: {},
+    protocolProfiles: (provider.protocolProfiles ?? []).map(profile => ({ ...profile })), protocolKeys: {},
     models: provider.models.map((item) => ({ ...item })),
   } : {
     name: '', icon: null, baseUrl: '', apiType: 'openai-completions', isDefault: true, apiKey: '', clearApiKey: false,

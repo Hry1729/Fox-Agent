@@ -6319,7 +6319,6 @@ pub fn model_provider_save(
             return storage_error(format!("配置已保存，但连接测试记录没有更新：{error}"));
         }
     }
-    let cleanup = request.clear_api_key || saved.is_default;
     if saved.is_default {
         if let Some(model) = saved
             .models
@@ -6353,9 +6352,7 @@ pub fn model_provider_save(
         }
     }
     // After the Fox model sync: a cleanup problem is only a warning.
-    if cleanup {
-        warn_managed_model_cleanup(&external, "model_provider_save");
-    }
+    warn_managed_model_cleanup(&external, "model_provider_save", &external.provider_bound_backends(&saved.id));
     let mut saved = saved;
     saved.credential_configured = api_key_configured(&saved.base_url);
     ApiResponse::success(saved)
@@ -6364,8 +6361,8 @@ pub fn model_provider_save(
 /// Remove Fox-generated login files of every project (best effort). Failures
 /// never undo or block the save / delete that asked for it: they are logged
 /// and recorded in the external-backend audit log as a warning.
-fn warn_managed_model_cleanup(external: &crate::external_backend::ExternalBackendHost, source: &str) {
-    let errors = external.clear_managed_model_files();
+fn warn_managed_model_cleanup(external: &crate::external_backend::ExternalBackendHost, source: &str, backends: &[fox_agent_backend::port::AgentBackend]) {
+    let errors: Vec<_> = backends.iter().flat_map(|backend| external.clear_managed_model_files(*backend)).collect();
     if errors.is_empty() {
         return;
     }
@@ -6404,6 +6401,7 @@ pub fn model_provider_delete(
     // Record first, then its Keys (base_url + protocol Keys); a failed Key
     // delete never restores the record and is audited as a warning
     // (fox_agent_backend::credential_delete, sandbox.md 13.22).
+    let bound_backends = external.provider_bound_backends(&provider.id);
     let key_ids = fox_agent_backend::credential_delete::provider_key_ids(
         &provider.id,
         &provider.base_url,
@@ -6433,8 +6431,8 @@ pub fn model_provider_delete(
     }
     if outcome.record_deleted && provider.is_default {
         if let Err(error) = state.runtime_host.reload_configuration() { return ApiResponse::failure("model.runtime_busy", configuration_saved_but_busy(&error), true); }
-        warn_managed_model_cleanup(&external, "model_provider_delete");
     }
+    if outcome.record_deleted { warn_managed_model_cleanup(&external, "model_provider_delete", &bound_backends); }
     ApiResponse::success(outcome.record_deleted)
 }
 
@@ -6513,7 +6511,9 @@ pub fn model_service_save(
                 let _ = crate::external_model::bump_credential_revision(&state.database, credential);
             }
             if request.clear_api_key {
-                warn_managed_model_cleanup(&external, "model_service_save");
+                if let Ok(Some(provider)) = crate::external_model::current(&state.database) {
+                    warn_managed_model_cleanup(&external, "model_service_save", &external.provider_bound_backends(&provider.id));
+                }
             }
             service.credential_configured = api_key_configured(&service.base_url);
             ApiResponse::success(service)

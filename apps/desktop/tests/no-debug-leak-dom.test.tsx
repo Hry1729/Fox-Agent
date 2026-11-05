@@ -64,21 +64,19 @@ async function mount(node: React.ReactNode) {
   }
 }
 
-test('设置 → Agent 的外部 Agent 行只有状态和开关，不露出调试信息', async () => {
+test('设置 → Agent 只显示模型配置入口，不露出调试信息', async () => {
   const view = await mount(<AgentBackendSettingsSection
     client={{
       agentBackendPreferences: async () => DEFAULT_AGENT_BACKEND_PREFERENCES,
       saveAgentBackendPreferences: async () => DEFAULT_AGENT_BACKEND_PREFERENCES,
       probeCodexResponses: async () => null,
-      agentBackendCredentials: async () => probe,
-      agentBackendModelConnection: async () => ({ status: 'missing_address', providerId: null, providerName: 'SenseNova', apiType: 'anthropic-messages', candidates: [], message: 'model.connection_required' }),
     }}
     onOpenModelSettings={() => undefined}
   />)
   try {
     const text = view.host.textContent ?? ''
-    expect(text).toContain('未配置')
-    expect(text).toContain('去模型服务配置')
+    expect(text).toContain('前往配置')
+    expect(text).toContain('模型与 Agent')
     for (const leak of leaks) expect(text).not.toContain(leak)
     expect(view.host.querySelectorAll('details').length).toBe(0)
   } finally {

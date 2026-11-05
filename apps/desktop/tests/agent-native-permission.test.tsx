@@ -26,7 +26,8 @@ const {
 import type { NativePermissionCatalog, NativePermissionRequest, NativePermissionView } from '../src/features/conversations/model/agent-native-permission'
 import type { AgentBackendCapabilities, AgentBackendStatus } from '../src/features/conversations/model/agent-backend'
 
-afterEach(cleanup)
+const { applyAgentEnablement } = await import('../src/features/conversations/model/external-agent-enablement')
+afterEach(() => { cleanup(); applyAgentEnablement([]) })
 
 const AUTO_REVIEW_REASON = '「帮我批准」由 Codex 调用 OpenAI 的 codex-auto-review 模型自动审查；当前供应商不是 OpenAI，会被拒绝'
 
@@ -283,7 +284,7 @@ describe('settings', () => {
       agentBackendNativePermissionSet: async (request: NativePermissionRequest & { mode: string }) => { calls.push(request); return view(catalogs[request.backend!], { draft: true, current: request.mode }) },
     }
     // UI 1103: the rows are offered for the external Agents the user enabled in 设置 → Agent.
-    window.localStorage.setItem('fox.preferences.enabledExternalAgents', JSON.stringify(['pi', 'codex', 'deepseek']))
+    applyAgentEnablement(['pi', 'codex', 'deepseek'].map(agent => ({ agent: agent as 'pi' | 'codex' | 'deepseek', enabled: true })))
     render(<AgentBackendSettingsSection client={client} />)
     // 设置 →「新会话使用的 Agent」is a select again (Fox / Pi / Codex / DeepSeek).
     await waitFor(() => expect(screen.getByLabelText('新会话使用的 Agent')).toBeTruthy())

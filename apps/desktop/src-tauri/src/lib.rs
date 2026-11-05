@@ -13,6 +13,7 @@ mod expert_teams;
 mod expert_workflows;
 mod external_backend;
 mod external_model;
+mod agent_config;
 mod external_policy;
 mod external_tools;
 mod kernel;
@@ -495,7 +496,14 @@ pub fn run() {
             commands::model_providers_list,
             commands::model_provider_save,
             commands::model_provider_delete,
-            external_model::agent_backend_model_connection,
+            agent_config::agent_config_overview,
+            agent_config::agent_enable_set,
+            agent_config::agent_binding_save,
+            agent_config::agent_binding_clear,
+            agent_config::agent_config_verify,
+            agent_config::agent_config_verify_cancel,
+            agent_config::agent_import_preview,
+            agent_config::agent_import_apply,
             // Four-agent plan v0.3.1, Host wiring first batch: backend picker state.
             commands::agent_backend_routing::agent_backends_status,
             // External backend wiring batch: effective capability dimensions.
@@ -504,9 +512,6 @@ pub fn run() {
             commands::agent_backend_routing::agent_backend_preview_action,
             // UX batch ①②: login guidance / import, permission mode, revocation.
             commands::agent_backend_routing::agent_backend_credentials,
-            commands::agent_backend_routing::agent_backend_import_candidates,
-            commands::agent_backend_routing::agent_backend_import_credentials,
-            commands::agent_backend_routing::agent_backend_choose_fox_source,
             commands::agent_backend_routing::agent_backend_open_private_home,
             commands::agent_backend_routing::agent_backend_permission_status,
             commands::agent_backend_routing::agent_backend_revoke_full_access,

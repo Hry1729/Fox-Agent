@@ -39,43 +39,6 @@ export interface UnifiedLoginReport {
   reason: string | null
 }
 
-/** One whitelisted item of the real HOME (`agent_backend_import_candidates`). */
-export interface ImportItem {
-  id: string
-  kind: 'file' | 'env_key'
-  /** File name or key name; never a value. */
-  name: string
-  /** Destination relative to the private HOME. */
-  destination: string
-}
-
-/** A project whose private HOME already had some items (kept, not copied). */
-export interface ImportSkip { project: string; label: string; items: string[] }
-
-/**
- * Where the overwritten items of one project were backed up. `directory` is
- * relative to the private HOME (`.fox-credential-backups/<stamp>`), the same
- * form as the audit; the Host never sends the absolute path (it contains the
- * user's SID / profile).
- */
-export interface ImportBackup { project: string; label: string; directory: string; items: string[] }
-
-/** Audit record returned by `agent_backend_import_credentials` (names only). */
-export interface ImportReport {
-  backend: string
-  /** Private HOMEs targeted. */
-  homes: number
-  /** Private HOMEs where something was written (older Hosts: absent). */
-  homesWritten?: number
-  /** "覆盖已有登录" was chosen. */
-  overwrite?: boolean
-  files: string[]
-  keys: string[]
-  skipped: string[]
-  skippedExisting?: ImportSkip[]
-  backups?: ImportBackup[]
-}
-
 /**
  * Which private HOME the probe / import / "打开文件夹" is about: an existing
  * conversation, or a NEW conversation (backend, project optional) before its

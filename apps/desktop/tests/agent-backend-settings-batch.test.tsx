@@ -12,7 +12,7 @@
 // ② UI 1103: no login / configuration card above the composer, in normal or
 //   developer mode (it used to leave an import receipt on the bar too).
 // ④ The backend of a new conversation is the saved setting (default Fox).
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 
@@ -43,7 +43,7 @@ import type { AgentBackendTarget, CredentialProbe } from '../src/features/conver
 
 // UI 1103: these tests pin the routing rules with every external Agent enabled in 设置 → Agent.
 const ALL_AGENTS = ['pi', 'codex', 'deepseek'] as const
-const { ENABLED_EXTERNAL_AGENTS_KEY, setExternalAgentEnabled } = await import('../src/features/conversations/model/external-agent-enablement')
+const { applyAgentEnablement, readEnabledExternalAgents, setExternalAgentEnabled } = await import('../src/features/conversations/model/external-agent-enablement')
 
 afterEach(cleanup)
 
@@ -248,8 +248,8 @@ describe('② UI 1103: no login or configuration card above the composer', () =>
 
 describe('④ 新会话使用的 Agent: a choice again (plan C1)', () => {
   // UI 1103: these pin the routing rules with every external Agent enabled in 设置 → Agent.
-  beforeEach(() => window.localStorage.setItem(ENABLED_EXTERNAL_AGENTS_KEY, JSON.stringify(ALL_AGENTS)))
-  afterEach(() => window.localStorage.removeItem(ENABLED_EXTERNAL_AGENTS_KEY))
+  beforeEach(() => applyAgentEnablement(ALL_AGENTS.map(agent => ({ agent, enabled: true }))))
+  afterEach(() => applyAgentEnablement([]))
   test('the settings row is a select of Fox / Pi / Codex / DeepSeek; a switched-off one is greyed with its reason', async () => {
     const client = { agentBackendPreferences: async () => c1Preferences({}, ['codex']), saveAgentBackendPreferences: async () => c1Preferences({}, ['codex']), probeCodexResponses: async () => null }
     render(<AgentBackendSettingsSection client={client} />)
@@ -389,93 +389,39 @@ describe('plan C1 (2026-10-31): the external Agents are back, the retirement mec
   })
 })
 
-describe('⑤ UI 1103: external Agents are enabled by the user in 设置 → Agent', () => {
-  afterEach(() => window.localStorage.removeItem(ENABLED_EXTERNAL_AGENTS_KEY))
+describe('Agent configuration is managed through Host bindings', () => {
+  afterEach(() => applyAgentEnablement([]))
 
-  function probe(backend: string, over: Partial<CredentialProbe> = {}): CredentialProbe {
-    return { ...missing(backend), state: 'ready', credentialsPresent: true, installed: true, ...over }
-  }
-
-  test('each external Agent has a switch (off by default), a status from the existing probes and a 去模型服务配置 entry', async () => {
+  test('Agent defaults link to model settings without running a connection or credential probe', async () => {
     let opened = 0
-    const targets: AgentBackendTarget[] = []
     const client = {
       agentBackendPreferences: async () => c1Preferences(),
       saveAgentBackendPreferences: async () => c1Preferences(),
-      probeCodexResponses: async () => null,
-      agentBackendCredentials: async (target: AgentBackendTarget) => {
-        targets.push(target)
-        if (target.backend === 'pi') return probe('pi', { installed: false })
-        if (target.backend === 'deepseek') return probe('deepseek', { state: 'missing_credentials', credentialsPresent: false })
-        return probe('codex')
-      },
-      agentBackendModelConnection: async () => ({ status: 'ready' as const, providerId: 'p', providerName: 'P', apiType: 'openai-completions', candidates: [], message: null }),
+      probeCodexResponses: async () => { throw new Error('must not probe on page open') },
     }
     render(<AgentBackendSettingsSection client={client} onOpenModelSettings={() => { opened += 1 }} />)
-    await waitFor(() => expect(document.querySelector('[data-external-agent-state="detected"]')).toBeTruthy())
-    const state = (backend: string) => screen.getByRole('switch', { name: `启用 ${backend}` }).closest('.fox-settings-row')?.querySelector('[data-external-agent-state]')?.textContent
-    expect(state('Pi')).toBe('未安装')
-    expect(state('Codex')).toBe('已检测到')
-    expect(state('DeepSeek（dsh）')).toBe('未配置')
-    expect(targets.map((target) => target.backend).sort()).toEqual(['codex', 'deepseek', 'pi'])
-    for (const name of ['Pi', 'Codex', 'DeepSeek（dsh）']) expect(screen.getByRole('switch', { name: `启用 ${name}` }).getAttribute('aria-checked')).toBe('false')
-    // Only Fox can be chosen for a new conversation until one is enabled.
-    expect(screen.getByRole('combobox', { name: '新会话使用的 Agent' }).textContent).toContain('Fox')
-    fireEvent.click(screen.getAllByRole('button', { name: '去模型服务配置' })[0])
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '新会话使用的 Agent' })).toBeTruthy())
+    expect(screen.queryByRole('switch', { name: '启用 Codex' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '前往配置' }))
     expect(opened).toBe(1)
-    fireEvent.click(screen.getByRole('switch', { name: '启用 Codex' }))
-    await waitFor(() => expect(screen.getByRole('switch', { name: '启用 Codex' }).getAttribute('aria-checked')).toBe('true'))
-    expect(JSON.parse(window.localStorage.getItem(ENABLED_EXTERNAL_AGENTS_KEY) ?? '[]')).toEqual(['codex'])
   })
 
-  test('13.37: turning an Agent on checks it at once (「检测中」, then 「已检测到」), the connection before the login probe; focus checks again', async () => {
-    // The Host writes the Fox login into the private HOME while answering the
-    // model connection; a login probe read before that says 「未配置」.
-    let prepared = false
-    const order: string[] = []
-    let release: (() => void) | null = null
-    const client = {
-      agentBackendPreferences: async () => c1Preferences(),
-      saveAgentBackendPreferences: async () => c1Preferences(),
-      probeCodexResponses: async () => null,
-      agentBackendModelConnection: async ({ target }: { target: AgentBackendTarget }) => {
-        order.push(`connection:${target.backend}`)
-        if (target.backend === 'deepseek' && prepared === false && order.filter((item) => item === 'connection:deepseek').length > 1) {
-          await new Promise<void>((resolve) => { release = resolve })
-          prepared = true
-        }
-        return { status: 'ready' as const, providerId: 'p', providerName: 'P', apiType: 'anthropic-messages', candidates: [], message: null }
-      },
-      agentBackendCredentials: async (target: AgentBackendTarget) => {
-        order.push(`credentials:${target.backend}`)
-        if (target.backend === 'deepseek' && !prepared) return probe('deepseek', { state: 'missing_credentials', credentialsPresent: false })
-        return probe(target.backend ?? 'pi')
-      },
-    }
-    render(<AgentBackendSettingsSection client={client} />)
-    const state = () => screen.getByRole('switch', { name: '启用 DeepSeek（dsh）' }).closest('.fox-settings-row')?.querySelector('[data-external-agent-state]')?.textContent
-    await waitFor(() => expect(state()).toBe('未配置'))
-    // Each Agent: model connection first, then the login probe.
-    for (const backend of ['pi', 'codex', 'deepseek']) expect(order.indexOf(`connection:${backend}`)).toBeLessThan(order.indexOf(`credentials:${backend}`))
-    fireEvent.click(screen.getByRole('switch', { name: '启用 DeepSeek（dsh）' }))
-    await waitFor(() => expect(state()).toBe('检测中'))
-    await act(async () => { release?.() })
-    await waitFor(() => expect(state()).toBe('已检测到'))
-    // The window regains focus: every row is checked again, no page switch needed.
-    const before = order.length
-    act(() => { window.dispatchEvent(new Event('focus')) })
-    await waitFor(() => expect(order.length).toBeGreaterThanOrEqual(before + 6))
-    await waitFor(() => expect(state()).toBe('已检测到'))
-  })
-
-  test('the composer picker lists Fox only by default, and Codex once it is enabled', async () => {
-    const view = render(<ComposerAgentPicker value="fox" status={c1Status()} onSelect={() => {}} />)
-    expect(view.getByRole('button', { name: '选择 Agent，当前 Fox' })).toBeTruthy()
-    const source = readFileSync(new URL('../src/features/chat/composer/composer-agent-picker.tsx', import.meta.url), 'utf8')
-    expect(source).toContain('isAgentEnabled(backend, enabled)')
-    act(() => setExternalAgentEnabled('codex', true))
-    expect(JSON.parse(window.localStorage.getItem(ENABLED_EXTERNAL_AGENTS_KEY) ?? '[]')).toEqual(['codex'])
-    await settle()
+  test('enablement is saved by Host before it becomes visible and ignores legacy browser storage', async () => {
+    const { desktopClient } = await import('../src/features/conversations/api/desktop-client')
+    const pending = deferred<void>()
+    const save = spyOn(desktopClient, 'agentEnableSet').mockReturnValue(pending.promise)
+    const legacyKey = 'fox.preferences.enabledExternalAgents'
+    window.localStorage.setItem(legacyKey, JSON.stringify(['pi']))
+    try {
+      applyAgentEnablement([])
+      const changing = setExternalAgentEnabled('codex', true)
+      expect(readEnabledExternalAgents()).toEqual([])
+      expect(save).toHaveBeenCalledWith('codex', true)
+      pending.resolve()
+      await changing
+      expect(readEnabledExternalAgents()).toEqual(['codex'])
+      expect(JSON.parse(window.localStorage.getItem(legacyKey)!)).toEqual(['pi'])
+    } finally { save.mockRestore(); window.localStorage.removeItem(legacyKey) }
   })
 
   test('the per-Agent default permission rows appear only for enabled Agents', async () => {
@@ -493,7 +439,7 @@ describe('⑤ UI 1103: external Agents are enabled by the user in 设置 → Age
       },
       agentBackendNativePermissionSet: async () => { throw new Error('not picked in this test') },
     }
-    window.localStorage.setItem(ENABLED_EXTERNAL_AGENTS_KEY, JSON.stringify(['codex']))
+    applyAgentEnablement([{ agent: 'codex', enabled: true }])
     render(<AgentBackendSettingsSection client={client} />)
     await waitFor(() => expect(screen.getByLabelText('Codex 默认权限')).toBeTruthy())
     expect(screen.queryByLabelText('DeepSeek 默认权限')).toBeNull()

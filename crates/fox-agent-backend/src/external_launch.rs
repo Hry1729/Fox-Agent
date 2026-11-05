@@ -134,6 +134,35 @@ pub fn parse_extra_domains(value: Option<&str>) -> BTreeMap<AgentBackend, Vec<St
 }
 
 impl HostLaunchConfig {
+    pub fn install_status(&self, backend: AgentBackend) -> crate::agent_config::InstallStatus {
+        use crate::agent_config::{InstallBlocker, InstallStatus, InstallVia};
+        if backend == AgentBackend::Fox {
+            return InstallStatus { detected: true, launchable: true, via: Some(InstallVia::Managed), blocker: None };
+        }
+        if self.managed_program(backend).is_none() {
+            let name = match backend { AgentBackend::Pi => "pi", AgentBackend::Codex => "codex", _ => "dsh" };
+            let detected = crate::external_home::which(name).is_some();
+            return InstallStatus { detected, launchable: false, via: detected.then_some(InstallVia::System), blocker: Some(if detected { InstallBlocker::SystemOnly } else { InstallBlocker::NotInstalled }) };
+        }
+        let launchable = self.managed_node().is_some() && self.install_preflight(backend).is_ok();
+        InstallStatus { detected: true, launchable, via: Some(InstallVia::Managed), blocker: (!launchable).then_some(InstallBlocker::RuntimeIncomplete) }
+    }
+
+    /// Unlike launch_spec_with, detection never creates a missing dsh preset.
+    pub fn install_preflight(&self, backend: AgentBackend) -> Result<(), LaunchFailure> {
+        match backend {
+            AgentBackend::Pi => self.pi_preflight(self.pi_launch(), || self.pi_turn_adapter_verified()),
+            AgentBackend::Deepseek => {
+                use crate::backends::deepseek::{default_preset_patch_path, verify_installed_preset_patch};
+                let native = crate::native_permission::effective_mode(backend, None, false, &Default::default());
+                let preset = crate::native_permission::dsh_preset(native);
+                let path = default_preset_patch_path(&self.runtime_root, preset, true);
+                verify_installed_preset_patch(&path, preset, true).map_err(|error| LaunchFailure::new("agent_backend_runtime_adapter_missing", error.to_string()))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// The pi-acp turn-outcome adaptation of the managed runtime matches its
     /// build-time pin ([`crate::runtime_adapters::PI_TURN_OUTCOME_ADAPTER`]).
     pub fn pi_turn_adapter_verified(&self) -> bool {
@@ -483,8 +512,8 @@ impl HostLaunchConfig {
         let mut probe = crate::onboarding::probe(request.backend, &home, &host_env);
         // UI 1103: 设置 → Agent shows「未安装」from the same check a launch uses.
         probe.installed = Some(self.managed_program(request.backend).is_some());
-        if request.backend == AgentBackend::Pi {
-            let mut source = crate::login_source::status(&self.state_root, &home, self.native_login_home.as_ref())
+        if request.backend != AgentBackend::Fox {
+            let mut source = crate::login_source::status(request.backend, &self.state_root, &home, self.native_login_home.as_ref())
                 .map_err(|e| LaunchFailure::new("agent_backend_source_failed", e))?;
             let choice_required = source.choice_required;
             if !choice_required && source.current == "fox" {
@@ -523,8 +552,8 @@ impl HostLaunchConfig {
         let home = private.private_home;
         crate::external_home::ensure_backend_home_dirs(request.backend, &home)
             .map_err(|error| LaunchFailure::new("agent_backend_unified_login_failed", format!("无法创建私有 HOME：{error}")))?;
-        if request.backend == AgentBackend::Pi {
-            crate::login_source::prepare(&self.state_root, &home, self.native_login_home.as_ref())
+        if request.backend != AgentBackend::Fox {
+            crate::login_source::prepare(request.backend, &self.state_root, &home, self.native_login_home.as_ref())
                 .map_err(|e| LaunchFailure::new("agent_backend_source_required", e))?;
         }
         let report = match &request.unified_login {

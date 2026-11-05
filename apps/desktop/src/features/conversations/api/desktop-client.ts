@@ -1,10 +1,11 @@
+import type { AgentConfigOverview, AgentConfigStatus, BindingSource, ExternalAgentId, ImportPreview, ImportApplyRequest, ImportApplied, VerificationReport, VerifyDepth } from '@/features/settings/model-agent/agent-config-types'
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { snapshotForRun } from '../model/kernel-snapshot'
 import type { ReconciliationRequest, ReconciliationView, ReconciliationOptions } from '../model/reconciliation'
 import type { KernelModelPreview } from '../model/types'
 import type { AgentBackendCapabilities, AgentBackendId, AgentBackendPreferences, AgentBackendStatus, CodexResponsesProbe } from '../model/agent-backend'
-import type { AgentBackendPermissionStatus, AgentBackendTarget, CredentialProbe, ExternalPermissionMode, ImportItem, ImportReport } from '../model/agent-backend-onboarding'
+import type { AgentBackendPermissionStatus, AgentBackendTarget, CredentialProbe, ExternalPermissionMode } from '../model/agent-backend-onboarding'
 import type { ApprovalModeLists, NativePermissionRequest, NativePermissionView } from '../model/agent-native-permission'
 import type {
   AgentRecord,
@@ -779,14 +780,14 @@ export const desktopClient = {
   /** UX batch ①: login probe of the private HOME (names only): a conversation, or a new conversation's backend + project. */
   agentBackendCredentials: (target: AgentBackendTarget) =>
     command<CredentialProbe>('agent_backend_credentials', target),
-  /** Whitelisted login files / key names in the real HOME (no values). */
-  agentBackendImportCandidates: (target: AgentBackendTarget) =>
-    command<ImportItem[]>('agent_backend_import_candidates', target),
-  /** Copy the confirmed items into the private HOME (or every project's); existing logins are kept unless `overwrite`. */
-  agentBackendImportCredentials: (target: AgentBackendTarget, selected: string[], allProjects: boolean, overwrite = false, reuseForNewProjects = false) =>
-    command<ImportReport>('agent_backend_import_credentials', { ...target, selected, allProjects, overwrite, reuseForNewProjects }),
-  agentBackendChooseFoxSource: (target: AgentBackendTarget, remember: boolean) =>
-    command<void>('agent_backend_choose_fox_source', { target, remember }),
+  agentConfigOverview: (developer = false) => command<AgentConfigOverview>('agent_config_overview', { developer }),
+  agentEnableSet: (backend: ExternalAgentId, enabled: boolean) => command<void>('agent_enable_set', { backend, enabled }),
+  agentBindingSave: (backend: ExternalAgentId, binding: BindingSource, developer = false) => command<AgentConfigStatus>('agent_binding_save', { backend, binding, developer }),
+  agentBindingClear: (backend: ExternalAgentId, developer = false) => command<AgentConfigStatus>('agent_binding_clear', { backend, developer }),
+  agentConfigVerify: (backend: AgentBackendId, depth: VerifyDepth, developer = false) => command<VerificationReport>('agent_config_verify', { backend, depth, developer }),
+  agentConfigVerifyCancel: (backend: AgentBackendId) => command<boolean>('agent_config_verify_cancel', { backend }),
+  agentImportPreview: (backend: ExternalAgentId, developer = false) => command<ImportPreview>('agent_import_preview', { backend, developer }),
+  agentImportApply: (request: ImportApplyRequest) => command<ImportApplied>('agent_import_apply', request),
   agentBackendOpenPrivateHome: (target: AgentBackendTarget) =>
     command<string>('agent_backend_open_private_home', target),
   /** UX batch ②: permission mode / lock / FORBIDDEN. */
@@ -1047,7 +1048,6 @@ export const desktopClient = {
   saveModelProvider: (request: { protocolProfiles?: import('../model/types').ProtocolProfile[]; protocolKeys?: Record<string, string>; id?: string; name: string; icon?: string | null; baseUrl: string; apiType: 'openai-completions' | 'anthropic-messages'; isDefault: boolean; models: Array<{ id?: string; modelId: string; displayName: string; contextWindow: number; maxOutputTokens: number; supportsImageInput: boolean; isDefault: boolean }>; apiKey?: string; clearApiKey?: boolean }) =>
     command<ModelProviderRecord>('model_provider_save', request),
   deleteModelProvider: (providerId: string) => command<boolean>('model_provider_delete', { providerId }),
-  agentBackendModelConnection: (request: import('@/features/chat/components/AgentModelConnectionCard').AgentModelConnectionRequest) => command<import('@/features/chat/components/AgentModelConnectionCard').AgentModelConnection>('agent_backend_model_connection', request),
   listenRuntimeEvents: (handler: (event: RuntimeEventNotification) => void): Promise<UnlistenFn> =>
     listen<RuntimeEventNotification>('fox://runtime-event', ({ payload }) => handler(payload)),
   listenKernelModelPreviews: (handler: (event: KernelModelPreview) => void): Promise<UnlistenFn> =>

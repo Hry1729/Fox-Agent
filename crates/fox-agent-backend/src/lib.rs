@@ -45,6 +45,7 @@
 //!
 //! This crate has no Tauri dependency so it builds and tests on any host.
 
+pub mod agent_config;
 pub mod capability_view;
 pub mod config;
 pub mod console;

@@ -7544,6 +7544,7 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     // rules and the auto-allow audit log. The retired conversation tool
     // permission table stays in place, unread.
     apply_migration(&transaction,PERMISSION_RULES_SCHEMA_VERSION,MIGRATION_104_PERMISSION_RULES,now)?;
+    apply_migration(&transaction, AGENT_BINDINGS_SCHEMA_VERSION, MIGRATION_105_AGENT_BINDINGS, now)?;
     finish_transaction(transaction)
 }
 
@@ -8042,6 +8043,30 @@ const _: () = assert!(DATABASE_SCHEMA_VERSION >= NATIVE_APPROVAL_COMMAND_SCHEMA_
 
 pub(crate) const PERMISSION_RULES_SCHEMA_VERSION: i64 = 104;
 const _: () = assert!(DATABASE_SCHEMA_VERSION >= PERMISSION_RULES_SCHEMA_VERSION);
+
+pub(crate) const AGENT_BINDINGS_SCHEMA_VERSION: i64 = 105;
+const _: () = assert!(DATABASE_SCHEMA_VERSION >= AGENT_BINDINGS_SCHEMA_VERSION);
+const MIGRATION_105_AGENT_BINDINGS: &str = r#"
+CREATE TABLE agent_bindings (
+    backend TEXT PRIMARY KEY CHECK(backend IN ('pi','codex','deepseek')),
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),
+    source TEXT CHECK(source IN ('fox_service','native')),
+    provider_id TEXT REFERENCES model_providers(id) ON DELETE SET NULL,
+    endpoint_id TEXT,
+    model_id TEXT,
+    updated_at INTEGER NOT NULL
+);
+CREATE TABLE agent_verifications (
+    backend TEXT NOT NULL,
+    identity TEXT NOT NULL,
+    layer TEXT NOT NULL CHECK(layer IN ('config_saved','model_request','agent_output','tool_call')),
+    status TEXT NOT NULL CHECK(status IN ('passed','failed','skipped')),
+    latency_ms INTEGER,
+    code TEXT,
+    checked_at INTEGER NOT NULL,
+    PRIMARY KEY(backend,identity,layer)
+);
+"#;
 
 pub(crate) const MIGRATION_104_PERMISSION_RULES: &str = r#"
 ALTER TABLE conversations ADD COLUMN full_access INTEGER NOT NULL DEFAULT 0 CHECK(full_access IN (0, 1));
@@ -8696,7 +8721,7 @@ mod stage_two_runtime_session_migration_tests {
         // 99 only adds the retired-generation ledger; the v98 mapping itself is
         // unchanged. This test still pins the mapping's version and the
         // database's current version, so a version bump is never silent.
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, 104);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::AGENT_BINDINGS_SCHEMA_VERSION);
 
         let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
         let columns: Vec<String> = database
@@ -8745,7 +8770,7 @@ mod runtime_session_generation_migration_tests {
             assert!(!upper.contains(forbidden), "the migration must not contain {forbidden}");
         }
         assert_eq!(RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION, 99);
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, 104);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::AGENT_BINDINGS_SCHEMA_VERSION);
     }
 
     /// A v98 database keeps its single live mapping at generation 1 and gains an
@@ -16397,7 +16422,7 @@ mod delivery_acceptance_migration_tests {
         assert_eq!(NATIVE_APPROVAL_COMMAND_SCHEMA_VERSION, 103);
         // v104: A1 permission rules, full-access flag and auto-allow audit.
         assert_eq!(PERMISSION_RULES_SCHEMA_VERSION, 104);
-        assert_eq!(DATABASE_SCHEMA_VERSION, PERMISSION_RULES_SCHEMA_VERSION);
+        assert_eq!(DATABASE_SCHEMA_VERSION, AGENT_BINDINGS_SCHEMA_VERSION);
 
         // The old rows are untouched.
         let title: String = connection

@@ -47,23 +47,20 @@ export function ProviderProtocolEditor({ form, disabled, onChange }: {
   return <section className="fox-protocol-editor" aria-label="外部 Agent 协议配置">
     <div className="fox-provider-models-head">
       <div><h3>外部 Agent 协议</h3><p>按需添加协议。默认复用供应商 Key，地址和模型分别配置。</p></div>
-      <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={() => onChange({ ...form, protocolProfiles: [...profiles, { id: crypto.randomUUID(), apiType: 'openai-responses', baseUrl: '', modelId: '', separateCredential: false, backends: [] }] })}>添加协议</Button>
+      <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={() => onChange({ ...form, protocolProfiles: [...profiles, { id: crypto.randomUUID(), apiType: 'openai-responses', baseUrl: '', modelId: '', separateCredential: false }] })}>添加协议</Button>
     </div>
-    <p>Fox 使用上方连接。各 Agent 自动使用当前供应商中匹配的入口；同一协议有多个地址时，首次使用会提示选择。</p>
+    <p>Fox 使用上方连接。各 Agent 使用单独绑定的服务和入口。</p>
     {profiles.map((profile, index) => <fieldset key={profile.id} disabled={disabled || testing !== null} className="fox-protocol-fields">
       <legend>协议配置 {index + 1}</legend>
       <div className="fox-provider-form-grid">
         <label>API 协议<Select value={profile.apiType} onValueChange={(value) => {
           const apiType = value as ProtocolProfile['apiType']
-          update(profile.id, { apiType, backends: profile.backends.filter(b => allProtocolAgents[apiType].includes(b)) })
+          update(profile.id, { apiType })
         }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{Object.entries(labels).map(([value, label]) => <SelectItem key={value} value={value}>{label} · {protocolAgents[value as ProtocolProfile['apiType']].map(b => names[b]).join(' / ')}</SelectItem>)}</SelectContent></Select></label>
         <label>模型 ID<Input value={profile.modelId} placeholder="留空使用供应商默认模型" onChange={event => update(profile.id, { modelId: event.target.value })} /></label>
         <label className="is-wide">API 地址<Input value={profile.baseUrl} placeholder="填写供应商提供的此协议地址" onChange={event => update(profile.id, { baseUrl: event.target.value })} /></label>
       </div>
       <p>协议适用于：{protocolAgents[profile.apiType].map(b => names[b]).join('、')}。协议匹配不代表连接已验证。</p>
-      <div className="fox-protocol-assignments">{protocolAgents[profile.apiType].map(backend => <label key={backend}>
-        <Switch checked={profile.backends.includes(backend)} onCheckedChange={checked => onChange({ ...form, protocolProfiles: profiles.map(p => ({ ...p, backends: p.id === profile.id && checked ? [...p.backends.filter(b => b !== backend), backend] : p.backends.filter(b => b !== backend) })) })} />用作 {names[backend]} 默认协议
-      </label>)}</div>
       <label className="fox-protocol-key"><Switch checked={profile.separateCredential} onCheckedChange={separateCredential => {
         const protocolKeys = { ...form.protocolKeys }; delete protocolKeys[profile.id]
         onChange({ ...form, protocolKeys, protocolProfiles: profiles.map(p => p.id === profile.id ? { ...p, separateCredential, credentialConfigured: false } : p) })

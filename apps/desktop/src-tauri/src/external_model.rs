@@ -1,17 +1,5 @@
-use crate::{app_state::AppState, database::{ApiResponse, Database, ModelProviderRecord}, model_service};
-use fox_agent_backend::{port::AgentBackend, provider_protocol::{self, ProtocolProfile}, unified_login::{Secret, UnifiedLogin}};
-use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConnectionState {
-    pub status: String,
-    pub provider_id: Option<String>,
-    pub provider_name: Option<String>,
-    pub api_type: String,
-    pub candidates: Vec<ProtocolProfile>,
-    pub message: Option<String>,
-}
+use crate::{database::{Database, ModelProviderRecord}, model_service};
+use fox_agent_backend::{agent_config::BindingSource, port::AgentBackend, provider_protocol::{self, ProtocolProfile}, unified_login::{Secret, UnifiedLogin}};
 
 pub fn required_api(backend: AgentBackend) -> &'static str {
     match backend { AgentBackend::Codex => "openai-responses", AgentBackend::Deepseek => "anthropic-messages", _ => "openai-completions" }
@@ -24,84 +12,57 @@ pub fn trusted(profile: &ProtocolProfile) -> bool {
         (Some("openai"), "openai-responses" | "openai-completions", "https://api.openai.com/v1"))
 }
 
-fn profiles(provider: &ModelProviderRecord, backend: AgentBackend) -> Vec<ProtocolProfile> {
-    let model = provider.models.iter().find(|m| m.is_default).or(provider.models.first()).map(|m| m.model_id.as_str()).unwrap_or_default();
-    let mut profiles = provider.protocol_profiles.clone();
-    if !profiles.iter().any(|p| p.api_type == provider.api_type) {
-        profiles.push(ProtocolProfile { preset_id: None, id: "primary".into(), api_type: provider.api_type.clone(), base_url: provider.base_url.clone(), model_id: model.into(), separate_credential: false, backends: vec![], credential_configured: false });
-    }
-    for p in &mut profiles { if p.model_id.trim().is_empty() { p.model_id = model.into(); } }
-    profiles.retain(|p| provider_protocol::supports(&p.api_type, backend.as_str()));
-    let bound: Vec<_> = profiles.iter().filter(|p| p.backends.iter().any(|b| b == backend.as_str())).cloned().collect();
-    if !bound.is_empty() { return bound; }
-    // pi accepts all three protocols. Prefer the supplier's main API, then Messages.
-    if backend == AgentBackend::Pi {
-        let api = if profiles.iter().any(|p| p.api_type == provider.api_type) { provider.api_type.as_str() }
-            else if profiles.iter().any(|p| p.api_type == "anthropic-messages") { "anthropic-messages" } else { "openai-responses" };
-        profiles.retain(|p| p.api_type == api);
-    }
+pub fn profiles(provider: &ModelProviderRecord, backend: AgentBackend) -> Vec<ProtocolProfile> {
+    let model = provider.models.iter().find(|model| model.is_default).or(provider.models.first()).map(|model| model.model_id.as_str()).unwrap_or_default();
+    let primary = ProtocolProfile { preset_id: None, id: "primary".into(), api_type: provider.api_type.clone(), base_url: provider.base_url.clone(), model_id: model.into(), separate_credential: false, credential_configured: false };
+    let mut profiles = vec![primary];
+    if backend != AgentBackend::Fox { profiles.extend(provider.protocol_profiles.iter().filter(|profile| profile.id != "primary").cloned()); }
+    for profile in &mut profiles { if profile.model_id.trim().is_empty() { profile.model_id = model.into(); } }
+    profiles.retain(|profile| provider_protocol::supports(&profile.api_type, backend.as_str()));
     profiles
 }
 
-fn current(database: &Database) -> Result<Option<ModelProviderRecord>, String> {
-    Ok(database.list_model_providers()?.into_iter().find(|p| p.enabled && p.is_default))
+pub fn current(database: &Database) -> Result<Option<ModelProviderRecord>, String> {
+    Ok(database.list_model_providers()?.into_iter().find(|provider| provider.enabled && provider.is_default))
 }
 
-fn cache_key(provider: &ModelProviderRecord, profile: &ProtocolProfile) -> String {
-    format!("model.protocol.{}.{}.{}", provider.id, profile.api_type, profile.id)
-}
-
-/// The pre-13.38 cache value: valid only until the next save of the provider
-/// (any save, a passing connection test too, moved `updated_at`). Still
-/// honoured so an upgrade does not ask for every address to be tested again.
-fn cache_value(provider: &ModelProviderRecord, profile: &ProtocolProfile) -> String {
-    crate::canonical_json::to_string(&(profile.base_url.as_str(), profile.model_id.as_str(), provider.updated_at)).expect("connection identity serializes")
-}
-
-/// The Key an address is used with: its own Key, or the provider's.
-fn credential_ref(provider: &ModelProviderRecord, profile: &ProtocolProfile) -> String {
+pub fn credential_ref(provider: &ModelProviderRecord, profile: &ProtocolProfile) -> String {
     if profile.separate_credential { provider_protocol::credential_id(&provider.id, &profile.id) } else { provider.base_url.clone() }
 }
 
-fn credential_revision_key(credential: &str) -> String {
-    format!("model.credential_revision.{credential}")
-}
+fn credential_revision_key(credential: &str) -> String { format!("model.credential_revision.{credential}") }
 
-/// Changes whenever the Key behind `credential` is written or deleted, so a
-/// connection test of the old Key no longer counts.
-fn credential_revision(database: &Database, credential: &str) -> String {
+pub fn credential_revision(database: &Database, credential: &str) -> String {
     database.app_setting(&credential_revision_key(credential)).ok().flatten().unwrap_or_else(|| "0".to_owned())
 }
 
-/// 13.38: a Key behind `credential` was written or deleted.
 pub fn bump_credential_revision(database: &Database, credential: &str) -> Result<(), String> {
     database.set_app_setting(&credential_revision_key(credential), &uuid::Uuid::new_v4().to_string())
 }
 
-/// What a passing connection test proves: this protocol, at this address,
-/// with this model, using this saved Key (13.37 B3-2).
 fn verification_key(api_type: &str, base_url: &str, model_id: &str, credential: &str) -> String {
     format!("model.verified.{}", crate::canonical_json::to_string(&(api_type, base_url, model_id, credential)).expect("connection identity serializes"))
 }
 
-/// Remember a passing connection test of exactly this connection. Unlike the
-/// pre-13.38 cache it survives a save of the provider that leaves the
-/// address, the model and the Key unchanged; changing any of them asks again.
 pub fn record_verified_connection(database: &Database, api_type: &str, base_url: &str, model_id: &str, credential: &str) -> Result<(), String> {
     database.set_app_setting(&verification_key(api_type, base_url, model_id, credential), &credential_revision(database, credential))
 }
 
-fn verified(database: &Database, provider: &ModelProviderRecord, profile: &ProtocolProfile) -> bool {
-    if trusted(profile) { return true; }
-    let credential = credential_ref(provider, profile);
-    let key = verification_key(&profile.api_type, &profile.base_url, &profile.model_id, &credential);
-    if database.app_setting(&key).ok().flatten().as_deref() == Some(credential_revision(database, &credential).as_str()) { return true; }
-    database.app_setting(&cache_key(provider, profile)).ok().flatten().as_deref() == Some(cache_value(provider, profile).as_str())
+pub fn forget_verified_connection(database: &Database, provider: &ModelProviderRecord, profile: &ProtocolProfile) -> Result<(), String> {
+    let key = verification_key(&profile.api_type, &profile.base_url, &profile.model_id, &credential_ref(provider, profile));
+    database.with_connection(|connection| { connection.execute("DELETE FROM app_settings WHERE key=?1", [key])?; Ok(()) })
 }
 
-/// The connection a passing `model_service_test` checked. `credential` is the
-/// saved Key it used (`None`: a Key typed into the form that is not saved
-/// yet, which proves nothing about what a send will use).
+pub fn verified(database: &Database, provider: &ModelProviderRecord, profile: &ProtocolProfile) -> bool {
+    let credential = credential_ref(provider, profile);
+    database.app_setting(&verification_key(&profile.api_type, &profile.base_url, &profile.model_id, &credential)).ok().flatten().as_deref() == Some(credential_revision(database, &credential).as_str())
+}
+
+pub fn verified_at(database: &Database, provider: &ModelProviderRecord, profile: &ProtocolProfile) -> Option<i64> {
+    if !verified(database, provider, profile) { return None; }
+    database.app_setting_updated_at(&verification_key(&profile.api_type, &profile.base_url, &profile.model_id, &credential_ref(provider, profile))).ok().flatten()
+}
+
 pub fn record_connection_test(database: &Database, api_type: &str, base_url: &str, model_id: &str, credential: Option<&str>) -> Result<(), String> {
     let Some(credential) = credential else { return Ok(()) };
     let model_id = crate::model_service::normalize_model_id(base_url, model_id);
@@ -109,121 +70,43 @@ pub fn record_connection_test(database: &Database, api_type: &str, base_url: &st
     record_verified_connection(database, api_type, base_url, &model_id, credential)
 }
 
-fn login(provider: &ModelProviderRecord, profile: &ProtocolProfile) -> Option<UnifiedLogin> {
-    let credential = if profile.separate_credential { provider_protocol::credential_id(&provider.id, &profile.id) } else { provider.base_url.clone() };
-    Some(UnifiedLogin { provider_name: provider.name.clone(), base_url: profile.base_url.clone(), api_type: profile.api_type.clone(), model: profile.model_id.clone(), api_key: Secret::new(model_service::get_api_key(&credential)?), responses_supported: None })
+pub fn login(provider: &ModelProviderRecord, profile: &ProtocolProfile) -> Option<UnifiedLogin> {
+    Some(UnifiedLogin { provider_name: provider.name.clone(), base_url: profile.base_url.clone(), api_type: profile.api_type.clone(), model: profile.model_id.clone(), api_key: Secret::new(model_service::get_api_key(&credential_ref(provider, profile))?), responses_supported: None })
+}
+
+pub fn bound_connection(database: &Database, backend: AgentBackend) -> Option<(ModelProviderRecord, ProtocolProfile)> {
+    if backend == AgentBackend::Fox {
+        let provider = current(database).ok()??;
+        let profile = profiles(&provider, backend).into_iter().next()?;
+        return Some((provider, profile));
+    }
+    let binding = database.agent_binding(backend).ok()??.binding?;
+    let BindingSource::FoxService { provider_id: Some(provider_id), endpoint_id, model_id } = binding.source else { return None };
+    let provider = database.list_model_providers().ok()?.into_iter().find(|provider| provider.id == provider_id && provider.enabled)?;
+    let mut profile = profiles(&provider, backend).into_iter().find(|profile| profile.id == endpoint_id)?;
+    profile.model_id = model_id;
+    Some((provider, profile))
 }
 
 pub fn external_login(database: &Database, backend: AgentBackend) -> Option<UnifiedLogin> {
-    let provider = current(database).ok()??;
-    let profiles = profiles(&provider, backend);
-    if profiles.len() != 1 || !verified(database, &provider, &profiles[0]) { return None; }
-    login(&provider, &profiles[0])
+    let (provider, profile) = bound_connection(database, backend)?;
+    verified(database, &provider, &profile).then(|| login(&provider, &profile)).flatten()
 }
 
-/// Why [`external_login`] has nothing for `backend` (13.35). Lets a send that
-/// cannot start say what to do instead of a generic "no connection":
-/// editing the provider (for example adding an Anthropic address) changes its
-/// revision, so the earlier connection test no longer counts and the address
-/// must be tested again before the next send creates a Run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoginGap {
-    /// No default provider, no address for this Agent's protocol, or no key.
-    Missing,
-    /// More than one address could serve this Agent; the user must pick one.
-    ChooseAddress,
-    /// Exactly one address, not (or no longer) verified by a connection test.
-    Unverified,
-}
+pub enum LoginGap { Unbound, Missing, Unverified }
 
 pub fn external_login_gap(database: &Database, backend: AgentBackend) -> Option<LoginGap> {
-    let Some(provider) = current(database).ok().flatten() else { return Some(LoginGap::Missing) };
-    let profiles = profiles(&provider, backend);
-    match profiles.len() {
-        0 => Some(LoginGap::Missing),
-        1 if !verified(database, &provider, &profiles[0]) => Some(LoginGap::Unverified),
-        1 => login(&provider, &profiles[0]).is_none().then_some(LoginGap::Missing),
-        _ => Some(LoginGap::ChooseAddress),
-    }
+    let Some(record) = database.agent_binding(backend).ok().flatten() else { return Some(LoginGap::Unbound) };
+    if record.binding.is_none() { return Some(LoginGap::Unbound); }
+    let Some((provider, profile)) = bound_connection(database, backend) else { return Some(LoginGap::Missing) };
+    if !verified(database, &provider, &profile) { return Some(LoginGap::Unverified); }
+    login(&provider, &profile).is_none().then_some(LoginGap::Missing)
 }
 
-/// 13.19 fix ④: the provider address an Agent's native permission list
-/// depends on (Codex「帮我批准」is offered on OpenAI only). Unlike [`external_login`] it
-/// needs no key and no verification, so a new conversation's list is right
-/// before the first login: the protocol address that serves `backend`, else
-/// (no such address bound) the default provider's own base URL. `None` when
-/// there is no default provider or it has no address at all.
 pub fn catalog_provider_base_url(database: &Database, backend: AgentBackend) -> Option<String> {
-    current(database).ok().flatten().and_then(|provider| provider_catalog_base_url(&provider, backend))
-}
-
-fn provider_catalog_base_url(provider: &ModelProviderRecord, backend: AgentBackend) -> Option<String> {
-    let candidates: Vec<String> = profiles(provider, backend).into_iter().map(|p| p.base_url.trim().to_owned()).filter(|url| !url.is_empty()).collect();
-    // Several unbound candidates: any non-OpenAI one decides (fail-closed).
-    if let Some(url) = candidates.iter().find(|url| !fox_agent_backend::native_permission::provider_is_openai(url)).or(candidates.first()) {
-        return Some(url.clone());
-    }
-    let own = provider.base_url.trim();
-    (!own.is_empty()).then(|| own.to_owned())
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConnectionRequest {
-    pub target: crate::external_backend::AgentBackendTarget,
-    pub provider_id: Option<String>,
-    pub profile_id: Option<String>,
-    pub base_url: Option<String>,
-}
-
-async fn resolve(state: &AppState, external: &crate::external_backend::ExternalBackendHost, request: ConnectionRequest) -> Result<ConnectionState, String> {
-    let (backend, own_login) = external.model_login_context(&request.target)?;
-    let mut view = ConnectionState { status: "missing_provider".into(), provider_id: None, provider_name: None, api_type: required_api(backend).into(), candidates: vec![], message: None };
-    if own_login { view.status = "existing_login".into(); return Ok(view); }
-    let Some(mut provider) = current(&state.database)? else { return Ok(view); };
-    view.provider_id = Some(provider.id.clone());
-    view.provider_name = Some(provider.name.clone());
-    if request.base_url.is_some() || request.profile_id.is_some() {
-        if request.provider_id.as_deref() != Some(provider.id.as_str()) { return Err("当前供应商已改变，请重试".into()); }
-        if let Some(id) = request.profile_id {
-            let choices = profiles(&provider, backend);
-            let mut selected = choices.into_iter().find(|p| p.id == id).ok_or("入口已改变，请重新选择")?;
-            for p in &mut provider.protocol_profiles { p.backends.retain(|b| b != backend.as_str()); }
-            if let Some(p) = provider.protocol_profiles.iter_mut().find(|p| p.id == id) { p.backends.push(backend.as_str().into()); }
-            else { selected.backends = vec![backend.as_str().into()]; provider.protocol_profiles.push(selected); }
-        } else if let Some(base_url) = request.base_url {
-            if !profiles(&provider, backend).is_empty() { return Err("已有可用入口，请刷新后选择".into()); }
-            provider.protocol_profiles.push(ProtocolProfile { preset_id: None, id: uuid::Uuid::new_v4().to_string(), api_type: required_api(backend).into(), base_url: model_service::normalize_model_base_url(&base_url)?, model_id: String::new(), separate_credential: false, backends: vec![backend.as_str().into()], credential_configured: false });
-        }
-        provider = state.database.save_model_provider(&provider)?;
-    }
-    view.candidates = profiles(&provider, backend);
-    if view.candidates.is_empty() { view.status = "missing_address".into(); return Ok(view); }
-    if view.candidates.len() > 1 { view.status = "choose_address".into(); return Ok(view); }
-    let profile = &view.candidates[0];
-    let Some(login) = login(&provider, profile) else { view.status = "missing_key".into(); return Ok(view); };
-    static VERIFY_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    let _verification_guard = VERIFY_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
-    if !verified(&state.database, &provider, profile) {
-        if let Err(error) = state.model_service_client.test_output(&login.base_url, Some(login.api_key.expose()), &login.api_type, &login.model).await {
-            view.status = "verification_failed".into(); view.message = Some(error); return Ok(view);
-        }
-        // A late probe cannot validate a supplier that changed while the request was running.
-        let latest = current(&state.database)?.ok_or("当前供应商已清空")?;
-        if latest.id != provider.id || latest.updated_at != provider.updated_at { return Err("供应商配置已改变，请重试".into()); }
-        record_verified_connection(&state.database, &profile.api_type, &profile.base_url, &profile.model_id, &credential_ref(&provider, profile))?;
-    }
-    external.prepare_model_login(&request.target)?;
-    view.status = "ready".into();
-    Ok(view)
-}
-
-#[tauri::command]
-pub async fn agent_backend_model_connection(state: tauri::State<'_, AppState>, external: tauri::State<'_, crate::external_backend::ExternalBackendHost>, request: ConnectionRequest) -> Result<ApiResponse<ConnectionState>, ()> {
-    Ok(match resolve(&state, &external, request).await {
-        Ok(view) => ApiResponse::success(view),
-        Err(error) => ApiResponse::failure("model.connection_failed", error, true),
-    })
+    bound_connection(database, backend).map(|(_, profile)| profile.base_url)
+        .or_else(|| current(database).ok().flatten().map(|provider| provider.base_url))
 }
 
 #[cfg(test)]
@@ -236,79 +119,7 @@ mod tests {
         }
     }
     fn endpoint(id: &str, api: &str) -> ProtocolProfile {
-        ProtocolProfile { preset_id: None, id: id.into(), api_type: api.into(), base_url: "https://example.com/v1".into(), model_id: String::new(), separate_credential: false, backends: vec![], credential_configured: false }
-    }
-    #[test]
-    fn automatically_matches_and_inherits_current_supplier_model() {
-        let mut p = provider();
-        assert!(profiles(&p, AgentBackend::Codex).is_empty());
-        assert!(profiles(&p, AgentBackend::Deepseek).is_empty());
-        p.protocol_profiles = vec![endpoint("responses", "openai-responses"), endpoint("messages", "anthropic-messages")];
-        assert_eq!(profiles(&p, AgentBackend::Codex)[0].id, "responses");
-        assert_eq!(profiles(&p, AgentBackend::Deepseek)[0].model_id, "default-model");
-        assert_eq!(profiles(&p, AgentBackend::Pi)[0].api_type, p.api_type);
-        assert_eq!(p.models[0].model_id, "default-model");
-    }
-    #[test]
-    fn ambiguity_requires_choice_and_explicit_binding_remembers_it() {
-        let mut p = provider();
-        p.protocol_profiles = vec![endpoint("one", "openai-responses"), endpoint("two", "openai-responses")];
-        assert_eq!(profiles(&p, AgentBackend::Codex).len(), 2);
-        p.protocol_profiles[1].backends = vec!["codex".into()];
-        assert_eq!(profiles(&p, AgentBackend::Codex)[0].id, "two");
-        assert_eq!(profiles(&p, AgentBackend::Codex).len(), 1);
-    }
-    #[test]
-    fn permission_catalog_falls_back_to_the_provider_address_without_a_login() {
-        use fox_agent_backend::native_permission::{catalog, CatalogContext, CODEX_NO_AUTO_TIER_REASON};
-        // Codex「帮我批准」(agent) is offered on an OpenAI address only.
-        let auto_review = |url: Option<String>| catalog(AgentBackend::Codex, &CatalogContext { provider_base_url: url, full_access_forbidden: false })
-            .options.into_iter().find(|option| option.id == "agent").unwrap().disabled_reason;
-        // No protocol address for Codex (Responses): the provider's own URL.
-        let mut p = provider();
-        p.base_url = "https://api.deepseek.com".into();
-        assert!(profiles(&p, AgentBackend::Codex).is_empty());
-        assert_eq!(provider_catalog_base_url(&p, AgentBackend::Codex).as_deref(), Some("https://api.deepseek.com"));
-        assert_eq!(auto_review(provider_catalog_base_url(&p, AgentBackend::Codex)).as_deref(), Some(CODEX_NO_AUTO_TIER_REASON));
-        // A bound Responses address wins over the provider URL.
-        let mut openai = endpoint("responses", "openai-responses");
-        openai.base_url = "https://api.openai.com/v1".into();
-        p.protocol_profiles = vec![openai];
-        assert_eq!(provider_catalog_base_url(&p, AgentBackend::Codex).as_deref(), Some("https://api.openai.com/v1"));
-        assert_eq!(auto_review(provider_catalog_base_url(&p, AgentBackend::Codex)), None);
-        // Two candidates, one not OpenAI: the non-OpenAI one is reported.
-        p.protocol_profiles.push(endpoint("other", "openai-responses"));
-        assert_eq!(provider_catalog_base_url(&p, AgentBackend::Codex).as_deref(), Some("https://example.com/v1"));
-        // Nothing to judge by: None.
-        p.protocol_profiles.clear();
-        p.base_url = "  ".into();
-        assert_eq!(provider_catalog_base_url(&p, AgentBackend::Codex), None);
-        assert_eq!(auto_review(None).as_deref(), Some(CODEX_NO_AUTO_TIER_REASON));
-    }
-    #[test]
-    fn only_catalog_provenance_and_exact_endpoint_are_trusted() {
-        let mut p = endpoint("responses", "openai-responses");
-        p.base_url = "https://api.deepseek.com".into();
-        assert!(!trusted(&p));
-        p.preset_id = Some("deepseek-official".into());
-        assert!(trusted(&p));
-        p.base_url = "https://api.deepseek.com.example.org".into();
-        assert!(!trusted(&p));
-    }
-    #[test]
-    fn validation_cache_tracks_model_address_and_supplier_revision() {
-        let path = std::env::temp_dir().join(format!("fox-protocol-cache-{}.db", uuid::Uuid::new_v4()));
-        let db = Database::open(path.clone()).unwrap();
-        let mut p = provider();
-        let mut profile = endpoint("responses", "openai-responses");
-        profile.model_id = "one".into();
-        assert!(!verified(&db, &p, &profile));
-        db.set_app_setting(&cache_key(&p, &profile), &cache_value(&p, &profile)).unwrap();
-        assert!(verified(&db, &p, &profile));
-        profile.model_id = "two".into(); assert!(!verified(&db, &p, &profile));
-        profile.model_id = "one".into(); profile.base_url.push_str("/changed"); assert!(!verified(&db, &p, &profile));
-        profile.base_url = "https://example.com/v1".into(); p.updated_at += 1; assert!(!verified(&db, &p, &profile));
-        drop(db); let _ = std::fs::remove_file(path);
+        ProtocolProfile { preset_id: None, id: id.into(), api_type: api.into(), base_url: "https://example.com/v1".into(), model_id: String::new(), separate_credential: false, credential_configured: false }
     }
     #[test]
     fn a_passing_test_of_the_saved_connection_survives_a_resave_but_not_a_key_change() {
@@ -348,39 +159,42 @@ mod tests {
         assert!(!verified(&db, &resaved, &separate));
         drop(db); let _ = std::fs::remove_file(path);
     }
+
     #[test]
-    fn login_gap_names_the_missing_step_after_a_provider_edit() {
-        let path = std::env::temp_dir().join(format!("fox-protocol-gap-{}.db", uuid::Uuid::new_v4()));
-        let db = Database::open(path.clone()).unwrap();
-        // No provider at all.
-        assert_eq!(external_login_gap(&db, AgentBackend::Deepseek), Some(LoginGap::Missing));
-        // A provider with no Messages address: dsh has nothing to use.
-        let saved = db.save_model_provider(&provider()).unwrap();
-        assert_eq!(external_login_gap(&db, AgentBackend::Deepseek), Some(LoginGap::Missing));
-        // The user adds an Anthropic address (13.35): the provider revision
-        // moves, nothing has tested the new address yet.
-        let mut edited = saved.clone();
-        edited.protocol_profiles = vec![endpoint("messages", "anthropic-messages")];
-        let edited = db.save_model_provider(&edited).unwrap();
-        assert_eq!(external_login_gap(&db, AgentBackend::Deepseek), Some(LoginGap::Unverified));
-        // Two Messages addresses: a choice is needed first.
-        let mut two = edited.clone();
-        two.protocol_profiles.push(endpoint("messages-2", "anthropic-messages"));
-        db.save_model_provider(&two).unwrap();
-        assert_eq!(external_login_gap(&db, AgentBackend::Deepseek), Some(LoginGap::ChooseAddress));
-        drop(db); let _ = std::fs::remove_file(path);
+    fn bindings_select_a_non_default_service_and_keep_missing_provider_visible() {
+        let db = Database::open(":memory:".into()).unwrap();
+        let first = db.save_model_provider(&provider()).unwrap();
+        assert!(external_login(&db, AgentBackend::Pi).is_none());
+        assert_eq!(external_login_gap(&db, AgentBackend::Pi), Some(LoginGap::Unbound));
+        let mut second = provider(); second.id = "second".into(); second.base_url = "https://second.example/v1".into(); second.is_default = false; second.models[0].id = "second-model".into();
+        db.save_model_provider(&second).unwrap();
+        db.set_agent_enabled(AgentBackend::Pi, true).unwrap();
+        db.save_agent_binding(AgentBackend::Pi, &BindingSource::FoxService { provider_id: Some(second.id.clone()), endpoint_id: "primary".into(), model_id: "selected-model".into() }).unwrap();
+        let (bound, profile) = bound_connection(&db, AgentBackend::Pi).unwrap();
+        assert_eq!(bound.id, second.id); assert_eq!(profile.model_id, "selected-model");
+        assert_eq!(current(&db).unwrap().unwrap().id, first.id);
+        assert_eq!(catalog_provider_base_url(&db, AgentBackend::Pi), Some(second.base_url.clone()));
+        assert_eq!(external_login_gap(&db, AgentBackend::Pi), Some(LoginGap::Unverified));
+        record_verified_connection(&db, &profile.api_type, &profile.base_url, &profile.model_id, &second.base_url).unwrap();
+        assert!(verified(&db,&bound,&profile));
+        bump_credential_revision(&db,&second.base_url).unwrap();
+        assert!(!verified(&db,&bound,&profile));
+        db.delete_model_provider(&second.id).unwrap();
+        assert!(bound_connection(&db, AgentBackend::Pi).is_none());
+        assert_eq!(external_login_gap(&db,AgentBackend::Pi),Some(LoginGap::Missing));
+        assert!(db.agent_binding(AgentBackend::Pi).unwrap().unwrap().enabled);
     }
+
     #[test]
-    fn does_not_fall_back_to_another_supplier() {
-        let path = std::env::temp_dir().join(format!("fox-protocol-current-{}.db", uuid::Uuid::new_v4()));
-        let db = Database::open(path.clone()).unwrap();
-        let mut other = provider(); other.id = "other".into(); other.base_url = "https://other.example.com/v1".into(); other.is_default = false; other.models[0].id = "other-model".into(); other.protocol_profiles = vec![endpoint("responses", "openai-responses")];
-        db.save_model_provider(&other).unwrap();
-        let chosen = db.save_model_provider(&provider()).unwrap();
-        assert_eq!(current(&db).unwrap().unwrap().id, chosen.id);
-        assert!(profiles(&current(&db).unwrap().unwrap(), AgentBackend::Codex).is_empty());
-        db.delete_model_provider(&chosen.id).unwrap();
-        assert!(current(&db).unwrap().is_none());
-        drop(db); let _ = std::fs::remove_file(path);
+    fn primary_and_extra_endpoints_remain_explicit_and_trust_is_not_a_test() {
+        let db = Database::open(":memory:".into()).unwrap();
+        let mut provider = provider();
+        let mut profile = endpoint("official", "openai-completions");
+        profile.preset_id = Some("openai".into()); profile.base_url = "https://api.openai.com/v1".into();
+        assert!(trusted(&profile)); assert!(!verified(&db,&provider,&profile));
+        provider.protocol_profiles = vec![profile];
+        assert_eq!(profiles(&provider, AgentBackend::Pi).len(), 2);
+        assert_eq!(profiles(&provider, AgentBackend::Fox).len(), 1);
+        assert_eq!(profiles(&provider, AgentBackend::Fox)[0].id, "primary");
     }
 }

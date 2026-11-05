@@ -6,14 +6,14 @@ import { ExpertBindingChip } from '../src/features/chat/components/ExpertBinding
 import { desktopClient } from '../src/features/conversations/api/desktop-client'
 import { useDesktopConversation } from '../src/features/conversations/hooks/use-desktop-conversation'
 import { DEFAULT_AGENT_BACKEND_PREFERENCES } from '../src/features/conversations/model/agent-backend'
-import { ENABLED_EXTERNAL_AGENTS_KEY } from '../src/features/conversations/model/external-agent-enablement'
+import { applyAgentEnablement } from '../src/features/conversations/model/external-agent-enablement'
 
 const spies = []
 // UI 1103: external Agents are off until enabled in 设置 → Agent. These tests
 // cover routing, so all three are enabled; default-off is covered in
 // agent-backend.test.ts and agent-backend-send.test.ts.
-beforeEach(() => { window.localStorage.setItem(ENABLED_EXTERNAL_AGENTS_KEY, JSON.stringify(['pi', 'codex', 'deepseek'])) })
-afterEach(() => { cleanup(); spies.splice(0).forEach(spy => spy.mockRestore()); window.localStorage.removeItem(ENABLED_EXTERNAL_AGENTS_KEY) })
+beforeEach(() => { applyAgentEnablement(['pi', 'codex', 'deepseek'].map(agent => ({ agent, enabled: true }))) })
+afterEach(() => { cleanup(); spies.splice(0).forEach(spy => spy.mockRestore()); applyAgentEnablement([]) })
 function fakeHost(defaultBackend = 'deepseek', retiredBackends = []) {
   const requests = []
   let conversation

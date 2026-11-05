@@ -81,11 +81,11 @@ describe('source assertions', () => {
     expect(panel).toContain("agentBackendAccess(shownBackend, status) === 'runnable'")
   })
 
-  test('UI 1103: 设置 → Agent probes each external Agent by backend, with no conversation needed', () => {
-    expect(settings).toContain('const target: AgentBackendTarget = { backend, fullAccess: false }')
-    expect(settings).toContain('credentials(target)')
+  test('configuration commands use the new read-only overview and explicit writes', () => {
+    expect(settings).not.toContain('agentBackendCredentials')
+    expect(client).toContain("command<AgentConfigOverview>('agent_config_overview', { developer })")
     expect(client).toContain("command<CredentialProbe>('agent_backend_credentials', target)")
-    expect(client).toContain('{ ...target, selected, allProjects, overwrite, reuseForNewProjects }')
+    for (const removed of ['agent_backend_model_connection', 'agent_backend_choose_fox_source', 'agent_backend_import_candidates', 'agent_backend_import_credentials']) expect(client).not.toContain(removed)
   })
 
   test('UI 1103: the login card above the composer is gone; nothing above the composer probes or imports a login', () => {

@@ -188,6 +188,11 @@ pub fn managed_candidates(backend: AgentBackend) -> &'static [&'static str] {
     }
 }
 
+pub(crate) fn managed_files(backend: AgentBackend, home: &Path) -> Vec<String> {
+    let ledger = read_ledger(home);
+    managed_candidates(backend).iter().filter(|relative| is_managed(home, &ledger, relative)).map(|relative| (*relative).to_owned()).collect()
+}
+
 /// Whether the user's own files in `home` already give `backend` a login
 /// (`host_login`: a login variable of the Host environment reaches it).
 pub fn user_login_present(backend: AgentBackend, home: &Path, host_login: bool) -> bool {

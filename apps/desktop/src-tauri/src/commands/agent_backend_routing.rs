@@ -295,24 +295,6 @@ pub async fn agent_backend_preview_action(external: tauri::State<'_, crate::exte
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AgentBackendImportRequest {
-    /// The conversation, or a new conversation's backend + project.
-    #[serde(flatten)]
-    pub target: crate::external_backend::AgentBackendTarget,
-    /// Ids from `agent_backend_import_candidates` the user confirmed.
-    pub selected: Vec<String>,
-    /// "套用到我所有项目".
-    #[serde(default)]
-    pub all_projects: bool,
-    /// "覆盖已有登录" (off by default: an existing login is kept and listed).
-    #[serde(default)]
-    pub overwrite: bool,
-    #[serde(default)]
-    pub reuse_for_new_projects: bool,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AgentBackendPermissionStatusRequest {
     #[serde(default)]
     pub conversation_id: Option<String>,
@@ -326,40 +308,6 @@ pub fn agent_backend_credentials(
     request: crate::external_backend::AgentBackendTarget,
 ) -> ApiResponse<fox_agent_backend::onboarding::CredentialProbe> {
     external.credential_probe(&request)
-}
-
-/// Whitelisted login files / key names found in the real HOME (no values).
-#[tauri::command]
-pub fn agent_backend_import_candidates(
-    external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
-    request: crate::external_backend::AgentBackendTarget,
-) -> ApiResponse<Vec<fox_agent_backend::onboarding::ImportItem>> {
-    external.import_candidates(&request)
-}
-
-/// Copy the confirmed items into the private HOME(s); audited by name.
-#[tauri::command]
-pub fn agent_backend_import_credentials(
-    external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
-    request: AgentBackendImportRequest,
-) -> ApiResponse<fox_agent_backend::onboarding::ImportReport> {
-    external.import_credentials(&request.target, &request.selected, request.all_projects, request.overwrite, request.reuse_for_new_projects)
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentBackendSourceRequest {
-    pub target: crate::external_backend::AgentBackendTarget,
-    #[serde(default)]
-    pub remember: bool,
-}
-
-#[tauri::command]
-pub fn agent_backend_choose_fox_source(
-    external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
-    request: AgentBackendSourceRequest,
-) -> ApiResponse<()> {
-    external.choose_fox_source(&request.target, request.remember)
 }
 
 /// Open the private HOME in the system file manager.
@@ -1164,18 +1112,8 @@ mod tests {
         assert!(matches!(gated, Ok(Route::Fox)));
     }
 
-    /// 80b1622 acceptance: the login card must show for a NEW conversation
-    /// (no row yet), and "覆盖已有登录" must be an explicit, default-off choice.
     #[test]
-    fn credential_requests_accept_a_draft_target_and_overwrite_defaults_off() {
-        let old: AgentBackendImportRequest = serde_json::from_value(serde_json::json!({ "conversationId": "c1", "selected": ["file:.codex/auth.json"], "allProjects": true })).unwrap();
-        assert_eq!(old.target.conversation_id.as_deref(), Some("c1"));
-        assert!(old.all_projects && !old.overwrite, "overwrite is off unless asked");
-        let draft: AgentBackendImportRequest = serde_json::from_value(serde_json::json!({ "backend": "codex", "projectId": "p1", "projectRoot": "D:/proj", "fullAccess": true, "selected": [], "overwrite": true })).unwrap();
-        assert!(draft.target.conversation_id.is_none());
-        assert_eq!(draft.target.backend.as_deref(), Some("codex"));
-        assert_eq!(draft.target.project_id.as_deref(), Some("p1"));
-        assert!(draft.target.full_access && draft.overwrite && !draft.all_projects);
+    fn credential_probe_accepts_draft_and_conversation_targets() {
         let probe: crate::external_backend::AgentBackendTarget = serde_json::from_value(serde_json::json!({ "backend": "deepseek", "projectRoot": "D:/proj" })).unwrap();
         assert_eq!(probe.project_root.as_deref(), Some("D:/proj"));
         assert!(!probe.full_access);

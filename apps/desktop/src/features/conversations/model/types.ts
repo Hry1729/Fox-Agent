@@ -1080,7 +1080,6 @@ export interface ProtocolProfile {
   baseUrl: string
   modelId: string
   separateCredential: boolean
-  backends: string[]
   credentialConfigured?: boolean
 }
 

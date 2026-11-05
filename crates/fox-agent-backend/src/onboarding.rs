@@ -373,6 +373,22 @@ pub struct ImportItem {
     source: PathBuf,
 }
 
+impl ImportItem {
+    pub fn label(&self) -> &'static str {
+        match self.destination.as_str() {
+            CODEX_AUTH | PI_AUTH => "登录信息",
+            CODEX_CONFIG => "模型与连接设置",
+            PI_MODELS => "模型服务配置",
+            PI_SETTINGS => "默认模型设置",
+            DSH_ENV => if self.name == "MAGPIE_GATEWAY_KEY" { "本机网关凭据" } else { "模型服务凭据" },
+            DSH_PATCH_ACP => "Agent 连接设置",
+            DSH_PATCH => "通用连接设置",
+            _ => "配置文件",
+        }
+    }
+    pub fn source_path(&self) -> &Path { &self.source }
+}
+
 fn file_item(source: PathBuf, destination: &str) -> Option<ImportItem> {
     is_present_file(&source).then(|| ImportItem {
         id: format!("file:{destination}"),
@@ -669,21 +685,27 @@ impl Backup<'_> {
     }
 }
 
-pub(crate) fn archive_pi_source(home: &Path) -> Result<(), String> {
+pub(crate) fn archive_source(backend: AgentBackend, home: &Path) -> Result<(), String> {
     let stamp = backup_stamp(std::time::SystemTime::now());
     let mut backup = Backup { home, stamp: &stamp, directory: None, items: Vec::new() };
-    for relative in [PI_AUTH, PI_MODELS, PI_SETTINGS] {
+    let files: &[&str] = match backend {
+        AgentBackend::Pi => &[PI_AUTH, PI_MODELS, PI_SETTINGS],
+        AgentBackend::Codex => &[CODEX_AUTH, CODEX_CONFIG],
+        AgentBackend::Deepseek => &[DSH_ENV, DSH_PATCH_ACP, DSH_PATCH],
+        AgentBackend::Fox => &[],
+    };
+    for relative in files {
         let source = rel(home, relative);
         match std::fs::symlink_metadata(&source) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(format!("无法读取 Pi 配置 {relative}：{error}")),
-            Ok(meta) if is_link(&source) || !meta.is_file() => return Err(format!("Pi 配置 {relative} 不是普通文件，未切换来源")),
+            Err(error) => return Err(format!("无法读取 Agent 配置 {relative}：{error}")),
+            Ok(meta) if is_link(&source) || !meta.is_file() => return Err(format!("Agent 配置 {relative} 不是普通文件，未切换来源")),
             Ok(_) => backup.save(relative)?,
         }
     }
     // 所有副本备份成功后才腾出原路径，真实 HOME 中的配置始终保留。
     for relative in &backup.items {
-        std::fs::remove_file(rel(home, relative)).map_err(|error| format!("无法切换 Pi 配置 {relative}：{error}"))?;
+        std::fs::remove_file(rel(home, relative)).map_err(|error| format!("无法切换 Agent 配置 {relative}：{error}"))?;
     }
     Ok(())
 }
@@ -700,6 +722,14 @@ pub(crate) fn archive_pi_source(home: &Path) -> Result<(), String> {
 /// old file is copied to `<home>/.fox-credential-backups/<stamp>/`. Other
 /// `.env` lines are always kept.
 pub fn import_into(backend: AgentBackend, real: &RealHome, selected: &[String], targets: &[ImportTarget], options: ImportOptions<'_>) -> Result<ImportReport, String> {
+    run_import(backend, real, selected, targets, options, true)
+}
+
+pub fn import_plan(backend: AgentBackend, real: &RealHome, selected: &[String], targets: &[ImportTarget]) -> Result<ImportReport, String> {
+    run_import(backend, real, selected, targets, ImportOptions::default(), false)
+}
+
+fn run_import(backend: AgentBackend, real: &RealHome, selected: &[String], targets: &[ImportTarget], options: ImportOptions<'_>, write: bool) -> Result<ImportReport, String> {
     if options.overwrite && !valid_stamp(options.backup_stamp) {
         return Err(format!("invalid backup name {:?}", options.backup_stamp));
     }
@@ -713,14 +743,17 @@ pub fn import_into(backend: AgentBackend, real: &RealHome, selected: &[String], 
     let mut homes_written = 0;
     for target in targets {
         let home = target.home.as_path();
-        ensure_private_dir(home, home).map_err(|error| format!("cannot create the private HOME: {error}"))?;
+        // Generated credentials are replaceable. User-edited files still take the keep/backup path.
+        let managed = crate::unified_login::managed_files(backend, home);
+        if write { crate::unified_login::remove_managed(backend, home)?; }
+        if write { ensure_private_dir(home, home).map_err(|error| format!("cannot create the private HOME: {error}"))?; }
         let mut kept: Vec<String> = Vec::new();
         let mut backup = Backup { home, stamp: options.backup_stamp, directory: None, items: Vec::new() };
         let mut wrote = false;
         // Whole files.
         for item in chosen.iter().filter(|item| item.kind == ImportKind::File) {
             let dest = rel(home, &item.destination);
-            let exists = std::fs::symlink_metadata(&dest).is_ok();
+            let exists = std::fs::symlink_metadata(&dest).is_ok() && !managed.contains(&item.destination);
             if exists && !options.overwrite {
                 kept.push(item.destination.clone());
                 continue;
@@ -735,11 +768,13 @@ pub fn import_into(backend: AgentBackend, real: &RealHome, selected: &[String], 
                     (meta.is_file() && meta.len() <= MAX_IMPORT_FILE_BYTES).then(|| std::fs::read(&item.source).ok()).flatten()
                 })
                 .ok_or_else(|| format!("{} is not a regular file of at most 1 MiB", item.name))?;
-            if exists {
+            if exists && write {
                 backup.save(&item.destination)?;
             }
-            ensure_private_dir(home, dest.parent().unwrap_or(home)).map_err(|error| format!("cannot create {}: {error}", item.destination))?;
-            write_private(&dest, &bytes).map_err(|error| format!("cannot write {}: {error}", item.destination))?;
+            if write {
+                ensure_private_dir(home, dest.parent().unwrap_or(home)).map_err(|error| format!("cannot create {}: {error}", item.destination))?;
+                write_private(&dest, &bytes).map_err(|error| format!("cannot write {}: {error}", item.destination))?;
+            }
             wrote = true;
             if !files.contains(&item.destination) {
                 files.push(item.destination.clone());
@@ -755,7 +790,7 @@ pub fn import_into(backend: AgentBackend, real: &RealHome, selected: &[String], 
             if is_link(&dest) {
                 return Err(format!("{destination} in the private HOME is a link; refusing to write through it"));
             }
-            let existing = if std::fs::symlink_metadata(&dest).is_ok() {
+            let existing = if std::fs::symlink_metadata(&dest).is_ok() && !managed.iter().any(|path| path == destination) {
                 read_small(&dest).ok_or_else(|| format!("{destination} in the private HOME is not a regular text file of at most 1 MiB; refusing to rewrite it"))?
             } else {
                 String::new()
@@ -777,11 +812,13 @@ pub fn import_into(backend: AgentBackend, real: &RealHome, selected: &[String], 
             if names.is_empty() {
                 continue;
             }
-            if replaced {
+            if replaced && write {
                 backup.save(destination)?;
             }
-            ensure_private_dir(home, dest.parent().unwrap_or(home)).map_err(|error| format!("cannot create {destination}: {error}"))?;
-            write_private(&dest, merge_env_lines(&existing, &source, &names).as_bytes()).map_err(|error| format!("cannot write {destination}: {error}"))?;
+            if write {
+                ensure_private_dir(home, dest.parent().unwrap_or(home)).map_err(|error| format!("cannot create {destination}: {error}"))?;
+                write_private(&dest, merge_env_lines(&existing, &source, &names).as_bytes()).map_err(|error| format!("cannot write {destination}: {error}"))?;
+            }
             wrote = true;
             for name in names {
                 if !keys.iter().any(|known| known == name) {
@@ -986,6 +1023,57 @@ mod tests {
         write(&real.home, DSH_PATCH_ACP, "changed");
         assert_ne!(std::fs::read_to_string(rel(&homes[1], DSH_PATCH_ACP)).unwrap(), "changed");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dry_run_matches_real_conflicts_for_all_three_agents_without_writing() {
+        let root = scratch("dry-run");
+        let real = RealHome { home: root.join("real"), codex_home: None };
+        for (backend, path, content) in [
+            (AgentBackend::Codex, CODEX_AUTH, r#"{"OPENAI_API_KEY":"fixture"}"#),
+            (AgentBackend::Pi, PI_AUTH, r#"{"provider":{"type":"api_key","key":"fixture"}}"#),
+            (AgentBackend::Deepseek, DSH_ENV, "DEEPSEEK_API_KEY=fixture\nUNRELATED=private\n"),
+        ] {
+            write(&real.home, path, content);
+            let selected: Vec<_> = import_candidates(backend, &real).into_iter().map(|item| item.id).collect();
+            let homes = vec![root.join(format!("homes/existing/{}", backend.as_str())), root.join(format!("homes/new/{}", backend.as_str()))];
+            write(&homes[0], path, content);
+            let before = std::fs::read(homes[0].join(path)).unwrap();
+            let plan = import_plan(backend, &real, &selected, &targets(&homes)).unwrap();
+            assert!(!homes[1].exists());
+            assert!(!homes[0].join(BACKUP_DIR).exists());
+            assert_eq!(std::fs::read(homes[0].join(path)).unwrap(), before);
+            let actual = import_into(backend, &real, &selected, &targets(&homes), ImportOptions::default()).unwrap();
+            assert_eq!(plan, actual);
+            assert!(!std::fs::read_to_string(homes[1].join(path)).unwrap().contains("UNRELATED"));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_import_replaces_generated_login_but_preserves_user_edits() {
+        let root = scratch("import-generated");
+        let real = RealHome { home: root.join("real"), codex_home: None };
+        let home = root.join("homes/project/pi");
+        let login = crate::unified_login::UnifiedLogin {
+            provider_name: "Fox".into(), base_url: "https://example.com/v1".into(), api_type: "openai-completions".into(), model: "old-model".into(),
+            api_key: crate::unified_login::Secret::new("old-generated"), responses_supported: None,
+        };
+        crate::unified_login::apply(AgentBackend::Pi, &home, &login, false).unwrap();
+        write(&real.home, PI_MODELS, r#"{"providers":{"native":{"baseUrl":"https://native.example/v1","apiKey":"imported"}}}"#);
+        let selected = vec![format!("file:{PI_MODELS}")];
+        let homes = targets(&[home.clone()]);
+        let plan = import_plan(AgentBackend::Pi, &real, &selected, &homes).unwrap();
+        assert!(plan.skipped_existing.is_empty());
+        assert!(std::fs::read_to_string(home.join(PI_MODELS)).unwrap().contains("old-generated"));
+        let actual = import_into(AgentBackend::Pi, &real, &selected, &homes, ImportOptions::default()).unwrap();
+        assert_eq!(plan, actual);
+        assert!(std::fs::read_to_string(home.join(PI_MODELS)).unwrap().contains("imported"));
+        write(&home, PI_MODELS, "user-owned");
+        let actual = import_into(AgentBackend::Pi, &real, &selected, &homes, ImportOptions::default()).unwrap();
+        assert_eq!(actual.skipped_existing.len(), 1);
+        assert_eq!(std::fs::read_to_string(home.join(PI_MODELS)).unwrap(), "user-owned");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

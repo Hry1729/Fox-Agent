@@ -290,11 +290,7 @@ impl BackendSwitch {
     }
 }
 
-/// AP-4: the gate of the commands that put credentials or model keys into a
-/// backend's private HOME, or probe / open it (`agent_backend_import_credentials`,
-/// `agent_backend_model_connection`, `agent_backend_open_private_home`,
-/// `agent_backend_choose_fox_source`, `agent_backend_credentials`,
-/// `agent_backend_import_candidates`, `agent_backend_probe_codex_responses`).
+/// Gates explicit binding/import mutations and conversation credential access.
 /// A backend that may not run (retired, hidden, or switched off by
 /// [`EXTERNAL_BACKENDS_ENV`]) gets no copy of a login it would never use.
 /// `existing_conversation` only picks the wording. Revoking full access is

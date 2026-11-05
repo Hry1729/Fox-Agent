@@ -30,6 +30,7 @@ use std::{
 use uuid::Uuid;
 
 mod a1_workflow;
+mod agent_config;
 mod artifact_delivery_view;
 mod app_management;
 mod bundled_capabilities;
@@ -10250,7 +10251,7 @@ mod tests {
             enabled: true, is_default: true, credential_configured: false, connection_type: "remote".into(),
             last_status: "unknown".into(), last_latency_ms: None, last_checked_at: None, created_at: 0, updated_at: 0,
             models: vec![ProviderModelRecord { id: "model-test".into(), model_id: "native-model".into(), display_name: "Native".into(), context_window: 128000, max_output_tokens: 8192, supports_image_input: false, is_default: true }],
-            protocol_profiles: vec![ProtocolProfile { preset_id: None, id: "responses".into(), api_type: "openai-responses".into(), base_url: "https://example.com/responses-api/v1".into(), model_id: "codex-model".into(), separate_credential: true, backends: vec!["codex".into()], credential_configured: false }],
+            protocol_profiles: vec![ProtocolProfile { preset_id: None, id: "responses".into(), api_type: "openai-responses".into(), base_url: "https://example.com/responses-api/v1".into(), model_id: "codex-model".into(), separate_credential: true, credential_configured: false }],
         };
         let saved = database.save_model_provider(&provider).unwrap();
         assert_eq!(saved.protocol_profiles, provider.protocol_profiles);

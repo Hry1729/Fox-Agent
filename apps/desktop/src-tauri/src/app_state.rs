@@ -16,6 +16,7 @@ use std::{
 use tokio::sync::Mutex as AsyncMutex;
 
 pub struct AppState {
+    pub agent_configuration: crate::agent_config::AgentConfigControl,
     pub database: Database,
     pub runtime_host: RuntimeHost,
     pub yuxi_client: YuxiClient,
@@ -43,6 +44,7 @@ impl AppState {
         skills_dir: PathBuf,
     ) -> Self {
         Self {
+            agent_configuration: crate::agent_config::AgentConfigControl::default(),
             database,
             runtime_host,
             yuxi_client,

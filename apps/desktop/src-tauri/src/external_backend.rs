@@ -276,48 +276,13 @@ fn agent_label(backend: AgentBackend) -> &'static str {
     }
 }
 
-/// Send refusal for a missing / unverified / ambiguous model connection of an
-/// external Agent. Every sentence points at 「设置 → 模型服务」: the composer's
-/// backend bar and login cards no longer exist (UI 1103), and the address an
-/// Agent uses is chosen there (「用作 X 默认协议」 on the protocol address).
 pub(crate) fn login_gap_failure(gap: Option<crate::external_model::LoginGap>, backend: AgentBackend) -> (&'static str, String) {
-    use crate::external_model::LoginGap;
     let name = agent_label(backend);
     match gap {
-        Some(LoginGap::Unverified) => ("model.connection_unverified",
-            "模型服务的配置改过了，当前地址还没有通过连接测试：请到「设置 → 模型服务」重新测试连接，通过后再发送".to_owned()),
-        Some(LoginGap::ChooseAddress) => ("model.connection_choose_address",
-            format!("当前供应商有多个地址都能给 {name} 用：请到「设置 → 模型服务」，在要用的地址上打开「用作 {name} 默认协议」后再发送")),
-        _ => ("model.connection_required", "请先到「设置 → 模型服务」配置并测试当前供应商，再发送".to_owned()),
+        Some(crate::external_model::LoginGap::Unverified) => ("model.connection_unverified", format!("请到「设置 → 模型与 Agent」重新验证 {name} 使用的模型服务。")),
+        _ => ("model.connection_required", format!("请到「设置 → 模型与 Agent」为 {name} 选择模型服务。")),
     }
 }
-
-/// What to do with Pi's pending 「配置来源」 choice before a send.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PiSourceStep {
-    /// Nothing pending.
-    Proceed,
-    /// Never chosen, and 模型服务 can serve Pi: use it for this project's
-    /// private HOME (not remembered as the default; recorded in the audit).
-    DefaultToFox,
-    /// The confirmed native source changed, or 模型服务 cannot serve Pi.
-    Refuse,
-}
-
-/// `implicit_fox`：没有待确认的选择，也从没选过来源，本机也没有 Pi 原生配置，当前来源只是
-/// 默认落到「模型服务」上（13.38 B3-4）。这时 Fox 模型服务可用就按 DefaultToFox 记下并写审计。
-pub(crate) fn pi_source_step(choice_required: bool, source_changed: bool, fox_login_ready: bool, implicit_fox: bool) -> PiSourceStep {
-    if !choice_required {
-        if implicit_fox && fox_login_ready { PiSourceStep::DefaultToFox } else { PiSourceStep::Proceed }
-    } else if !source_changed && fox_login_ready {
-        PiSourceStep::DefaultToFox
-    } else {
-        PiSourceStep::Refuse
-    }
-}
-
-pub(crate) const PI_SOURCE_CHOICE_REQUIRED: &str = "agent_backend_pi_source_choice_required";
-pub(crate) const PI_SOURCE_CHOICE_MESSAGE: &str = "Pi 的配置来源需要确认：请先到「设置 → 模型服务」配置并测试一个供应商（Fox 会把它交给 Pi），再发送";
 
 /// Carry a refusal over to another payload type.
 fn retype<T: serde::Serialize>(refusal: ApiResponse<()>) -> ApiResponse<T> {
@@ -438,15 +403,7 @@ impl ExternalBackendHost {
             Err(refusal) => return retype(refusal),
         };
         let target = AgentBackendTarget { conversation_id: Some(request.conversation_id.clone()), backend: None, project_id: None, project_root: None, full_access: false };
-        // e2e-1101: Pi's 「配置来源」 choice (Fox 模型服务 or the native ~/.pi
-        // config) is settled here, before any Run exists. The UI that offered
-        // the choice is gone (UI 1103 removed the login cards above the
-        // composer), so a pending choice would fail every send afterwards.
-        if backend == AgentBackend::Pi {
-            if let Err(refusal) = self.settle_pi_source(&target) {
-                return retype(refusal);
-            }
-        }
+        if let Err(refusal) = self.settle_login_source(&target) { return retype(refusal); }
         let native_login_present = match self.model_login_context(&target) {
             Ok((_, false)) if self.unified_login(backend).is_none() => {
                 // 13.35: say which step is missing. An edited provider (e.g. an
@@ -661,29 +618,21 @@ impl ExternalBackendHost {
         crate::external_model::external_login(&self.database, backend)
     }
 
-    /// e2e-1101: settle Pi's pending 「配置来源」 choice before a send (see
-    /// [`pi_source_step`]). Defaulting to 模型服务 only scopes this project's
-    /// private HOME (`choose_fox(.., remember = false)`) and is audited.
-    fn settle_pi_source(&self, target: &AgentBackendTarget) -> Result<(), ApiResponse<()>> {
+    pub(crate) fn launch_config(&self) -> &HostLaunchConfig { &self.runtime.launcher().config }
+
+    fn settle_login_source(&self, target: &AgentBackendTarget) -> Result<(), ApiResponse<()>> {
         let request = self.target_request(target)?;
-        let launcher = self.runtime.launcher();
-        settle_pi_source_choice(&self.database, &launcher.config, &request)
+        settle_login_source_choice(&self.database, self.launch_config(), &request)
     }
 
     pub(crate) fn model_login_context(&self, target: &AgentBackendTarget) -> Result<(AgentBackend, bool), String> {
-        let mut request = self.target_request(target).map_err(|r| r.error.map(|e| e.message).unwrap_or_else(|| "无法读取会话配置".into()))?;
-        request.unified_login = None;
-        let launcher = self.runtime.launcher();
-        let config = &launcher.config;
+        let request = self.target_request(target).map_err(|r| r.error.map(|e| e.message).unwrap_or_else(|| "无法读取会话配置".into()))?;
+        let config = self.launch_config();
         let home = config.private_home_path(fox_agent_backend::external_home::home_project_uuid(request.project_uuid.as_deref()), request.backend).map_err(|e| e.message)?;
-        if request.backend == AgentBackend::Pi {
-            let source = fox_agent_backend::login_source::status(&config.state_root, &home, Self::real_home().as_ref())?;
-            if source.choice_required { return Ok((request.backend, true)); }
-            if source.reusable { config.apply_unified_login(&request).map_err(|e| e.message)?; }
-        }
-        let probe = config.credential_probe(&request).map_err(|e| e.message)?;
-        let host_login = probe.present_keys.iter().any(|key| key.ends_with("（Host 环境）"));
-        Ok((request.backend, fox_agent_backend::unified_login::user_login_present(request.backend, &home, host_login)))
+        let native = self.database.agent_binding(request.backend)?.and_then(|record| record.binding)
+            .is_some_and(|binding| binding.source == fox_agent_backend::agent_config::BindingSource::Native);
+        if native { fox_agent_backend::login_source::prepare(request.backend, &config.state_root, &home, config.native_login_home.as_ref())?; }
+        Ok((request.backend, native && fox_agent_backend::unified_login::user_login_present(request.backend, &home, false)))
     }
 
     /// The user changed the conversation's native permission mode: the live
@@ -706,55 +655,20 @@ impl ExternalBackendHost {
         let _ = self.database.append_agent_backend_audit(None, "-", event, details);
     }
 
-    /// Remove the Fox-managed login files of every project x backend (the
-    /// default provider changed or lost its key). Never stops at the first
-    /// problem: projects without a canonical UUID (e.g. `legacy-<hex>` ids
-    /// of old conversations) have no private HOME and are skipped; every
-    /// other failure is collected per project / backend and returned, so the
-    /// caller can report it as a warning after its own work is done.
-    pub(crate) fn clear_managed_model_files(&self) -> Vec<String> {
-        let projects = match self.database.known_projects() {
-            Ok(projects) => projects,
-            Err(error) => return vec![format!("无法列出项目：{error}")],
-        };
-        let mut errors = Vec::new();
-        for (id, _) in projects {
-            if fox_agent_backend::external_home::canonical_project_uuid(&id).is_none() {
-                continue;
-            }
-            for backend in [AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek] {
-                let result = self
-                    .runtime
-                    .launcher()
-                    .config
-                    .private_home_path(&id, backend)
-                    .map_err(|e| e.message)
-                    .and_then(|home| fox_agent_backend::unified_login::remove_managed(backend, &home).map(|_| ()));
-                if let Err(error) = result {
-                    errors.push(format!("项目 {id} / {}：{error}", backend.as_str()));
-                }
-            }
-        }
-        // 无项目外部会话共用的 HOME 不是 projects 行，换供应商时同样清掉 Fox 代写的登录。
-        for backend in [AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek] {
-            let result = self
-                .runtime
-                .launcher()
-                .config
-                .private_home_path(fox_agent_backend::external_home::DEFAULT_CONVERSATIONS_HOME_ID, backend)
-                .map_err(|e| e.message)
-                .and_then(|home| fox_agent_backend::unified_login::remove_managed(backend, &home).map(|_| ()));
-            if let Err(error) = result {
-                errors.push(format!("未选项目的对话 / {}：{error}", backend.as_str()));
-            }
-        }
-        errors
+    pub(crate) fn provider_bound_backends(&self, provider_id: &str) -> Vec<AgentBackend> {
+        [AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek].into_iter().filter(|backend| {
+            self.database.agent_binding(*backend).ok().flatten().and_then(|record| record.binding).is_some_and(|binding|
+                matches!(binding.source, fox_agent_backend::agent_config::BindingSource::FoxService { provider_id: Some(id), .. } if id == provider_id))
+        }).collect()
     }
 
-    pub(crate) fn prepare_model_login(&self, target: &AgentBackendTarget) -> Result<(), String> {
-        let request = self.target_request(target).map_err(|r| r.error.map(|e| e.message).unwrap_or_else(|| "无法读取会话配置".into()))?;
-        self.runtime.launcher().config.apply_unified_login(&request).map_err(|e| e.message)?;
-        Ok(())
+    pub(crate) fn clear_managed_model_files(&self, backend: AgentBackend) -> Vec<String> {
+        let projects = match self.database.known_projects() { Ok(projects) => projects, Err(error) => return vec![error] };
+        import_home_targets(true, None, &projects).into_iter().filter_map(|(id, _)| {
+            self.launch_config().private_home_path(&id, backend).map_err(|e| e.message)
+                .and_then(|home| fox_agent_backend::unified_login::remove_managed(backend, &home).map(|_| ()))
+                .err()
+        }).collect()
     }
 
     /// The launch request a turn of `conversation_id` would use (backend,
@@ -864,87 +778,6 @@ impl ExternalBackendHost {
             Ok(probe) => ApiResponse::success(probe),
             Err(error) => failure(&error.code, error.message, false),
         }
-    }
-
-    fn real_home() -> Option<fox_agent_backend::onboarding::RealHome> {
-        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).filter(|value| !value.is_empty())?;
-        let codex_home = std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()).map(std::path::PathBuf::from);
-        Some(fox_agent_backend::onboarding::RealHome { home: std::path::PathBuf::from(home), codex_home })
-    }
-
-    /// What the real HOME has for this backend (file / key names only).
-    pub fn import_candidates(&self, target: &AgentBackendTarget) -> ApiResponse<Vec<fox_agent_backend::onboarding::ImportItem>> {
-        let request = match self.target_request(target) {
-            Ok(request) => request,
-            Err(refusal) => return retype(refusal),
-        };
-        let Some(real) = Self::real_home() else {
-            return failure("agent_backend_import_failed", "找不到当前用户的 HOME 目录", false);
-        };
-        ApiResponse::success(fox_agent_backend::onboarding::import_candidates(request.backend, &real))
-    }
-
-    /// Copy the confirmed items into this project's private HOME, or every
-    /// known project's ("套用到我所有项目"); one audit event, names only. A
-    /// login already there (this project included) is kept unless
-    /// `overwrite` ("覆盖已有登录"), which backs it up first.
-    pub fn import_credentials(&self, target: &AgentBackendTarget, selected: &[String], all_projects: bool, overwrite: bool, reuse_for_new_projects: bool) -> ApiResponse<fox_agent_backend::onboarding::ImportReport> {
-        let request = match self.target_request(target) {
-            Ok(request) => request,
-            Err(refusal) => return retype(refusal),
-        };
-        let Some(real) = Self::real_home() else {
-            return failure("agent_backend_import_failed", "找不到当前用户的 HOME 目录", false);
-        };
-        let known = match self.database.known_projects() {
-            Ok(known) => known,
-            Err(error) => return failure("storage.operation_failed", error, true),
-        };
-        let projects = import_home_targets(all_projects, request.project_uuid.as_deref(), &known);
-        let snapshot = if reuse_for_new_projects && request.backend == AgentBackend::Pi {
-            match fox_agent_backend::login_source::Snapshot::capture(&real, selected) {
-                Ok(snapshot) => Some(snapshot),
-                Err(error) => return failure("agent_backend_source_failed", error, false),
-            }
-        } else { None };
-        match self.runtime.launcher().config.import_credentials(request.backend, &projects, &real, selected, overwrite) {
-            Ok(report) => {
-                if let Some(snapshot) = snapshot {
-                    if !snapshot.matches(&real.home) { return failure("agent_backend_source_changed", "配置已导入，但原生来源已变化；新项目复用未启用，请重新确认", true); }
-                    let current_home = self.runtime.launcher().config.private_home_path(fox_agent_backend::external_home::home_project_uuid(request.project_uuid.as_deref()), request.backend);
-                    if !current_home.is_ok_and(|home| snapshot.matches(&home)) {
-                        return failure("agent_backend_source_not_copied", "已有文件被保留，新项目复用尚未启用。要切换到原生配置，请勾选覆盖已有登录后重新导入；覆盖前会备份。", true);
-                    }
-                    if let Err(error) = snapshot.remember(&self.runtime.launcher().config.state_root) {
-                        return failure("agent_backend_source_failed", error, true);
-                    }
-                }
-                let mut details = report.audit_event();
-                details["allProjects"] = json!(all_projects);
-                let conversation = target.conversation_id.as_deref().filter(|id| !id.is_empty());
-                let _ = self.database.append_agent_backend_audit(conversation, request.backend.as_str(), "agent_backend.credentials_imported", &details);
-                ApiResponse::success(report)
-            }
-            Err(error) => failure(&error.code, error.message, false),
-        }
-    }
-
-    pub fn choose_fox_source(&self, target: &AgentBackendTarget, remember: bool) -> ApiResponse<()> {
-        let request = match self.target_request(target) { Ok(request) => request, Err(refusal) => return refusal };
-        if request.backend != AgentBackend::Pi { return failure("agent_backend_invalid", "此选择仅用于 Pi", false); }
-        let config = &self.runtime.launcher().config;
-        let known = match self.database.known_projects() {
-            Ok(projects) => projects,
-            Err(error) => return failure("storage.operation_failed", error, true),
-        };
-        let projects = import_home_targets(remember, request.project_uuid.as_deref(), &known);
-        for (index, (project, _)) in projects.iter().enumerate() {
-            let result = config.private_home_path(project, AgentBackend::Pi)
-                .map_err(|e| e.message)
-                .and_then(|home| fox_agent_backend::login_source::choose_fox(&config.state_root, &home, remember && index + 1 == projects.len()));
-            if let Err(error) = result { return failure("agent_backend_source_failed", error, true); }
-        }
-        ApiResponse::success(())
     }
 
     /// Open the private HOME in the system file manager (created when
@@ -1057,30 +890,34 @@ pub(crate) fn reachability_probe_target(native_login_present: bool, unified_base
     unified_base_url
 }
 
-fn settle_pi_source_choice(database: &Database, config: &HostLaunchConfig, request: &LaunchRequest) -> Result<(), ApiResponse<()>> {
-    let home = config.private_home_path(fox_agent_backend::external_home::home_project_uuid(request.project_uuid.as_deref()), AgentBackend::Pi)
-        .map_err(|error| failure(PI_SOURCE_CHOICE_REQUIRED, format!("无法确定 Pi 的私有目录：{}", error.message), true))?;
-    let source = fox_agent_backend::login_source::status(&config.state_root, &home, config.native_login_home.as_ref())
-        .map_err(|error| failure(PI_SOURCE_CHOICE_REQUIRED, format!("无法读取 Pi 的配置来源：{error}"), true))?;
-    let login = request.unified_login.as_ref();
-    let implicit_fox = !source.choice_required && source.current == "fox" && !source.fox_chosen;
-    match pi_source_step(source.choice_required, source.source_changed, login.is_some(), implicit_fox) {
-        PiSourceStep::Proceed => Ok(()),
-        PiSourceStep::Refuse => Err(failure(PI_SOURCE_CHOICE_REQUIRED, PI_SOURCE_CHOICE_MESSAGE, true)),
-        PiSourceStep::DefaultToFox => {
-            fox_agent_backend::login_source::choose_fox(&config.state_root, &home, false)
-                .map_err(|error| failure(PI_SOURCE_CHOICE_REQUIRED, format!("无法记录 Pi 的配置来源：{error}"), true))?;
-            let details = json!({
-                "provider": login.map(|login| login.provider_name.clone()),
-                "model": login.map(|login| login.model.clone()),
-                "nativeAvailable": source.native_available,
-                "reason": if source.choice_required { "choice_pending" } else { "no_source_chosen" },
-            });
-            database.append_agent_backend_audit(Some(&request.conversation_id), AgentBackend::Pi.as_str(), "agent_backend.pi_source_defaulted_to_fox", &details)
-                .map_err(|error| failure("storage.operation_failed", error, true))?;
-            Ok(())
+fn settle_login_source_choice(database: &Database, config: &HostLaunchConfig, request: &LaunchRequest) -> Result<(), ApiResponse<()>> {
+    use fox_agent_backend::{agent_config::BindingSource, login_source};
+    let backend = request.backend;
+    let home = config.private_home_path(fox_agent_backend::external_home::home_project_uuid(request.project_uuid.as_deref()), backend)
+        .map_err(|error| failure(&error.code, error.message, true))?;
+    let mut binding = database.agent_binding(backend).map_err(|e| failure("storage.operation_failed", e, true))?.and_then(|record| record.binding);
+    if binding.is_none() && backend == AgentBackend::Pi {
+        let source = login_source::status(backend, &config.state_root, &home, config.native_login_home.as_ref())
+            .map_err(|e| failure("agent_config.read_failed", e, true))?;
+        if source.source_changed || source.reusable || source.current == "native" { return Err(failure("model.connection_required", "请到「设置 → 模型与 Agent」确认 Pi 的配置来源。", true)); }
+        if let Some(provider) = crate::external_model::current(database).map_err(|e| failure("storage.operation_failed", e, true))? {
+            if let Some(profile) = crate::external_model::profiles(&provider, backend).into_iter().next() {
+                let selected = BindingSource::FoxService { provider_id: Some(provider.id.clone()), endpoint_id: profile.id.clone(), model_id: profile.model_id.clone() };
+                database.save_agent_binding(backend, &selected).map_err(|e| failure("storage.operation_failed", e, true))?;
+                database.append_agent_backend_audit(Some(&request.conversation_id), backend.as_str(), "agent_binding.defaulted", &json!({"backend": backend, "providerId": provider.id, "endpointId": profile.id, "model": profile.model_id}))
+                    .map_err(|e| failure("storage.operation_failed", e, true))?;
+                binding = database.agent_binding(backend).map_err(|e| failure("storage.operation_failed", e, true))?.and_then(|record| record.binding);
+            }
         }
     }
+    if matches!(binding.map(|binding| binding.source), Some(BindingSource::FoxService { .. })) {
+        let source = login_source::status(backend, &config.state_root, &home, config.native_login_home.as_ref())
+            .map_err(|e| failure("agent_config.read_failed", e, true))?;
+        if !source.fox_chosen {
+            login_source::choose_fox(backend, &config.state_root, &home, false).map_err(|e| failure("agent_config.read_failed", e, true))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1090,78 +927,42 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn implicit_pi_source_is_audited_once_per_isolated_home() {
-        use fox_agent_backend::{external::LaunchRequest, external_launch::HostLaunchConfig, unified_login::{Secret, UnifiedLogin}, port::AgentBackend};
-        let root = std::env::temp_dir().join(format!("fox-source-audit-{}", uuid::Uuid::new_v4()));
-        for data in [root.join("first"), root.join("second")] {
-            let database = crate::database::Database::open(":memory:".into()).unwrap();
-            let conversation = database.create_conversation("fox-general", None, None, Some("ask")).unwrap();
-            let mut config = HostLaunchConfig::from_env(&data);
-            config.state_root = data.join("agent-state");
-            config.native_login_home = None;
-            let request = LaunchRequest {
-                conversation_id: conversation.id.clone(), backend: AgentBackend::Pi, project_uuid: None,
-                project_root: data.join("project"), session_key: "audit".into(), full_access_granted: false,
-                native_permission: None, unified_login: Some(UnifiedLogin {
-                    provider_name: "Audit provider".into(), base_url: "https://example.com/v1".into(),
-                    api_type: "openai-completions".into(), model: "audit-model".into(), api_key: Secret::new("test-key"), responses_supported: None,
-                }),
-            };
-            for _ in 0..2 { super::settle_pi_source_choice(&database, &config, &request).unwrap(); }
-            let (count, details, runs): (i64, String, i64) = database.with_connection(|connection| {
-                connection.query_row("SELECT COUNT(*), MAX(details_json), (SELECT COUNT(*) FROM runs) FROM agent_backend_audit_log WHERE event='agent_backend.pi_source_defaulted_to_fox'", [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            }).unwrap();
-            assert_eq!(count, 1);
-            assert_eq!(runs, 0);
-            let details: serde_json::Value = serde_json::from_str(&details).unwrap();
-            assert_eq!(details["reason"], "no_source_chosen");
-            assert_eq!(details["provider"], "Audit provider");
-            assert_eq!(details["model"], "audit-model");
-            assert!(!details.to_string().contains("test-key"));
-        }
+    fn pi_defaults_its_binding_once_on_send_without_claiming_verification() {
+        use crate::database::{Database, ModelProviderRecord, ProviderModelRecord};
+        use fox_agent_backend::{external::LaunchRequest, external_launch::HostLaunchConfig, port::AgentBackend};
+        let root = std::env::temp_dir().join(format!("fox-default-binding-{}", uuid::Uuid::new_v4()));
+        let database = Database::open(":memory:".into()).unwrap();
+        let conversation = database.create_conversation("fox-general", None, None, Some("ask")).unwrap();
+        let provider = ModelProviderRecord {
+            id: "default-provider".into(), name: "Default".into(), icon: None, base_url: "https://example.com/v1".into(), api_type: "openai-completions".into(), enabled: true, is_default: true, credential_configured: false, connection_type: "remote".into(), last_status: "unknown".into(), last_latency_ms: None, last_checked_at: None, created_at: 0, updated_at: 0,
+            models: vec![ProviderModelRecord { id: "default-model-row".into(), model_id: "default-model".into(), display_name: "Default".into(), context_window: 128000, max_output_tokens: 8192, supports_image_input: false, is_default: true }], protocol_profiles: vec![],
+        };
+        database.save_model_provider(&provider).unwrap();
+        let mut config = HostLaunchConfig::from_env(&root);
+        config.fox_data = root.clone(); config.state_root = root.join("agent-state"); config.native_login_home = None;
+        let request = LaunchRequest { conversation_id: conversation.id, backend: AgentBackend::Pi, project_uuid: None, project_root: root.join("project"), session_key: "fixture".into(), full_access_granted: false, native_permission: None, unified_login: None };
+        assert!(database.agent_binding(AgentBackend::Pi).unwrap().is_none());
+        for _ in 0..2 { super::settle_login_source_choice(&database, &config, &request).unwrap(); }
+        let (bound, endpoint) = crate::external_model::bound_connection(&database, AgentBackend::Pi).unwrap();
+        assert_eq!(bound.id, provider.id);
+        assert_eq!(endpoint.model_id, "default-model");
+        assert!(!crate::external_model::verified(&database, &bound, &endpoint));
+        let (count, runs): (i64, i64) = database.with_connection(|connection| connection.query_row("SELECT COUNT(*),(SELECT COUNT(*) FROM runs) FROM agent_backend_audit_log WHERE event='agent_binding.defaulted'", [], |row| Ok((row.get(0)?,row.get(1)?)))).unwrap();
+        assert_eq!((count, runs), (1, 0));
+        assert!(!root.join("agent-homes").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// e2e-1101: the composer's backend bar / login cards are gone (UI 1103);
-    /// every model-connection refusal of an external Agent points at
-    /// 「设置 → 模型服务」 and names the Agent where the address is chosen.
     #[test]
-    fn login_gap_refusals_point_at_model_settings_never_at_removed_ui() {
+    fn login_gap_refusals_point_to_model_agent_settings() {
         use crate::external_model::LoginGap;
-        use fox_agent_backend::port::AgentBackend;
-        for backend in [AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek] {
-            for gap in [None, Some(LoginGap::Missing), Some(LoginGap::Unverified), Some(LoginGap::ChooseAddress)] {
+        for backend in [fox_agent_backend::port::AgentBackend::Pi, fox_agent_backend::port::AgentBackend::Codex, fox_agent_backend::port::AgentBackend::Deepseek] {
+            for gap in [None, Some(LoginGap::Unbound), Some(LoginGap::Missing), Some(LoginGap::Unverified)] {
                 let (code, message) = super::login_gap_failure(gap, backend);
-                assert!(code.starts_with("model.connection_"), "{code}");
-                for removed in ["后端栏", "Agent 栏", "登录卡片"] {
-                    assert!(!message.contains(removed), "{message}");
-                }
-                assert!(message.contains("设置 → 模型服务"), "{message}");
+                assert!(code.starts_with("model.connection_"));
+                assert!(message.contains("设置 → 模型与 Agent"));
             }
         }
-        let (code, message) = super::login_gap_failure(Some(LoginGap::ChooseAddress), AgentBackend::Deepseek);
-        assert_eq!(code, "model.connection_choose_address");
-        assert!(message.contains("用作 DeepSeek 默认协议"), "{message}");
-        assert_eq!(super::login_gap_failure(Some(LoginGap::Unverified), AgentBackend::Pi).0, "model.connection_unverified");
-        assert_eq!(super::login_gap_failure(Some(LoginGap::Missing), AgentBackend::Pi).0, "model.connection_required");
-        assert!(!super::PI_SOURCE_CHOICE_MESSAGE.contains("Agent 栏"));
-    }
-
-    /// e2e-1101: a Pi source choice never made defaults to 模型服务 when it can
-    /// serve Pi; a changed confirmed source or no usable 模型服务 refuses the
-    /// send before a Run exists; nothing pending proceeds.
-    #[test]
-    fn pi_source_defaults_to_fox_only_when_never_chosen_and_fox_is_ready() {
-        use super::{pi_source_step, PiSourceStep};
-        assert_eq!(pi_source_step(false, false, false, false), PiSourceStep::Proceed);
-        assert_eq!(pi_source_step(false, true, true, false), PiSourceStep::Proceed);
-        assert_eq!(pi_source_step(true, false, true, false), PiSourceStep::DefaultToFox);
-        assert_eq!(pi_source_step(true, false, false, false), PiSourceStep::Refuse);
-        assert_eq!(pi_source_step(true, true, true, false), PiSourceStep::Refuse, "a changed confirmed import is never overridden");
-        // 13.38（B3-4）：什么来源都没选、本机也没有 Pi 配置，模型服务可用：默认到模型服务并写审计。
-        assert_eq!(pi_source_step(false, false, true, true), PiSourceStep::DefaultToFox);
-        assert_eq!(pi_source_step(false, false, false, true), PiSourceStep::Proceed, "模型服务不可用时照旧（之后由缺凭据拒绝）");
     }
 
     #[test]
