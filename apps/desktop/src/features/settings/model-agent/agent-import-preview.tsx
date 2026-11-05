@@ -24,7 +24,7 @@ export function AgentImportPreview({ backend, developer, onDone, onCancel }: { b
     setBusy(true); setError('')
     try {
       const result = await desktopClient.agentImportApply({ backend, selected, scope, onConflict: overwrite ? 'overwrite_with_backup' : 'keep', developer })
-      toast.success(`导入完成：写入 ${result.written} 项，保留 ${result.kept} 项，备份 ${result.backups} 项。`)
+      toast.success(`导入完成：写入 ${result.written} 个项目，${result.kept} 个项目保留原有配置，备份 ${result.backups} 项。`)
       onDone()
     } catch (cause) { setError(configErrorText(cause)) }
     finally { setBusy(false) }

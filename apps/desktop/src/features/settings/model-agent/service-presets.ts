@@ -1,7 +1,7 @@
 import type { SaveModelProviderInput } from '../use-model-providers'
 import type { ModelProviderRecord } from '@/features/conversations/model/types'
 export type ServiceDraft = SaveModelProviderInput & { apiKey: string; clearApiKey: boolean }
-export type ServicePreset = {
+type BuiltinPreset = {
   id: string
   name: string
   icon: string
@@ -14,7 +14,7 @@ export type ServicePreset = {
 }
 
 // Keep these defaults aligned with Yuxi's builtin provider catalog.
-export const servicePresets: ServicePreset[] = [
+const builtinPresets: BuiltinPreset[] = [
   { id: 'openai', name: 'OpenAI', icon: 'openai.svg', baseUrl: 'https://api.openai.com/v1', apiType: 'openai-completions', modelPlaceholder: 'gpt-4.1', contextWindow: 128000, maxOutputTokens: 16384, supportsImageInput: true },
   { id: 'deepseek', name: 'DeepSeek 官方', icon: 'deepseek.svg', baseUrl: 'https://api.deepseek.com', apiType: 'openai-completions', modelPlaceholder: 'deepseek-flash', contextWindow: 128000, maxOutputTokens: 8192, supportsImageInput: false },
   { id: 'alibaba', name: 'DashScope', icon: 'alibaba.svg', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', apiType: 'openai-completions', modelPlaceholder: 'qwen3-max', contextWindow: 128000, maxOutputTokens: 8192, supportsImageInput: true },
@@ -38,6 +38,12 @@ export const servicePresets: ServicePreset[] = [
   { id: 'siliconflow', name: 'SiliconFlow (International)', icon: 'siliconflow.svg', baseUrl: 'https://api.siliconflow.com/v1', apiType: 'openai-completions', modelPlaceholder: 'deepseek-ai/DeepSeek-V4-Flash', contextWindow: 128000, maxOutputTokens: 8192, supportsImageInput: false },
 ]
 
+export type ServicePreset = BuiltinPreset & { endpoints: { apiType: import('./agent-config-types').ApiType; baseUrl: string }[] }
+export const servicePresets: ServicePreset[] = builtinPresets.map(preset => ({ ...preset, endpoints: [
+  { apiType: preset.apiType, baseUrl: preset.baseUrl },
+  ...(preset.id === 'deepseek' ? [{ apiType: 'anthropic-messages' as const, baseUrl: 'https://api.deepseek.com/anthropic' }, { apiType: 'openai-responses' as const, baseUrl: 'https://api.deepseek.com' }] : preset.id === 'openai' ? [{ apiType: 'openai-responses' as const, baseUrl: 'https://api.openai.com/v1' }] : []),
+] }))
+
 export const providerIconOptions = Array.from(new Map(servicePresets.map((preset) => [preset.icon, preset])).values())
 
 export function providerIcon(name: string, baseUrl: string, customIcon?: string | null) {
@@ -53,14 +59,7 @@ export function presetDraft(preset: ServicePreset, isDefault: boolean): ServiceD
     icon: preset.icon,
     baseUrl: preset.baseUrl,
     apiType: preset.apiType,
-    protocolProfiles: preset.id === 'deepseek' ? [
-      { id: 'primary', presetId: 'deepseek-official', apiType: preset.apiType, baseUrl: preset.baseUrl, modelId: '', separateCredential: false },
-      { id: crypto.randomUUID(), presetId: 'deepseek-official', apiType: 'anthropic-messages', baseUrl: 'https://api.deepseek.com/anthropic', modelId: '', separateCredential: false },
-      { id: crypto.randomUUID(), presetId: 'deepseek-official', apiType: 'openai-responses', baseUrl: 'https://api.deepseek.com', modelId: '', separateCredential: false },
-    ] : preset.id === 'openai' ? [
-      { id: 'primary', presetId: 'openai', apiType: preset.apiType, baseUrl: preset.baseUrl, modelId: '', separateCredential: false },
-      { id: crypto.randomUUID(), presetId: 'openai', apiType: 'openai-responses', baseUrl: 'https://api.openai.com/v1', modelId: '', separateCredential: false },
-    ] : [],
+    protocolProfiles: preset.endpoints.slice(1).map(endpoint => ({ id: crypto.randomUUID(), presetId: preset.id, apiType: endpoint.apiType, baseUrl: endpoint.baseUrl, modelId: '', separateCredential: false })),
     isDefault,
     apiKey: '',
     clearApiKey: false,
