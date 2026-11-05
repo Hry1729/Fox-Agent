@@ -1,0 +1,974 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fox 09 · 模型服务与 Agent 配置 · 样式稿</title>
+<style>
+/* ===== Fox 主题 token：逐字复制自 apps/desktop/src/styles/themes.css 与 globals.css（main 0168302c） ===== */
+/* A. Graphite: pure neutral black and white; only status colours carry hue. */
+:root,
+[data-color-theme="graphite"] {
+  --radius: 0.375rem;
+  --fox-radius-small: 4px;
+  --fox-radius-control: 6px;
+  --fox-radius-card: 8px;
+  --fox-radius-large: 12px;
+  --fox-radius-overlay: 12px;
+  --background: oklch(1 0 0);
+  --chat-background: oklch(0.988 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  /* 0.556 在侧栏底色上只有 4.4:1，压到 0.54 后 ≥ 4.6:1（与 mist 主题同一明度）。 */
+  --muted-foreground: oklch(0.54 0 0);
+  --accent: oklch(0.955 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: var(--brand);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.708 0 0);
+  --chart-3: oklch(0.556 0 0);
+  --chart-4: oklch(0.439 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.975 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.935 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+  --brand: oklch(0.205 0 0);
+  --brand-foreground: oklch(0.985 0 0);
+  --brand-soft: oklch(0.955 0 0);
+  --success: oklch(0.56 0.12 160);
+  --warning: oklch(0.55 0.13 70);
+  --user-bubble: oklch(0.955 0 0);
+  --user-bubble-foreground: oklch(0.205 0 0);
+  --shell: oklch(0.965 0 0);
+}
+:root.dark,
+[data-color-theme="graphite"].dark {
+  --background: oklch(0.145 0 0);
+  --chat-background: var(--background);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.18 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.2 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.24 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.255 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 9%);
+  --input: oklch(1 0 0 / 14%);
+  --ring: var(--brand);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.708 0 0);
+  --chart-3: oklch(0.556 0 0);
+  --chart-4: oklch(0.439 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.175 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.922 0 0);
+  --sidebar-primary-foreground: oklch(0.205 0 0);
+  --sidebar-accent: oklch(0.25 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 8%);
+  --sidebar-ring: oklch(0.556 0 0);
+  --brand: oklch(0.922 0 0);
+  --brand-foreground: oklch(0.17 0 0);
+  --brand-soft: oklch(0.269 0 0);
+  --success: oklch(0.74 0.13 160);
+  --warning: oklch(0.8 0.13 75);
+  --user-bubble: oklch(0.25 0 0);
+  --user-bubble-foreground: oklch(0.985 0 0);
+  --shell: oklch(0.12 0 0);
+}
+
+/* B. Paper: warm stone surfaces with a gold accent. */
+[data-color-theme="paper"] {
+  --radius: 0.875rem;
+  --fox-radius-small: 7px;
+  --fox-radius-control: 10px;
+  --fox-radius-card: 16px;
+  --fox-radius-large: 20px;
+  --fox-radius-overlay: 20px;
+  --background: oklch(0.982 0.008 85);
+  --chat-background: oklch(0.991 0.004 85);
+  --foreground: oklch(0.24 0.012 60);
+  --card: oklch(0.995 0.003 85);
+  --card-foreground: oklch(0.24 0.012 60);
+  --popover: oklch(0.995 0.003 85);
+  --popover-foreground: oklch(0.24 0.012 60);
+  --primary: oklch(0.52 0.105 78);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.95 0.012 85);
+  --secondary-foreground: oklch(0.24 0.012 60);
+  --muted: oklch(0.95 0.012 85);
+  --muted-foreground: oklch(0.52 0.018 60);
+  --accent: oklch(0.935 0.014 85);
+  --accent-foreground: oklch(0.24 0.012 60);
+  --destructive: oklch(0.56 0.2 28);
+  --border: oklch(0.895 0.014 85);
+  --input: oklch(0.875 0.016 85);
+  --ring: oklch(0.52 0.105 78);
+  --chart-1: oklch(0.78 0.09 82);
+  --chart-2: oklch(0.64 0.12 78);
+  --chart-3: oklch(0.7 0.12 65);
+  --chart-4: oklch(0.6 0.1 155);
+  --chart-5: oklch(0.55 0.1 20);
+  --sidebar: oklch(0.952 0.013 85);
+  --sidebar-foreground: oklch(0.24 0.012 60);
+  --sidebar-primary: oklch(0.52 0.105 78);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.915 0.017 85);
+  --sidebar-accent-foreground: oklch(0.24 0.012 60);
+  --sidebar-border: oklch(0.895 0.014 85);
+  --sidebar-ring: oklch(0.52 0.105 78);
+  --brand: oklch(0.52 0.105 78);
+  --brand-foreground: oklch(0.985 0 0);
+  --brand-soft: oklch(0.945 0.035 85);
+  --success: oklch(0.55 0.11 155);
+  --warning: oklch(0.55 0.12 65);
+  --user-bubble: oklch(0.925 0.018 85);
+  --user-bubble-foreground: oklch(0.24 0.012 60);
+  --shell: oklch(0.945 0.014 85);
+}
+[data-color-theme="paper"].dark {
+  --background: oklch(0.235 0.008 70);
+  --chat-background: var(--background);
+  --foreground: oklch(0.955 0.008 85);
+  --card: oklch(0.27 0.009 70);
+  --card-foreground: oklch(0.955 0.008 85);
+  --popover: oklch(0.28 0.009 70);
+  --popover-foreground: oklch(0.955 0.008 85);
+  --primary: oklch(0.78 0.12 82);
+  --primary-foreground: oklch(0.22 0.02 75);
+  --secondary: oklch(0.31 0.01 70);
+  --secondary-foreground: oklch(0.955 0.008 85);
+  --muted: oklch(0.31 0.01 70);
+  --muted-foreground: oklch(0.73 0.014 75);
+  --accent: oklch(0.33 0.011 70);
+  --accent-foreground: oklch(0.955 0.008 85);
+  --destructive: oklch(0.7 0.18 25);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.78 0.12 82);
+  --sidebar: oklch(0.205 0.008 70);
+  --sidebar-foreground: oklch(0.955 0.008 85);
+  --sidebar-primary: oklch(0.78 0.12 82);
+  --sidebar-primary-foreground: oklch(0.22 0.02 75);
+  --sidebar-accent: oklch(0.3 0.01 70);
+  --sidebar-accent-foreground: oklch(0.955 0.008 85);
+  --sidebar-border: oklch(1 0 0 / 8%);
+  --sidebar-ring: oklch(0.78 0.12 82);
+  --brand: oklch(0.78 0.12 82);
+  --brand-foreground: oklch(0.22 0.02 75);
+  --brand-soft: oklch(0.34 0.045 78);
+  --success: oklch(0.74 0.12 155);
+  --warning: oklch(0.8 0.12 75);
+  --user-bubble: oklch(0.33 0.012 70);
+  --user-bubble-foreground: oklch(0.955 0.008 85);
+  --shell: oklch(0.19 0.008 70);
+}
+
+/* C. Mist: Fox's original cool blue-grey identity on one consistent scale. */
+[data-color-theme="mist"] {
+  --radius: 0.625rem;
+  --fox-radius-small: 6px;
+  --fox-radius-control: 8px;
+  --fox-radius-card: 12px;
+  --fox-radius-large: 14px;
+  --fox-radius-overlay: 16px;
+  --background: oklch(1 0 0);
+  --chat-background: oklch(0.993 0.003 250);
+  --foreground: oklch(0.2 0.015 245);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.2 0.015 245);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.2 0.015 245);
+  --primary: oklch(0.56 0.13 255);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.958 0.012 245);
+  --secondary-foreground: oklch(0.2 0.015 245);
+  --muted: oklch(0.958 0.012 245);
+  --muted-foreground: oklch(0.54 0.025 245);
+  --accent: oklch(0.94 0.026 250);
+  --accent-foreground: oklch(0.2 0.015 245);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.915 0.012 245);
+  --input: oklch(0.9 0.014 245);
+  --ring: var(--brand);
+  --chart-1: oklch(0.809 0.105 251.813);
+  --chart-2: oklch(0.623 0.214 259.815);
+  --chart-3: oklch(0.546 0.245 262.881);
+  --chart-4: oklch(0.488 0.243 264.376);
+  --chart-5: oklch(0.424 0.199 265.638);
+  --sidebar: oklch(0.962 0.015 245);
+  --sidebar-foreground: oklch(0.2 0.015 245);
+  --sidebar-primary: oklch(0.56 0.13 255);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.925 0.035 250);
+  --sidebar-accent-foreground: oklch(0.2 0.015 245);
+  --sidebar-border: oklch(0.915 0.012 245);
+  --sidebar-ring: oklch(0.72 0.1 255);
+  --brand: oklch(0.56 0.13 255);
+  --brand-foreground: oklch(0.985 0 0);
+  --brand-soft: oklch(0.95 0.028 250);
+  --success: oklch(0.56 0.12 160);
+  --warning: oklch(0.55 0.13 70);
+  --user-bubble: oklch(0.935 0.04 250);
+  --user-bubble-foreground: oklch(0.27 0.04 250);
+  --shell: oklch(0.955 0.015 245);
+}
+[data-color-theme="mist"].dark {
+  --background: oklch(0.19 0.02 250);
+  --chat-background: var(--background);
+  --foreground: oklch(0.97 0.006 245);
+  --card: oklch(0.23 0.022 250);
+  --card-foreground: oklch(0.97 0.006 245);
+  --popover: oklch(0.24 0.022 250);
+  --popover-foreground: oklch(0.97 0.006 245);
+  --primary: oklch(0.72 0.12 255);
+  --primary-foreground: oklch(0.17 0 0);
+  --secondary: oklch(0.27 0.024 250);
+  --secondary-foreground: oklch(0.97 0.006 245);
+  --muted: oklch(0.27 0.024 250);
+  --muted-foreground: oklch(0.73 0.02 245);
+  --accent: oklch(0.29 0.035 250);
+  --accent-foreground: oklch(0.97 0.006 245);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 9%);
+  --input: oklch(1 0 0 / 14%);
+  --ring: var(--brand);
+  --sidebar: oklch(0.165 0.02 250);
+  --sidebar-foreground: oklch(0.97 0.006 245);
+  --sidebar-primary: oklch(0.72 0.12 255);
+  --sidebar-primary-foreground: oklch(0.17 0 0);
+  --sidebar-accent: oklch(0.28 0.04 250);
+  --sidebar-accent-foreground: oklch(0.97 0.006 245);
+  --sidebar-border: oklch(1 0 0 / 7%);
+  --sidebar-ring: oklch(0.7 0.11 255);
+  --brand: oklch(0.72 0.12 255);
+  --brand-foreground: oklch(0.17 0 0);
+  --brand-soft: oklch(0.3 0.05 250);
+  --success: oklch(0.74 0.13 160);
+  --warning: oklch(0.8 0.13 75);
+  --user-bubble: oklch(0.32 0.05 250);
+  --user-bubble-foreground: oklch(0.95 0.02 250);
+  --shell: oklch(0.15 0.02 250);
+}
+
+/* The avatar disk and motion ornaments share the selected theme's palette. */
+:root, [data-color-theme='graphite'] { --fox-avatar-color: #45474e; }
+[data-color-theme='graphite'].dark, :root.dark:not([data-color-theme]) { --fox-avatar-color: #898d98; }
+[data-color-theme='paper'] { --fox-avatar-color: #eddaa6; }
+[data-color-theme='mist'] { --fox-avatar-color: #8fc6fe; }
+:root { --fox-avatar-ornament: color-mix(in srgb, var(--fox-avatar-color) 55%, var(--background)); }
+
+/* Elevation uses dark palette ink in both modes, avoiding pale shadows at night. */
+:root, [data-color-theme="graphite"] { --fox-shadow-color: oklch(0.2 0 0); }
+[data-color-theme="paper"] { --fox-shadow-color: oklch(0.3 0.055 78); }
+[data-color-theme="mist"] { --fox-shadow-color: oklch(0.26 0.045 255); }
+:root.dark, [data-color-theme="graphite"].dark { --fox-shadow-color: oklch(0.04 0 0); }
+[data-color-theme="paper"].dark { --fox-shadow-color: oklch(0.1 0.025 78); }
+[data-color-theme="mist"].dark { --fox-shadow-color: oklch(0.08 0.025 255); }
+
+:root { --fox-onboarding-tint: 28%; --fox-loading-background: linear-gradient(145deg,var(--background),var(--muted)); }
+[data-color-theme='paper'] { --fox-onboarding-tint: 8%; }
+:root {
+  font-size: 14px;
+  font-family: "HarmonyOS Sans SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  color: var(--foreground);
+  background: var(--background);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --fox-canvas: var(--background);
+  --fox-sidebar: var(--sidebar);
+  --fox-card: var(--card);
+  --fox-panel: var(--muted);
+  --fox-elevated: color-mix(in oklch, var(--card) 94%, transparent);
+  /* Legacy --fox-* colours are aliases of the theme tokens in themes.css, so
+     every colour theme and both modes flow through them without overrides. */
+  --fox-blue: var(--brand);
+  --fox-blue-soft: var(--brand-soft);
+  --fox-blue-soft-hover: color-mix(in oklch, var(--brand-soft) 86%, var(--brand));
+  --fox-send-surface: var(--primary);
+  --fox-send-ink: var(--primary-foreground);
+  --fox-hover: color-mix(in oklch, var(--fox-panel) 78%, var(--fox-card));
+  --fox-border: var(--border);
+  --fox-border-strong: color-mix(in oklch, var(--border) 72%, var(--foreground) 28%);
+  --fox-text: var(--foreground);
+  --fox-muted: var(--muted-foreground);
+  /* Thinking/status text is deliberately lighter than body copy, and its sweep is
+     the brand colour rather than a grey wash, so a running thought reads as
+     activity without dropping to an unreadable tint. The component is never
+     made transparent to fake the effect. */
+  --fox-thinking-text: var(--muted-foreground);
+  --fox-thinking-shimmer: color-mix(in oklch, var(--brand) 80%, var(--background));
+  --fox-thinking-shimmer-soft: color-mix(in oklch, var(--brand) 45%, var(--background));
+  /* 浅色下第三级文字（分组标题、时间、快捷键）原来是 72% 透明，侧栏上只有 2.7:1。
+     改成不透明的 muted，在 background / card / sidebar 上都 ≥ 4.5:1；层级靠字号区分。 */
+  --fox-faint: var(--muted-foreground);
+  --fox-accent: var(--fox-blue);
+  --fox-accent-soft: var(--fox-blue-soft);
+  --fox-success: var(--success);
+  --fox-warning: var(--warning);
+  /* 小号文字用的警示色：浅色下纯 warning 在浅底上只有 3.9:1，往前景色压一点到 ≥ 4.5:1。 */
+  --fox-warning-text: color-mix(in oklch, var(--warning) 72%, var(--foreground));
+  --fox-surface-subtle: color-mix(in oklch, var(--fox-panel) 32%, var(--fox-card));
+  --fox-surface-muted: color-mix(in srgb, var(--fox-panel) 48%, var(--fox-card));
+  --fox-surface-strong: color-mix(in srgb, var(--fox-panel) 58%, var(--fox-card));
+  --fox-selection-surface: color-mix(in srgb, var(--fox-card) 92%, var(--fox-accent-soft));
+  --fox-unread-surface: color-mix(in oklch, var(--fox-accent-soft) 32%, var(--fox-card));
+  --fox-accent-border: color-mix(in srgb, var(--fox-accent) 38%, var(--fox-border));
+  --fox-accent-border-soft: color-mix(in srgb, var(--fox-accent) 28%, var(--fox-border));
+  --fox-accent-surface: color-mix(in srgb, var(--fox-accent-soft) 70%, var(--fox-card));
+  --fox-danger-border: color-mix(in srgb, var(--destructive) 38%, var(--fox-border));
+  --fox-danger-border-soft: color-mix(in srgb, var(--destructive) 28%, var(--fox-border));
+  --fox-danger-surface: color-mix(in srgb, var(--destructive) 7%, var(--fox-card));
+  --fox-success-border: color-mix(in srgb, var(--fox-success) 30%, var(--fox-border));
+  --fox-success-surface: color-mix(in srgb, var(--fox-success) 8%, var(--fox-card));
+  --fox-focus-ring: color-mix(in srgb, var(--ring) 22%, transparent);
+  --fox-scrim: color-mix(in srgb, black 30%, transparent);
+  /* Search-term highlight. Brand-tinted instead of the classic yellow so the
+     colour still comes from the active theme. */
+  --fox-mark: color-mix(in oklch, var(--brand) 16%, transparent);
+  --fox-user: var(--user-bubble);
+  --fox-user-foreground: var(--user-bubble-foreground);
+  /* Three elevation steps: sm for raised controls, md for menus and popovers,
+     lg for dialogs. No inset highlights. */
+  --fox-shadow-sm: 0 1px 2px color-mix(in oklch, var(--fox-shadow-color) 6%, transparent);
+  --fox-shadow-md: 0 4px 16px color-mix(in oklch, var(--fox-shadow-color) 9%, transparent);
+  --fox-shadow-lg: 0 16px 45px color-mix(in oklch, var(--fox-shadow-color) 12%, transparent);
+  --fox-shadow: var(--fox-shadow-lg);
+  --fox-control-sm: 28px;
+  --fox-control-md: 32px;
+  --fox-control-lg: 36px;
+  --fox-action-height: var(--fox-control-md);
+  --fox-inline-action-height: var(--fox-control-sm);
+  --fox-sidebar-row-height: 32px;
+  --fox-sidebar-icon-size: 16px;
+  /* 侧栏行网格。icon 中心线 = inset + icon-box / 2，命令行、项目名、日期分组、
+     顶层对话和项目下对话的状态图标共用这一列；分组标题和项目名行的 +/… 共用右缘
+     （inset + action-size）。 */
+  --fox-sidebar-inset: var(--fox-space-m);
+  --fox-sidebar-icon-box: var(--fox-sidebar-icon-size);
+  --fox-sidebar-icon-gap: var(--fox-space-m);
+  --fox-sidebar-action-size: var(--fox-control-sm);
+  --fox-sidebar-action-gap: var(--fox-space-micro);
+  --fox-command-row-height: 32px;
+  --fox-badge-height: 20px;
+  --fox-library-card-tag-height: 20px;
+  --fox-icon-size: 16px;
+  --fox-icon-size-small: 14px;
+  --fox-icon-size-compact: 12px;
+  --fox-content-max: 1120px;
+  --fox-library-card-edge-space: var(--fox-space-m);
+  --fox-library-card-header-height: 56px;
+  --fox-library-card-content-height: 68px;
+  --fox-library-card-height: 126px;
+  --fox-space-micro: 2px;
+  --fox-space-xs: 4px;
+  --fox-space-s: 6px;
+  --fox-space-m: 8px;
+  --fox-space-l: 12px;
+  --fox-space-xl: 16px;
+  --fox-space-2xl: 20px;
+  --fox-space-3xl: 24px;
+  --fox-space-4xl: 32px;
+  --fox-space-5xl: 40px;
+  --fox-space-6xl: 48px;
+  --fox-space-8xl: 64px;
+  /* --fox-radius-small/control/card/large/overlay are set per theme in themes.css. */
+  --fox-radius-window: 8px;
+  --fox-radius-pill: 999px;
+  --fox-text-scale: 1;
+  /* Type scale: 12 / 13 / 14 / 15 / 16 / 24. Chat reads at
+     15; sidebars, menus and controls sit one step down at 13. */
+  --fox-type-workbench: calc(15px * var(--fox-text-scale));
+  --fox-type-chrome: calc(13px * var(--fox-text-scale));
+  --fox-type-caption: calc(12px * var(--fox-text-scale));
+  --fox-type-card-stat: calc(12px * var(--fox-text-scale));
+  --fox-type-meta: calc(12px * var(--fox-text-scale));
+  --fox-type-control: var(--fox-type-chrome);
+  --fox-type-body: calc(14px * var(--fox-text-scale));
+  --fox-type-ui: calc(13px * var(--fox-text-scale));
+  --fox-type-title: calc(16px * var(--fox-text-scale));
+  --fox-type-card-title: calc(16px * var(--fox-text-scale));
+  --fox-type-section: calc(16px * var(--fox-text-scale));
+  --fox-type-page: calc(24px * var(--fox-text-scale));
+  --fox-type-display: calc(32px * var(--fox-text-scale));
+  --fox-weight-regular: 400;
+  --fox-weight-medium: 500;
+  --fox-weight-semibold: 600;
+  /* Weights stop at 600; bold is kept as an alias so old rules land on the scale. */
+  --fox-weight-bold: 600;
+  --fox-transition-fast: 120ms ease;
+  --fox-transition-base: 160ms ease;
+  /* ── UI 1102 设计 token（只增不改：新代码和各区域修复只引用这些名字，不再写裸数值）── */
+  /* 字号：最小字号 11px，不再出现 9 / 9.5 / 10 / 10.5px。 */
+  --fox-type-micro: calc(11px * var(--fox-text-scale));
+  /* 图标：16 / 14 / 12 之外补两档。 */
+  --fox-icon-size-large: 20px;
+  --fox-icon-size-xl: 24px;
+  /* 圆角语义层：输入框和替代输入框的决策卡共用一档，随主题的 large 圆角变化；
+     内层卡片与外框同心（外框圆角 - 内边距）。单行输入框用胶囊。 */
+  --fox-composer-inset: var(--fox-space-xs);
+  --fox-radius-composer: calc(var(--fox-radius-large) + var(--fox-space-m));
+  --fox-radius-composer-inner: calc(var(--fox-radius-composer) - var(--fox-composer-inset));
+  --fox-radius-bubble: var(--fox-radius-composer-inner);
+  --fox-radius-chip: var(--fox-radius-control);
+  /* 阴影：popover / 浮层统一用 md，拖起的卡片用 lg。 */
+  --fox-shadow-popover: var(--fox-shadow-md);
+  --fox-shadow-raised: var(--fox-shadow-lg);
+  /* 焦点：所有可交互元素 focus-visible 用同一圈。 */
+  --fox-focus-width: 2px;
+  --fox-focus-offset: 2px;
+  --fox-focus-outline: var(--fox-focus-width) solid var(--ring);
+  --fox-focus-shadow: 0 0 0 3px var(--fox-focus-ring);
+  /* 动效：常规状态切换 120–160ms，浮层出现 240ms；离开比进入快。 */
+  --fox-duration-fast: 120ms;
+  --fox-duration-base: 160ms;
+  --fox-duration-slow: 240ms;
+  --fox-ease-out: cubic-bezier(.16, 1, .3, 1);
+  --fox-ease-standard: cubic-bezier(.2, 0, 0, 1);
+  /* 侧栏行：动作浮层（+ / …）悬停时盖在标题末尾，渐隐宽度和行高、徽标高度统一。 */
+  --fox-sidebar-actions-fade: var(--fox-space-3xl);
+  --fox-sidebar-badge-height: var(--fox-badge-height);
+  /* 页面骨架：页面内边距、分区间距、卡片内边距、表单行高。 */
+  --fox-page-padding-x: var(--fox-space-4xl);
+  --fox-page-padding-y: var(--fox-space-3xl);
+  --fox-section-gap: var(--fox-space-3xl);
+  --fox-card-padding: var(--fox-space-xl);
+  --fox-field-height: var(--fox-control-md);
+  /* 浮层与弹窗。 */
+  --fox-dialog-padding: var(--fox-space-3xl);
+  --fox-dialog-gap: var(--fox-space-xl);
+  --fox-popover-padding: var(--fox-space-xs);
+  --fox-menu-item-height: var(--fox-control-md);
+}
+
+.fox-library-card {
+  min-height: var(--fox-library-card-height) !important;
+  border: 1px solid var(--fox-border) !important;
+  border-radius: var(--fox-radius-card) !important;
+  background: var(--fox-card) !important;
+  box-shadow: none !important;
+}
+
+/* Colours come from the theme tokens; dark mode only changes how they are mixed. */
+.dark {
+  color-scheme: dark;
+  --fox-elevated: color-mix(in oklch, var(--card) 96%, transparent);
+  --fox-hover: color-mix(in oklch, var(--fox-panel) 82%, var(--fox-card));
+  --fox-border-strong: color-mix(in oklch, var(--border) 65%, var(--foreground) 35%);
+  /* On a dark surface the muted grey and the brand sweep both read too dim. */
+  --fox-thinking-text: color-mix(in oklch, var(--muted-foreground) 70%, var(--foreground));
+  --fox-thinking-shimmer: var(--brand);
+  --fox-thinking-shimmer-soft: color-mix(in oklch, var(--brand) 60%, var(--foreground));
+  /* Opaque, so contrast does not depend on the surface underneath: keeps 12px
+     secondary text at or above 4.5:1 on background, card, popover and muted. */
+  --fox-faint: color-mix(in oklch, var(--muted-foreground) 88%, var(--background));
+  --fox-warning-text: var(--warning);
+  /* 16% brand is invisible on a dark surface; the highlight needs more of it. */
+  --fox-mark: color-mix(in oklch, var(--brand) 28%, transparent);
+  --fox-shadow-sm: 0 1px 2px color-mix(in oklch, var(--fox-shadow-color) 30%, transparent);
+  --fox-shadow-md: 0 6px 20px color-mix(in oklch, var(--fox-shadow-color) 32%, transparent);
+  --fox-shadow-lg: 0 18px 55px color-mix(in oklch, var(--fox-shadow-color) 35%, transparent);
+}
+
+
+
+/* ===== 样式稿本地样式（只引用上面的 token） ===== */
+html, body { margin: 0; }
+:root { font-family: "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI Variable", "Segoe UI", "Noto Sans CJK SC", "WenQuanYi Zen Hei", system-ui, sans-serif; }
+body { background: var(--shell); color: var(--foreground); font-size: var(--fox-type-body); -webkit-font-smoothing: antialiased; }
+* { box-sizing: border-box; }
+button, input, select { font: inherit; color: inherit; }
+
+/* demo 工具条（不属于产品界面） */
+.demo-bar { position: sticky; top: 0; z-index: 10; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 8px 16px; background: #1d1d20; color: #e8e8ea; font-size: 12px; border-bottom: 1px solid #333; }
+.demo-bar b { color: #fff; font-weight: 600; margin-right: 4px; }
+.demo-bar label { display: inline-flex; align-items: center; gap: 6px; }
+.demo-bar select, .demo-bar button { background: #2b2b30; color: #eee; border: 1px solid #44444a; border-radius: 6px; height: 26px; padding: 0 8px; font-size: 12px; }
+.demo-bar .note { color: #a0a0a8; }
+body.bare .demo-bar { display: none; }
+
+/* 应用壳 */
+.shell { display: grid; grid-template-columns: 216px 1fr; min-height: calc(100vh - 43px); }
+body.bare .shell { min-height: 100vh; }
+.side { background: var(--sidebar); padding: 14px 8px; color: var(--sidebar-foreground); font-size: var(--fox-type-chrome); }
+.side h6 { margin: 6px 10px 6px; font-size: var(--fox-type-caption); font-weight: 500; color: var(--fox-faint); }
+.side a { display: flex; align-items: center; gap: 8px; height: var(--fox-sidebar-row-height); padding: 0 10px; border-radius: var(--fox-radius-control); color: inherit; text-decoration: none; }
+.side a.on { background: var(--sidebar-accent); font-weight: 500; }
+.side svg { width: 16px; height: 16px; opacity: .8; }
+.main { margin: 8px 8px 8px 0; background: var(--background); border: 1px solid var(--border); border-radius: var(--fox-radius-window); overflow: hidden; }
+.topbar { height: 44px; display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid var(--border); font-size: var(--fox-type-chrome); color: var(--muted-foreground); gap: 6px; }
+.topbar b { color: var(--foreground); font-weight: 500; }
+
+/* SettingsPageLayout / SettingsGroup / SettingsRow（对应 settings-layout.css） */
+.page { --hair: color-mix(in oklch, var(--border) 70%, transparent); width: min(760px, calc(100% - 48px)); margin: 0 auto; padding: 48px 0 64px; }
+.page-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 32px; }
+.page-head h1 { margin: 0 0 4px; font-size: var(--fox-type-page); font-weight: 600; line-height: 1.33; }
+.page-head p { margin: 0; color: var(--muted-foreground); font-size: var(--fox-type-chrome); line-height: 1.5; }
+.crumb { font-size: var(--fox-type-caption); color: var(--muted-foreground); margin-bottom: 6px; }
+.crumb a { color: var(--muted-foreground); text-decoration: none; }
+.actions { display: flex; gap: 8px; flex: none; }
+.group + .group { margin-top: var(--fox-section-gap); }
+.group-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 28px; padding-bottom: 6px; }
+.group-head h2 { margin: 0; font-size: var(--fox-type-chrome); font-weight: 600; line-height: 1.5; }
+.group-aside { color: var(--muted-foreground); font-size: var(--fox-type-caption); display: flex; align-items: center; gap: 8px; }
+.group-body { padding-inline: 16px; border: 1px solid var(--fox-border); border-radius: var(--fox-radius-card); background: var(--card); }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-height: 60px; padding: 12px 0; border-bottom: 1px solid var(--hair); }
+.row:last-child { border-bottom: 0; }
+.row-text { min-width: 0; display: grid; gap: 2px; }
+.row-text b { font-size: var(--fox-type-body); font-weight: 500; line-height: 1.43; }
+.row-text small { color: var(--muted-foreground); font-size: var(--fox-type-caption); line-height: 1.5; }
+.row-control { display: flex; align-items: center; gap: 8px; flex: none; }
+
+/* 控件（近似 shadcn Button / Select / Input / Switch / Badge） */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: var(--fox-control-md); padding: 0 12px; border-radius: var(--fox-radius-control); border: 1px solid transparent; background: var(--primary); color: var(--primary-foreground); font-size: var(--fox-type-chrome); font-weight: 500; white-space: nowrap; cursor: pointer; }
+.btn.sm { height: var(--fox-control-sm); padding: 0 10px; }
+.btn.outline { background: var(--background); color: var(--foreground); border-color: var(--border); box-shadow: var(--fox-shadow-sm); }
+.btn.ghost { background: transparent; color: var(--foreground); }
+.btn.ghost:hover, .btn.outline:hover { background: var(--accent); }
+.btn.danger { background: transparent; color: var(--destructive); }
+.btn[disabled] { opacity: .5; cursor: default; }
+.btn svg { width: 14px; height: 14px; }
+.select { display: inline-flex; align-items: center; justify-content: space-between; gap: 8px; height: var(--fox-control-md); padding: 0 10px; min-width: 180px; border: 1px solid var(--input); border-radius: var(--fox-radius-control); background: transparent; font-size: var(--fox-type-chrome); box-shadow: var(--fox-shadow-sm); white-space: nowrap; overflow: hidden; }
+.select::after { content: ''; width: 6px; height: 6px; border-right: 1.5px solid var(--muted-foreground); border-bottom: 1.5px solid var(--muted-foreground); transform: rotate(45deg) translateY(-2px); flex: none; }
+.select span { overflow: hidden; text-overflow: ellipsis; }
+.select .dim { color: var(--muted-foreground); }
+.input { display: flex; align-items: center; height: var(--fox-control-md); padding: 0 10px; border: 1px solid var(--input); border-radius: var(--fox-radius-control); background: transparent; font-size: var(--fox-type-chrome); box-shadow: var(--fox-shadow-sm); width: 100%; overflow: hidden; white-space: nowrap; }
+.input.ph { color: var(--muted-foreground); }
+.input.mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px; }
+.switch { width: 32px; height: 18px; border-radius: 999px; background: var(--input); position: relative; flex: none; border: 0; padding: 0; }
+.switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--background); box-shadow: 0 1px 2px rgb(0 0 0 / .2); transition: left .15s; }
+.dark .switch::after { background: var(--foreground); }
+.switch.on { background: var(--primary); }
+.switch.on::after { left: 16px; }
+.dark .switch.on::after { background: var(--primary-foreground); }
+.switch[disabled] { opacity: .45; }
+.pill { display: inline-flex; align-items: center; height: var(--fox-badge-height); padding: 0 8px; border-radius: 999px; background: var(--secondary); color: var(--secondary-foreground); font-size: var(--fox-type-caption); font-weight: 500; white-space: nowrap; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fox-border-strong); flex: none; display: inline-block; }
+.dot.ok { background: var(--success); }
+.dot.warn { background: var(--warning); }
+.dot.err { background: var(--destructive); }
+.dot.info { background: var(--brand); }
+.check { width: 16px; height: 16px; border-radius: 4px; border: 1px solid var(--fox-border-strong); display: inline-grid; place-items: center; flex: none; background: var(--background); }
+.check.on { background: var(--primary); border-color: var(--primary); }
+.check.on::after { content: ''; width: 8px; height: 4px; border-left: 2px solid var(--primary-foreground); border-bottom: 2px solid var(--primary-foreground); transform: rotate(-45deg) translate(1px,-1px); }
+.radio { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--fox-border-strong); display: inline-grid; place-items: center; flex: none; background: var(--background); }
+.radio.on::after { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--primary); }
+.seg { display: inline-flex; padding: 2px; border-radius: var(--fox-radius-control); background: var(--muted); gap: 2px; }
+.seg span { height: 26px; padding: 0 12px; display: inline-flex; align-items: center; border-radius: calc(var(--fox-radius-control) - 2px); font-size: var(--fox-type-chrome); color: var(--muted-foreground); white-space: nowrap; }
+.seg span.on { background: var(--background); color: var(--foreground); box-shadow: var(--fox-shadow-sm); font-weight: 500; }
+.seg span.off { opacity: .5; }
+
+/* 服务行（.fox-settings-provider） */
+.svc { position: relative; display: flex; align-items: flex-start; gap: 12px; padding: 14px 8px; margin: 0 -8px; border-radius: var(--fox-radius-card); }
+.svc + .svc::before { content: ''; position: absolute; top: 0; left: 8px; right: 8px; height: 1px; background: var(--hair); }
+.svc:hover { background: var(--fox-hover); }
+.mark { width: 32px; height: 32px; flex: none; display: grid; place-items: center; border: 1px solid var(--border); border-radius: var(--fox-radius-control); background: var(--card); font-size: 12px; font-weight: 600; color: var(--muted-foreground); }
+.svc-text { min-width: 0; flex: 1; display: grid; gap: 2px; }
+.svc-name { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.svc-name b { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.svc-text small { color: var(--muted-foreground); font-size: var(--fox-type-caption); line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.svc-status { flex: none; display: flex; align-items: center; gap: 8px; font-size: var(--fox-type-caption); color: var(--muted-foreground); padding-top: 6px; white-space: nowrap; }
+.svc-status b { color: var(--foreground); font-weight: 500; }
+.more { width: 28px; height: 28px; display: grid; place-items: center; border-radius: var(--fox-radius-control); color: var(--muted-foreground); flex: none; margin-top: 2px; }
+.chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: 999px; font-size: var(--fox-type-caption); border: 1px solid var(--fox-border); color: var(--muted-foreground); background: var(--background); white-space: nowrap; }
+.chip b { color: var(--foreground); font-weight: 500; }
+.chip.ok { border-color: var(--fox-success-border); background: var(--fox-success-surface); }
+.chip.ok i { color: var(--success); font-style: normal; font-weight: 600; }
+.chip-miss { font-size: var(--fox-type-caption); color: var(--fox-faint); margin-left: 2px; }
+
+/* Agent 配置行 */
+.agent { padding: 14px 0; border-bottom: 1px solid var(--hair); }
+.agent:last-child { border-bottom: 0; }
+.agent-top { display: flex; align-items: center; gap: 12px; }
+.agent-id { width: 128px; flex: none; display: grid; gap: 4px; }
+.agent-id b { font-weight: 500; font-size: var(--fox-type-body); }
+.state { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fox-type-caption); color: var(--foreground); font-weight: 500; white-space: nowrap; }
+.state.muted { color: var(--muted-foreground); }
+.agent-desc { flex: 1; min-width: 0; font-size: var(--fox-type-caption); color: var(--muted-foreground); line-height: 1.5; }
+.agent-desc .strong { color: var(--foreground); }
+.agent-desc .layers { display: block; color: var(--fox-faint); }
+.agent-act { display: flex; align-items: center; gap: 6px; flex: none; }
+.dev { margin: 8px 0 0 140px; padding: 6px 8px; border-radius: var(--fox-radius-small); background: var(--muted); font: 11.5px/1.5 ui-monospace, "SF Mono", Consolas, monospace; color: var(--muted-foreground); word-break: break-all; }
+body:not(.devmode) .dev { display: none; }
+.expand { margin: 12px 0 2px 140px; padding: 14px 16px; border: 1px solid var(--fox-border); border-radius: var(--fox-radius-card); background: var(--fox-surface-subtle); }
+.expand h4 { margin: 0 0 10px; font-size: var(--fox-type-chrome); font-weight: 600; }
+.expand .sub { margin: -6px 0 12px; font-size: var(--fox-type-caption); color: var(--muted-foreground); }
+.field { display: grid; gap: 6px; margin-bottom: 12px; }
+.field > span { font-size: var(--fox-type-caption); color: var(--muted-foreground); font-weight: 500; }
+.field small { font-size: var(--fox-type-caption); color: var(--fox-faint); line-height: 1.5; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+.grid3 { display: grid; grid-template-columns: 1.3fr 1.15fr 1fr; gap: 0 12px; }
+.grid3 .select { min-width: 0; }
+.foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.foot .grow { flex: 1; }
+.opt { display: flex; align-items: flex-start; gap: 10px; padding: 8px 0; font-size: var(--fox-type-chrome); }
+.opt small { display: block; color: var(--muted-foreground); font-size: var(--fox-type-caption); }
+.opt .path { font: 11px/1.5 ui-monospace, Consolas, monospace; color: var(--fox-faint); }
+body:not(.devmode) .opt .path { display: none; }
+.callout { display: grid; gap: 4px; padding: 10px 12px; border-radius: var(--fox-radius-control); border: 1px solid color-mix(in srgb, var(--warning) 40%, var(--fox-border)); background: color-mix(in srgb, var(--warning) 8%, var(--card)); font-size: var(--fox-type-caption); line-height: 1.55; margin-bottom: 12px; }
+.callout b { color: var(--fox-warning-text); font-weight: 600; }
+.sep { height: 1px; background: var(--hair); margin: 10px 0; }
+
+/* 验证阶梯 */
+.ladder { display: grid; gap: 0; margin: 2px 0 10px; }
+.step { display: grid; grid-template-columns: 22px 1fr auto; align-items: start; gap: 10px; padding: 8px 0; position: relative; }
+.step + .step::before { content: ''; position: absolute; left: 10px; top: -8px; height: 16px; width: 1px; background: var(--fox-border); }
+.ic { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 700; border: 1.5px solid var(--fox-border-strong); color: var(--muted-foreground); background: var(--card); }
+.ic.ok { border-color: var(--success); background: var(--success); color: var(--background); }
+.ic.err { border-color: var(--destructive); background: var(--destructive); color: var(--background); }
+.ic.run { border-color: var(--brand); border-top-color: transparent; animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+body.bare .ic.run { animation: none; border-top-color: var(--brand); border-style: dashed; }
+.step-t b { font-size: var(--fox-type-chrome); font-weight: 500; display: block; }
+.step-t small { font-size: var(--fox-type-caption); color: var(--muted-foreground); display: block; line-height: 1.5; }
+.step-t .code { font: 11px/1.5 ui-monospace, Consolas, monospace; color: var(--destructive); margin-top: 2px; }
+body:not(.devmode) .step-t .code { display: none; }
+.step-m { font-size: var(--fox-type-caption); color: var(--fox-faint); white-space: nowrap; padding-top: 2px; }
+.step.skip .step-t b { color: var(--muted-foreground); }
+
+/* 页内表单 */
+.form-card { border: 1px solid var(--fox-border); border-radius: var(--fox-radius-card); background: var(--card); padding: 20px; }
+.form-step + .form-step { margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--hair); }
+.step-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.step-no { width: 22px; height: 22px; border-radius: 50%; background: var(--primary); color: var(--primary-foreground); font-size: 12px; font-weight: 600; display: grid; place-items: center; flex: none; }
+.step-no.done { background: var(--secondary); color: var(--secondary-foreground); }
+.step-head h3 { margin: 0; font-size: var(--fox-type-body); font-weight: 600; }
+.step-head small { color: var(--muted-foreground); font-size: var(--fox-type-caption); }
+.step-head .grow { flex: 1; }
+.targets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 16px; }
+.target { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--fox-border); border-radius: var(--fox-radius-control); background: var(--background); position: relative; }
+.target.on { border-color: var(--fox-accent-border); background: var(--fox-selection-surface); box-shadow: inset 0 0 0 1px var(--fox-accent-border); }
+.target b { font-size: var(--fox-type-chrome); font-weight: 500; display: flex; align-items: center; gap: 8px; padding-right: 22px; }
+.target small { font-size: var(--fox-type-caption); color: var(--muted-foreground); line-height: 1.4; }
+.target .check { position: absolute; right: 10px; top: 10px; }
+.label { font-size: var(--fox-type-caption); color: var(--muted-foreground); font-weight: 500; margin-bottom: 8px; }
+.presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.preset { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border: 1px solid var(--fox-border); border-radius: var(--fox-radius-control); background: var(--background); min-width: 0; }
+.preset .mark { width: 24px; height: 24px; font-size: 10px; }
+.preset div { min-width: 0; display: grid; }
+.preset b { font-size: var(--fox-type-chrome); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.preset small { font-size: 11px; color: var(--muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.preset small.warn { color: var(--fox-warning-text); }
+.preset.on { border-color: var(--fox-accent-border); background: var(--fox-selection-surface); box-shadow: inset 0 0 0 1px var(--fox-accent-border); }
+.summary { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--fox-radius-control); background: var(--fox-surface-muted); font-size: var(--fox-type-chrome); }
+.summary span { flex: 1; color: var(--muted-foreground); }
+.summary span b { color: var(--foreground); font-weight: 500; }
+.disclosure { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0 4px; cursor: pointer; }
+.disclosure div { display: grid; gap: 2px; }
+.disclosure b { font-size: var(--fox-type-chrome); font-weight: 500; }
+.disclosure small { font-size: var(--fox-type-caption); color: var(--muted-foreground); }
+.chev { width: 8px; height: 8px; border-right: 1.5px solid var(--muted-foreground); border-bottom: 1.5px solid var(--muted-foreground); transform: rotate(-45deg); }
+.chev.open { transform: rotate(45deg); }
+.test-lines { display: grid; gap: 4px; margin-top: 10px; font-size: var(--fox-type-caption); color: var(--muted-foreground); }
+.test-lines div { display: flex; align-items: center; gap: 8px; }
+.test-lines b { color: var(--foreground); font-weight: 500; }
+.test-lines .mono { font: 11px ui-monospace, Consolas, monospace; color: var(--destructive); }
+body:not(.devmode) .test-lines .mono { display: none; }
+.endpoint { display: grid; grid-template-columns: 150px 1fr 130px 104px; gap: 8px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--hair); font-size: var(--fox-type-caption); }
+.endpoint:last-of-type { border-bottom: 0; }
+.endpoint .proto b { display: block; font-size: var(--fox-type-chrome); font-weight: 500; }
+.endpoint .proto small { color: var(--muted-foreground); }
+.endpoint .k { display: flex; align-items: center; justify-content: flex-end; gap: 6px; color: var(--muted-foreground); white-space: nowrap; }
+.models-t { width: 100%; border-collapse: collapse; font-size: var(--fox-type-caption); }
+.models-t td, .models-t th { padding: 7px 6px; border-bottom: 1px solid var(--hair); text-align: left; white-space: nowrap; }
+.models-t th { color: var(--muted-foreground); font-weight: 500; }
+.models-t tr:last-child td { border-bottom: 0; }
+.adv-grid { display: grid; gap: 16px; padding-top: 8px; }
+.adv-sec h5 { margin: 0 0 6px; font-size: var(--fox-type-caption); color: var(--muted-foreground); font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+.toast { position: fixed; right: 24px; bottom: 24px; display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 14px; border: 1px solid var(--border); border-radius: var(--fox-radius-large); background: var(--popover); box-shadow: var(--fox-shadow-md); font-size: var(--fox-type-chrome); }
+.hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="demo-bar">
+  <b>Fox 09 样式稿</b>
+  <label>场景 <select id="scene">
+    <option value="list">列表 · 常见状态</option>
+    <option value="list-b">列表 · 异常状态</option>
+    <option value="list-c">列表 · 全新电脑</option>
+    <option value="add1">添加服务 · 第一步</option>
+    <option value="add2">添加服务 · 第二步 + 高级设置</option>
+    <option value="edit">编辑服务（同一表单）</option>
+    <option value="binding">Agent 绑定（Pi · 更改）</option>
+    <option value="import">导入预览（Codex）</option>
+    <option value="verify">分层验证 · 进行中</option>
+    <option value="verify-fail">分层验证 · 失败</option>
+  </select></label>
+  <label>主题 <select id="mode"><option value="light">浅色</option><option value="dark">深色</option></select></label>
+  <label>配色 <select id="palette"><option value="graphite">Graphite</option><option value="paper">Paper</option><option value="mist">Mist</option></select></label>
+  <label><input type="checkbox" id="devmode"> 开发者模式</label>
+  <span class="note">非开发者模式下不显示错误码、路径、环境变量名、原始 JSON</span>
+</div>
+
+<div class="shell">
+  <nav class="side">
+    <h6>设置</h6>
+    <a>通用</a><a>对话</a><a class="on">模型与 Agent</a><a>Agent</a><a>插件</a><a>资料库</a><a>数据与关于</a>
+  </nav>
+  <section class="main">
+    <div class="topbar"><span>设置</span><span>/</span><b>模型与 Agent</b></div>
+    <div class="page" id="page"></div>
+  </section>
+</div>
+<div class="toast hidden" id="toast"><span class="dot ok"></span>模型服务已保存。要让 Pi 使用这个服务吗？<button class="btn sm outline">使用</button></div>
+
+<script>
+const $ = (s) => document.querySelector(s)
+const params = new URLSearchParams(location.search)
+const state = {
+  scene: params.get('scene') || 'list',
+  mode: params.get('mode') || 'light',
+  palette: params.get('palette') || 'graphite',
+  dev: params.get('dev') === '1',
+}
+if (params.get('bare') === '1') document.body.classList.add('bare')
+
+const SERVICES = [
+  { name: 'DeepSeek 官方', mark: 'DS', isDefault: true, detail: '4 个模型 · api.deepseek.com', status: ['ok', '已连接', '312 ms'],
+    chips: [['Fox', 1], ['Pi', 1], ['Codex', 0], ['DeepSeek（dsh）', 1]], miss: '' },
+  { name: 'Kimi Code', mark: 'K', detail: '2 个模型 · api.kimi.com', status: ['ok', '已连接', '486 ms'],
+    chips: [['Fox', 1], ['Pi', 0]], miss: 'Codex 缺少 Responses 入口 · dsh 缺少 Messages 入口' },
+  { name: '本地 Ollama', mark: 'OL', detail: '未填写 API Key', status: ['', '未检测', ''],
+    chips: [['Fox', 0], ['Pi', 0]], miss: '' },
+]
+
+const sw = (on, dis) => `<button class="switch ${on ? 'on' : ''}" ${dis ? 'disabled' : ''} aria-label="启用"></button>`
+const chip = ([n, ok]) => ok ? `<span class="chip ok"><b>${n}</b><i>✓</i>已实测</span>` : `<span class="chip"><b>${n}</b>可用 · 未实测</span>`
+
+function serviceRows() {
+  return SERVICES.map(s => `
+  <div class="svc">
+    <span class="mark">${s.mark}</span>
+    <div class="svc-text">
+      <span class="svc-name"><b>${s.name}</b>${s.isDefault ? '<span class="pill">默认</span>' : ''}</span>
+      <small>${s.detail}</small>
+      <div class="chips">${s.chips.map(chip).join('')}${s.miss ? `<span class="chip-miss">${s.miss}</span>` : ''}</div>
+    </div>
+    <span class="svc-status"><i class="dot ${s.status[0]}"></i><b>${s.status[1]}</b>${s.status[2] ? `<span>·</span><span>${s.status[2]}</span>` : ''}</span>
+    <span class="more">⋯</span>
+  </div>`).join('')
+}
+
+/* 一行 Agent：name, state[dotClass,label], desc html, actions html, switch, dev text, expand html */
+function agentRow(a) {
+  return `<div class="agent">
+    <div class="agent-top">
+      <div class="agent-id"><b>${a.name}</b><span class="state ${a.muted ? 'muted' : ''}"><i class="dot ${a.dot}"></i>${a.label}</span></div>
+      <div class="agent-desc">${a.desc}</div>
+      <div class="agent-act">${a.act || ''}${a.sw === undefined ? '' : sw(a.sw, a.swDis)}</div>
+    </div>
+    ${a.dev ? `<div class="dev">${a.dev}</div>` : ''}
+    ${a.expand || ''}
+  </div>`
+}
+
+const FOX = { name: 'Fox', dot: 'ok', label: '已就绪', desc: '<span class="strong">DeepSeek 官方 · deepseek-chat</span><span class="layers">使用「默认模型」· 模型请求通过</span>', act: '<button class="btn sm ghost">查看</button>' }
+const PI_READY = { name: 'Pi', dot: 'ok', label: '已就绪', desc: '<span class="strong">DeepSeek 官方 · Messages · deepseek-chat</span><span class="layers">模型请求通过 · Agent 有输出 · 工具调用通过 · 今天 12:30</span>', act: '<button class="btn sm outline">验证</button><button class="btn sm ghost">更改</button>', sw: true }
+const CODEX_IMPORT = { name: 'Codex', dot: 'info', label: '本机已有配置可导入', desc: '在这台电脑上找到了 Codex 的登录配置。也可以改用模型服务。', act: '<button class="btn sm outline">导入…</button><button class="btn sm ghost">改用模型服务</button>', sw: false }
+const DSH_UNCONF = { name: 'DeepSeek（dsh）', dot: '', label: '已安装，未配置', muted: true, desc: '选择一个支持 Anthropic Messages 的模型服务。', act: '<button class="btn sm outline">配置</button>', sw: false }
+
+function agentsFor(scene) {
+  if (scene === 'list-b') return [
+    FOX,
+    { name: 'Pi', dot: 'warn', label: '待验证', desc: '<span class="strong">Kimi Code · Chat Completions · kimi-for-coding</span><span class="layers">还没有验证</span>', act: '<button class="btn sm">验证</button><button class="btn sm ghost">更改</button>', sw: true },
+    { name: 'Codex', dot: '', label: '未安装', muted: true, desc: '电脑上装了 Codex，但 Fox 需要用自带的运行时启动它。请重新安装或修复 Fox。', sw: false, swDis: true, dev: 'agent_config.system_only · via=system · C:\\Users\\hu\\AppData\\Roaming\\npm\\codex.cmd' },
+    { name: 'DeepSeek（dsh）', dot: 'err', label: '检测失败', desc: '没能读取这个 Agent 的配置，请重试。', act: '<button class="btn sm outline">重试</button>', sw: true, dev: 'agent_config.read_failed · 拒绝访问 (os error 5) · C:\\ProgramData\\Fox\\sandbox\\S-1-5-21-…\\homes\\default\\deepseek\\.deepseek\\.env' },
+  ]
+  if (scene === 'list-c') return [
+    { name: 'Fox', dot: '', label: '未配置', muted: true, desc: '添加一个模型服务后，Fox 会使用其中的默认模型。', act: '<button class="btn sm outline">添加服务</button>' },
+    { name: 'Pi', dot: '', label: '未安装', muted: true, desc: '这个 Agent 的运行时不完整，Fox 无法启动它。请修复 Fox 外部运行时。', sw: false, swDis: true, dev: 'agent_backend_pi_gate_missing · C:\\Program Files\\Fox\\sandbox-runtime\\0.1.8\\pi-gate\\pi-gated.cmd' },
+    { name: 'Codex', dot: '', label: '未安装', muted: true, desc: 'Fox 运行时里没有这个 Agent。', sw: false, swDis: true, dev: 'agent_backend_not_installed · backends/codex' },
+    { name: 'DeepSeek（dsh）', dot: '', label: '已安装，未配置', muted: true, desc: '还没有支持 Anthropic Messages 的服务。', act: '<button class="btn sm outline">添加服务</button>', sw: false },
+  ]
+  return [FOX, PI_READY, CODEX_IMPORT, DSH_UNCONF]
+}
+
+function bindingExpand() {
+  return `<div class="expand">
+    <h4>Pi 使用的模型</h4>
+    <div class="field"><span>来源</span><div><span class="seg"><span class="on">Fox 模型服务</span><span>本机配置（~/.pi）</span></span></div>
+      <small>本机配置会把这台电脑上 Pi 自己的设置复制到 Fox 的私有目录，不会改动原文件。</small></div>
+    <div class="grid3">
+      <div class="field"><span>服务</span><div class="select"><span>DeepSeek 官方 <span class="dim">· 已实测</span></span></div></div>
+      <div class="field"><span>入口</span><div class="select"><span>Anthropic Messages</span></div></div>
+      <div class="field"><span>模型</span><div class="select"><span>deepseek-chat</span></div></div>
+    </div>
+    <div class="field" style="margin-top:-4px"><small>只列出 Pi 能使用的服务。Kimi Code（未实测）、本地 Ollama（未实测）也可以选。</small></div>
+    <div class="foot"><button class="btn danger sm">不再使用模型服务</button><span class="grow"></span><button class="btn outline sm">取消</button><button class="btn outline sm">保存</button><button class="btn sm">保存并验证</button></div>
+  </div>`
+}
+
+function importExpand() {
+  return `<div class="expand">
+    <h4>从这台电脑导入 Codex 配置</h4>
+    <p class="sub">Fox 只复制下面勾选的内容到 Codex 的私有目录，原文件不会被修改。</p>
+    <div class="label">要导入的内容</div>
+    <div class="opt"><span class="check on"></span><div>登录信息<small>Codex 的账户登录</small><div class="path">~/.codex/auth.json → &lt;私有 HOME&gt;/.codex/auth.json</div></div></div>
+    <div class="opt"><span class="check on"></span><div>模型与地址设置<small>Codex 使用的模型和服务地址</small><div class="path">~/.codex/config.toml → &lt;私有 HOME&gt;/.codex/config.toml</div></div></div>
+    <div class="sep"></div>
+    <div class="label">用在哪里</div>
+    <div class="opt"><span class="radio on"></span><div>所有现有项目，并在新项目中继续使用<small>5 个项目 + 不选项目的对话</small></div></div>
+    <div class="opt"><span class="radio"></span><div>所有现有项目<small>之后新建的项目需要再导入一次</small></div></div>
+    <div class="opt"><span class="radio"></span><div>只在不选项目的对话中使用</div></div>
+    <div class="sep"></div>
+    <div class="callout"><b>2 个项目里已经有 Codex 登录</b><span>Fox-Agent、毕业论文。这两个项目原本的登录可以保留，也可以覆盖。</span></div>
+    <div class="opt" style="padding-top:0"><span class="radio on"></span><div>保留它们（推荐）<small>这两个项目继续使用原来的登录</small></div></div>
+    <div class="opt"><span class="radio"></span><div>覆盖，先备份原文件<small>备份放在各自的私有目录里，可以手动恢复</small></div></div>
+    <div class="foot"><button class="btn outline sm">取消</button><button class="btn sm">导入</button></div>
+  </div>`
+}
+
+function ladder(fail) {
+  const S = fail ? [
+    ['ok', '配置已保存', 'Kimi Code · Chat Completions · kimi-for-coding', '', ''],
+    ['err', '模型请求失败', '请检查地址、模型和 Key。', 'agent_verify.model_failed · HTTP 401 · https://api.kimi.com/coding/v1/chat/completions', '1.2 s'],
+    ['', 'Agent 有输出', '未进行', '', ''],
+    ['', '工具调用通过', '未进行', '', ''],
+  ] : [
+    ['ok', '配置已保存', 'DeepSeek 官方 · Anthropic Messages · deepseek-chat', '', '12 ms'],
+    ['ok', '模型请求通过', '服务正常返回了完整回复', '', '312 ms'],
+    ['ok', 'Agent 有输出', 'dsh 在临时目录里回复了「OK」', '', '8.4 s'],
+    ['run', '正在测试工具调用…', '让 Agent 读取一个临时文件并回复其中的内容', '', ''],
+  ]
+  return `<div class="ladder">${S.map(([st, t, d, code, ms], i) => `
+    <div class="step ${st === '' ? 'skip' : ''}"><span class="ic ${st}">${st === 'ok' ? '✓' : st === 'err' ? '!' : st === 'run' ? '' : i + 1}</span>
+      <div class="step-t"><b>${t}</b><small>${d}</small>${code ? `<div class="code">${code}</div>` : ''}</div><span class="step-m">${ms}</span></div>`).join('')}</div>`
+}
+
+function verifyExpand(fail) {
+  return `<div class="expand">
+    <h4>${fail ? '验证 Pi' : '验证 DeepSeek（dsh）'}</h4>
+    ${ladder(fail)}
+    <div class="foot">${fail
+      ? '<span class="grow" style="font-size:12px;color:var(--muted-foreground)">修改 Key 或地址后可以重新验证</span><button class="btn outline sm">编辑服务</button><button class="btn sm">重新验证</button>'
+      : '<span class="grow" style="font-size:12px;color:var(--muted-foreground)">完整验证会启动一次 Agent，通常需要 10–60 秒</span><button class="btn outline sm">停止</button>'}</div>
+  </div>`
+}
+
+function listPage(scene) {
+  let agents = agentsFor(scene)
+  if (scene === 'binding') agents = [FOX, { ...PI_READY, act: '<button class="btn sm outline">验证</button><button class="btn sm ghost" style="background:var(--accent)">更改</button>', expand: bindingExpand() }, CODEX_IMPORT, DSH_UNCONF]
+  if (scene === 'import') agents = [FOX, PI_READY, { ...CODEX_IMPORT, expand: importExpand() }, DSH_UNCONF]
+  if (scene === 'verify') agents = [FOX, PI_READY, CODEX_IMPORT, { name: 'DeepSeek（dsh）', dot: 'warn', label: '验证中', desc: '<span class="strong">DeepSeek 官方 · Messages · deepseek-chat</span>', act: '', sw: true, expand: verifyExpand(false) }]
+  if (scene === 'verify-fail') agents = [FOX, { name: 'Pi', dot: 'err', label: '验证失败', desc: '<span class="strong">Kimi Code · Chat Completions · kimi-for-coding</span><span class="layers">模型请求失败 · 刚刚</span>', act: '', sw: true, expand: verifyExpand(true) }, CODEX_IMPORT, DSH_UNCONF]
+  const services = scene === 'list-c' ? '' : serviceRows()
+  return `
+  <header class="page-head"><div><h1>模型与 Agent</h1><p>管理模型服务，并为每个 Agent 选择使用哪个服务。</p></div><div class="actions"><button class="btn">＋ 添加服务</button></div></header>
+  <section class="group"><div class="group-head"><h2>默认</h2></div><div class="group-body">
+    <div class="row"><div class="row-text"><b>默认模型</b><small>新对话和 Fox 未指定模型时使用</small></div><div class="row-control">${scene === 'list-c' ? '<span style="font-size:12px;color:var(--fox-faint)">添加服务后可选择</span>' : '<div class="select" style="width:280px"><span>DeepSeek 官方 · deepseek-chat</span></div>'}</div></div>
+  </div></section>
+  <section class="group"><div class="group-head"><h2>模型服务</h2><div class="group-aside">${scene === 'list-c' ? '' : '3 个服务，2 个已连接'}</div></div><div class="group-body">
+    ${services || '<p style="margin:0;padding:18px 0;font-size:13px;color:var(--muted-foreground)">还没有模型服务。点「添加服务」开始，先选你想让哪些 Agent 使用它。</p>'}
+  </div></section>
+  <section class="group"><div class="group-head"><h2>Agent 使用配置</h2><div class="group-aside">外部 Agent 需要先启用，才会出现在对话的 Agent 选择里</div></div><div class="group-body">
+    ${agents.map(agentRow).join('')}
+  </div></section>`
+}
+
+const TARGETS = [['Fox', '内置 Agent', 1], ['Pi', '需要任意一种协议', 1], ['Codex', '需要 Responses 协议', 0], ['DeepSeek（dsh）', '需要 Messages 协议', 1]]
+const PRESETS = [
+  ['DS', 'DeepSeek 官方', '覆盖所选全部 Agent', 1, 0], ['OA', 'OpenAI', '缺少 Messages 地址', 0, 1], ['K', 'Kimi Code', '缺少 Messages 地址', 0, 1], ['Mo', 'Moonshot', '缺少 Messages 地址', 0, 1],
+  ['DA', 'DashScope', '缺少 Messages 地址', 0, 1], ['GL', 'Zhipu (BigModel)', '缺少 Messages 地址', 0, 1], ['OR', 'OpenRouter', '缺少 Messages 地址', 0, 1], ['＋', '自定义', '自己填写地址', 0, 0],
+]
+
+function step1(collapsed, preset) {
+  if (collapsed) return `<div class="form-step"><div class="step-head"><span class="step-no done">1</span><h3>目标与预设</h3><span class="grow"></span></div>
+    <div class="summary"><span>目标 <b>Fox、Pi、DeepSeek（dsh）</b> · 预设 <b>DeepSeek 官方</b></span><button class="btn sm ghost">更改</button></div></div>`
+  return `<div class="form-step">
+    <div class="step-head"><span class="step-no">1</span><h3>这个服务给谁用</h3><small>可多选，之后还能改</small></div>
+    <div class="targets">${TARGETS.map(([n, d, on]) => `<div class="target ${on ? 'on' : ''}"><span class="check ${on ? 'on' : ''}"></span><b>${n}</b><small>${d}</small>${n === 'Codex' ? '<small style="color:var(--fox-faint)">未启用</small>' : ''}</div>`).join('')}</div>
+    <div class="label">从预设开始 · 已按所选 Agent 排序</div>
+    <div class="presets">${PRESETS.map(([m, n, d, on, warn], i) => `<div class="preset ${preset === i ? 'on' : ''}"><span class="mark">${m}</span><div><b>${n}</b><small class="${warn ? 'warn' : ''}">${d}</small></div></div>`).join('')}</div>
+  </div>`
+}
+
+function step2(edit, advOpen) {
+  return `<div class="form-step">
+    <div class="step-head"><span class="step-no">2</span><h3>填写必填项</h3><small>只列出所选 Agent 需要的内容</small></div>
+    <div class="grid2">
+      <div class="field"><span>服务名称</span><div class="input">DeepSeek 官方</div></div>
+      <div class="field"><span>默认模型</span><div class="input ${edit ? '' : 'ph'}">${edit ? 'deepseek-chat' : '例如 deepseek-chat'}</div></div>
+    </div>
+    <div class="field"><span>API Key</span><div class="input ph">${edit ? '已安全保存 · 留空保持不变' : '输入服务商 API Key'}</div><small>Key 保存在系统凭据库；Agent 使用时由 Fox 写进它的私有配置，不会写进你自己的 HOME。</small></div>
+    <div style="display:flex;align-items:center;gap:10px"><button class="btn outline sm">⚡ 测试连接</button><span style="font-size:12px;color:var(--fox-faint)">${edit ? '' : '预设已包含 Fox、Pi、dsh 需要的入口'}</span></div>
+    ${edit ? `<div class="test-lines">
+      <div><i class="dot ok"></i><b>Fox / Pi 用的入口</b>连接正常 · 312 ms</div>
+      <div><i class="dot ok"></i><b>dsh 用的入口</b>连接正常 · 405 ms</div>
+      <div><i class="dot err"></i><b>Codex 用的入口</b>连接失败，请检查地址和 Key <span class="mono">model.connection_failed · HTTP 404 · https://api.deepseek.com/responses</span></div>
+    </div>` : ''}
+    <div class="sep" style="margin-top:16px"></div>
+    <div class="disclosure"><div><b>高级设置</b><small>Chat Completions · 上下文 128K · 最大输出 8K · 3 个入口</small></div><span class="chev ${advOpen ? 'open' : ''}"></span></div>
+    ${advOpen ? `<div class="adv-grid">
+      <div class="adv-sec"><h5>协议入口 <button class="btn sm ghost">＋ 添加入口</button></h5>
+        <div class="endpoint"><div class="proto"><b>Chat Completions</b><small>Fox、Pi</small></div><div class="input mono">https://api.deepseek.com</div><div class="input ph">使用默认模型</div><span class="k">主地址</span></div>
+        <div class="endpoint"><div class="proto"><b>Anthropic Messages</b><small>Pi、dsh</small></div><div class="input mono">https://api.deepseek.com/anthropic</div><div class="input ph">使用默认模型</div><span class="k">${sw(false)}独立 Key</span></div>
+        <div class="endpoint"><div class="proto"><b>OpenAI Responses</b><small>Pi、Codex</small></div><div class="input mono">https://api.deepseek.com</div><div class="input ph">使用默认模型</div><span class="k">${sw(false)}独立 Key</span></div>
+      </div>
+      <div class="adv-sec"><h5>模型 <button class="btn sm ghost">＋ 添加模型</button></h5>
+        <table class="models-t"><tr><th>模型 ID</th><th>显示名</th><th>上下文</th><th>最大输出</th><th>图片</th><th></th></tr>
+          <tr><td>deepseek-chat</td><td>DeepSeek Chat</td><td>128K</td><td>8K</td><td>—</td><td><span class="pill">默认</span></td></tr>
+          <tr><td>deepseek-reasoner</td><td>DeepSeek Reasoner</td><td>128K</td><td>32K</td><td>—</td><td><button class="btn sm ghost">设为默认</button></td></tr></table>
+      </div>
+      <div class="adv-sec"><h5>其他</h5>
+        <div class="row" style="min-height:44px;padding:6px 0"><div class="row-text"><b style="font-size:13px">设为默认服务</b><small>Fox 新对话使用此服务中的默认模型</small></div>${sw(true)}</div>
+        <div class="row" style="min-height:44px;padding:6px 0"><div class="row-text"><b style="font-size:13px">供应商图标</b></div><div class="select" style="min-width:140px"><span>自动识别</span></div></div>
+      </div>
+    </div>` : ''}
+  </div>`
+}
+
+function formPage(kind) {
+  const edit = kind === 'edit'
+  return `
+  <header class="page-head"><div><div class="crumb"><a href="#">模型服务</a> / ${edit ? 'DeepSeek 官方' : '添加服务'}</div><h1>${edit ? '编辑服务' : '添加服务'}</h1><p>${edit ? '修改后需要重新测试连接，相关 Agent 会显示「待验证」。' : '先选目标和预设，再填写必填项；协议细节在「高级设置」里。'}</p></div>
+    <div class="actions"><button class="btn outline">取消</button><button class="btn" ${kind === 'add1' ? 'disabled' : ''}>${edit ? '保存' : '添加'}</button></div></header>
+  <div class="form-card">
+    ${kind === 'add1' ? step1(false, -1) : kind === 'add2' ? step1(true) + '' : step1(true)}
+    ${kind === 'add1' ? `<div class="form-step"><div class="step-head"><span class="step-no done">2</span><h3 style="color:var(--muted-foreground)">填写必填项</h3><small>选择预设后继续</small></div></div>` : step2(edit, kind === 'add2')}
+    ${edit ? `<div class="form-step" style="display:flex;align-items:center"><button class="btn danger sm">删除服务</button><span style="flex:1"></span><span style="font-size:12px;color:var(--muted-foreground)">Pi、dsh 正在使用这个服务</span></div>` : ''}
+  </div>`
+}
+
+function render() {
+  const root = document.documentElement
+  root.classList.toggle('dark', state.mode === 'dark')
+  if (state.palette === 'graphite') root.removeAttribute('data-color-theme'); else root.setAttribute('data-color-theme', state.palette)
+  document.body.classList.toggle('devmode', state.dev)
+  const s = state.scene
+  $('#page').innerHTML = (s === 'add1' || s === 'add2' || s === 'edit') ? formPage(s) : listPage(s)
+  $('#toast').classList.toggle('hidden', s !== 'list-toast')
+  $('#scene').value = s; $('#mode').value = state.mode; $('#palette').value = state.palette; $('#devmode').checked = state.dev
+}
+$('#scene').onchange = (e) => { state.scene = e.target.value; render() }
+$('#mode').onchange = (e) => { state.mode = e.target.value; render() }
+$('#palette').onchange = (e) => { state.palette = e.target.value; render() }
+$('#devmode').onchange = (e) => { state.dev = e.target.checked; render() }
+render()
+</script>
+</body>
+</html>
