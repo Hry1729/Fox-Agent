@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { runtimeProcess, toolPartialOutputText, withSettledToolCalls, TOOL_HOST_SETTLED_EVENT, type ToolCallLike } from '../src/features/chat/timeline/fox-runtime-process-model'
+import { runtimeProcess, toolPartialOutputText, type ToolCallLike } from '../src/features/chat/timeline/fox-runtime-process-model'
+import { projectKernelGroups, projectRuntimeGroups } from '../src/features/chat/runtime-process-groups'
 import { summarizeRunSteps } from '../src/features/chat/run-activity-presentation'
 import type { RunEventRecord } from '../src/features/conversations/model/types'
 
@@ -37,37 +38,40 @@ describe('runtimeProcess settles unfinished tools when the run ends first', () =
   })
 })
 
-describe('withSettledToolCalls', () => {
+describe('persistent tool settlement after process grouping', () => {
   const hostCall: ToolCallLike = {
     runId: 'run', runtimeToolCallId: 'h1', toolName: 'run_command', input: { command: 'ping' },
     status: 'cancelled', result: { status: 'running', text: '正在 Ping 127.0.0.1\n', streamedOutput: true }, errorMessage: null,
   }
 
-  test('adds the database card of a cancelled Host tool with its partial output', () => {
-    const events = [event(1, 'run.started'), event(2, 'tool.started', { toolCallId: 'h1', tool: 'run_command', input: { command: 'ping' } }), event(3, 'run.cancelled')]
-    const merged = withSettledToolCalls(events, [hostCall])
-    expect(merged).toHaveLength(4)
-    expect(merged[3].eventType).toBe(TOOL_HOST_SETTLED_EVENT)
-    expect(merged[3].seq).toBe(3)
-    const tool = runtimeProcess(merged).tools[0]
-    expect(tool.settled).toBe('cancelled')
-    expect(toolPartialOutputText(tool.partialOutput)).toBe('正在 Ping 127.0.0.1\n')
+  for (const project of [projectRuntimeGroups, (runId: string, _content: string, events: RunEventRecord[]) => projectKernelGroups(runId, [], events)]) {
+    test(`${project.name}: retains Host output without inserting synthetic event sequences`, () => {
+      const events = [event(1, 'run.started'), event(2, 'tool.started', { toolCallId: 'h1', tool: 'run_command', input: { command: 'ping' }, kernelCheckpointSeq: '1' }), event(3, 'run.cancelled')]
+      const groups = project('run', '', events)!
+      const group = groups.find(item => item.kind === 'process')!
+      expect(group.kind).toBe('process')
+      if (group.kind !== 'process') throw new Error('missing process group')
+      expect(group.events.map(item => item.seq)).toEqual([2])
+      const tool = runtimeProcess(group.events, [hostCall], 'cancelled').tools[0]
+      expect(tool.settled).toBe('cancelled')
+      expect(toolPartialOutputText(tool.partialOutput)).toBe('正在 Ping 127.0.0.1\n')
+      expect(events).toHaveLength(3)
+    })
+  }
+
+  test('does not borrow output from a different run or another process group', () => {
+    const tool = runtimeProcess(ping, [hostCall, { ...hostCall, runtimeToolCallId: 'p1', runId: 'other' }]).tools[0]
+    expect(tool.settled).toBeUndefined()
+    expect(toolPartialOutputText(tool.partialOutput)).toContain('来自 127.0.0.1')
+    expect(runtimeProcess(ping, [hostCall]).tools).toHaveLength(1)
   })
 
-  test('skips cards of other runs, finished cards, and cards the stream already ended', () => {
-    const events = [event(1, 'run.started'), event(2, 'tool.completed', { toolCallId: 'h1', result: {} })]
-    expect(withSettledToolCalls(events, [hostCall])).toBe(events)
-    expect(withSettledToolCalls([event(1, 'run.started')], [{ ...hostCall, runId: 'other' }])).toHaveLength(1)
-    expect(withSettledToolCalls([event(1, 'run.started')], [{ ...hostCall, status: 'completed' }])).toHaveLength(1)
-    expect(withSettledToolCalls([], [hostCall])).toEqual([])
-  })
-
-  test('falls back to the error message when the card has no output', () => {
-    const events = [event(1, 'run.started'), event(2, 'tool.started', { toolCallId: 'h1', tool: 'run_command' }), event(3, 'run.failed')]
-    const merged = withSettledToolCalls(events, [{ ...hostCall, status: 'interrupted', result: null, errorMessage: '运行中断' }])
-    const tool = runtimeProcess(merged).tools[0]
-    expect(tool.settled).toBe('interrupted')
-    expect(toolPartialOutputText(tool.partialOutput)).toBe('运行中断')
+  test('real failures before cancellation stay failed and keep streamed output', () => {
+    const tool = runtimeProcess([...ping, event(4, 'tool.completed', { toolCallId: 'p1', isError: true, result: { text: 'diagnostic' } })], undefined, 'cancelled').tools[0]
+    expect(tool.isError).toBe(true)
+    expect(tool.completed).toBe(true)
+    expect(tool.settled).toBeUndefined()
+    expect(toolPartialOutputText(tool.partialOutput)).toContain('来自 127.0.0.1')
   })
 })
 

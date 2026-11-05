@@ -10064,6 +10064,7 @@ fn execute_host_tool_request(
             }
             command_jobs::execute(database,run_id,input,root,&cancellation,budget)
         } else if matches!(prepared, crate::tool_host::PreparedToolAction::RunCommand { .. }) {
+            let prepared = prepared.with_command_environment(command_proxy_environment_for_mode(policy.decision.mode));
             // 13.38（A-2）：前台命令边执行边把已产生的输出写进这张工具卡（每秒最多一次）。
             let (live_db, live_run, live_call) = (database.clone(), run_id.to_owned(), tool_call_id.to_owned());
             crate::tool_host::with_live_output(
@@ -10071,7 +10072,6 @@ fn execute_host_tool_request(
                 || crate::tool_host::execute_with_cancellation(prepared, Some(&cancellation)),
             )
         } else {
-            let prepared = prepared.with_command_environment(command_proxy_environment_for_mode(policy.decision.mode));
             crate::tool_host::execute_with_cancellation(prepared, Some(&cancellation))
         }
     })();

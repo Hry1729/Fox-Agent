@@ -19,6 +19,24 @@ const groupHelpers = await import('../src/features/chat/runtime-process-groups')
 await import('../src/components/ai-elements/message-response')
 afterEach(cleanup)
 
+test('运行失败使用中文连接提示，开发者详情保留无stderr的错误码', async () => {
+  const { ErrorPrompt } = await import('../src/features/chat/demo/fox-demo-prompts')
+  const { persistDeveloperUi, readDeveloperUi } = await import('../src/features/chat/developer-ui')
+  const previous = readDeveloperUi()
+  persistDeveloperUi(false)
+  const view = render(<ErrorPrompt failure={{ kind: 'failed', code: 'provider.request_failed', message: 'fetch failed: connection reset' }} />)
+  try {
+    expect(view.getByRole('alert').textContent).toContain('模型服务连接中断，可重试。')
+    expect(view.queryByText(/fetch failed/)).toBeNull()
+    expect(view.queryByText(/provider.request_failed/)).toBeNull()
+    await act(async () => persistDeveloperUi(true))
+    fireEvent.click(view.getByRole('button', { name: '查看错误详情' }))
+    await waitFor(() => expect(view.getByText('provider.request_failed: fetch failed: connection reset')).toBeDefined())
+  } finally {
+    await act(async () => persistDeveloperUi(previous))
+  }
+})
+
 test('输入流光仅新建页挂载，已有页即使centered、聚焦或运行也没有beam节点', async () => {
   const { MemoizedComposer } = await import('../src/features/chat/composer/fox-composer')
   const { TooltipProvider } = await import('../src/components/ui/tooltip')
@@ -181,6 +199,49 @@ test('真实AUI适配器保留Kernel中途回复与最终回复，并只显示�
   await waitFor(() => expect(view.container.querySelectorAll('[data-slot="tool-call"]')).toHaveLength(1))
   expect(view.container.querySelector('[data-activity-kind="commentary"]')?.textContent).toBe('中途回复')
   expect(view.container.querySelector('.fox-answer-segment.is-final')?.textContent).toBe('最终回复')
+})
+
+for (const backend of ['external', 'kernel']) {
+  test(`${backend}取消后经过真实分组仍能展开工具输出，重新打开会话也保留`, async () => {
+    const { default: AssistantUiChat } = await import('../src/features/chat/thread/fox-assistant-ui-chat')
+    const event = (seq: number, type: string, data = {}) => ({ runId: 'run', seq, eventType: type, event: { type, ...data }, createdAt: 1000 + seq })
+    const events = [event(1, 'run.started'), event(2, 'tool.started', {
+      toolCallId: 'ping', tool: backend === 'kernel' ? 'run_command' : 'bash', input: { command: 'ping -n 60 127.0.0.1' },
+      ...(backend === 'kernel' ? { kernelCheckpointSeq: '1' } : {}),
+    }), event(3, 'run.cancelled')]
+    const toolCalls = [{ runId: 'run', runtimeToolCallId: 'ping', toolName: 'run_command', input: {}, status: 'cancelled', result: { text: '来自 127.0.0.1 的回复\n', streamedOutput: true }, errorMessage: null }]
+    const detail = { conversation: { id: 'c' }, messages: [{ id: backend === 'kernel' ? 'kernel-message:run:1' : 'assistant-run', role: 'assistant', content: '', runId: 'run', conversationId: 'c', kind: 'text', status: 'cancelled', createdAt: 1000, updatedAt: 6000, ordinal: 1 }], runtimeEvents: events, attachments: [], artifacts: [], approvals: [], toolCalls, knowledgeBindings: [], runs: [], lastRun: { id: 'run', status: 'cancelled', startedAt: 1000, finishedAt: 6000 } }
+    const conversation = { enabled: true, detail, streamingText: '', cancel: async () => true, loadEarlierMessages: async () => {} } as any
+    for (let opened = 0; opened < 2; opened++) {
+      const view = render(<AssistantUiChat conversation={conversation} callbacks={{ onSubmit: () => {}, onReload: () => {} }} />)
+      await waitFor(() => expect(view.container.querySelector('[data-settled="cancelled"]')).not.toBeNull())
+      await act(async () => {})
+      const cards = view.container.querySelectorAll('[data-slot="tool-call"]')
+      expect(cards).toHaveLength(1)
+      expect(cards[0].textContent).not.toContain('正在执行')
+      fireEvent.click(cards[0].querySelector('button')!)
+      await waitFor(() => expect(cards[0].textContent).toContain('来自 127.0.0.1 的回复'))
+      expect(cards[0].textContent).toContain('[已取消，以上是取消前已经产生的输出]')
+      const settledDetail = { ...detail, toolCalls: [{ ...toolCalls[0], result: { text: '来自 127.0.0.1 的回复\n最后一行输出\n', streamedOutput: true } }] }
+      await act(async () => view.rerender(<AssistantUiChat conversation={{ ...conversation, detail: settledDetail }} callbacks={{ onSubmit: () => {}, onReload: () => {} }} />))
+      await waitFor(() => expect(cards[0].textContent).toContain('最后一行输出'))
+      await act(async () => view.unmount())
+    }
+  })
+}
+
+test('取消前真正失败的工具仍显示失败，并保留命令已经产生的输出', async () => {
+  const { RuntimeProcess } = await import('../src/features/chat/timeline/fox-runtime-process-view')
+  const event = (seq: number, type: string, data = {}) => ({ runId: 'run', seq, eventType: type, event: { type, ...data }, createdAt: seq })
+  const events = [event(1, 'tool.started', { toolCallId: 'failed', tool: 'bash', input: { command: 'ping' } }),
+    event(2, 'tool.completed', { toolCallId: 'failed', isError: true, result: { text: 'internal failure diagnostic', output: '命令已输出第一行\n', streamedOutput: true } })]
+  const view = render(<RuntimeProcess events={events} grouped running={false} runOutcome="cancelled" outcome="cancelled" />)
+  const card = view.container.querySelector('[data-slot="tool-call"]')!
+  expect(card.textContent).toContain('工具调用未成功')
+  expect(card.querySelector('[data-settled]')).toBeNull()
+  fireEvent.click(card.querySelector('button')!)
+  await waitFor(() => expect(card.textContent).toContain('命令已输出第一行'))
+  expect(card.textContent).not.toContain('internal failure diagnostic')
 })
 
 test('AUI运行中隐藏当前助手footer，历史保留，终态整体显示；用户编辑仍受运行约束', async () => {

@@ -11,6 +11,7 @@ import { createFauxCore, fauxAssistantMessage, fauxToolCall } from '@earendil-wo
 import { Type } from 'typebox'
 import {
   createNativeToolBridge,
+  nativeHostToolResult,
   TOOL_BATCH_REGISTER,
   TOOL_CALL_EXECUTE,
   TOOL_CALL_CLOSE,
@@ -19,6 +20,25 @@ import {
 
 const READ_ONLY = new Set(['read', 'grep', 'ls', 'find', 'skill_load'])
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+test('a bounded Host success exposes its exact read-back reference to the model', () => {
+  const reference = 'fox-result://original-run/large-command'
+  const preview = { truncated: true, originalBytes: 558407, preview: '第1行 中文内容', message: 'Use read_tool_result.' }
+  const payload = {
+    isError: false,
+    result: preview,
+    resultRef: reference,
+    resultRefRetrievable: true,
+    toolResultStorage: { stored: true, storedBytes: 558407, retrievableBytes: 558407 },
+  }
+  const result = nativeHostToolResult('run_command', payload, { runId: 'original-run', toolCallId: 'large-command' })
+  const visible = JSON.parse(result.content[0].text)
+  assert.equal(result.isError, false)
+  assert.equal(visible.resultRef, reference)
+  assert.equal(visible.resultRefRetrievable, true)
+  assert.equal(visible.originalBytes, 558407)
+  assert.equal(preview.resultRef, undefined)
+})
 
 function fauxCore(name) {
   return createFauxCore({

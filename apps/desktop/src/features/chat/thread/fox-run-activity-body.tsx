@@ -11,6 +11,7 @@ export function FoxRunActivityBody({ message }: { message: FoxThreadMessage }) {
   const artifacts = message.content.flatMap(part => part.type === 'data-fox-artifacts' ? part.data : [])
   return <MemoizedRuntimeAssistantMessage message={message.source} kernelMessages={message.source.kernelMessages}
     processEvents={message.runId ? fox.eventsByRun.get(message.runId) ?? [] : []} groupHelpers={fox.groupHelpers}
+    toolCalls={fox.toolCalls}
     singleRunMessage running={message.isActiveRun} runInProgress={message.isActiveRun}
     artifacts={artifacts} assistantName={timeline.assistantName || 'Fox 默认助手'} modelName={timeline.runModel}
     knowledgeBindings={fox.knowledgeBindings} attachmentNames={fox.attachmentNames}

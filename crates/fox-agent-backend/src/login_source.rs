@@ -81,6 +81,7 @@ pub fn choose_fox(state: &Path, home: &Path, remember: bool) -> Result<(), Strin
     let file = path(state);
     let _lock = statefile::StateLock::acquire(&statefile::lock_path_for(&file)).map_err(|_| "无法锁定配置来源记录")?;
     let mut choices: Choices = statefile::read_json(&file)?;
+    onboarding::archive_pi_source(home)?;
     choices.fox_homes.insert(home.to_string_lossy().into_owned());
     if remember { choices.default_fox = true; choices.reuse = None; }
     statefile::write_json(&file, &choices)
@@ -196,5 +197,37 @@ mod tests {
     fn partial_selection_cannot_approve_reuse() {
         let (_dir, real, _, _, _) = fixture();
         assert!(Snapshot::capture(&real, &[format!("file:{}", onboarding::PI_AUTH)]).is_err());
+    }
+
+    #[test]
+    fn switching_imported_pi_to_fox_preserves_native_config_in_private_backup() {
+        let (_dir, real, state, home, selected) = fixture();
+        Snapshot::capture(&real, &selected).unwrap().remember(&state).unwrap();
+        prepare(&state, &home, Some(&real)).unwrap();
+        assert_eq!(status(&state, &home, Some(&real)).unwrap().current, "native");
+        choose_fox(&state, &home, true).unwrap();
+        let source = status(&state, &home, Some(&real)).unwrap();
+        assert_eq!(source.current, "fox");
+        assert!(source.fox_chosen);
+        let backup = std::fs::read_dir(home.join(onboarding::BACKUP_DIR)).unwrap().next().unwrap().unwrap().path();
+        for relative in FILES {
+            assert_eq!(std::fs::read(backup.join(relative)).unwrap(), std::fs::read(real.home.join(relative)).unwrap());
+            assert!(!home.join(relative).exists());
+        }
+        let login = crate::unified_login::UnifiedLogin {
+            provider_name: "Fox fixture".into(), base_url: "https://example.com/v1".into(),
+            api_type: "openai-completions".into(), model: "fox-model".into(),
+            api_key: crate::unified_login::Secret::new("fox-test-key"), responses_supported: None,
+        };
+        let report = crate::unified_login::apply(AgentBackend::Pi, &home, &login, false).unwrap();
+        assert_eq!(report.outcome, crate::unified_login::Outcome::Generated);
+        let native = crate::model_endpoint::resolve(AgentBackend::Pi, &home, &home.join("project")).unwrap();
+        assert_eq!(native.provider.as_deref(), Some("fox"));
+        assert_eq!(native.model.as_deref(), Some("fox-model"));
+        assert_eq!(status(&state, &home, Some(&real)).unwrap().current, "fox");
+        onboarding::import_into(AgentBackend::Pi, &real, &selected,
+            &[onboarding::ImportTarget { project: "project".into(), label: "project".into(), home: home.clone() }],
+            onboarding::ImportOptions { overwrite: true, backup_stamp: "back-to-native" }).unwrap();
+        assert_eq!(status(&state, &home, Some(&real)).unwrap().current, "native");
     }
 }

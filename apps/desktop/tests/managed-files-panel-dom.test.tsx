@@ -32,6 +32,8 @@ type RestoreCall = {
 }
 
 const restoreCalls: RestoreCall[] = []
+let listError: Error | null = null
+let listCalls = 0
 let restoreImpl: (call: RestoreCall) => Promise<unknown> = async () => ({
   id: 'v-restored',
   versionNo: 9,
@@ -101,7 +103,11 @@ mock.module('../src/features/conversations/api/desktop-client', () => ({
   desktopRuntimeAvailable: true,
   desktopClient: {
     ...actualDesktopClient.desktopClient,
-    listManagedFileVersions: async () => versions,
+    listManagedFileVersions: async () => {
+      listCalls += 1
+      if (listError) throw listError
+      return versions
+    },
     restoreManagedFileVersion: async (
       conversationId: string,
       versionId: string,
@@ -155,6 +161,8 @@ setConfirmDialogPresenter(async (options) => {
 
 afterEach(() => {
   cleanup()
+  listError = null
+  listCalls = 0
   restoreCalls.length = 0
   settledByRequestId.clear()
   restoreImpl = async () => ({ id: 'v-restored', versionNo: 9 })
@@ -178,6 +186,26 @@ async function mountPanel() {
 const restoreButton = () => screen.getByRole('button', { name: '恢复版本' })
 
 describe('ManagedFilesPanel render contract', () => {
+  test('a completed run reveals its first captured file without switching conversations', async () => {
+    versions = []
+    const view = render(<ManagedFilesPanel conversationId="conv-1" refreshKey="running" />)
+    await waitFor(() => expect(listCalls).toBe(1))
+    expect(screen.queryByRole('button', { name: /文件版本/ })).toBeNull()
+    versions = [versionRow({ id: 'v1', versionNo: 1, createdAt: 1 })]
+    view.rerender(<ManagedFilesPanel conversationId="conv-1" refreshKey="idle" />)
+    await screen.findByRole('button', { name: /文件版本/ })
+    expect(listCalls).toBe(2)
+  })
+
+  test('a failed version lookup leaves a visible retry entry', async () => {
+    listError = new Error('文件版本暂时无法读取')
+    render(<ManagedFilesPanel conversationId="conv-1" />)
+    fireEvent.click(await screen.findByRole('button', { name: /文件版本/ }))
+    expect(screen.getByText('文件版本暂时无法读取')).toBeDefined()
+    listError = null
+    fireEvent.click(screen.getByTitle('重新检查'))
+    await waitFor(() => expect(screen.queryByText('文件版本暂时无法读取')).toBeNull())
+  })
   // Server rendering never runs `useEffect`, so the version list is still empty
   // and the panel takes its documented early return. This covers the "no
   // interactive surface until the Host has answered" rule only; the affordances

@@ -410,6 +410,17 @@ fn production_adapter_start_nonzero_and_utf8_byte_paging_are_durable() {
         terminal.result_ref.is_some(),
         "failure output must be published durably"
     );
+    for action in ["status", "output"] {
+        let mut outcome = CallOutcome::Completed;
+        let read = execute_inner(&fixture.database, &fixture.run_id, &json!({"action":action,"jobId":id}),
+            &fixture.root, &fixture.token, Duration::from_secs(5), refusing_proof(), None,
+            &mut ExecutionEvidence::NotStarted, &mut outcome).expect("read failed command");
+        assert_eq!(read["isError"], false, "{read}");
+        assert_eq!(read["details"]["state"], "failed");
+        assert_eq!(read["details"]["exitCode"], 7);
+        assert_eq!(read["details"]["errorCode"], "tool.nonzero_exit");
+        assert!(matches!(outcome, CallOutcome::Completed), "{outcome:?}");
+    }
 
     let first = fixture
         .action(json!({"action":"output","jobId":id,"stream":"stdout","offset":0,"limit":4}))
@@ -919,6 +930,7 @@ fn r1_4_a_later_run_in_the_same_conversation_reads_but_cannot_cancel_earlier_job
     fixture.action(json!({"action":"cancel","jobId":id})).expect("cancel");
     assert_eq!(fixture.wait_terminal(&id).state, JobState::Cancelled);
     let status = fixture.action(json!({"action":"status","jobId":id})).expect("own status");
+    assert_eq!(status["isError"], false, "{status}");
     assert_eq!(status["details"]["final"], true);
     assert_eq!(status["details"]["stateLabel"], "已取消");
     assert!(status["details"]["note"].as_str().unwrap().contains("不是抽样"));
@@ -930,12 +942,19 @@ fn r1_4_a_later_run_in_the_same_conversation_reads_but_cannot_cancel_earlier_job
     let registry = CancellationRegistry::default();
     registry.register_run(&later).expect("register later run");
     let token = registry.run_token(&later).expect("later token");
-    let read = execute(&fixture.database, &later, &json!({"action":"status","jobId":id}), &fixture.root, &token, Duration::from_secs(5))
-        .expect("same conversation may read an earlier job's status");
-    assert_eq!(read["details"]["state"], "cancelled");
-    assert_eq!(read["details"]["final"], true);
-    execute(&fixture.database, &later, &json!({"action":"output","jobId":id,"stream":"stdout"}), &fixture.root, &token, Duration::from_secs(5))
-        .expect("same conversation may read an earlier job's output");
+    for action in ["status", "output"] {
+        let mut outcome = CallOutcome::Completed;
+        let read = execute_inner(&fixture.database, &later, &json!({"action":action,"jobId":id}),
+            &fixture.root, &token, Duration::from_secs(5), refusing_proof(), None,
+            &mut ExecutionEvidence::NotStarted, &mut outcome)
+            .expect("same conversation may read an earlier job");
+        assert_eq!(read["isError"], false, "{read}");
+        assert_eq!(read["details"]["state"], "cancelled");
+        assert!(matches!(outcome, CallOutcome::Completed), "{outcome:?}");
+        if action == "status" {
+            assert_eq!(read["details"]["final"], true);
+        }
+    }
     let denied = execute(&fixture.database, &later, &json!({"action":"cancel","jobId":id}), &fixture.root, &token, Duration::from_secs(5))
         .expect_err("writes stay scoped to the job's own Run");
     assert!(denied.contains("outside this Run"), "{denied}");

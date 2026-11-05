@@ -116,12 +116,96 @@ def patch_pi_bundle_hidden(source):
 
 
 def patch_pi_bundle_all(source):
-    return patch_pi_bundle_hidden(patch_pi_dispatcher(source))
+    return patch_pi_bundle_console(patch_pi_bundle_hidden(patch_pi_dispatcher(source)))
+
+
+def patch_pi_shell_console(source):
+    source = 'import { pipeFoxConsoleOutput } from "./fox-console-output.mjs";\n' + source
+    source = replace_once(source, '                child.stdout?.on("data", onData);\n                child.stderr?.on("data", onData);',
+                          '                const foxStdout = pipeFoxConsoleOutput(child.stdout, onData);\n                const foxStderr = pipeFoxConsoleOutput(child.stderr, onData);')
+    return replace_once(source, 'const exitCode = await waitForChildProcess(child);',
+                        'const exitCode = await waitForChildProcess(child);\n                foxStdout();\n                foxStderr();')
+
+
+def patch_pi_bundle_console(source):
+    source = 'import { pipeFoxConsoleOutput } from "./fox-console-output.mjs";\n' + source
+    source = replace_once(source, ',child.stdout?.on("data",onData),child.stderr?.on("data",onData),signal&&',
+                          ';let foxStdout=pipeFoxConsoleOutput(child.stdout,onData),foxStderr=pipeFoxConsoleOutput(child.stderr,onData);signal&&')
+    return replace_once(source, 'let exitCode=await waitForChildProcess(child);',
+                        'let exitCode=await waitForChildProcess(child);foxStdout();foxStderr();')
+
+
+def patch_dsh_owner_label(source):
+    source = replace_once(source, 'api.getNamedSecurityInfoW(path, 1, 20, ownerSlot',
+                          'api.getNamedSecurityInfoW(path, 1, 21, ownerSlot')
+    source = replace_once(source, '\t\toldAcl: decodePtr(daclSlot),',
+                          '\t\towner: decodePtr(ownerSlot),\n\t\toldAcl: decodePtr(daclSlot),')
+    anchor = 'function grantWrite(api, path, sidPtr, lowLabelSidPtr, worldSidPtr) {\n\twithPathLock(api, path, () => {\n\t\tconst { oldAcl, labelAcl, descriptor } = readCurrentSecurity(api, path);'
+    return replace_once(source, anchor, '''function foxEnsureOwnerLabelAccess(api, path) {
+\t// An owner can edit the DACL but does not implicitly have WRITE_OWNER,
+\t// which Windows requires to set the Low label on a Modify-only directory.
+\tconst handle = api.createFileW(path, 524288, 7, null, 3, 33554432, null);
+\tif (!isInvalidHandle(handle)) {
+\t\tif (api.closeHandle(handle) === 0) throwLastError$1(api, "CloseHandle", "owner label access");
+\t\treturn;
+\t}
+\tif (api.getLastError() !== 5) throwLastError$1(api, "CreateFileW", path);
+\tconst token = openCurrentProcessToken(api);
+\ttry {
+\t\tconst size = allocUint32();
+\t\tapi.getTokenInformation(token, 1, null, 0, size);
+\t\tconst user = Buffer.alloc(decodeUint32(size));
+\t\tif (api.getTokenInformation(token, 1, user, user.length, size) === 0) throwLastError$1(api, "GetTokenInformation", "TokenUser");
+\t\tconst security = readCurrentSecurity(api, path);
+\t\ttry {
+\t\t\tif (security.owner === null || !sameSidAt(security.owner, 0, decodePtrAt(user, 0), 0) || security.oldAcl === null) return;
+\t\t\tmergeAndApply(api, path, buildExplicitAccess(security.owner, 1, 524288, 0), security.oldAcl,
+\t\t\t\t{ kind: "keep" }, null, "owner label access");
+\t\t} finally {
+\t\t\tif (security.descriptor !== null) api.localFree(security.descriptor);
+\t\t}
+\t} finally {
+\t\tapi.closeHandle(token);
+\t}
+}
+function grantWrite(api, path, sidPtr, lowLabelSidPtr, worldSidPtr) {
+\twithPathLock(api, path, () => {
+\t\tfoxEnsureOwnerLabelAccess(api, path);
+\t\tconst { oldAcl, labelAcl, descriptor } = readCurrentSecurity(api, path);''')
 
 
 def patch_dsh_proxy(source):
     source = 'import { foxModelProxyTarget } from "./fox-model-proxy.mjs";\n' + source
     return replace_once(source, '\tif (isLoopbackHost(url.hostname)) return void 0;', '\tif (isLoopbackHost(url.hostname) && foxModelProxyTarget(url)) return proxy;\n\tif (isLoopbackHost(url.hostname)) return void 0;')
+
+
+def patch_dsh_cancel(source):
+    source = replace_once(source, '\tactivityDone = Promise.resolve();', '\tactivityDone = Promise.resolve();\n\tfoxUserCancelled = false;')
+    source = replace_once(source, '\tsend(message, target, wakeup) {', '''\tsend(message, target, wakeup) {
+\t\tif (this.foxUserCancelled) {
+\t\t\tif (message.source.kind !== "user") return;
+\t\t\tthis.foxUserCancelled = false;
+\t\t}''')
+    return replace_once(source, '\tcancel(cause, options = {}) {', '''\tcancel(cause, options = {}) {
+\t\tif (cause.kind === "user") {
+\t\t\t// Set the fence before killing jobs: their settlement can enqueue a followup.
+\t\t\tthis.foxUserCancelled = true;
+\t\t\tconst jobs = this.ctx.get("jobs");
+\t\t\tfor (const job of jobs?.list(this.id) ?? []) {
+\t\t\t\tif (job.owner !== this.id || (job.status !== "running" && job.status !== "stopping")) continue;
+\t\t\t\ttry {
+\t\t\t\t\tjobs.kill(job.id, this.id, "user cancelled the Fox turn");
+\t\t\t\t} catch (error) {
+\t\t\t\t\tthis.ctx.logger.warn(`Fox: failed to cancel job ${job.id}: ${String(error)}`);
+\t\t\t\t}
+\t\t\t}
+\t\t}''')
+
+
+def patch_dsh_job_notifications(source):
+    # Explicitly killed jobs must not ask the model to retry, even if they
+    # settle after the user has already started the next prompt.
+    return replace_once(source, 'event.awaited || event.cause === "teardown"', 'event.awaited || event.cause === "kill" || event.cause === "teardown"')
 
 
 def patch_pi_dispatcher(source):
@@ -133,8 +217,12 @@ def patch_pi_dispatcher(source):
 PATCHES = [
     {"id": "pi-acp-errors", "package": "backends/pi/node_modules/pi-acp", "version": "0.0.34", "file": "dist/index.js", "sha256": "324aeb8bba1228937e16b1326fb3e014e2a625b2dea549dbcd49b006cd5df6a2", "patch": patch_pi_acp_all, "helper": ("pi-turn-outcome.mjs", "dist/fox-turn-outcome.mjs")},
     {"id": "dsh-model-proxy", "package": "backends/dsh/node_modules/@deepseek-ai/dsh-http-proxy", "version": "0.2.1-rc.2", "file": "lib/index.js", "sha256": "5310861bc89788ea24be82a3b323e34cbd42b9e6214e2a179b2e6f92a8758cd5", "patch": patch_dsh_proxy, "helper": ("dsh-model-proxy.mjs", "lib/fox-model-proxy.mjs")},
+    {"id": "dsh-session-cancel", "package": "backends/dsh/node_modules/@deepseek-ai/dsh-agent-loop", "version": "0.2.1-rc.2", "file": "lib/index.js", "sha256": "cf57e3ecd487ac5c2553455aaa5cef2c6fb41e6bd61be5aa455675d1d7193033", "patch": patch_dsh_cancel},
+    {"id": "dsh-killed-job-notifications", "package": "backends/dsh/node_modules/@deepseek-ai/dsh-tool-jobs", "version": "0.2.1-rc.2", "file": "lib/index.js", "sha256": "de5707b43480ba37c8e141e6f67674978f3a46d87d58390c18eb1659bb17ec2f", "patch": patch_dsh_job_notifications},
     {"id": "pi-model-proxy", "package": "backends/pi/node_modules/@earendil-works/pi-coding-agent", "version": "1.4.0", "file": "dist/core/http-dispatcher.js", "sha256": "f9aa2c81b0a5958ffba6368506f24c9b202904c234ada19494cdc9c4a1d0e97b", "patch": patch_pi_dispatcher},
-    {"id": "pi-bundled-model-proxy", "package": "backends/pi/node_modules/@earendil-works/pi-coding-agent", "version": "1.4.0", "file": "dist/bundle/chunks/chunk-MM3LKT73.js", "sha256": "aa4c8b091657bda611f6fd58343561fa44cda1070ae4cd5dbd09ffe1d9a34aab", "patch": patch_pi_bundle_all},
+    {"id": "pi-bundled-model-proxy", "package": "backends/pi/node_modules/@earendil-works/pi-coding-agent", "version": "1.4.0", "file": "dist/bundle/chunks/chunk-MM3LKT73.js", "sha256": "aa4c8b091657bda611f6fd58343561fa44cda1070ae4cd5dbd09ffe1d9a34aab", "patch": patch_pi_bundle_all, "helper": ("pi-console-output.mjs", "dist/bundle/chunks/fox-console-output.mjs")},
+    {"id": "pi-shell-console", "package": "backends/pi/node_modules/@earendil-works/pi-coding-agent", "version": "1.4.0", "file": "dist/core/tools/bash.js", "sha256": "f32e87a42f66276b2eafaaf0848babf52523d37ab0fd448439586376747f03c4", "patch": patch_pi_shell_console, "helper": ("pi-console-output.mjs", "dist/core/tools/fox-console-output.mjs")},
+    {"id": "dsh-owner-label-access", "package": "backends/dsh/node_modules/@deepseek-ai/dsh-sandbox-windows-acl", "version": "0.2.1-rc.2", "file": "lib/types-Cl_DXjhk.js", "sha256": "0bb3a34508785bdc34626542f9358d398fd9f60fdaf4b48201dfdff2122f25fc", "patch": patch_dsh_owner_label},
 ]
 
 

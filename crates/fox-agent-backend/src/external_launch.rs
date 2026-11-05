@@ -182,8 +182,9 @@ impl HostLaunchConfig {
             }
             _ => fox_data.join("agent-runtime"),
         });
+        // 显式数据目录必须隔离来源选择，不能继承日常实例的 Pi 默认来源。
         let state_root = match os {
-            HostOs::Windows => std::env::var_os("LOCALAPPDATA")
+            HostOs::Windows if std::env::var_os("FOX_DATA_DIR").is_none() => std::env::var_os("LOCALAPPDATA")
                 .map(|base| PathBuf::from(base).join("Fox").join("state"))
                 .unwrap_or_else(|| fox_data.join("agent-state")),
             _ => fox_data.join("agent-state"),
@@ -294,6 +295,17 @@ impl HostLaunchConfig {
         self.launch_spec_with(backend, native, project_root)
     }
 
+    pub fn require_installed(&self, backend: AgentBackend) -> Result<PathBuf, LaunchFailure> {
+        self.managed_program(backend).ok_or_else(|| {
+            LaunchFailure::new(
+                "agent_backend_not_installed",
+                format!("外部后端「{}」未安装在 Fox 受管运行时 {}", backend.as_str(), self.runtime_root.display()),
+            )
+            .remedy("安装或修复 Fox 的外部后端运行时（随 Fox 安装包一并安装）；开发调试可用环境变量指定已安装的入口")
+            .detail(serde_json::json!({ "runtimeRoot": self.runtime_root, "overrideEnv": crate::launch::program_override_env(backend) }))
+        })
+    }
+
     /// [`Self::launch_spec`] in the Agent's own permission mode `native`
     /// ([`crate::native_permission`]):
     /// Codex starts in that codex-acp mode (`INITIAL_AGENT_MODE`), dsh with
@@ -303,14 +315,7 @@ impl HostLaunchConfig {
         if backend == AgentBackend::Fox {
             return Err(LaunchFailure::new("agent_backend_invalid", "Fox 不经外部运行时启动"));
         }
-        let program = self.managed_program(backend).ok_or_else(|| {
-            LaunchFailure::new(
-                "agent_backend_not_installed",
-                format!("外部后端「{}」未安装在 Fox 受管运行时 {}", backend.as_str(), self.runtime_root.display()),
-            )
-            .remedy("安装或修复 Fox 的外部后端运行时（随 Fox 安装包一并安装）；开发调试可用环境变量指定已安装的入口")
-            .detail(serde_json::json!({ "runtimeRoot": self.runtime_root, "overrideEnv": crate::launch::program_override_env(backend) }))
-        })?;
+        let program = self.require_installed(backend)?;
         let program_text = program.to_string_lossy().into_owned();
         let mut pi_launch = PiLaunch::Stock;
         let mut spec = match backend {
@@ -441,7 +446,8 @@ impl HostLaunchConfig {
     /// On Windows the per-user root earlier releases kept under
     /// `%ProgramData%\Fox\sandbox\<SID>` is reused when it already exists, so
     /// logins made there keep working; otherwise the per-user
-    /// `<fox data>/agent-homes` is used.
+    /// `<fox data>/agent-homes` is used. An explicit data directory always
+    /// uses its own homes and source state.
     pub fn private_dirs(&self, request: &LaunchRequest) -> Result<PrivateDirs, LaunchFailure> {
         // 没有项目时用保留 HOME，不把空串送进 home_for（空串会被拒绝）。
         let project_uuid = home_project_uuid(request.project_uuid.as_deref());
@@ -452,7 +458,7 @@ impl HostLaunchConfig {
 
     /// External backends' private roots (see [`Self::private_dirs`]).
     fn external_private_roots(&self) -> (PathBuf, PathBuf) {
-        if self.os == HostOs::Windows {
+        if self.os == HostOs::Windows && self.state_root != self.fox_data.join("agent-state") {
             if let Some(root) = crate::external_home::legacy_windows_private_root() {
                 return (root.join("homes"), root.join("tmp"));
             }
@@ -889,6 +895,45 @@ mod tests {
             pi_providers: vec![],
             extra_domains: BTreeMap::new(),
             env_passthrough: vec![],
+        }
+    }
+
+    #[test]
+    fn isolated_windows_state_does_not_reuse_legacy_private_homes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = config(root.path());
+        config.os = HostOs::Windows;
+        let (homes, tmp) = config.external_private_roots();
+        assert_eq!(homes, config.fox_data.join("agent-homes"));
+        assert_eq!(tmp, config.state_root.join("agent-tmp"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn explicit_data_directory_isolates_source_state_and_private_homes() {
+        const CHILD: &str = "FOX_TEST_ISOLATED_HOME_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["external_launch::tests::explicit_data_directory_isolates_source_state_and_private_homes", "--exact", "--nocapture"])
+                .env(CHILD, "1").env("FOX_DATA_DIR", root.path()).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let data = PathBuf::from(std::env::var_os("FOX_DATA_DIR").unwrap());
+        let config = HostLaunchConfig::from_env(&data);
+        assert_eq!(config.state_root, data.join("agent-state"));
+        assert_eq!(config.external_private_roots(), (data.join("agent-homes"), data.join("agent-state/agent-tmp")));
+    }
+
+    #[test]
+    fn installation_preflight_uses_the_same_check_as_the_launch() {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path());
+        for backend in [AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek] {
+            if crate::launch::program_override(backend).is_some() { continue; }
+            assert_eq!(config.require_installed(backend).unwrap_err().code, "agent_backend_not_installed");
+            assert_eq!(config.launch_spec(backend, root.path()).unwrap_err().code, "agent_backend_not_installed");
         }
     }
 

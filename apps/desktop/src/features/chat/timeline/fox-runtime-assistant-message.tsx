@@ -1,4 +1,4 @@
-import { hasRunFailureDiagnostic, runFailureDetailText, type RunFailure } from '../../conversations/model/run-failure'
+import type { RunFailure } from '../../conversations/model/run-failure'
 import { useProcessDisplayMode } from '../process-display-mode'
 import { runPhaseTiming, runPhaseTitle } from '../run-phase'
 import { activeModelWaiting, compactionFailurePresentation, modelWaitingTitle } from '../run-status-facts'
@@ -19,7 +19,7 @@ import { type ArtifactRecord, type ConversationMessage, type KnowledgeBindingRec
 import { notify as toast } from '@/features/notifications'
 import { memo, useContext, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { TimelineRuntimeContext, requestConversationFork } from '../fox-shared'
-import { type RuntimeSource, runtimeProcess } from './fox-runtime-process-model'
+import { type RuntimeSource, type ToolCallLike, runtimeProcess } from './fox-runtime-process-model'
 import { RuntimeProcess, useLiveNow } from './fox-runtime-process-view'
 import { RuntimeSources } from './fox-runtime-sources'
 import { splitAssistantContent } from './fox-assistant-content'
@@ -27,11 +27,13 @@ import { formatDateTime } from '@/lib/time-format'
 
 export type RuntimeGroupHelpers = typeof import('../runtime-process-groups')
 
-function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleRunMessage, kernelMessages, running, runInProgress = false, hasInterleavedInput = false, artifacts, assistantName, modelName, knowledgeBindings, attachmentNames, onOpenSource, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer, onFork, failureReason, cancelled, queuedAt, hideFooter = false, onRetry }: { message: ConversationMessage; processEvents: RunEventRecord[]; groupHelpers: RuntimeGroupHelpers | null; singleRunMessage: boolean; kernelMessages?: ConversationMessage[]; running: boolean; runInProgress?: boolean; hasInterleavedInput?: boolean; artifacts: ArtifactRecord[]; assistantName: string; modelName?: string; knowledgeBindings?: KnowledgeBindingRecord[]; attachmentNames?: ReadonlyMap<string, string>; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void; onFork?: (messageId: string) => void; failureReason?: RunFailure; cancelled?: boolean; /** When the prompt that started this run was written, so queue wait is real. */ queuedAt?: number | null; hideFooter?: boolean; onRetry?: () => void }) {
+function RuntimeAssistantMessage({ message, processEvents, toolCalls, groupHelpers, singleRunMessage, kernelMessages, running, runInProgress = false, hasInterleavedInput = false, artifacts, assistantName, modelName, knowledgeBindings, attachmentNames, onOpenSource, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer, onFork, failureReason, cancelled, queuedAt, hideFooter = false, onRetry }: { message: ConversationMessage; processEvents: RunEventRecord[]; toolCalls?: readonly ToolCallLike[]; groupHelpers: RuntimeGroupHelpers | null; singleRunMessage: boolean; kernelMessages?: ConversationMessage[]; running: boolean; runInProgress?: boolean; hasInterleavedInput?: boolean; artifacts: ArtifactRecord[]; assistantName: string; modelName?: string; knowledgeBindings?: KnowledgeBindingRecord[]; attachmentNames?: ReadonlyMap<string, string>; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void; onFork?: (messageId: string) => void; failureReason?: RunFailure; cancelled?: boolean; /** When the prompt that started this run was written, so queue wait is real. */ queuedAt?: number | null; hideFooter?: boolean; onRetry?: () => void }) {
   const { authoritativeRunId, authoritativeRunState } = useContext(TimelineRuntimeContext)
   const processDisplayMode = useProcessDisplayMode()
   const parsed = useMemo(() => splitAssistantContent(message.content ?? ''), [message.content])
-  const process = useMemo(() => runtimeProcess(processEvents), [processEvents])
+  const terminal = processEvents.find(item => item.eventType === 'run.cancelled' || item.eventType === 'run.failed' || item.eventType === 'run.interrupted')
+  const runOutcome = terminal ? terminal.eventType === 'run.cancelled' ? 'cancelled' : 'interrupted' : undefined
+  const process = useMemo(() => runtimeProcess(processEvents, toolCalls, runOutcome), [processEvents, toolCalls, runOutcome])
   // Stage of the whole Run, not of one projected group: the group that is still
   // live can be a later slice that no longer contains `run.started`.
   const liveNow = useLiveNow(running)
@@ -166,6 +168,7 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
                 content: group.kind === 'process' ? <div hidden={turnProcessCollapsed} className="fox-process-stage">
                   <RuntimeProcess
                     events={group.events} grouped groupHelpers={groupHelpers} displayMode={processDisplayMode} runInProgress={runInProgress} running={runActive && index === orderedGroups.length - 1}
+                    toolCalls={toolCalls} runOutcome={runOutcome}
                     outcome={index === lastProcessIndex ? failureReason ? 'failed' : cancelled ? 'cancelled' : undefined : undefined}
                     attachmentNames={attachmentNames}
                     phaseTitle={phaseTitle}
@@ -181,7 +184,7 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
             {presentation.label}
           </div>)}
           {!running && <RuntimeArtifacts artifacts={artifacts} onOpenArtifact={onOpenArtifact} />}
-          {failureReason && !hideFooter && <ErrorPrompt error={failureReason.message} diagnostic={hasRunFailureDiagnostic(failureReason) ? runFailureDetailText(failureReason) : undefined} onRetry={onRetry} />}
+          {failureReason && !hideFooter && <ErrorPrompt failure={failureReason} onRetry={onRetry} />}
           {cancelled && <StoppedRun reason="运行已取消，已生成内容保留" />}
           <RuntimeSources sources={process.sources} knowledgeBindings={knowledgeBindings} onOpenSource={onOpenSource} />
         </MessageContent>
@@ -206,6 +209,7 @@ export const MemoizedRuntimeAssistantMessage = memo(RuntimeAssistantMessage, (pr
   && previous.message.createdAt === next.message.createdAt
   && previous.message.updatedAt === next.message.updatedAt
   && previous.processEvents === next.processEvents
+  && previous.toolCalls === next.toolCalls
   && previous.groupHelpers === next.groupHelpers
   && previous.singleRunMessage === next.singleRunMessage
   && previous.kernelMessages === next.kernelMessages

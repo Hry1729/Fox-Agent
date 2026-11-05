@@ -724,7 +724,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
             {steeringView.retainedNotice}
           </p>
         )}
-        {runtimeControlled && <ManagedFilesPanel conversationId={steeringConversationId} />}
+        {runtimeControlled && <ManagedFilesPanel conversationId={steeringConversationId} refreshKey={chatState} />}
         <PromptInput
           accept={supportsImageInput ? 'image/*,.pdf,.txt,.md,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.tsv' : '.pdf,.txt,.md,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.tsv'}
           multiple

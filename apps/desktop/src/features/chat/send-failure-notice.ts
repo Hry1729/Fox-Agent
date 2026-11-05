@@ -163,7 +163,9 @@ export function userFacingError(text: string | null | undefined, developerUi: bo
   const value = text?.trim() ?? ''
   if (!value) return fallback
   if (developerUi) return value
-  return isInternalRawText(value) ? fallback : value
+  // The known recovery message is user-facing; its technical filename stays in developer mode.
+  const displayText = value.replace('向量模型文件缺失（model.onnx）', '向量模型文件缺失')
+  return isInternalRawText(displayText) ? fallback : displayText
 }
 
 /** 捕获到的异常转成界面文字：开发者模式原文，普通模式遇到调试信息改用 fallback。 */

@@ -2,10 +2,16 @@
   "revision": 1,
   "files": {
     "backends/pi/node_modules/pi-acp/dist/index.js": "7f921a0918a96365edfaffddb39d83e371891479a9ee64b245180f5a39b970e1",
-    "backends/pi/node_modules/pi-acp/dist/fox-turn-outcome.mjs": "a114e4f99ed0be6567ff1845cb6c3f412ac4491a0fab6cfc8241ec5f27a99f18",
+    "backends/pi/node_modules/pi-acp/dist/fox-turn-outcome.mjs": "2a542b8f29a6d86471194431af8f6b498c09da172f7f787cd39f5b09f336711c",
     "backends/dsh/node_modules/@deepseek-ai/dsh-http-proxy/lib/index.js": "a67c7f6b64989efbe5838276085593ce8743fb408148025bd24076cc9fd386e3",
     "backends/dsh/node_modules/@deepseek-ai/dsh-http-proxy/lib/fox-model-proxy.mjs": "c4de3d75afb063066250e61b4d247eeb32f40fe419d1d7632fffd4f8aa884dc0",
     "backends/pi/node_modules/@earendil-works/pi-coding-agent/dist/core/http-dispatcher.js": "0d4de7e398ae61237fa73cff9ad687c380524819a6c3cb9bd6710cf05dbdd352",
-    "backends/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-MM3LKT73.js": "ca845072d29bfdf1f473b7129e728abde91cd55052e5921d5a42259a42a857d5"
+    "backends/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-MM3LKT73.js": "4798dae56cddc6104b3d6424f377db9b2a66b44e65af1fa9f04887168d405dd5",
+    "backends/dsh/node_modules/@deepseek-ai/dsh-agent-loop/lib/index.js": "2673b0e37288f5b26be3b81991655e7ea4ce188c02153461249ce5e90ab0adb8",
+    "backends/dsh/node_modules/@deepseek-ai/dsh-tool-jobs/lib/index.js": "f9c110bfde452c82b1c9b7d97e8ff2ea96a1ee8cb242c974cc203d56c23fe0fb",
+    "backends/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/fox-console-output.mjs": "87ceb56000a8c42b76b7afd79f3680253c37427a401b61488f5a46f58e309e2c",
+    "backends/pi/node_modules/@earendil-works/pi-coding-agent/dist/core/tools/bash.js": "d0ee22d5e0c55908ac1b1b7711d8935325ac73476c8f638ea34857f50ced5516",
+    "backends/pi/node_modules/@earendil-works/pi-coding-agent/dist/core/tools/fox-console-output.mjs": "87ceb56000a8c42b76b7afd79f3680253c37427a401b61488f5a46f58e309e2c",
+    "backends/dsh/node_modules/@deepseek-ai/dsh-sandbox-windows-acl/lib/types-Cl_DXjhk.js": "bc4257102d0f4adc4a1dc62c179e8780f1404fc33e8a7e6510b476dfa9a43388"
   }
 }

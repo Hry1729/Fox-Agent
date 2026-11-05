@@ -280,8 +280,6 @@ describe('error detail rendering of long stderr tails', () => {
     expect(src('src/features/chat/demo/fox-demo-prompts.tsx')).toMatch(/<ErrorState [^>]*diagnostic=\{diagnostic \|\| presentation\.detail\}/)
     // 13.38（R1-3 / B4-2）：诊断（含错误码与英文原文）只在开发者模式给出。
     expect(src('src/features/chat/thread/parts/fox-error.tsx')).toMatch(/<ErrorState [^>]*diagnostic=\{developerUi \? runFailureDetailText\(failure\) : undefined\}/)
-    expect(src('src/features/chat/thread/fox-assistant-message.tsx')).toMatch(/<ErrorPrompt [^>]*diagnostic=\{hasRunFailureDiagnostic\(foxMessage\.failure\) \? runFailureDetailText/)
-    expect(src('src/features/chat/timeline/fox-runtime-assistant-message.tsx')).toMatch(/<ErrorPrompt [^>]*diagnostic=\{hasRunFailureDiagnostic\(failureReason\) \? runFailureDetailText/)
   })
 })
 
@@ -373,6 +371,20 @@ describe('13.38 R1-3 / B4-2: no English internal text in normal mode', () => {
     expect(userFacingError('模型服务连接中断，可重试。', false, '兜底')).toBe('模型服务连接中断，可重试。')
     expect(userFacingError('请检查 Codex 登录', false, '兜底')).toBe('请检查 Codex 登录')
     expect(isInternalRawText('OK')).toBe(false)
+  })
+
+  test('missing vector model notices retain the reason and remedy in normal mode', () => {
+    const raw = '向量模型文件缺失（model.onnx）。请到「设置 → 资料库」重新下载或导入模型，再重试检索。'
+    expect(userFacingError(raw, false, '兜底')).toBe('向量模型文件缺失。请到「设置 → 资料库」重新下载或导入模型，再重试检索。')
+    expect(userFacingError(raw, true, '兜底')).toBe(raw)
+    expect(userFacingError(`${raw} C:\\private\\model.onnx`, false, '兜底')).toBe('兜底')
+    expect(userFacingError('model.onnx load failed', false, '兜底')).toBe('兜底')
+  })
+
+  test('Pi connection interruptions retain the Host remedy and developer code', () => {
+    const failure = { kind: 'failed' as const, code: 'agent_backend_model_connection_interrupted', message: '模型服务连接中断，请检查网络或服务状态后重试。' }
+    expect(runFailureUserMessage(failure)).toBe(failure.message)
+    expect(runFailureDetailText(failure)).toBe(`${failure.code}: ${failure.message}`)
   })
 
   test('the thread error card passes the mapped message in normal mode', () => {

@@ -8,6 +8,27 @@ import { foxModelProxyTarget } from './dsh-model-proxy.mjs';
 const failed = { role: 'assistant', content: [], stopReason: 'error', errorMessage: '403 Connection blocked by network allowlist key=secret' };
 const success = { role: 'assistant', content: [{ type: 'text', text: 'ok' }], stopReason: 'stop' };
 
+test('Pi terminated response streams keep their connection-interrupted category through settlement', () => {
+  const assistant = { role: 'assistant', content: [{ type: 'text', text: '连接中断测试' }], stopReason: 'error', errorMessage: 'terminated' };
+  const outcome = new FoxTurnOutcome();
+  for (const event of [
+    { type: 'message_end', message: assistant },
+    { type: 'auto_retry_end', success: false, finalError: 'terminated' },
+    { type: 'agent_end', messages: [assistant] },
+  ]) {
+    outcome.observe(event);
+    assert.equal(outcome.failure.failureKind, 'connection_interrupted');
+    assert.equal(outcome.failure.message, '模型服务连接中断，请检查网络或服务状态后重试。');
+  }
+  for (const errorMessage of ['TypeError: terminated', 'ECONNRESET', 'UND_ERR_SOCKET', 'socket hang up']) {
+    assert.equal(modelFailure({ errorMessage }).failureKind, 'connection_interrupted');
+  }
+  assert.equal(modelFailure({ errorMessage: 'tool process terminated with exit code 1' }).failureKind, 'model_error');
+  assert.equal(modelFailure({ errorMessage: 'ECONNREFUSED' }).failureKind, 'network_unreachable');
+  outcome.observe({ type: 'message_end', message: success });
+  assert.equal(outcome.failure, null);
+});
+
 test('model error survives partial output and tool completion', () => {
   const outcome = new FoxTurnOutcome();
   outcome.observe({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'partial' } });
@@ -99,9 +120,78 @@ test('pinned patched PiAcpSession emits legal prompt failures and preserves canc
   assert.equal(error.error.data.failureKind, 'network_allowlist');
   assert.equal(error.value, undefined);
   assert.equal((await settle([{ type: 'message_end', message: failed }], true)).value, 'cancelled');
+  const disconnected = { ...failed, errorMessage: 'terminated' };
+  assert.equal((await settle([{ type: 'message_end', message: disconnected }])).error.data.failureKind, 'connection_interrupted');
+  assert.equal((await settle([{ type: 'message_end', message: disconnected }], true)).value, 'cancelled');
   assert.equal((await settle([{ type: 'message_end', message: failed }, { type: 'message_end', message: success }])).value, 'end_turn');
   const partial = await settle([{ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'partial' } }, { type: 'turn_end', message: failed }]);
   assert.equal(partial.error.data.failureKind, 'network_allowlist');
   assert.equal(partial.updates.filter(update => update.sessionUpdate === 'agent_message_chunk').length, 1);
   assert.equal((await settle([{ type: 'tool_execution_end', toolCallId: '', isError: false }])).value, 'end_turn');
+});
+
+const dshLoopPath = process.env.FOX_PATCHED_DSH_LOOP;
+test('patched dsh cancels owned jobs and blocks notices until the next user prompt', { skip: !dshLoopPath && 'set FOX_PATCHED_DSH_LOOP to the staged patched bundle' }, () => {
+  const source = readFileSync(dshLoopPath, 'utf8');
+  const start = source.indexOf('var ReactLoopAgent = class {');
+  const end = source.indexOf('\n};', start) + 3;
+  assert.ok(start > 0 && end > start);
+  const context = {};
+  runInNewContext(source.slice(start, end) + '\nthis.Agent = ReactLoopAgent;', context);
+  const agent = Object.create(context.Agent.prototype);
+  const queued = [], killed = [];
+  const notice = { source: { kind: 'tool-jobs' } };
+  const jobs = {
+    list: () => [
+      { id: 'running', owner: 'session', status: 'running' },
+      { id: 'stopping', owner: 'session', status: 'stopping' },
+      { id: 'completed', owner: 'session', status: 'completed' },
+      { id: 'foreign', owner: 'another', status: 'running' },
+    ],
+    kill(id, owner) { killed.push([id, owner]); agent.followup(notice); },
+  };
+  const abort = new AbortController();
+  Object.assign(agent, {
+    id: 'session', ctx: { get: () => jobs, logger: { warn: assert.fail } },
+    phase: { kind: 'running', abort, wakeRequested: true },
+    inbox: { clear() { queued.length = 0; }, splice(_target, _start, _remove, messages) { queued.push(...messages); } },
+    wakeDriver() { this.wakes = (this.wakes ?? 0) + 1; },
+  });
+  agent.cancel({ kind: 'user' });
+  assert.equal(abort.signal.aborted, true);
+  assert.deepEqual(killed, [['running', 'session'], ['stopping', 'session']]);
+  assert.equal(agent.wakes, undefined, 'job settlement during cancellation must not wake the loop');
+  agent.phase = { kind: 'idle' };
+  agent.followup(notice);
+  agent.inject(notice);
+  assert.equal(queued.length, 0);
+  assert.equal(agent.wakes, undefined);
+  const user = { source: { kind: 'user' } };
+  agent.followup(user);
+  assert.equal(agent.wakes, 1);
+  assert.deepEqual(queued, [user]);
+  agent.followup(notice);
+  assert.equal(agent.wakes, 2, 'normal background completion remains available after explicit resume');
+});
+
+const dshJobsPath = process.env.FOX_PATCHED_DSH_JOBS;
+test('patched dsh job delivery never wakes or injects explicitly killed work', { skip: !dshJobsPath && 'set FOX_PATCHED_DSH_JOBS to the staged patched bundle' }, () => {
+  const source = readFileSync(dshJobsPath, 'utf8');
+  const start = source.indexOf('ctx.jobs.events.subscribe({ owners: "scope" }');
+  const end = source.indexOf('\n\t});', start) + 5;
+  assert.ok(start > 0 && end > start);
+  let settle;
+  const messages = [];
+  const owner = { status: 'idle', followup: message => messages.push(message), inject: message => messages.push(message) };
+  const context = {
+    ctx: { jobs: { events: { subscribe(_filter, listener) { settle = listener; } } }, get: () => ({ get: () => owner }) },
+    killedByModel: new Set(), delivery: 'wakeup', wakeBudget: undefined, spentWakes: new WeakMap(),
+    createUserMessage: value => value, fitCompletionNotice: () => 'job finished', completionSummary: () => 'job',
+  };
+  runInNewContext(source.slice(start, end), context);
+  const event = { type: 'settled', job: { id: 'job', owner: 'session' }, awaited: false };
+  settle({ ...event, cause: 'kill' });
+  assert.equal(messages.length, 0, 'also suppressed after the next prompt has resumed');
+  settle({ ...event, cause: 'producer' });
+  assert.equal(messages.length, 1, 'ordinary completion still wakes the owner');
 });

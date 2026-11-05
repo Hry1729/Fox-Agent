@@ -146,8 +146,11 @@ export function decodeHostToolResponse(tool, response) {
     if (!error.code && typeof detailCode === 'string' && detailCode) error.code = detailCode
     throw error
   }
-  if (payload.result && typeof payload.result === "object" && payload.toolResultStorage) hostStorage.set(payload.result, payload.toolResultStorage)
-  return payload.result
+  const result = payload.result?.truncated === true && payload.resultRef
+    ? { ...payload.result, resultRef: payload.resultRef, resultRefRetrievable: payload.resultRefRetrievable }
+    : payload.result
+  if (result && typeof result === "object" && payload.toolResultStorage) hostStorage.set(result, payload.toolResultStorage)
+  return result
 }
 
 const COMPUTE_PARAMETERS = Type.Object({

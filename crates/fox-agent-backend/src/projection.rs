@@ -152,6 +152,7 @@ pub struct AcpProjector {
     /// Backend status lines taken out of the answer ([`backend_notice_kind`]).
     notices: Vec<Value>,
     delivered: bool,
+    cancel_requested: bool,
 }
 
 /// Kind of a backend status line that is not part of the answer, or `None`.
@@ -394,6 +395,15 @@ impl AcpProjector {
             progress.exit_code = Some(code.clone());
         }
         match status {
+            Some("failed") if self.cancel_requested => {
+                // ACP uses failed for aborted tools. Keep the card open for
+                // the Run's cancellation settlement, with its last output.
+                let mut result = tool_result(update);
+                result["status"] = json!("cancelled");
+                progress.decorate(&mut result);
+                progress.pending = None;
+                out.push(json!({ "type": "tool.updated", "toolCallId": id, "update": result }));
+            }
             Some("completed" | "failed") => {
                 if status == Some("completed") { self.delivered = true; }
                 let mut result = tool_result(update);
@@ -442,6 +452,11 @@ impl AcpProjector {
             }
         }
         out
+    }
+
+    pub fn request_cancel(&mut self) -> Vec<Value> {
+        self.cancel_requested = true;
+        self.flush_pending()
     }
 
     /// Project one ACP `SessionUpdate` (the JSON of `session/update`'s
@@ -788,6 +803,26 @@ mod tests {
         json!({ "sessionUpdate": "tool_call_update", "toolCallId": id,
             "content": [{ "type": "terminal", "terminalId": "term-1" }],
             "_meta": { key: { "terminal_id": "term-1", "data": data } } })
+    }
+
+    #[test]
+    fn cancel_failure_keeps_output_for_run_settlement_without_relabelling_prior_failures() {
+        let mut projector = AcpProjector::new();
+        for id in ["aborted", "failed", "success"] {
+            projector.project(&json!({ "sessionUpdate": "tool_call", "toolCallId": id, "kind": "execute", "status": "in_progress" }));
+        }
+        let failed = projector.project(&json!({ "sessionUpdate": "tool_call_update", "toolCallId": "failed", "status": "failed" }));
+        assert_eq!(failed[0]["isError"], true);
+        projector.project(&output_update("aborted", "terminal_output", "来自 127.0.0.1 的回复\n"));
+        let flushed = projector.request_cancel();
+        assert_eq!(flushed[0]["update"]["output"], "来自 127.0.0.1 的回复\n");
+        let aborted = projector.project(&json!({ "sessionUpdate": "tool_call_update", "toolCallId": "aborted", "status": "failed" }));
+        assert_eq!(types(&aborted), ["tool.updated"]);
+        assert_eq!(aborted[0]["update"]["status"], "cancelled");
+        assert_eq!(aborted[0]["update"]["output"], "来自 127.0.0.1 的回复\n");
+        let success = projector.project(&json!({ "sessionUpdate": "tool_call_update", "toolCallId": "success", "status": "completed" }));
+        assert_eq!(success[0]["isError"], false);
+        assert_eq!(projector.running_tools(), ["aborted"]);
     }
 
     #[test]

@@ -669,6 +669,25 @@ impl Backup<'_> {
     }
 }
 
+pub(crate) fn archive_pi_source(home: &Path) -> Result<(), String> {
+    let stamp = backup_stamp(std::time::SystemTime::now());
+    let mut backup = Backup { home, stamp: &stamp, directory: None, items: Vec::new() };
+    for relative in [PI_AUTH, PI_MODELS, PI_SETTINGS] {
+        let source = rel(home, relative);
+        match std::fs::symlink_metadata(&source) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("无法读取 Pi 配置 {relative}：{error}")),
+            Ok(meta) if is_link(&source) || !meta.is_file() => return Err(format!("Pi 配置 {relative} 不是普通文件，未切换来源")),
+            Ok(_) => backup.save(relative)?,
+        }
+    }
+    // 所有副本备份成功后才腾出原路径，真实 HOME 中的配置始终保留。
+    for relative in &backup.items {
+        std::fs::remove_file(rel(home, relative)).map_err(|error| format!("无法切换 Pi 配置 {relative}：{error}"))?;
+    }
+    Ok(())
+}
+
 /// Copy the items with ids in `selected` (re-checked against
 /// [`import_candidates`]; anything else is skipped) into every target's
 /// private HOME. A copy, never a link; regular files only.

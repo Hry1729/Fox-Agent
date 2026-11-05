@@ -4043,15 +4043,21 @@ fn managed_version_dto(
 /// List the append-only managed file versions of a conversation, newest last,
 /// optionally restricted to one storage path. Drift is computed Host-side
 /// against the bytes currently on disk.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedFileVersionsRequest {
+    pub conversation_id: String,
+    pub storage_path: Option<String>,
+}
+
 #[tauri::command]
 pub fn managed_file_versions_list(
     state: State<'_, AppState>,
-    conversation_id: String,
-    storage_path: Option<String>,
+    request: ManagedFileVersionsRequest,
 ) -> ApiResponse<Vec<ManagedFileVersionDto>> {
     match state
         .database
-        .managed_file_versions(&conversation_id, storage_path.as_deref())
+        .managed_file_versions(&request.conversation_id, request.storage_path.as_deref())
     {
         Ok(rows) => {
             // Rows are ordered storage_path, version_no; the last row seen for

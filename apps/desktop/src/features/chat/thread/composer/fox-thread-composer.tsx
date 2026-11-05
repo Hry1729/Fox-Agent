@@ -379,7 +379,7 @@ export function FoxThreadComposer({ runtimeControlled, runtimeInitializing = fal
         pushedTextRef.current = next
         void aui.composer.setText(next)
       }} />}
-      {runtimeControlled && <ManagedFilesPanel conversationId={steeringConversationId} />}
+      {runtimeControlled && <ManagedFilesPanel conversationId={steeringConversationId} refreshKey={isRunning} />}
       {commandOpen && <Command loop className={`fox-slash-menu ${commandView === 'knowledge' ? 'is-knowledge' : ''}`}>
         <CommandList>
           {commandView === 'commands' ? <>

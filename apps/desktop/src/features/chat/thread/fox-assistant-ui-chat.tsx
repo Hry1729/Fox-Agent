@@ -1,7 +1,7 @@
 import { AssistantRuntimeProvider } from '@assistant-ui/react'
 import type { ArtifactRecord, ConversationMessage } from '../../conversations/model/types'
 import { useDesktopConversation } from '../../conversations/hooks/use-desktop-conversation'
-import { withSettledToolCalls, type RuntimeSource } from '../timeline/fox-runtime-process-model'
+import { type RuntimeSource } from '../timeline/fox-runtime-process-model'
 import type { GoalProgressData } from '../hooks/use-goal-progress'
 import { TimelineRuntimeContext } from '../fox-shared'
 import { useContext, useEffect, useMemo, useState } from 'react'
@@ -56,10 +56,8 @@ export default function AssistantUiChat({ statusBar, approvalSlot, conversation,
       if (bucket) bucket.push(event)
       else grouped.set(event.runId, [event])
     }
-    // 13.38（A-2）：已取消 / 已中断的工具卡（含取消前已产生的输出）以数据库为准补进这一轮。
-    if (toolCalls?.length) for (const [runId, bucket] of grouped) grouped.set(runId, withSettledToolCalls(bucket, toolCalls))
     return grouped
-  }, [events, toolCalls])
+  }, [events])
   const attachments = useMemo(() => detail?.attachments ?? [], [detail])
   const attachmentNames = useMemo(() => new Map(attachments.map((attachment) => [attachment.id, attachment.displayName])), [attachments])
   const attachmentsByMessage = useMemo(() => {
@@ -85,6 +83,7 @@ export default function AssistantUiChat({ statusBar, approvalSlot, conversation,
   const fox = useMemo(() => ({
     events,
     eventsByRun,
+    toolCalls,
     attachmentNames,
     attachmentsByMessage,
     knowledgeBindings: timelineContext.knowledgeBindings,
@@ -93,7 +92,7 @@ export default function AssistantUiChat({ statusBar, approvalSlot, conversation,
     onOpenArtifact,
     onOpenFileInSidebar,
     onRevealFileInExplorer,
-  }), [events, eventsByRun, attachmentNames, attachmentsByMessage, timelineContext.knowledgeBindings, timelineContext.onOpenSource, groupHelpers, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer])
+  }), [events, eventsByRun, toolCalls, attachmentNames, attachmentsByMessage, timelineContext.knowledgeBindings, timelineContext.onOpenSource, groupHelpers, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer])
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <FoxThread statusBar={statusBar} approvalSlot={approvalSlot} fox={fox} suggestions={suggestions} onStart={onStart} planRevision={planRevision} turnRailMessages={detail?.messages} turnRailArtifacts={detail?.artifacts} />

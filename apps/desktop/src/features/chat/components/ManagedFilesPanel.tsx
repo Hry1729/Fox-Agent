@@ -60,7 +60,7 @@ interface FileGroup {
   versions: ManagedFileVersion[] // newest version_no first
 }
 
-export function ManagedFilesPanel({ conversationId }: { conversationId?: string }) {
+export function ManagedFilesPanel({ conversationId, refreshKey }: { conversationId?: string; refreshKey?: string | boolean }) {
   const [rows, setRows] = useState<ManagedFileVersion[]>([])
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -99,8 +99,11 @@ export function ManagedFilesPanel({ conversationId }: { conversationId?: string 
     setRows([])
     setError(null)
     setForceHint({})
+  }, [conversationId])
+
+  useEffect(() => {
     void load()
-  }, [conversationId, load])
+  }, [conversationId, refreshKey, load])
 
   const groups = useMemo<FileGroup[]>(() => {
     const map = new Map<string, FileGroup>()
@@ -190,7 +193,7 @@ export function ManagedFilesPanel({ conversationId }: { conversationId?: string 
     [busyId, load],
   )
 
-  if (!desktopRuntimeAvailable || !conversationId || rows.length === 0) return null
+  if (!desktopRuntimeAvailable || !conversationId || (rows.length === 0 && !error)) return null
 
   return (
     <div className="fox-managed-panel">

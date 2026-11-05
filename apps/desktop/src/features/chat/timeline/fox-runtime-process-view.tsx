@@ -17,7 +17,7 @@ import { AlertTriangle, Bot, Brain, Check, ChevronRight, CircleHelp, Database, F
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { MarkdownResponse } from '../fox-shared'
 import { type RuntimeGroupHelpers } from './fox-runtime-assistant-message'
-import { type RuntimeToolStep, runtimeProcess, stepSlotsText, toolActivity, toolIcon, toolPartialOutputText, toolRowSlots } from './fox-runtime-process-model'
+import { type RuntimeToolStep, type ToolCallLike, runtimeProcess, stepSlotsText, toolActivity, toolIcon, toolPartialOutputText, toolRowSlots } from './fox-runtime-process-model'
 
 function RuntimeReasoningItem({ detail, running = false, preview = true }: { detail: string; running?: boolean; preview?: boolean }) {
   const summary = preview ? reasoningSummary(detail) : ''
@@ -84,11 +84,11 @@ function RuntimeToolItem({ tool, active, attemptState, attachmentNames, onOpenFi
   // 已经产生的输出放进结果里，展开可看。
   const frozen = !tool.completed && Boolean(tool.settled)
   const slots = toolRowSlots(frozen ? { ...tool, completed: true } : tool, attachmentNames)
-  const partialText = frozen || (!tool.completed && active) ? toolPartialOutputText(tool.partialOutput) : ''
+  const partialText = frozen || tool.isError || (!tool.completed && active) ? toolPartialOutputText(tool.partialOutput) : ''
   const settledLabel = frozen ? tool.settled === 'cancelled' ? '已取消' : '已中断' : ''
   const outputView = tool.completed
     ? (failure
-      ? { 说明: failure.summary, ...(failure.hint ? { 处理建议: failure.hint } : {}), ...(failure.target ? { 对象: failure.target } : {}), ...(failureRaw ? { 原文: failureRaw } : {}) }
+      ? { 说明: failure.summary, ...(partialText ? { 已产生的输出: partialText } : {}), ...(failure.hint ? { 处理建议: failure.hint } : {}), ...(failure.target ? { 对象: failure.target } : {}), ...(failureRaw ? { 原文: failureRaw } : {}) }
       : tool.output)
     : partialText
       ? (frozen ? `${partialText}${partialText.endsWith('\n') ? '' : '\n'}[${settledLabel}，以上是${settledLabel === '已取消' ? '取消' : '中断'}前已经产生的输出]` : partialText)
@@ -273,12 +273,12 @@ export function useLiveNow(active: boolean) {
   return now
 }
 
-export function RuntimeProcess({ events, process: preparedProcess, groupHelpers, displayMode = 'standard', runInProgress = false, running: runtimeRunning, answerStarted = false, leading, grouped = false, outcome, attachmentNames, onOpenFileInSidebar, onRevealFileInExplorer, phaseTitle }: { events: RunEventRecord[]; process?: ReturnType<typeof runtimeProcess>; groupHelpers?: RuntimeGroupHelpers | null; displayMode?: ProcessDisplayMode; runInProgress?: boolean; running: boolean; answerStarted?: boolean; leading?: ReactNode; grouped?: boolean; outcome?: 'failed' | 'cancelled'; attachmentNames?: ReadonlyMap<string, string>; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void; /** Stage label for the whole Run, computed where its full event list is known. */ phaseTitle?: string }) {
+export function RuntimeProcess({ events, toolCalls, runOutcome, process: preparedProcess, groupHelpers, displayMode = 'standard', runInProgress = false, running: runtimeRunning, answerStarted = false, leading, grouped = false, outcome, attachmentNames, onOpenFileInSidebar, onRevealFileInExplorer, phaseTitle }: { events: RunEventRecord[]; toolCalls?: readonly ToolCallLike[]; runOutcome?: 'cancelled' | 'interrupted'; process?: ReturnType<typeof runtimeProcess>; groupHelpers?: RuntimeGroupHelpers | null; displayMode?: ProcessDisplayMode; runInProgress?: boolean; running: boolean; answerStarted?: boolean; leading?: ReactNode; grouped?: boolean; outcome?: 'failed' | 'cancelled'; attachmentNames?: ReadonlyMap<string, string>; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void; /** Stage label for the whole Run, computed where its full event list is known. */ phaseTitle?: string }) {
   // 13.38（A-2）：取消的这一轮默认展开，工具卡直接可见；用户自己收起 / 展开后以用户为准。
   const [openChoice, setOpen] = useState<boolean | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
-  const process = useMemo(() => preparedProcess ?? runtimeProcess(events), [events, preparedProcess])
+  const process = useMemo(() => preparedProcess ?? runtimeProcess(events, toolCalls, runOutcome), [events, preparedProcess, toolCalls, runOutcome])
   const activity = useMemo(() => runtimeProcessActivity(events, runtimeRunning, answerStarted), [events, runtimeRunning, answerStarted])
   const { running, terminalEvent } = activity
   const hasLifecycle = running || Boolean(terminalEvent) || events.some((item) => (

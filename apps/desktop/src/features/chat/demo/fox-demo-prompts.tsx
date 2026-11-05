@@ -1,5 +1,6 @@
 import { FOX_ASSISTANT_AVATAR, RunStatusText } from '../components/FoxAssistantAvatar'
 import { ErrorState } from '@/components/assistant-ui/elements/error-state'
+import { runFailureDetailText, runFailureUserMessage, type RunFailure } from '@/features/conversations/model/run-failure'
 import { expertErrorPresentation } from '../components/expert-binding-ui'
 import { ChainOfThought, ChainOfThoughtContent, ChainOfThoughtHeader, ChainOfThoughtSearchResult, ChainOfThoughtSearchResults, ChainOfThoughtStep } from '@/components/ai-elements/chain-of-thought'
 import { Confirmation, ConfirmationAction, ConfirmationActions, ConfirmationRejected, ConfirmationRequest, ConfirmationTitle } from '@/components/ai-elements/confirmation'
@@ -107,7 +108,12 @@ export function DeniedPrompt() {
   )
 }
 
-function errorPresentation(error?: string | null, details?: DesktopErrorDetails | null) {
+function errorPresentation(error?: string | null, details?: DesktopErrorDetails | null, failure?: RunFailure) {
+  if (failure) return {
+    title: failure.kind === 'interrupted' ? '运行中断' : '运行失败',
+    description: runFailureUserMessage(failure),
+    detail: runFailureDetailText(failure),
+  }
   const detail = error?.trim() ?? ''
   const expertError = expertErrorPresentation(details ?? error)
   if (expertError) {
@@ -140,8 +146,8 @@ function errorPresentation(error?: string | null, details?: DesktopErrorDetails 
   }
 }
 
-export function ErrorPrompt({ onRetry, error, errorDetails, diagnostic }: { onRetry?: () => void; error?: string | null; errorDetails?: DesktopErrorDetails | null; /** Full "查看错误详情" text (e.g. with the backend stderr tail); replaces the bare message there. */ diagnostic?: string }) {
-  const presentation = errorPresentation(error, errorDetails)
+export function ErrorPrompt({ onRetry, error, errorDetails, diagnostic, failure }: { onRetry?: () => void; error?: string | null; errorDetails?: DesktopErrorDetails | null; failure?: RunFailure; /** Full "查看错误详情" text (e.g. with the backend stderr tail); replaces the bare message there. */ diagnostic?: string }) {
+  const presentation = errorPresentation(error, errorDetails, failure)
   return <ErrorState title={presentation.title} detail={presentation.description} diagnostic={diagnostic || presentation.detail} onRetry={presentation.retryable === false ? undefined : onRetry} retryLabel={presentation.retryLabel} />
 }
 

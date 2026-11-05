@@ -994,8 +994,8 @@ pub(crate) struct SweepOutcome {
     /// 无法判断是否本轮进程，只记录不结束，也不因此停掉后端。
     pub outside_job_unverified: Vec<u32>,
     /// 13.38（R1-2）：Job 外、本轮创建、结束时被拒绝访问（Win32 5，多为沙箱账户 / 其他令牌的进程），
-    /// 按父进程链兜底也没结束的进程。只写审计，不算清扫失败：停掉后端也结束不了它们，
-    /// 取消照常完成。每项带 pid、映像名、父进程链和原因。
+    /// 按父进程链兜底也没结束的进程。Host 停掉后端以阻止继续发起任务，
+    /// 但不能据此宣称这些进程已经退出。每项带 pid、映像名、父进程链和原因。
     pub access_denied: Vec<serde_json::Value>,
 }
 
@@ -1005,7 +1005,7 @@ impl SweepOutcome {
     }
 
     pub(crate) fn stop_required(&self) -> bool {
-        self.no_baseline || !self.failed.is_empty()
+        self.no_baseline || !self.failed.is_empty() || !self.access_denied.is_empty()
     }
 }
 
@@ -2065,6 +2065,17 @@ impl AcpConnection {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn access_denied_sweep_requires_stopping_the_backend() {
+        let mut outcome = super::SweepOutcome {
+            killed: Vec::new(), failed: Vec::new(), no_baseline: false,
+            outside_job: Vec::new(), outside_job_unverified: Vec::new(), access_denied: Vec::new(),
+        };
+        assert!(!outcome.stop_required());
+        outcome.access_denied.push(serde_json::json!({ "pid": 12984, "reason": "access denied" }));
+        assert!(outcome.stop_required());
+    }
+
     use super::*;
 
     #[test]

@@ -7,6 +7,7 @@ export function modelFailure(error) {
     : /allowlist|blocked.by.network|proxy.*403/i.test(text) ? 'network_allowlist'
     : /401|unauthori[sz]ed|authentication|api.?key/i.test(text) ? 'authentication'
     : /429|rate.?limit/i.test(text) ? 'rate_limit'
+    : /^\s*(?:TypeError:\s*)?terminated\s*$|ECONNRESET|UND_ERR_SOCKET|socket hang up/i.test(text) ? 'connection_interrupted'
     : /connection|fetch failed|ECONN|ENOTFOUND|ETIMEDOUT|proxy|network|abort.*connect/i.test(text) ? 'network_unreachable'
     : 'model_error';
   const messages = {
@@ -14,6 +15,7 @@ export function modelFailure(error) {
     network_allowlist: '模型请求被沙箱网络允许列表阻止',
     authentication: '模型服务拒绝了登录凭据',
     rate_limit: '模型服务达到请求限额',
+    connection_interrupted: '模型服务连接中断，请检查网络或服务状态后重试。',
     network_unreachable: '沙箱内无法通过受管代理连接模型服务',
     model_error: '模型服务未能完成本轮请求',
   };

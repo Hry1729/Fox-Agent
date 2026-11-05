@@ -440,6 +440,7 @@ fn model_error_terminal(data: &str) -> Option<TurnTerminal> {
         "endpoint_changed" => ("endpoint_changed", "pi 当前会话的模型端点已变化；请重新应用已授权的模型配置后重试"),
         "network_allowlist" => ("network_allowlist", "模型请求被沙箱网络允许列表阻止"),
         "network_unreachable" => ("network_unreachable", "沙箱内无法通过受管代理连接模型服务"),
+        "connection_interrupted" => ("connection_interrupted", "模型服务连接中断，请检查网络或服务状态后重试。"),
         "authentication" => ("authentication", "模型服务拒绝了登录凭据"),
         "rate_limit" => ("rate_limit", "模型服务达到请求限额"),
         "model_error" => ("request_failed", "模型服务未能完成本轮请求"),
@@ -1805,7 +1806,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             turn.arbiter.request_cancel();
             turn.approvals.clear();
             // 13.38（A-2）：节流期间压下的命令输出先落库，再发 session/cancel。
-            let flushed = turn.projector.flush_pending();
+            let flushed = turn.projector.request_cancel();
             (connection.filter(|_| turn.prompt_sent), native, generation, flushed)
         };
         for event in flushed {
@@ -1936,11 +1937,11 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
             "accessDenied": { "count": outcome.access_denied.len(), "processes": outcome.access_denied },
         });
         if !outcome.access_denied.is_empty() {
-            // 13.38（R1-2）：Job 外、拒绝访问、按父进程链也没结束的本轮进程。单独一条审计，取消照常完成。
+            // 停止连接只能阻止新任务，不能把拒绝访问的旧进程记成已退出。
             self.inner.sink.audit(&session.conversation_id, session.backend, "agent_backend.cancel_sweep_access_denied", &json!({
                 "runId": run_id,
                 "processes": outcome.access_denied,
-                "note": "这些进程不在 Fox 的 Job 里，且 Fox 无权结束（多为沙箱账户或受限令牌下由服务代为创建）；取消已完成，进程可能仍在运行",
+                "note": "这些进程不在 Fox 的 Job 里，且 Fox 无权结束；进程可能仍在运行，取消处理将停止后端连接以阻止新任务",
             }));
         }
         if outcome.no_baseline || !outcome.failed.is_empty() {
@@ -2292,7 +2293,20 @@ async fn close_shared(mut connection: Arc<AcpConnection>) -> TerminateReport {
 
 #[cfg(test)]
 mod exit_failure_tests {
-    use super::{backend_exit_failure, display_path, failure_codes};
+    use super::{backend_exit_failure, display_path, failure_codes, model_error_terminal, TurnTerminal};
+
+    #[test]
+    fn model_stream_disconnect_maps_to_terminal_failure() {
+        let data = serde_json::json!({
+            "code": "agent_backend_model_failed",
+            "failureKind": "connection_interrupted",
+            "redacted": true,
+        });
+        let terminal = model_error_terminal(&data.to_string()).expect("known Pi model failure");
+        assert!(matches!(terminal, TurnTerminal::Failed { code, message }
+            if code == "agent_backend_model_connection_interrupted"
+                && message == "模型服务连接中断，请检查网络或服务状态后重试。"));
+    }
 
     #[test]
     fn dsh_grant_write_access_denied_gets_its_own_code_and_plain_words() {

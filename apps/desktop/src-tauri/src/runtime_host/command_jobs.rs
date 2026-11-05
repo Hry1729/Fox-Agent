@@ -576,7 +576,7 @@ fn execute_inner(
     if action == "cancel" {
         row = database.kernel_job_request_cancel(&binding.conversation_id, &id)?;
     }
-    let failed = matches!(row.state, JobState::Failed | JobState::Cancelled);
+    let failed = !read_only && matches!(row.state, JobState::Failed | JobState::Cancelled);
     if failed {
         *outcome = CallOutcome::Failed { code: row.error_code.clone().unwrap_or_else(|| "tool.unknown".into()) };
     }

@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react'
-import type { ArtifactRecord, AttachmentRecord, KnowledgeBindingRecord, RunEventRecord } from '../../conversations/model/types'
+import type { ArtifactRecord, AttachmentRecord, KnowledgeBindingRecord, RunEventRecord, ToolCallRecord } from '../../conversations/model/types'
 import type { RuntimeSource } from '../timeline/fox-runtime-process-model'
 
 /**
@@ -14,6 +14,7 @@ export interface FoxThreadContextValue {
   events: RunEventRecord[]
   /** Events grouped by run id, memoized by the provider. */
   eventsByRun: Map<string, RunEventRecord[]>
+  toolCalls?: readonly ToolCallRecord[]
   /** Attachment display names by attachment id (tool rows resolve ids). */
   attachmentNames: ReadonlyMap<string, string>
   /** Attachments grouped by message id (user bubbles render their own). */

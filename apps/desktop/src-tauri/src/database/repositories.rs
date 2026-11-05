@@ -9973,10 +9973,11 @@ fn compact_tool_result(value: &Value) -> Value {
     if serialized.len() <= MAX_STORED_TOOL_RESULT_BYTES {
         return value.clone();
     }
-    let preview = serialized.chars().take(8_000).collect::<String>();
+    let (text, _, original_bytes) = stored_result_text(Some(value));
+    let preview = text.chars().take(8_000).collect::<String>();
     json!({
         "truncated": true,
-        "originalBytes": serialized.len(),
+        "originalBytes": original_bytes,
         "preview": preview,
         "message": "Large tool result is stored by Fox; use read_tool_result with this call's reference to page through every byte."
     })
@@ -9990,13 +9991,15 @@ fn compact_tool_result(value: &Value) -> Value {
 /// `tool_result_range`. Serialization failures degrade to the old inline-only
 /// behavior instead of failing the completion.
 fn split_tool_result(value: &Value) -> (Value, Option<(String, String, usize)>) {
-    let inline = compact_tool_result(value);
-    if inline.get("truncated").and_then(Value::as_bool) != Some(true) {
-        return (inline, None);
-    }
     let Ok(full) = crate::canonical_json::to_string(value) else {
-        return (inline, None);
+        return (Value::Null, None);
     };
+    // A native settlement may echo an already bounded preview. Its `truncated`
+    // flag must not turn that preview into a replacement for the full blob.
+    if full.len() <= MAX_STORED_TOOL_RESULT_BYTES {
+        return (value.clone(), None);
+    }
+    let inline = compact_tool_result(value);
     let sha = format!(
         "sha256:{}",
         hex::encode(Sha256::digest(full.as_bytes()))

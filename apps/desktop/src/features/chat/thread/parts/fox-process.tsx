@@ -33,6 +33,7 @@ export function FoxProcessPart(part: DataMessagePartProps<FoxProcessData>) {
     <div className="fox-thread-process">
       <RuntimeProcess
         events={events}
+        toolCalls={fox.toolCalls}
         process={hasEventData ? undefined : data}
         groupHelpers={fox.groupHelpers}
         grouped

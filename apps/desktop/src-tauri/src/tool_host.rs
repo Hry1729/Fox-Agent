@@ -2428,8 +2428,8 @@ struct CapturedStream {
 
 /// Turn a child's raw bytes into text plus the name of what was actually
 /// applied. UTF-8 output is taken verbatim; a stream cut mid-sequence keeps its
-/// decodable prefix and says so; anything else is decoded with the codepage the
-/// console is actually using instead of being silently replaced.
+/// decodable prefix and says so; other output uses the no-window child's OEM
+/// code page instead of the parent's console code page.
 pub(crate) fn decode_child_bytes(bytes: &[u8]) -> (String, String) {
     if std::str::from_utf8(bytes).is_ok() || !bytes.contains(&b'\n') {
         return decode_child_chunk(bytes);
@@ -2461,25 +2461,18 @@ fn decode_child_chunk(bytes: &[u8]) -> (String, String) {
     }
 }
 
-/// The code page a child writes its redirected output with. A GUI host owns no
-/// console, so the per-process console code page can be unset; the machine OEM
-/// code page is what `cmd.exe` falls back to (CP936 on a Chinese Windows).
+/// SystemSpawner uses CREATE_NO_WINDOW, so cmd does not inherit the parent's
+/// console code page. Its redirected output uses the machine OEM code page.
 #[cfg(windows)]
-fn console_output_codepage() -> u32 {
+fn child_output_codepage() -> u32 {
     use windows::Win32::Globalization::GetOEMCP;
-    use windows::Win32::System::Console::GetConsoleOutputCP;
-    let (console_codepage, oem_codepage) = unsafe { (GetConsoleOutputCP(), GetOEMCP()) };
-    if console_codepage == 0 {
-        oem_codepage
-    } else {
-        console_codepage
-    }
+    unsafe { GetOEMCP() }
 }
 
 #[cfg(windows)]
 fn decode_console_codepage(bytes: &[u8]) -> (String, String) {
     use windows::Win32::Globalization::{MultiByteToWideChar, MULTI_BYTE_TO_WIDE_CHAR_FLAGS};
-    let codepage = console_output_codepage();
+    let codepage = child_output_codepage();
     let lossy = || String::from_utf8_lossy(bytes).into_owned();
     if codepage == 0 || codepage == 65001 || bytes.is_empty() {
         return (lossy(), format!("cp{codepage}-lossy"));
@@ -3902,7 +3895,7 @@ mod tests {
     }
 
     #[test]
-    fn utf8_child_bytes_are_kept_and_other_bytes_use_the_console_codepage() {
+    fn utf8_child_bytes_are_kept_and_other_bytes_use_the_no_window_child_codepage() {
         let chinese = "编译失败：3 errors".as_bytes().to_vec();
         let (text, encoding) = decode_child_bytes(&chinese);
         assert_eq!(encoding, "utf-8");
@@ -3921,10 +3914,10 @@ mod tests {
         let gbk: Vec<u8> = vec![0xB1, 0xE0, 0xD2, 0xEB, 0xCA, 0xA7, 0xB0, 0xDC];
         let (text, encoding) = decode_child_bytes(&gbk);
         if cfg!(windows) {
-            let codepage = console_output_codepage();
+            let codepage = child_output_codepage();
             if codepage == 65001 {
-                // These deliberately invalid UTF-8 bytes cannot round-trip in
-                // a UTF-8 console; the result must disclose the lossy fallback.
+                // Invalid UTF-8 cannot round-trip when the system OEM code page
+                // is UTF-8; disclose the lossy fallback.
                 assert_eq!(encoding, "cp65001-lossy");
                 assert!(text.contains('\u{fffd}'));
                 return;

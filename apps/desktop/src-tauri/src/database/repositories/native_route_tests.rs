@@ -66,6 +66,63 @@ fn native_host_writers_and_display_events_preserve_failed_and_cancelled_facts() 
 }
 
 #[test]
+fn native_projection_preserves_full_output_after_a_bounded_host_response() {
+    for failed in [false, true] {
+        let (db, run, conversation) = fixture(Some(ExecutorRoute::PiNative));
+        ledger(&db, &run, "running", None);
+        db.create_host_tool_call(&run, "call", "read", &input(), "running", false).unwrap();
+        let text: String = (1..=20_000).map(|line| format!("第{line}行 中文内容\n")).collect();
+        let full = json!({"stdout":text,"exitCode":if failed { 7 } else { 0 }});
+        db.complete_host_tool_call(&run, "call", Some(&full), failed.then_some("command failed")).unwrap();
+        let preview = db.get_runtime_tool_call(&run, "call").unwrap().unwrap().result.unwrap();
+        assert_eq!(preview["truncated"], true);
+        let response = json!({"isError":failed,"result":preview,"error":if failed { "command failed" } else { "" }});
+        db.with_connection(|connection| connection.execute(
+            "UPDATE kernel_tool_calls SET state=?2,result_json=?3,settled_at=2 WHERE run_id=?1",
+            params![run,if failed { "failed" } else { "completed" },response.canonical_string()])).unwrap();
+        for (seq, event) in [(1, "tool.updated"), (2, "tool.completed")] {
+            db.apply_runtime_event(&run, seq, &json!({"type":event,"toolCallId":"call","tool":"read","result":response["result"]})).unwrap();
+        }
+        db.apply_runtime_event(&run, 3, &json!({"type":"run.completed"})).unwrap();
+        let reference = crate::kernel_compaction::tool_result_ref(&run, "call").unwrap();
+        let mut offset = 0;
+        let mut restored = String::new();
+        loop {
+            let range = db.tool_result_range(&reference, &conversation, offset, 65_536).unwrap();
+            assert!(range.retrievable);
+            assert!(!range.truncated);
+            restored.push_str(&range.content);
+            if range.next_offset.is_none() { break; }
+            offset = range.next_offset.expect("unfinished result has a next page");
+        }
+        assert_eq!(restored, full.canonical_string());
+        assert!(restored.contains("第10000行 中文内容"));
+        assert_eq!(db.get_runtime_tool_call(&run, "call").unwrap().unwrap().status,
+            if failed { "failed" } else { "completed" });
+    }
+}
+
+#[test]
+fn content_preview_byte_count_matches_the_text_read_by_its_reference() {
+    let (db, run, conversation) = fixture(Some(ExecutorRoute::PiNative));
+    db.create_host_tool_call(&run, "call", "run_command", &input(), "running", false).unwrap();
+    let text = "中文 \"quoted\"\\path\r\n".repeat(20_000);
+    let result = json!({"content":[{"type":"text","text":text}],"exitCode":0});
+    assert!(result.canonical_string().len() > text.len());
+    db.complete_host_tool_call(&run, "call", Some(&result), None).unwrap();
+    let preview = db.get_runtime_tool_call(&run, "call").unwrap().unwrap().result.unwrap();
+    assert_eq!(preview["originalBytes"], text.len());
+    assert!(text.starts_with(preview["preview"].as_str().unwrap()));
+    let reference = crate::kernel_compaction::tool_result_ref(&run, "call").unwrap();
+    let storage = db.tool_result_storage(&run, "call").unwrap();
+    assert_eq!(storage.retrievable_bytes, text.len() as u64);
+    let range = db.tool_result_range(&reference, &conversation, text.len(), 1024).unwrap();
+    assert_eq!(range.original_bytes, text.len());
+    assert!(range.content.is_empty());
+    assert!(range.next_offset.is_none());
+}
+
+#[test]
 fn native_completion_cannot_skip_unsettled_or_unknown_tool_outcomes() {
     for state in ["pending","waiting_approval","running","completed"] {
         let (db,run,_) = fixture(Some(ExecutorRoute::PiNative));
