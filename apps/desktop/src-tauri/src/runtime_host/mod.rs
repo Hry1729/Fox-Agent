@@ -10963,8 +10963,8 @@ mod attachment_tests {
         assert_eq!(inline["truncated"], Value::Bool(true));
         assert_eq!(
             inline["originalBytes"].as_u64().unwrap() as usize,
-            serialized.len(),
-            "the preview must report the size of the value it replaced"
+            stdout.len(),
+            "the preview reports the retained output bytes, without counting the duplicated JSON envelope"
         );
 
         // Every retained byte comes back through the reference, and the tool is

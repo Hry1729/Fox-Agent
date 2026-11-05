@@ -3116,7 +3116,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("fox-missing-vector-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let manifest = serde_json::json!({ "version":"fixture", "dimension":3, "tokenizer":"tokenizer.json", "hash":"0".repeat(64), "license":"fixture" });
-        fs::write(root.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        fs::write(root.join("manifest.json"), crate::canonical_json::to_vec(&manifest).unwrap()).unwrap();
         let error = validate_embedding_package(&root).unwrap_err();
         assert!(error.to_string().contains("向量模型文件缺失"));
         assert!(error.to_string().contains("重新下载或导入模型"));
