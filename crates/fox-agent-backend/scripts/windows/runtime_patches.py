@@ -208,6 +208,25 @@ def patch_dsh_job_notifications(source):
     return replace_once(source, 'event.awaited || event.cause === "teardown"', 'event.awaited || event.cause === "kill" || event.cause === "teardown"')
 
 
+# fox-runtime-dsh-messages: SenseNova's DeepSeek-compatible Messages stream sends
+# content_block_start without the "text" / "thinking" field, or with
+# "signature": null. dsh 0.2.1-rc.2 requires strings there and fails the whole
+# turn with "DeepSeek Messages expected a string field". Read a missing or null
+# field as the empty string (the deltas that follow carry the content); a
+# missing signature stays absent, as upstream.
+DSH_MESSAGES_START_FIELDS = [
+    ('\t\t\t\ttext: string(native.text)\n', '\t\t\t\ttext: string(native.text ?? "")\n'),
+    ('\t\t\t\ttext: string(native.thinking)\n', '\t\t\t\ttext: string(native.thinking ?? "")\n'),
+    ('...native.signature === void 0 ? {} : { signature: string(native.signature) }', '...native.signature === void 0 ? {} : { signature: string(native.signature ?? "") }'),
+]
+
+
+def patch_dsh_messages(source):
+    for old, new in DSH_MESSAGES_START_FIELDS:
+        source = replace_once(source, old, new)
+    return source
+
+
 def patch_pi_dispatcher(source):
     return replace_once(source, 'new undici.EnvHttpProxyAgent({', 'new undici.EnvHttpProxyAgent({\n        ...(process.env.FOX_MODEL_PROXY_REQUIRED === "1" ? { noProxy: "" } : {}),')
 
@@ -219,6 +238,9 @@ PATCHES = [
     {"id": "dsh-model-proxy", "package": "backends/dsh/node_modules/@deepseek-ai/dsh-http-proxy", "version": "0.2.1-rc.2", "file": "lib/index.js", "sha256": "5310861bc89788ea24be82a3b323e34cbd42b9e6214e2a179b2e6f92a8758cd5", "patch": patch_dsh_proxy, "helper": ("dsh-model-proxy.mjs", "lib/fox-model-proxy.mjs")},
     {"id": "dsh-session-cancel", "package": "backends/dsh/node_modules/@deepseek-ai/dsh-agent-loop", "version": "0.2.1-rc.2", "file": "lib/index.js", "sha256": "cf57e3ecd487ac5c2553455aaa5cef2c6fb41e6bd61be5aa455675d1d7193033", "patch": patch_dsh_cancel},
     {"id": "dsh-killed-job-notifications", "package": "backends/dsh/node_modules/@deepseek-ai/dsh-tool-jobs", "version": "0.2.1-rc.2", "file": "lib/index.js", "sha256": "de5707b43480ba37c8e141e6f67674978f3a46d87d58390c18eb1659bb17ec2f", "patch": patch_dsh_job_notifications},
+
+
+    {"id": "dsh-messages-stream", "package": "backends/dsh/node_modules/@deepseek-ai/dsh-llm-deepseek", "version": "0.2.1-rc.2", "file": "lib/index.js", "sha256": "eba35025ed1eedda89c51f2da46a3a968f7be1d59719f2ceeadfc4518dff37d6", "patch": patch_dsh_messages},
     {"id": "pi-model-proxy", "package": "backends/pi/node_modules/@earendil-works/pi-coding-agent", "version": "1.4.0", "file": "dist/core/http-dispatcher.js", "sha256": "f9aa2c81b0a5958ffba6368506f24c9b202904c234ada19494cdc9c4a1d0e97b", "patch": patch_pi_dispatcher},
     {"id": "pi-bundled-model-proxy", "package": "backends/pi/node_modules/@earendil-works/pi-coding-agent", "version": "1.4.0", "file": "dist/bundle/chunks/chunk-MM3LKT73.js", "sha256": "aa4c8b091657bda611f6fd58343561fa44cda1070ae4cd5dbd09ffe1d9a34aab", "patch": patch_pi_bundle_all, "helper": ("pi-console-output.mjs", "dist/bundle/chunks/fox-console-output.mjs")},
     {"id": "pi-shell-console", "package": "backends/pi/node_modules/@earendil-works/pi-coding-agent", "version": "1.4.0", "file": "dist/core/tools/bash.js", "sha256": "f32e87a42f66276b2eafaaf0848babf52523d37ab0fd448439586376747f03c4", "patch": patch_pi_shell_console, "helper": ("pi-console-output.mjs", "dist/core/tools/fox-console-output.mjs")},

@@ -5,6 +5,7 @@
     "backends/pi/node_modules/pi-acp/dist/fox-turn-outcome.mjs": "2a542b8f29a6d86471194431af8f6b498c09da172f7f787cd39f5b09f336711c",
     "backends/dsh/node_modules/@deepseek-ai/dsh-http-proxy/lib/index.js": "a67c7f6b64989efbe5838276085593ce8743fb408148025bd24076cc9fd386e3",
     "backends/dsh/node_modules/@deepseek-ai/dsh-http-proxy/lib/fox-model-proxy.mjs": "c4de3d75afb063066250e61b4d247eeb32f40fe419d1d7632fffd4f8aa884dc0",
+    "backends/dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js": "93b00dff214cb5d34d6c2ea55d4ba003f474a16806be2d48715222b001db1c9c",
     "backends/pi/node_modules/@earendil-works/pi-coding-agent/dist/core/http-dispatcher.js": "0d4de7e398ae61237fa73cff9ad687c380524819a6c3cb9bd6710cf05dbdd352",
     "backends/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-MM3LKT73.js": "4798dae56cddc6104b3d6424f377db9b2a66b44e65af1fa9f04887168d405dd5",
     "backends/dsh/node_modules/@deepseek-ai/dsh-agent-loop/lib/index.js": "2673b0e37288f5b26be3b81991655e7ea4ce188c02153461249ce5e90ab0adb8",
