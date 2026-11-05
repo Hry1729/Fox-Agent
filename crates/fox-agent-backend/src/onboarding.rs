@@ -745,8 +745,8 @@ fn run_import(backend: AgentBackend, real: &RealHome, selected: &[String], targe
         let home = target.home.as_path();
         // Generated credentials are replaceable. User-edited files still take the keep/backup path.
         let managed = crate::unified_login::managed_files(backend, home);
-        if write { crate::unified_login::remove_managed(backend, home)?; }
-        if write { ensure_private_dir(home, home).map_err(|error| format!("cannot create the private HOME: {error}"))?; }
+        if write && !chosen.is_empty() { crate::unified_login::remove_managed(backend, home)?; }
+        if write && !chosen.is_empty() { ensure_private_dir(home, home).map_err(|error| format!("cannot create the private HOME: {error}"))?; }
         let mut kept: Vec<String> = Vec::new();
         let mut backup = Backup { home, stamp: options.backup_stamp, directory: None, items: Vec::new() };
         let mut wrote = false;

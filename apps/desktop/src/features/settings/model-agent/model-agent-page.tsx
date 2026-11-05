@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { listen } from '@tauri-apps/api/event'
 import { MoreHorizontal, Plus, Server } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
@@ -45,6 +46,16 @@ export function ModelAgentPage({ sidebarCollapsed, onSidebar }: { sidebarCollaps
     window.addEventListener('fox:model-service-changed', update)
     return () => { window.removeEventListener('focus', update); window.removeEventListener('fox:model-service-changed', update) }
   }, [refresh])
+  useEffect(() => {
+    if (!running) return
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void listen<{ backend: AgentId; report: VerificationReport }>('agent-config-verification', event => {
+      if (event.payload.backend === running) setReports(previous => ({ ...previous, [running]: event.payload.report }))
+    }).then(stop => { if (disposed) stop(); else unlisten = stop }).catch(() => {})
+    return () => { disposed = true; unlisten?.() }
+  }, [running])
+  const providerError = providers.error === '这个服务地址已经添加过了' ? providers.error : providers.error ? '操作没有完成，请重试。' : null
   const edit = (provider?: ModelProviderRecord) => {
     const next = serviceDraft(provider)
     if (!provider) next.isDefault = providers.items.length === 0
@@ -92,12 +103,12 @@ export function ModelAgentPage({ sidebarCollapsed, onSidebar }: { sidebarCollaps
     <SettingsPageLayout className="fox-model-agent-page" title="模型与 Agent" description="管理模型服务，并为每个 Agent 选择使用哪个服务。" actions={draft ? <Button variant="outline" onClick={() => setDraft(null)}>取消</Button> : <Button onClick={() => edit()}><Plus />添加服务</Button>}>
       {error && <p role="alert" className="fox-model-error">{error}<Button variant="ghost" size="sm" onClick={() => void refresh()}>重试</Button></p>}
       {offers.map(agent => <div className="fox-agent-inline fox-model-actions" key={agent.agent}><span>要让 {AGENT_NAMES[agent.agent]} 使用这个服务吗？</span><Button size="sm" onClick={() => { const candidate = agent.candidates.find(c => c.providerId === offerProvider); if (!candidate || agent.agent === 'fox') return; void desktopClient.agentBindingSave(agent.agent, { source: 'fox_service', providerId: candidate.providerId, endpointId: candidate.endpointId, modelId: candidate.modelId }, developer).then(() => { setOffers(current => current.filter(a => a.agent !== agent.agent)); void refresh() }).catch(cause => setError(configErrorText(cause))) }}>使用</Button><Button variant="ghost" size="sm" onClick={() => setOffers(current => current.filter(a => a.agent !== agent.agent))}>暂不使用</Button></div>)}
-      {draft ? <ServiceForm form={draft} onChange={setDraft} targets={targets} onTargets={setTargets} enabled={enabled} existingServices={providers.items} credentialConfigured={providers.items.find(p => p.id === draft.id)?.credentialConfigured ?? false} busy={providers.busyId !== null} error={providers.error} onCancel={() => setDraft(null)} onSave={() => void save()} onDelete={draft.id ? () => { const provider = providers.items.find(p => p.id === draft.id); if (provider) void remove(provider) } : undefined} /> : <>
+      {draft ? <ServiceForm form={draft} onChange={setDraft} targets={targets} onTargets={setTargets} enabled={enabled} existingServices={providers.items} credentialConfigured={providers.items.find(p => p.id === draft.id)?.credentialConfigured ?? false} busy={providers.busyId !== null} error={providerError} onCancel={() => setDraft(null)} onSave={() => void save()} onDelete={draft.id ? () => { const provider = providers.items.find(p => p.id === draft.id); if (provider) void remove(provider) } : undefined} /> : <>
         <SettingsGroup title="默认"><SettingsRow title="默认模型" description="新对话和 Fox 未指定模型时使用"><select aria-label="默认模型" disabled={providers.busyId !== null || !providers.items.length} value={defaultProvider && defaultModel ? `${defaultProvider.id}::${defaultModel.modelId}` : ''} onChange={e => { const [id, model] = e.target.value.split('::'); const provider = providers.items.find(p => p.id === id); if (provider) void setDefault(provider, model) }}><option value="" disabled>添加服务后可选择</option>{providers.items.flatMap(p => p.models.map(m => <option key={`${p.id}:${m.modelId}`} value={`${p.id}::${m.modelId}`}>{p.name} · {m.displayName || m.modelId}</option>))}</select></SettingsRow></SettingsGroup>
         <SettingsGroup title="模型服务" aside={`${providers.items.length} 个服务`}>
           {providers.loading && !providers.items.length && <p className="fox-model-section" role="status">正在读取服务…</p>}
           {!providers.loading && !providers.items.length && <p className="fox-model-section">还没有模型服务。点“添加服务”开始，先选你想让哪些 Agent 使用它。</p>}
-          {providers.error && <p role="alert" className="fox-model-error">{providers.error}</p>}
+          {providerError && <p role="alert" className="fox-model-error">{providerError}</p>}
           {providers.items.map(provider => {
             const service = overview?.services.find(s => s.providerId === provider.id)
             const icon = providerIcon(provider.name, provider.baseUrl, provider.icon)

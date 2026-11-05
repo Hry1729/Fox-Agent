@@ -3,7 +3,7 @@ use fox_agent_backend::{agent_config::*, external_launch::HostLaunchConfig, logi
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::{BTreeMap, HashMap}, sync::{LazyLock, Mutex}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
-use tauri::State;
+use tauri::{Emitter, State};
 use tokio::sync::watch;
 
 static VERIFY_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
@@ -243,14 +243,18 @@ fn verification_identity(database: &Database, config: &HostLaunchConfig, backend
 }
 
 #[tauri::command]
-pub async fn agent_config_verify(state: State<'_, AppState>, external: State<'_, ExternalBackendHost>, request: VerifyRequest) -> Result<ApiResponse<VerificationReport>, ()> {
+pub async fn agent_config_verify(app: tauri::AppHandle, state: State<'_, AppState>, external: State<'_, ExternalBackendHost>, request: VerifyRequest) -> Result<ApiResponse<VerificationReport>, ()> {
     let (sender, mut cancel) = watch::channel(false);
     {
         let mut running = state.agent_configuration.running.lock().unwrap();
         if running.contains_key(&request.backend) { return Ok(ApiResponse::failure("agent_verify.busy", "正在验证，请稍候。", true)); }
         running.insert(request.backend, sender);
     }
-    let result = verify_model(&state.database, external.launch_config(), &state.model_service_client, &request, &mut cancel).await;
+    let result = verify_all(&state.database, external.launch_config(), &state.model_service_client, &request, &mut cancel, |report| {
+        let mut public = report.clone();
+        if !request.developer { for layer in &mut public.layers { layer.code = None; layer.detail = None; } }
+        let _ = app.emit("agent-config-verification", serde_json::json!({"backend":request.backend,"report":public}));
+    }).await;
     state.agent_configuration.running.lock().unwrap().remove(&request.backend);
     Ok(response(result))
 }
@@ -306,6 +310,40 @@ async fn verify_model(database: &Database, config: &HostLaunchConfig, client: &m
         for layer in &mut report.layers[2..] { layer.message = "Fox 内置 Agent 不需要单独验证".into(); }
     }
     persist_report(database, request, report)
+}
+
+async fn verify_all(database: &Database, config: &HostLaunchConfig, client: &model_service::ModelServiceClient, request: &VerifyRequest, cancel: &mut watch::Receiver<bool>, mut progress: impl FnMut(&VerificationReport)) -> Result<VerificationReport, ConfigError> {
+    let mut report = verify_model(database, config, client, request, cancel).await?;
+    progress(&report);
+    if request.backend == AgentBackend::Fox || matches!(request.depth, VerifyDepth::Model) || report.layers[..2].iter().any(|layer| layer.status == VerificationStatus::Failed) { return Ok(report); }
+    let connection = configured_connection(database, config, request.backend)?;
+    let login = connection.as_ref().and_then(|(provider, profile)| external_model::login(provider, profile));
+    let native_home = if connection.is_none() {
+        let projects = crate::external_backend::import_home_targets(true, None, &database.known_projects().map_err(ConfigError::read)?);
+        projects.into_iter().find_map(|(id, _)| {
+            let home = config.private_home_path(&id, request.backend).ok()?;
+            fox_agent_backend::unified_login::user_login_present(request.backend, &home, false).then_some(home)
+        })
+    } else { None };
+    if connection.is_none() && native_home.is_none() { return Err(ConfigError::new("agent_binding.native_required", "请先导入本机配置，再进行完整验证。")); }
+    let input = fox_agent_backend::verify_session::SessionVerification { config: config.clone(), backend: request.backend, login, native_home, with_tool: matches!(request.depth, VerifyDepth::Tool) };
+    let layers = fox_agent_backend::verify_session::verify_session(input, cancel, |layer| {
+        let at = if layer.layer == VerificationLayer::AgentOutput { 2 } else { 3 };
+        report.layers[at] = layer.clone();
+        progress(&report);
+    }).await;
+    report.layers[2] = layers[0].clone();
+    report.layers[3] = layers[1].clone();
+    if verification_identity(database, config, request.backend)? != report.identity {
+        report.layers[2] = LayerResult::new(VerificationLayer::AgentOutput, VerificationStatus::Failed, Some("agent_verify.config_changed"), None);
+        report.layers[3] = LayerResult::new(VerificationLayer::ToolCall, VerificationStatus::Skipped, None, None);
+    } else if connection.is_none() && report.layers[2].status == VerificationStatus::Passed {
+        report.layers[1] = LayerResult::new(VerificationLayer::ModelRequest, VerificationStatus::Passed, None, report.layers[2].latency_ms);
+        report.layers[1].message = "原生登录模型请求通过（随 Agent 验证）".into();
+    }
+    let report = persist_report(database, request, report)?;
+    progress(&report);
+    Ok(report)
 }
 
 fn persist_report(database: &Database, request: &VerifyRequest, mut report: VerificationReport) -> Result<VerificationReport, ConfigError> {

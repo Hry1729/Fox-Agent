@@ -82,3 +82,6 @@ pub mod preview;
 pub mod fox_mcp;
 
 pub mod backends;
+
+#[cfg(feature = "acp")]
+pub mod verify_session;

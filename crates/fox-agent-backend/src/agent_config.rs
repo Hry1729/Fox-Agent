@@ -114,6 +114,9 @@ impl LayerResult {
             },
             VerificationStatus::Failed => match code.unwrap_or_default() {
                 "agent_verify.cancelled" => "已停止验证。",
+                "agent_verify.stop_unconfirmed" => "Agent 已请求停止，但未能确认全部进程结束。",
+                "agent_verify.cleanup_failed" => "验证已结束，临时文件清理未完成。",
+                "agent_verify.config_changed" => "配置已变化，请重新验证。",
                 "agent_verify.timeout" => "验证超时，请稍后重试。",
                 "agent_binding.provider_not_found" => "选择的服务已被删除，请重新选择。",
                 "agent_binding.endpoint_not_found" => "这个服务没有可用入口，请重新选择。",

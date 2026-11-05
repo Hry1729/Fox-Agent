@@ -19,6 +19,8 @@ const ERRORS: Record<string, string> = {
   'agent_verify.model_failed': '模型请求失败，请检查地址、模型和 Key。',
   'agent_verify.agent_no_output': 'Agent 没有输出。',
   'agent_verify.tool_failed': '工具调用没有完成。',
+  'agent_verify.stop_unconfirmed': 'Agent 已请求停止，但未能确认全部进程结束。',
+  'agent_verify.cleanup_failed': '验证已结束，临时文件清理未完成。',
   'agent_verify.timeout': '验证超时，请稍后重试。',
   'agent_verify.busy': '正在验证，请稍候。',
   'agent_verify.cancelled': '已停止验证。',
