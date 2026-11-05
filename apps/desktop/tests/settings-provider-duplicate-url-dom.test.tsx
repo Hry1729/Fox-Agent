@@ -26,12 +26,14 @@ mock.module('../src/features/conversations/api/desktop-client', () => ({
     listModelProviders: async () => [{ ...existing }],
     saveModelProvider: async () => { throw saveError },
     getModelServiceStatus: async () => null,
+    agentConfigOverview: async () => ({ services: [], agents: [] }),
   },
 }))
 
 const React = await import('react')
 const { act, cleanup, fireEvent, render, screen, waitFor, within } = await import('@testing-library/react')
-const { ModelProvidersPage, ProviderEditor } = await import('../src/features/settings/settings-pages')
+const { ModelProvidersPage } = await import('../src/features/settings/settings-pages')
+const { ServiceForm } = await import('../src/features/settings/model-agent/service-form')
 const { TooltipProvider } = await import('../src/components/ui/tooltip')
 const { DUPLICATE_SERVICE_URL_TEXT, findDuplicateServiceUrl, providerErrorText, serviceUrlKey } = await import('../src/features/settings/provider-errors')
 const { DesktopCommandError } = actualDesktopClient as any
@@ -39,7 +41,11 @@ const { DesktopCommandError } = actualDesktopClient as any
 afterEach(() => { cleanup(); saveError = null })
 
 const form = (baseUrl: string, id?: string) => ({ id, name: '新服务', icon: null, baseUrl, apiType: 'openai-completions' as const, isDefault: false, apiKey: '', clearApiKey: false, protocolProfiles: [], models: [{ modelId: 'm', displayName: 'M', contextWindow: 8192, maxOutputTokens: 1024, supportsImageInput: false, isDefault: true }] })
-const editor = (baseUrl: string, id?: string) => render(React.createElement(TooltipProvider, null, React.createElement(ProviderEditor, { layout: 'dialog', existingServices: [existing], form: form(baseUrl, id) as any, busy: false, credentialConfigured: false, onChange: () => {}, onCancel: () => {}, onSave: () => {}, onTest: () => {} })))
+const editor = (baseUrl: string, id?: string) => {
+  const result = render(React.createElement(TooltipProvider, null, React.createElement(ServiceForm, { existingServices: [existing], targets: ['fox'], enabled: [], onTargets: () => {}, error: null, form: form(baseUrl, id) as any, busy: false, credentialConfigured: false, onChange: () => {}, onCancel: () => {}, onSave: () => {} })))
+  if (!id) fireEvent.click(screen.getByRole('button', { name: '下一步' }))
+  return result
+}
 
 describe('duplicate service base URL', () => {
   test('normalized comparison ignores trailing slashes, case and the service itself', () => {
@@ -53,14 +59,14 @@ describe('duplicate service base URL', () => {
   test('the editor shows the hint under 服务地址 and disables 添加', () => {
     editor('https://API.example.com/v1/')
     const hint = screen.getByText(DUPLICATE_SERVICE_URL_TEXT)
-    expect(hint.id).toBe('fox-provider-base-url-error')
-    expect((screen.getByRole('button', { name: '添加' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(hint.getAttribute('role')).toBe('alert')
+    expect((screen.getByRole('button', { name: '保存' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   test('a different URL, or the service being edited, has no hint', () => {
     editor('https://api.example.com/v2')
     expect(screen.queryByText(DUPLICATE_SERVICE_URL_TEXT)).toBeNull()
-    expect((screen.getByRole('button', { name: '添加' }) as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: '保存' }) as HTMLButtonElement).disabled).toBe(false)
     cleanup()
     editor('https://api.example.com/v1', 'svc-a')
     expect(screen.queryByText(DUPLICATE_SERVICE_URL_TEXT)).toBeNull()
@@ -79,7 +85,7 @@ describe('duplicate service base URL', () => {
     await act(async () => { render(React.createElement(TooltipProvider, null, React.createElement(ModelProvidersPage, { sidebarCollapsed: false, onSidebar: () => {} }))) })
     await waitFor(() => { if (!document.querySelector('[aria-label="编辑 已有服务"]')) throw new Error('not loaded') })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '编辑 已有服务' })) })
-    const sheet = await waitFor(() => document.querySelector('[data-slot="sheet-content"]') as HTMLElement)
+    const sheet = await waitFor(() => document.querySelector('.fox-service-form') as HTMLElement)
     await act(async () => { fireEvent.click(within(sheet).getByRole('button', { name: '保存' })) })
     await waitFor(() => expect(sheet.textContent).toContain(DUPLICATE_SERVICE_URL_TEXT))
     expect(document.body.textContent).not.toContain('UNIQUE constraint')

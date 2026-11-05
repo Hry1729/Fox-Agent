@@ -31,3 +31,6 @@ export function codeToText(code: string): string { return ERRORS[code] ?? '操�
 export function configErrorText(error: unknown): string {
   return codeToText(error && typeof error === 'object' && 'code' in error ? String(error.code) : '')
 }
+
+export const AGENT_NAMES = { fox: 'Fox', pi: 'Pi', codex: 'Codex', deepseek: 'DeepSeek（dsh）' } as const
+export const API_NAMES = { 'openai-completions': 'Chat Completions', 'anthropic-messages': 'Messages', 'openai-responses': 'Responses' } as const

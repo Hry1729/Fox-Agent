@@ -2138,7 +2138,7 @@
   border: 0;
   border-radius: calc(var(--fox-radius-window) + 4px) calc(var(--fox-radius-window) + 4px) var(--fox-radius-window) calc(var(--fox-radius-window) + 4px);
   background: transparent;
-  box-shadow: 0 1px 9px rgb(0 0 0 / 0.10);
+  box-shadow: var(--fox-shadow-sm);
   filter: none;
 }
 
@@ -7339,7 +7339,7 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .dark .fox-content-card {
-  box-shadow: 0 1px 10.8px rgb(0 0 0 / 0.30);
+  box-shadow: var(--fox-shadow-sm);
   filter: none;
 }
 

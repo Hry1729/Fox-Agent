@@ -27,6 +27,7 @@ mock.module('../src/features/conversations/api/desktop-client', () => ({
     listModelProviders: async () => providers.map((item) => ({ ...item })),
     deleteModelProvider: async (id: string) => { deleted.push(id); providers = providers.filter((item) => item.id !== id); return true },
     getModelServiceStatus: async () => null,
+    agentConfigOverview: async () => ({ services: [], agents: [] }),
   },
 }))
 
@@ -87,15 +88,16 @@ describe('service row ⋯ menu', () => {
     await waitFor(() => expect(deleted).toEqual(['svc-test']))
   })
 
-  test('重命名 opens the prompt dialog on repeated menu opens', async () => {
+  test('编辑 enters the same inline form on repeated menu opens', async () => {
     providers = [{ ...provider }]
     await mount()
     for (let round = 0; round < 2; round += 1) {
-      await openMenuAndChoose('重命名')
-      await waitFor(() => { if (!document.querySelector('[role="dialog"], [role="alertdialog"]')) throw new Error(`prompt missing (round ${round + 1})`) })
-      const box = document.querySelector('[role="dialog"], [role="alertdialog"]') as HTMLElement
-      await act(async () => { fireEvent.click(buttonIn(box, '取消')) })
-      await waitFor(() => { if (document.querySelector('[role="dialog"], [role="alertdialog"]')) throw new Error('prompt still open') })
+      await openMenuAndChoose('编辑')
+      await waitFor(() => expect(document.querySelector('.fox-service-form')).toBeTruthy())
+      expect(document.querySelector('[data-slot="sheet-content"]')).toBeNull()
+      const form = document.querySelector('.fox-service-form')!
+      await act(async () => { fireEvent.click(buttonIn(form, '取消')) })
+      await waitFor(() => expect(document.querySelector('.fox-service-form')).toBeNull())
     }
   })
 })

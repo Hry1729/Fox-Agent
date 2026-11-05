@@ -1,0 +1,52 @@
+.fox-model-agent-page { width: min(960px, calc(100% - var(--fox-space-6xl))); }
+.fox-model-agent-page small, .fox-model-breadcrumb { color: var(--fox-muted); font-size: var(--fox-type-caption); }
+.fox-model-agent-page select { min-height: var(--fox-control-md); max-width: 100%; border: 1px solid var(--fox-border); border-radius: var(--fox-radius-control); background: var(--fox-card); color: var(--fox-text); padding: var(--fox-space-s) var(--fox-space-m); font: inherit; }
+.fox-model-section { padding-block: var(--fox-space-xl); }
+.fox-model-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--fox-space-s); }
+.fox-model-actions .is-grow { flex: 1; }
+.fox-model-error { color: var(--destructive); }
+.fox-model-service-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: var(--fox-space-s); padding-block: var(--fox-space-xl); border-bottom: 1px solid var(--fox-settings-hairline); }
+.fox-model-service-row:last-child, .fox-agent-config-row:last-child { border-bottom: 0; }
+.fox-model-service-main { display: flex; align-items: center; gap: var(--fox-space-l); min-width: 0; text-align: left; border: 0; background: transparent; color: inherit; cursor: pointer; }
+.fox-model-service-main > span:nth-child(2) { min-width: 0; flex: 1; }
+.fox-model-service-main small { display: block; margin-top: var(--fox-space-xs); overflow-wrap: anywhere; }
+.fox-model-service-status { color: var(--fox-muted); font-size: var(--fox-type-caption); white-space: nowrap; }
+.fox-service-matches { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: var(--fox-space-s); padding-left: calc(var(--fox-control-lg) + var(--fox-space-l)); }
+.fox-agent-chip { display: inline-flex; align-items: center; min-height: var(--fox-space-2xl); padding: 0 var(--fox-space-s); margin-inline: var(--fox-space-xs); border: 1px solid var(--fox-border); border-radius: var(--fox-radius-pill); color: var(--fox-muted); font-size: var(--fox-type-caption); font-weight: 400; }
+.fox-agent-chip.is-verified { color: var(--success); border-color: color-mix(in oklch, var(--success) 35%, transparent); background: color-mix(in oklch, var(--success) 7%, transparent); }
+.fox-agent-config-row { border-bottom: 1px solid var(--fox-settings-hairline); }
+.fox-agent-config-main { display: grid; grid-template-columns: minmax(112px, .7fr) minmax(0, 2fr) auto; align-items: center; gap: var(--fox-space-xl); padding-block: var(--fox-space-xl); }
+.fox-agent-config-main small { display: block; margin-top: var(--fox-space-xs); }
+.fox-agent-config-main [data-ready='true'] { color: var(--success); }
+.fox-agent-description { min-width: 0; overflow-wrap: anywhere; }
+.fox-agent-inline { margin: 0 0 var(--fox-space-xl); padding: var(--fox-space-xl); border: 1px solid var(--fox-settings-hairline); border-radius: var(--fox-radius-card); background: var(--fox-panel); }
+.fox-agent-inline h3 { font-size: var(--fox-type-body); margin: 0 0 var(--fox-space-l); }
+.fox-agent-inline > .fox-model-actions:first-child { margin-bottom: var(--fox-space-l); }
+.fox-model-fields { display: grid; gap: var(--fox-space-xl); }
+.fox-model-fields > label { display: grid; gap: var(--fox-space-s); }
+.fox-model-fields label:has([role='switch']) { display: flex; align-items: center; gap: var(--fox-space-m); }
+.fox-model-agent-page fieldset { min-width: 0; border: 0; padding: 0; margin: var(--fox-space-l) 0; }
+.fox-model-agent-page legend { margin-bottom: var(--fox-space-m); font-weight: var(--fox-weight-medium); }
+.fox-model-choice { display: flex; align-items: baseline; gap: var(--fox-space-s); margin-block: var(--fox-space-s); }
+.fox-model-choice input { accent-color: var(--primary); }
+.fox-model-agent-page code, .fox-model-agent-page pre { display: block; overflow-wrap: anywhere; white-space: pre-wrap; color: var(--fox-muted); font-size: var(--fox-type-caption); }
+.fox-target-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--fox-space-m); }
+.fox-preset-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--fox-space-m); margin-bottom: var(--fox-space-xl); }
+.fox-target-option, .fox-preset-grid button { min-width: 0; display: flex; align-items: center; gap: var(--fox-space-m); border: 1px solid var(--fox-border); background: var(--fox-card); color: var(--fox-text); border-radius: var(--fox-radius-control); padding: var(--fox-space-l); text-align: left; cursor: pointer; }
+.fox-target-option { flex-direction: column; align-items: flex-start; }
+.fox-preset-grid button img { width: var(--fox-icon-size); height: var(--fox-icon-size); }
+.fox-preset-grid small { display: block; margin-top: var(--fox-space-xs); }
+.fox-target-grid [aria-pressed='true'], .fox-preset-grid [aria-pressed='true'] { border-color: var(--primary); background: var(--fox-accent-surface); }
+.fox-model-advanced { margin-block: var(--fox-space-xl); border: 1px solid var(--fox-border); border-radius: var(--fox-radius-card); padding: var(--fox-space-xl); }
+.fox-model-advanced summary { cursor: pointer; }
+.fox-model-advanced summary span { display: block; color: var(--fox-muted); font-size: var(--fox-type-caption); margin-top: var(--fox-space-xs); }
+.fox-model-advanced[open] summary { margin-bottom: var(--fox-space-xl); }
+.fox-model-edit-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--fox-space-m); }
+.fox-model-edit-row label { display: grid; gap: var(--fox-space-xs); }
+.fox-verification ol { list-style: decimal; margin: 0; padding-left: var(--fox-space-xl); }
+.fox-verification li { padding: var(--fox-space-s) 0; }
+.fox-verification li > span { display: block; color: var(--fox-muted); margin-top: var(--fox-space-xs); }
+.fox-verification li[data-status='passed']::marker { color: var(--success); }
+.fox-verification li[data-status='failed']::marker { color: var(--destructive); }
+@media (max-width: 900px) { .fox-agent-config-main { grid-template-columns: minmax(0, 1fr) auto; } .fox-agent-description { grid-column: 1 / -1; grid-row: 2; } .fox-preset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .fox-target-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .fox-model-service-status { display: none; } .fox-service-matches { padding-left: 0; } .fox-model-agent-page { width: calc(100% - var(--fox-space-xl)); } }

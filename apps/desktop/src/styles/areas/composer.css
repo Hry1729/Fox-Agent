@@ -5,8 +5,7 @@
    0、1px 描边、百分比和 auto 除外。 */
 
 :root {
-  /* 外框 1px 描边算进内边距：视觉内边距仍是 --fox-composer-inset，内卡圆角用 -inner，内外同心。 */
-  --fox-composer-frame-padding: calc(var(--fox-composer-inset) - 1px);
+  --fox-composer-frame-padding: var(--fox-composer-inset);
   /* 菜单宽度由控件高度和间距推出。 */
   --fox-composer-menu-min-width: calc(var(--fox-menu-item-height) * 6);
   --fox-composer-execution-min-width: calc(var(--fox-menu-item-height) * 7 + var(--fox-space-m));
@@ -17,12 +16,12 @@
   --fox-composer-send-disabled-bg: color-mix(in oklch, var(--muted) 78%, var(--fox-card));
 }
 
-/* I1 新对话外框（含项目条）与内卡同心；亮暗描边都用 --fox-border。 */
+/* 外围托盘与侧栏使用相同表面，描边留在输入卡片上。 */
 .fox-composer-wrap.is-new-conversation .fox-prompt-shell:not(.is-decision) {
   padding: var(--fox-composer-frame-padding);
-  border: 1px solid var(--fox-border);
+  border: 0;
   border-radius: var(--fox-radius-composer);
-  background: var(--fox-accent-surface);
+  background: color-mix(in oklch, var(--background) 34%, var(--shell));
 }
 
 .fox-composer-wrap.is-new-conversation .fox-prompt-shell:not(.is-decision) .fox-prompt-border-beam {
@@ -397,3 +396,7 @@
   height: var(--fox-control-md);
   border-radius: calc(var(--fox-composer-group-radius) - var(--fox-space-m));
 }
+
+.dark .fox-composer-wrap.is-new-conversation .fox-prompt-shell:not(.is-decision) { background: var(--shell); }
+.fox-composer-wrap.is-new-conversation .fox-prompt-textarea { padding: var(--fox-space-m) var(--fox-space-m) 0 !important; }
+.fox-composer-wrap.is-history .fox-prompt-textarea { padding-block: calc(var(--fox-space-xs) + var(--fox-space-micro)) var(--fox-space-micro) !important; }
