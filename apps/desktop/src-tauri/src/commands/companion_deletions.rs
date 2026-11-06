@@ -111,14 +111,22 @@ const SOURCES: &str = "SELECT conversation_id,storage_path AS path,'attachment' 
     UNION ALL SELECT conversation_id,after_backup_path,'managed_backup' FROM managed_file_versions WHERE after_backup_path IS NOT NULL";
 
 fn managed_path(path: &Path, original_data: &Path, data: &Path) -> io::Result<Option<PathBuf>> {
-    let Ok(relative) = path.strip_prefix(data).or_else(|_| path.strip_prefix(original_data)) else {
+    let Ok(relative) = path
+        .strip_prefix(data)
+        .or_else(|_| path.strip_prefix(original_data))
+    else {
         return Ok(None);
     };
     let resolved = normalized(&data.join(relative))?;
     Ok(resolved.starts_with(data).then_some(resolved))
 }
 
-fn references(conn: &Connection, conversation: &str, original_data: &Path, data: &Path) -> DeletionResult<BTreeSet<PathBuf>> {
+fn references(
+    conn: &Connection,
+    conversation: &str,
+    original_data: &Path,
+    data: &Path,
+) -> DeletionResult<BTreeSet<PathBuf>> {
     let mut statement = conn.prepare(&format!(
         "SELECT DISTINCT path FROM ({SOURCES}) WHERE conversation_id<>?1"
     ))?;
@@ -171,7 +179,9 @@ fn file_entries(
     }
     let mut entries = BTreeMap::new();
     for (path, kind) in files {
-        let Some(path) = managed_path(&path, original_data, data)? else { continue; };
+        let Some(path) = managed_path(&path, original_data, data)? else {
+            continue;
+        };
         let shared_path = shared.contains(&path)
             || (kind == "compute_dir" && shared.iter().any(|p| p.starts_with(&path)));
         let remove = !path.starts_with(workspace)
@@ -255,7 +265,7 @@ fn plan(conn: &Connection, data: &Path, id: &str) -> DeletionResult<Plan> {
             id,
         )?,
         shared_memories: count(
-            "SELECT count(*) FROM memory_entities WHERE scope='global' AND source_companion_id=?1",
+            "SELECT count(*) FROM memory_entities WHERE scope='global' AND source_companion_id=?1 AND state='confirmed' AND deleted_at IS NULL",
             id,
         )?,
         generations: count(
@@ -306,6 +316,12 @@ fn collect(db: &Database, data: &Path, id: &str, expected: &str) -> Result<(), S
 fn purge_rows(db: &Database, plan: &Plan) -> Result<(), String> {
     on_db(db, |conn| {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM memory_entities WHERE id IN (
+                 SELECT candidate_memory_id FROM companion_shared_requests
+                 WHERE companion_id=?1 AND status IN ('open','stale','rejected'))",
+            [&plan.companion_id],
+        )?;
         tx.execute(
             "DELETE FROM memory_entities WHERE scope='agent' AND scope_key=?1",
             [&plan.companion_id],
@@ -485,7 +501,21 @@ pub(crate) fn companion_delete(
             .runtime_host
             .companion_transition()
             .and_then(|_guard| {
-                collect(&state.database, &state.data_dir, &companion_id, &plan_hash)?;
+                let existing: Option<String> = state.database.with_connection(|c| {
+                    c.query_row(
+                        "SELECT plan_hash FROM companion_deletions WHERE companion_id=?1",
+                        [&companion_id],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                })?;
+                match existing {
+                    Some(signature) if signature != plan_hash => {
+                        return Err("companion.plan_changed".into())
+                    }
+                    Some(_) => {}
+                    None => collect(&state.database, &state.data_dir, &companion_id, &plan_hash)?,
+                }
                 resume(&state, &companion_id)
             }),
     )
@@ -601,7 +631,17 @@ mod tests {
                     VALUES('v2',?1,'edit_file','other-path','quote',1,'modified',?2,1)",params![other.conversation_id,shared.to_string_lossy()])?;
                 Ok(())
             }).unwrap();
+            db.with_connection(|c| {
+                for (memory, status) in [("saved","confirmed"),("unresolved","candidate")] {
+                    c.execute("INSERT INTO memory_entities(id,scope,kind,canonical_key,content,state,created_by,source_companion_id,created_at,updated_at)
+                        VALUES(?1,'global','fact',?1,'记忆',?2,'agent',?3,1,1)",params![memory,status,id])?;
+                }
+                c.execute("INSERT INTO companion_shared_requests(id,companion_id,candidate_memory_id,candidate_version,created_at)
+                    VALUES('req',?1,'unresolved',1,1)",[id])?;
+                Ok(())
+            }).unwrap();
             let before = on_db(&db, |c| plan(c, &data, id)).unwrap();
+            assert_eq!(before.shared_memories, 1);
             assert_eq!(before.workspace_files, 2);
             assert!(collect(&db, &data, id, "outdated")
                 .unwrap_err()
@@ -626,6 +666,10 @@ mod tests {
             let result = finish(&db, &data, id, |_| Ok(())).unwrap();
             assert_eq!(result["removedFiles"], 4);
             assert_eq!(result["keptFiles"], 2);
+            let memories: (String,i64) = db.with_connection(|c| c.query_row(
+                "SELECT source_label,(SELECT count(*) FROM memory_entities WHERE id='unresolved') FROM memory_entities WHERE id='saved'",
+                [],|r| Ok((r.get(0)?,r.get(1)?)))).unwrap();
+            assert_eq!(memories, (a.profile.display_name.clone(), 0));
             assert_eq!(fs::read(&retained).unwrap(), b"final quote");
             assert_eq!(fs::read(&imported).unwrap(), b"original quote");
             assert!(shared.is_file());

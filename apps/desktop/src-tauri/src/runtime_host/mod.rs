@@ -2895,7 +2895,9 @@ impl RuntimeHost {
         input: Option<&Value>,
     ) -> Result<(), (&'static str, String)> {
         let data_dir = self.sessions_dir.parent().ok_or(("companion.workspace_unavailable", "缺少数据目录".into()))?;
-        crate::companion_workspace::check_run_tool(&self.database, data_dir, run_id, tool, input)?;
+        crate::companion_workspace::check_run_tool(&self.database, data_dir, run_id, tool, input, Some(&|id, path| {
+            let _ = self.app.emit("fox://companion-import-suggested", json!({"companionId": id, "path": path}));
+        }))?;
         let (active_profile_id, capabilities) = {
             let state = self.state.lock().map_err(|_| {
                 (

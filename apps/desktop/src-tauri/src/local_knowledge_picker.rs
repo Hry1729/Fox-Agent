@@ -204,6 +204,13 @@ fn collect_folder_files(root: &Path) -> Result<Vec<PickedLocalKnowledgeFile>, St
 
 #[cfg(windows)]
 fn pick_files_windows() -> Result<Vec<PickedLocalKnowledgeFile>, String> {
+    pick_file_paths_windows()?.iter().enumerate().map(|(index, path)|
+        validate_picked_file(path).map_err(|error| format!("第 {} 个所选文件无效：{error}", index + 1))
+    ).collect()
+}
+
+#[cfg(windows)]
+pub(crate) fn pick_file_paths_windows() -> Result<Vec<std::path::PathBuf>, String> {
     use windows::core::HRESULT;
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
@@ -264,10 +271,7 @@ fn pick_files_windows() -> Result<Vec<PickedLocalKnowledgeFile>, String> {
             let path = path.map_err(|error| {
                 format!("第 {} 个所选文件路径不是有效的 Unicode：{error}", index + 1)
             })?;
-            files.push(
-                validate_picked_file(Path::new(&path))
-                    .map_err(|error| format!("第 {} 个所选文件无效：{error}", index + 1))?,
-            );
+            files.push(std::path::PathBuf::from(path));
         }
         Ok(files)
     }

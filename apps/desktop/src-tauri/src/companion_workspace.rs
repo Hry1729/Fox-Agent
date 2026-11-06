@@ -140,6 +140,7 @@ pub(crate) fn check_run_tool(
     run: &str,
     tool: &str,
     input: Option<&serde_json::Value>,
+    suggest_import: Option<&dyn Fn(&str, &Path)>,
 ) -> Result<(), (&'static str, String)> {
     let profile: Option<(String, String)> = database.with_connection(|db| {
         use rusqlite::OptionalExtension;
@@ -162,6 +163,39 @@ pub(crate) fn check_run_tool(
             "companion.workspace_unavailable",
             "私聊的项目目录与联系人不符".into(),
         ));
+    }
+    if let Some(input) = input.filter(|_| {
+        matches!(
+            tool,
+            "read" | "grep" | "find" | "ls" | "write_file" | "edit_file" | "present_files"
+        )
+    }) {
+        let direct = input
+            .get("path")
+            .and_then(|v| v.as_str())
+            .filter(|_| tool != "present_files");
+        let files = input["files"]
+            .as_array()
+            .filter(|_| tool == "present_files")
+            .into_iter()
+            .flatten()
+            .filter_map(|file| file["path"].as_str());
+        for path in direct.into_iter().chain(files) {
+            if crate::tool_host::reject_network_or_device_path(path).is_err() {
+                continue;
+            }
+            if let Ok(target) = root.join(path).canonicalize() {
+                if !target.starts_with(&root) && target.is_file() {
+                    if let Some(emit) = suggest_import {
+                        emit(&id, &target);
+                    }
+                    return Err((
+                        "companion.path_blocked",
+                        "私聊只可访问本联系人工作目录中的文件".into(),
+                    ));
+                }
+            }
+        }
     }
     if let Some(input) = input.filter(|_| matches!(tool, "write_file" | "edit_file")) {
         let path = input["path"]
@@ -275,11 +309,18 @@ pub(crate) fn companion_workspace_repair(
 pub(crate) async fn companion_import_files(
     state: State<'_, AppState>,
     companion_id: String,
-    paths: Vec<PathBuf>,
+    paths: Option<Vec<PathBuf>>,
 ) -> Result<ApiResponse<Vec<PathBuf>>, String> {
     let database = state.database.clone();
     let data_dir = state.data_dir.clone();
     let result = tokio::task::spawn_blocking(move || {
+        let paths = match paths {
+            Some(paths) => paths,
+            #[cfg(windows)]
+            None => crate::local_knowledge_picker::pick_file_paths_windows()?,
+            #[cfg(not(windows))]
+            None => return Err("此平台尚无系统文件选择框".into()),
+        };
         import_files(&database, &data_dir, &companion_id, &paths)
     })
     .await
@@ -366,6 +407,24 @@ mod tests {
             .unwrap()
             .run
             .id;
+        let suggested = std::cell::RefCell::new(None);
+        let on_import = |id: &str, path: &Path| {
+            *suggested.borrow_mut() = Some((id.to_owned(), path.to_owned()));
+        };
+        let refusal = check_run_tool(
+            &db,
+            &data,
+            &run,
+            "read",
+            Some(&json!({"path":b_file})),
+            Some(&on_import),
+        )
+        .unwrap_err();
+        assert_eq!(refusal.0, "companion.path_blocked");
+        assert_eq!(
+            suggested.into_inner(),
+            Some((a_id.to_owned(), b_file.clone()))
+        );
         for mode in ["read_only", "ask", "allow"] {
             db.with_connection(|c| {
                 c.execute(
@@ -383,14 +442,22 @@ mod tests {
                     ".git/config",
                 ] {
                     assert_eq!(
-                        check_run_tool(&db, &data, &run, tool, Some(&json!({"path":path})))
+                        check_run_tool(&db, &data, &run, tool, Some(&json!({"path":path})), None)
                             .unwrap_err()
                             .0,
                         "companion.path_blocked",
                         "{mode} {tool} {path}"
                     );
                 }
-                check_run_tool(&db, &data, &run, tool, Some(&json!({"path":"报告.txt"}))).unwrap();
+                check_run_tool(
+                    &db,
+                    &data,
+                    &run,
+                    tool,
+                    Some(&json!({"path":"报告.txt"})),
+                    None,
+                )
+                .unwrap();
             }
         }
         let repo = data.join("outside-repo");
@@ -420,7 +487,7 @@ mod tests {
             "attachment_compute",
         ] {
             assert_eq!(
-                check_run_tool(&db, &data, &run, tool, Some(&json!({"path":b_root})))
+                check_run_tool(&db, &data, &run, tool, Some(&json!({"path":b_root})), None)
                     .unwrap_err()
                     .0,
                 "companion.tool_not_available"
@@ -434,7 +501,15 @@ mod tests {
             .unwrap()
             .run
             .id;
-        check_run_tool(&db, &data, &ordinary_run, "git_read", Some(&json!({}))).unwrap();
+        check_run_tool(
+            &db,
+            &data,
+            &ordinary_run,
+            "git_read",
+            Some(&json!({})),
+            None,
+        )
+        .unwrap();
         fs::remove_dir_all(&a_root).unwrap();
         assert!(require_for_chat(&db, &data, &a.conversation_id).is_err());
         assert_eq!(
