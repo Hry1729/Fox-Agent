@@ -202,7 +202,7 @@ fn reported_negative_temporary_and_rephrased_statements_require_confirmation() {
 
 #[test]
 fn undoing_a_move_preserves_all_rows_at_limit_and_after_a_topic_delete() {
-    with_notes(|db, _, owner, chat| {
+    with_notes(|db, root, owner, chat| {
         let add = |k: &str, t: &str| {
             write(
                 db,
@@ -219,13 +219,20 @@ fn undoing_a_move_preserves_all_rows_at_limit_and_after_a_topic_delete() {
         add("new", &"a".repeat(400));
         let undo = db.companion_note_move_undo(owner, mid).unwrap();
         assert_eq!(undo["overBy"], 400);
+        let original = format!("\t{}\r\n{}\r\n  ", "多".repeat(99), "少".repeat(100));
         let too_long = db
-            .companion_note_save_user(owner, None, None, &"多".repeat(200), Some("draft"), None)
+            .companion_note_save_user(owner, None, None, &original, Some("draft"), None)
             .unwrap();
         assert_eq!(too_long["overBy"], 100);
         let notes = db.companion_notes_get(owner).unwrap();
         assert_eq!(notes["usedChars"], 3900);
-        assert_eq!(notes["draft"].as_str().unwrap().chars().count(), 200);
+        assert_eq!(notes["draft"].as_str(), Some(original.as_str()));
+        let reopened = Database::open(root.join("fox.db")).unwrap();
+        assert_eq!(
+            reopened.companion_notes_get(owner).unwrap()["draft"].as_str(),
+            Some(original.as_str())
+        );
+        drop(reopened);
         assert_eq!(notes["moves"][0]["state"], "applied");
         let topic_read = db.companion_topic_read(owner, topic).unwrap();
         assert!(topic_read["content"]

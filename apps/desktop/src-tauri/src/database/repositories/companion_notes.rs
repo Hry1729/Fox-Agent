@@ -225,9 +225,6 @@ fn save_note(
         None => item.content.chars().count() as i64,
     };
     if let Some(refusal) = over_budget(tx, item.owner, delta)? {
-        if item.actor == "user" {
-            draft(tx, item.owner, item.content)?;
-        }
         return Ok(refusal);
     }
     let result = if let Some(previous) = before {
@@ -238,12 +235,6 @@ fn save_note(
     } else {
         json!({"status":"created","memoryId":insert(tx,item,true)?})
     };
-    if item.actor == "user" {
-        tx.execute(
-            "DELETE FROM companion_note_drafts WHERE companion_id=? AND content=?",
-            params![item.owner, item.content],
-        )?;
-    }
     Ok(result)
 }
 
@@ -311,7 +302,16 @@ impl Database {
                 evidence: "",
                 basis: None,
             };
-            save_note(tx, &item, before.as_ref())
+            let result = save_note(tx, &item, before.as_ref())?;
+            if result["overBy"].is_number() {
+                draft(tx, id, content)?;
+            } else {
+                tx.execute(
+                    "DELETE FROM companion_note_drafts WHERE companion_id=? AND content=?",
+                    params![id, content],
+                )?;
+            }
+            Ok(result)
         })
     }
 
