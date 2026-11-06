@@ -258,7 +258,7 @@ impl SharedBatchRegistry {
     }
 
     fn refusal_receipt(&self, database: &Database, envelope: &RuntimeEnvelope,
-        request: &ToolCallExecuteRequest) -> Result<Value,String> {
+        request: &ToolCallExecuteRequest, diagnostic: &str) -> Result<Value,String> {
         let _guard=self.gate.lock().map_err(|_|"native batch lock poisoned")?;
         let result=database.with_connection(|connection| {
             let tx=connection.transaction()?;
@@ -281,7 +281,11 @@ impl SharedBatchRegistry {
             if row.state!="pending" || row.claimed_at.is_some() {
                 return Err(invalid("native refusal cannot settle an unknown execution outcome"));
             }
-            let response=failure("tool was not executed: intercepted");
+            let response = match diagnostic.split_once(": ") {
+                Some((code @ ("companion.tool_not_available" | "companion.path_blocked" | "companion.workspace_unavailable"), message)) =>
+                    json!({"isError":true,"error":message,"errorDetails":{"code":code,"retryable":false}}),
+                _ => failure("tool was not executed: intercepted"),
+            };
             let changed=tx.execute("UPDATE kernel_tool_calls SET state='not_started',close_reason='intercepted',result_json=?4,settled_at=?5
                                    WHERE run_id=?1 AND batch_id=?2 AND tool_call_id=?3 AND state='pending' AND claimed_at IS NULL AND result_json IS NULL",
                 params![request.run_id,request.batch_id,request.call_id,canonical(&response)?,crate::database::now_ms()])?;
@@ -769,7 +773,7 @@ fn validate_tool_policy(host: &super::RuntimeHost, envelope: &RuntimeEnvelope,
 fn execution_refusal(host: &super::RuntimeHost, envelope: &RuntimeEnvelope,
     request: &ToolCallExecuteRequest, diagnostic: &str) -> Option<Value> {
     eprintln!("[native.execution_refused] run={} call={} error={diagnostic}",request.run_id,request.call_id);
-    match host.native_batches.refusal_receipt(&host.database,envelope,request) {
+    match host.native_batches.refusal_receipt(&host.database,envelope,request,diagnostic) {
         Ok(receipt)=>Some(receipt),
         Err(error)=>{
             host.reject_runtime_run_event(&request.run_id,"runtime.native_refusal_uncommitted",&error);
@@ -1618,9 +1622,9 @@ mod tests {
     fn capacity_and_policy_refusals_return_the_committed_nonexecution_receipt() {
         let (fixture,registry,request,envelope)=refusal_fixture();
         validate_execution_identity(&fixture.database,&request).unwrap();
-        let receipt=registry.refusal_receipt(&fixture.database,&envelope,&request).unwrap();
+        let receipt=registry.refusal_receipt(&fixture.database,&envelope,&request,"").unwrap();
         assert_refusal_receipt(&fixture,&request,&receipt);
-        assert_eq!(registry.refusal_receipt(&fixture.database,&envelope,&request).unwrap(),receipt);
+        assert_eq!(registry.refusal_receipt(&fixture.database,&envelope,&request,"").unwrap(),receipt);
     }
 
     #[test]
@@ -1631,7 +1635,7 @@ mod tests {
                 if reason=="timeout" {Ok(())} else {Err(reason.into())}
             }).unwrap_err();
             if reason=="timeout" {assert!(failure.contains("timed out"));} else {assert_eq!(failure,reason);}
-            let receipt=registry.refusal_receipt(&fixture.database,&envelope,&request).unwrap();
+            let receipt=registry.refusal_receipt(&fixture.database,&envelope,&request,"").unwrap();
             assert_refusal_receipt(&fixture,&request,&receipt);
         }
     }
@@ -1640,15 +1644,15 @@ mod tests {
     fn refusal_never_settles_foreign_identity_changed_input_or_an_unknown_claim() {
         let (fixture,registry,request,envelope)=refusal_fixture();
         let mut foreign=envelope.clone();foreign.conversation_id=Some("foreign".into());
-        assert!(registry.refusal_receipt(&fixture.database,&foreign,&request).is_err());
+        assert!(registry.refusal_receipt(&fixture.database,&foreign,&request,"").is_err());
         let mut changed=request.clone();changed.tool="write_file".into();
-        assert!(registry.refusal_receipt(&fixture.database,&envelope,&changed).is_err());
+        assert!(registry.refusal_receipt(&fixture.database,&envelope,&changed,"").is_err());
         let claimed=ToolCallExecuteRequest {call_id:"barrier".into(),tool:"write_file".into(),input:json!({"path":"test"}),..request.clone()};
         assert_eq!(SharedBatchRegistry::try_claim(&fixture.database,&claimed).unwrap(),Claim::Execute);
         let mut claimed_envelope=envelope.clone();claimed_envelope.payload=Some(serde_json::to_value(&claimed).unwrap());
         let mut drifted=claimed.clone();drifted.input["path"]=json!("other");
-        assert!(registry.refusal_receipt(&fixture.database,&claimed_envelope,&drifted).is_err());
-        assert!(registry.refusal_receipt(&fixture.database,&claimed_envelope,&claimed).unwrap_err().contains("unknown execution outcome"));
+        assert!(registry.refusal_receipt(&fixture.database,&claimed_envelope,&drifted,"").is_err());
+        assert!(registry.refusal_receipt(&fixture.database,&claimed_envelope,&claimed,"").unwrap_err().contains("unknown execution outcome"));
         fixture.database.with_connection(|connection| {
             let rows=positions(connection,&request.run_id,&request.batch_id)?;
             assert!(position(&rows,"barrier")?.result.is_none());assert_eq!(position(&rows,"barrier")?.state,"running");

@@ -18,6 +18,7 @@
 .fox-contact-panel textarea { min-height:64px; resize:vertical; }
 .fox-contact-actions,.fox-contact-banner,.fox-contact-footer { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
 .fox-contact-banner { padding:8px 16px; border-bottom:1px solid var(--border); font-size:13px; }
+.fox-contact-footer .fox-contact-avatar { width:16px; height:16px; }
 .fox-contact-footer button { color:var(--muted-foreground); font-size:12px; padding:2px 6px; }
 .fox-contact-panel details { padding:10px 0; }
 .fox-contact-panel summary { cursor:pointer; }

@@ -1516,8 +1516,8 @@ fn an_empty_allocated_file_is_not_adopted() {
     );
 
     let mapping = fixture.mapping().unwrap();
-    assert!(super::session_lifecycle::context_irrecoverable(Some(&mapping), None));
-    assert!(!super::session_lifecycle::context_irrecoverable(Some(&mapping), Some("runtime-8")));
+    assert!(super::session_lifecycle::context_recovery_issue(Some(&mapping), None).is_some());
+    assert!(super::session_lifecycle::context_recovery_issue(Some(&mapping), Some("runtime-8")).is_none());
     let mut runtime = ScriptedRuntime::default();
     let error = fixture
         .lifecycle()

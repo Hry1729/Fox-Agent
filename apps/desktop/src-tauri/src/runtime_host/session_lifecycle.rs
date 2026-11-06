@@ -329,12 +329,15 @@ fn classify_open(
     }
 }
 
-pub(crate) fn context_irrecoverable(mapping: Option<&RuntimeSessionRecord>, live: Option<&str>) -> bool {
-    let Some(record) = mapping.filter(|record| record.is_native()) else { return false };
+pub(crate) fn context_recovery_issue(mapping: Option<&RuntimeSessionRecord>, live: Option<&str>) -> Option<(&'static str, &'static str)> {
+    let record = mapping.filter(|record| record.is_native())?;
     let path = record.native_path();
     let persisted = path.as_deref().is_some_and(native_session_file_is_persisted);
     let exists = path.is_some_and(|path| std::fs::symlink_metadata(path).is_ok());
-    matches!(classify_open(Some(record), persisted, exists, live), OpenDecision::Refuse { .. })
+    match classify_open(Some(record), persisted, exists, live) {
+        OpenDecision::Refuse { code, detail } => Some((code, detail)),
+        _ => None,
+    }
 }
 
 /// Runtime events that prove Pi has written its session file.

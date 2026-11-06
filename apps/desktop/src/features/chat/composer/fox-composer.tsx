@@ -1,3 +1,4 @@
+import { ContactComposerFooter } from '@/features/companions/chat-controls'
 import { useContacts } from '@/features/companions/context'
 import { ExpertBindingChip } from '../components/ExpertBindingChip'
 import { ComposerProjectBar } from './composer-project-bar'
@@ -636,7 +637,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
   const sendControls = sendButton
 
   const expertControl = !companion?.privateChat && !(newConversation && entry.draftAgentBackend && entry.draftAgentBackend !== 'fox') && displayExpert && onChangeExpert && <ExpertBindingChip expert={displayExpert} defaultLabel={!activeExpert} directSelection={newConversation} readOnly={expertReadOnly} toolAvailability={expertToolAvailability} onView={activeExpert ? onViewExpert ?? (() => {}) : entry.onViewDefaultExpert ?? (() => {})} onChange={onChangeExpert} />
-  const modelControl = isYuxiAgent ? <Models value={model} disabled={!supportsDynamicModelSwitch || chatState === 'running'} onValueChange={setModel} options={modelOptions.map(item => ({ id: item.spec, name: item.displayName || item.modelId, meta: item.providerDisplayName }))} fallbackLabel={defaultModel} /> : <ComposerModelPicker service={modelService} disabled={!runtimeControlled || chatState === 'running' || runtimeInitializing} onOpenSettings={entry.onOpenModelSettings} />
+  const modelControl = companion?.privateChat ? null : isYuxiAgent ? <Models value={model} disabled={!supportsDynamicModelSwitch || chatState === 'running'} onValueChange={setModel} options={modelOptions.map(item => ({ id: item.spec, name: item.displayName || item.modelId, meta: item.providerDisplayName }))} fallbackLabel={defaultModel} /> : <ComposerModelPicker service={modelService} disabled={!runtimeControlled || chatState === 'running' || runtimeInitializing} onOpenSettings={entry.onOpenModelSettings} />
 
   return (
     <div ref={composerRef} className={`fox-composer-wrap ${centered ? 'is-empty' : ''} ${newConversation ? 'is-new-conversation' : 'is-history'}`}>
@@ -807,7 +808,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
           setDraft('')
           setCommandOpen(false)
           setMentionOpen(false)
-          const selectedModel = conversationModelOverride(activeAgent, model, yuxiModels)
+          const selectedModel = companion?.privateChat ? undefined : conversationModelOverride(activeAgent, model, yuxiModels)
           const prompt = text.trim() || '请分析这些附件'
           const runtimeText = selectedSlashCommand ? slashCommandRuntimeText(selectedSlashCommand, prompt) : undefined
           let outcome: Awaited<ReturnType<NonNullable<typeof onSubmitPrompt>>> | undefined
@@ -852,7 +853,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
         <ComposerInitialAttachmentBridge request={initialAttachments} onConsumed={onInitialAttachmentsConsumed} />
         <ComposerAttachmentPreview knowledgeChips={runtimeControlled ? knowledgeChips : []} onKnowledge={openKnowledge} />
         <PromptInputBody>
-          <PromptInputTextarea value={draft} disabled={questionSubmitting || Boolean(inputLockedReason)} aria-disabled={inputLockedReason ? true : undefined} title={inputLockedReason ?? undefined} spellCheck={spellcheckEnabled} onChange={onDraftChange} onKeyDown={onComposerKeyDown} className="fox-prompt-textarea" placeholder={inputLockedReason ? '此会话为只读，不能发送' : activeQuestionRequest ? '补充你的答案，或直接选择上方选项' : '给 Fox 发消息，输入 / 查看命令，@ 引用文件…'} />
+          <PromptInputTextarea value={draft} disabled={questionSubmitting || Boolean(inputLockedReason)} aria-disabled={inputLockedReason ? true : undefined} title={inputLockedReason ?? undefined} spellCheck={spellcheckEnabled} onChange={onDraftChange} onKeyDown={onComposerKeyDown} className="fox-prompt-textarea" placeholder={inputLockedReason ? '此会话为只读，不能发送' : activeQuestionRequest ? '补充你的答案，或直接选择上方选项' : (companion?.current ? '给'+companion.current.displayName+'发消息…' : '给 Fox 发消息，输入 / 查看命令，@ 引用文件…')} />
         </PromptInputBody>
         <PromptInputFooter className="fox-prompt-toolbar">
           <PromptInputTools className="fox-composer-tools">
@@ -861,7 +862,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
               <PromptInputActionMenuContent side="top" className={`fox-add-menu ${!newConversation ? 'fox-history-add-menu' : ''}`}>
                 <PromptInputActionAddAttachments label="添加附件" />
                 <PromptInputActionMenuItem onSelect={openKnowledge}><Library />添加资料库</PromptInputActionMenuItem>
-                {!newConversation && <div className="fox-history-menu-settings">{expertControl}{modelControl}</div>}
+                {!newConversation && !companion?.privateChat && <div className="fox-history-menu-settings">{expertControl}{modelControl}</div>}
               </PromptInputActionMenuContent>
             </PromptInputActionMenu>
             {approvalControl ?? <FoxApprovalControl catalog={foxApprovalCatalog} value={projectPermissionMode} disabled={!runtimeControlled} onChange={onPermissionModeChange} />}
@@ -875,7 +876,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
         </PromptInputFooter>
         </PromptInput>
         </ComposerBorderBeam>}
-        {!decisionPending && companion?.privateChat && <div className="fox-composer-draft-footer fox-contact-footer"><button type="button" title={projectRoot ?? ''} onClick={companion.showProfile}>工作目录</button><button type="button" onClick={companion.showProfile}>{companion.current?.displayName ?? '联系人'}</button></div>}
+        {!decisionPending && companion?.privateChat && <ContactComposerFooter />}
         {!decisionPending && !companion?.privateChat && newConversation && runtimeControlled && <div className="fox-composer-draft-footer">
           {entry.onSelectProject && entry.onAddProject && <ComposerProjectBar projectRoot={projectRoot} projects={entry.projects} onSelect={entry.onSelectProject} onAdd={entry.onAddProject} locked={entryFrozen} />}
           {entryFrozen

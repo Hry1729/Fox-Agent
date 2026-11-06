@@ -37,6 +37,8 @@ mod native_business_integration_tests;
 #[cfg(test)]
 mod native_isolation_tests;
 #[cfg(test)]
+mod companion_prompt_tests;
+#[cfg(test)]
 mod search_knowledge_agent_tests;
 #[cfg(test)]
 mod cx2_shutdown_tests;
@@ -970,13 +972,14 @@ pub(crate) fn conversation_prompt_context(
         });
         let expert_binding = database
             .current_conversation_expert_binding(conversation_id)?;
-        let assistant_skills = database.enabled_agent_skills(&assistant.id)?;
+        let private_expert = expert_binding.is_some() && database.companion_chat_state(conversation_id)?.is_some();
+        let assistant_skills = if private_expert { Vec::new() } else { database.enabled_agent_skills(&assistant.id)? };
         let mut configured_expert_skills = expert_binding
             .as_ref()
             .map(|binding| database.enabled_agent_skills(&binding.expert_id))
             .transpose()?
             .unwrap_or_default();
-        if !configured_expert_skills.is_empty() && database.companion_chat_state(conversation_id)?.is_some() {
+        if private_expert && !configured_expert_skills.is_empty() {
             let installed: HashSet<_> = crate::skills::scan_skills(skills_dir, &configured_expert_skills)?
                 .into_iter().filter(|skill| skill.record.valid).map(|skill| skill.record.id).collect();
             configured_expert_skills.retain(|id| installed.contains(id));
@@ -2378,9 +2381,7 @@ impl RuntimeHost {
         if state != Some(crate::database::CompanionChatState::Active) {
             return Ok(ResetAvailability::unsupported("companion.repair_not_needed", "仅可修复使用中的联系人私聊。"));
         }
-        let record = self.database.get_runtime_session(chat)?;
-        let live = self.live_runtime_session_id(chat);
-        if !session_lifecycle::context_irrecoverable(record.as_ref(), live.as_deref()) {
+        if self.companion_context_issue(chat)?.is_none() {
             return Ok(ResetAvailability::unsupported("companion.repair_not_needed", "当前私聊无需修复。"));
         }
         if self.database.conversation_has_active_run(chat)? {
@@ -2391,6 +2392,12 @@ impl RuntimeHost {
             return Ok(ResetAvailability::unsupported("companion.workspace_unavailable", error));
         }
         Ok(ResetAvailability::supported())
+    }
+
+    pub(crate) fn companion_context_issue(&self, chat: &str) -> Result<Option<(&'static str, &'static str)>, String> {
+        let record = self.database.get_runtime_session(chat)?;
+        let live = self.live_runtime_session_id(chat);
+        Ok(session_lifecycle::context_recovery_issue(record.as_ref(), live.as_deref()))
     }
 
     fn session_lifecycle(&self) -> session_lifecycle::SessionLifecycle<'_> {
@@ -5104,7 +5111,9 @@ pub(super) fn conversation_enabled_skill_ids(
     let assistant = database
         .get_agent(&agent_id)?
         .ok_or_else(|| "conversation assistant was not found".to_owned())?;
-    let assistant_skills = database.enabled_agent_skills(&assistant.id)?;
+    let expert_binding = database.current_conversation_expert_binding(conversation_id)?;
+    let private_expert = expert_binding.is_some() && database.companion_chat_state(conversation_id)?.is_some();
+    let assistant_skills = if private_expert { Vec::new() } else { database.enabled_agent_skills(&assistant.id)? };
     let enabled_mcps = database
         .list_mcp_servers()?
         .into_iter()
@@ -5114,7 +5123,6 @@ pub(super) fn conversation_enabled_skill_ids(
     let bound_knowledge = database.conversation_knowledge_references(conversation_id)?;
     let assistant_package =
         runtime_agent_package(&assistant, &assistant_skills, &enabled_mcps, &bound_knowledge)?;
-    let expert_binding = database.current_conversation_expert_binding(conversation_id)?;
     let effective_expert_skills = expert_binding
         .as_ref()
         .map(|binding| {

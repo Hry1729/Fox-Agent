@@ -1,5 +1,5 @@
 import { command } from '@/features/conversations/api/desktop-client'
-import type { ConversationContextReset, MemoryEntityRecord } from '@/features/conversations/model/types'
+import type { AgentRecord, ConversationContextReset, MemoryEntityRecord } from '@/features/conversations/model/types'
 
 export interface Companion {
   id: string
@@ -43,8 +43,8 @@ export interface DeletePlan {
 
 export interface TemplateStatus {
   latestHash: string | null
-  boundSnapshot: Record<string, unknown> | null
-  latestSnapshot: Record<string, unknown> | null
+  boundSnapshot: Partial<AgentRecord> | null
+  latestSnapshot: Partial<AgentRecord> | null
   updateAvailable: boolean
   dismissed: boolean
 }
