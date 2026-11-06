@@ -16,6 +16,7 @@
 // * The button reads what the backend really runs: a choice the live
 //   process has not taken yet (dsh restarts at the next turn) shows the small
 //   note「下一轮生效」inside the button, never on a row of its own.
+import { useContacts } from '@/features/companions/context'
 import { Check, CircleHelp, Eye, Pencil, Play, ShieldAlert, Sparkles, UserCheck } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { PromptInputActionMenu, PromptInputActionMenuContent, PromptInputActionMenuItem, PromptInputActionMenuTrigger } from '@/components/ai-elements/prompt-input'
@@ -132,6 +133,7 @@ export function FoxApprovalControl({ catalog, value, disabled, onChange }: {
   disabled?: boolean
   onChange?: (mode: ComposerAccessMode, options?: { confirmedFullAccess?: boolean }) => void | Promise<void>
 }) {
+  const companion = useContacts()
   const current = value ?? 'ask'
   const [pendingMode, setPendingMode] = useState<string | null>(null)
   const rows: NativePermissionRow[] = catalog
@@ -161,7 +163,7 @@ export function FoxApprovalControl({ catalog, value, disabled, onChange }: {
     <>
       <ApprovalMenu
         backend="fox"
-        rows={rows}
+        rows={companion?.privateChat ? rows.filter(row => row.value !== 'full_access' && row.tier !== 'full_access') : rows}
         current={current}
         disabled={disabled}
         tooltip={`审批模式（${catalog?.switchNote || '运行中切换，从下一次工具调用起生效'}）`}

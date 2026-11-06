@@ -1,3 +1,4 @@
+import { ContactSettings, ProjectContactGrants } from '@/features/companions/profile'
 import { useEffect, useMemo, useState } from 'react'
 import { ProjectPermissionRules } from './project-permission-rules'
 import { Archive, Bot, ChevronRight, ExternalLink, FolderOpen, Info, LoaderCircle, MoreHorizontal, Plus, RotateCcw } from 'lucide-react'
@@ -246,6 +247,7 @@ export function AgentSettingsPage({ sidebarCollapsed, onSidebar, navigate, secti
 
   return <WorkspacePage title="Agent" subtitle="助手、专家与项目权限" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
     <SettingsPageLayout title="Agent" description="配置通用助手、专家、外部 Agent 和项目权限。">
+      <SettingsGroup title="联系人"><ContactSettings/></SettingsGroup>
       <SettingsGroup title="通用助手">
         <div className="fox-settings-providers">
           <div className="fox-settings-provider">
@@ -380,6 +382,7 @@ export function AgentSettingsPage({ sidebarCollapsed, onSidebar, navigate, secti
             </section>
           </div>
           <div className="fox-settings-sheet-foot">
+            <ProjectContactGrants projectId={openProject.id}/>
             <Button type="button" variant="ghost" className="fox-settings-danger" disabled={busyId === openProject.id} onClick={() => { const project = openProject; setProjectId(null); void projectsResource.setArchived(project, true) }}><Archive />归档项目</Button>
             <span className="is-grow" />
             <Button type="button" variant="outline" disabled={!openProject.pathExists} onClick={() => void projectsResource.openRoot(openProject)}><ExternalLink />打开目录</Button>

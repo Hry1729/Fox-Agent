@@ -1,3 +1,5 @@
+import { ContactWriteCards } from '@/features/companions/chat-cards'
+import { useContacts } from '@/features/companions/context'
 import { ActionBarPrimitive, MessagePrimitive, useAui, useAuiState } from '@assistant-ui/react'
 import type { DataMessagePartComponent } from '@assistant-ui/react'
 import { TimelineRuntimeContext, requestConversationFork } from '../fox-shared'
@@ -58,6 +60,7 @@ function FoxFeedbackDialog({ open, onOpenChange, messageId, onSaved }: { open: b
  * Completed messages keep their footer visible; the active run reveals it at termination.
  */
 export function FoxAssistantMessage() {
+  const companion = useContacts()
   const aui = useAui()
   const { assistantName } = useContext(TimelineRuntimeContext)
   const messageId = useAuiState((state) => state.message.id)
@@ -85,13 +88,14 @@ export function FoxAssistantMessage() {
     <div id={`fox-turn-${messageId}`} data-turn-message-id={messageId} className="fox-turn-anchor">
       <MessagePrimitive.Root className="fox-thread-msg is-assistant">
         {foxMessage?.source ? <FoxRunActivityBody message={foxMessage} /> : <MessagePrimitive.Parts components={FOX_PART_COMPONENTS} />}
-        {foxMessage?.source && foxMessage.failure && <ErrorPrompt failure={foxMessage.failure} onRetry={isLast ? () => aui.message.reload() : undefined} />}
+        {foxMessage?.source && foxMessage.failure && <ErrorPrompt failure={foxMessage.failure} onRetry={!companion?.privateChat && isLast ? () => aui.message.reload() : undefined} />}
         {!foxMessage?.source && cancelled && <StoppedRun reason="运行已取消，已生成内容保留" />}
+        {companion?.privateChat && <ContactWriteCards runId={foxMessage?.runId ?? null}/>}
         {!messageRunning && <div className="fox-message-footer">
           <ActionBarPrimitive.Root autohide="never" className="fox-thread-actionbar">
             <FoxMessageActions reaction={reaction} busy={feedbackSaving}
               onCopy={() => copyMessageResponse(aui.message.getState().content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n\n'))}
-              onFork={() => requestConversationFork(aui.message.getState().id)} onPositive={() => void submitPositive()} onNegative={() => setFeedbackOpen(true)} onRegenerate={isLast ? () => aui.message.reload() : undefined} />
+              onFork={companion?.privateChat ? undefined : () => requestConversationFork(aui.message.getState().id)} onPositive={() => void submitPositive()} onNegative={() => setFeedbackOpen(true)} onRegenerate={!companion?.privateChat && isLast ? () => aui.message.reload() : undefined} />
           </ActionBarPrimitive.Root>
           <div className="fox-message-meta">
             <span>{assistantName || 'Fox 默认助手'}</span>

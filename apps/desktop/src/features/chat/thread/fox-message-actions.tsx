@@ -40,7 +40,7 @@ export function FoxMessageActions({ reaction, busy, onCopy, onFork, onPositive, 
   reaction: 'positive' | 'negative' | null
   busy: boolean
   onCopy: CopyAction
-  onFork: () => void
+  onFork?: () => void
   onPositive: () => void
   onNegative: () => void
   onRegenerate?: () => void

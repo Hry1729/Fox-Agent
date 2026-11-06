@@ -438,6 +438,9 @@ export type MemoryKind = 'preference' | 'identity' | 'project' | 'workflow' | 'f
 export type MemoryState = 'candidate' | 'confirmed' | 'conflict'
 
 export interface MemoryEntityRecord {
+  sourceCompanionId?: string | null
+  sourceLabel?: string | null
+  evidenceBasis?: string | null
   id: string
   scope: MemoryScope
   scopeKey: string
@@ -582,6 +585,8 @@ export interface ContextResetAvailability {
 }
 
 export interface ConversationDetail {
+  companionId?: string | null
+  contextRepair?: {available: boolean; reason?: string | null}
   /** Authoritative-only, independently versioned read model; never a Legacy sequence. */
   kernelSnapshot?: KernelRunSnapshot | null
   conversation: ConversationSummary

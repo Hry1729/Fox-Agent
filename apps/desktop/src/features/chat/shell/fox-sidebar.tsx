@@ -1,3 +1,4 @@
+import { ContactSidebar } from '@/features/companions/chat-controls'
 import { formatClockTime } from '@/lib/time-format'
 import { sidebarDateGroups } from '../sidebar-date-groups'
 import '@/components/fox-ui/sidebar-list-pane.css'
@@ -490,10 +491,12 @@ export function Sidebar({
         <SidebarMotionItem><button className={`fox-sidebar-command ${activeView === 'plugins' ? 'is-active' : ''}`} type="button" aria-label="插件" aria-current={activeView === 'plugins' ? 'page' : undefined} onClick={() => onNavigate('plugins')}><Blocks size={18} /><span>插件</span></button></SidebarMotionItem>
       </div>}
 
+      {!notificationsOpen && collapsed && sidebarMode === 'chat' && <ContactSidebar activeId={activeConversationId} collapsed />}
       {!notificationsOpen && collapsed && sidebarMode === 'chat' && <SidebarCollapsedMenus projects={projectGroups} conversations={visibleConversations} indicators={runIndicators} onOpen={onOpenConversation} />}
 
       {sidebarMode === 'chat' ? <>{!notificationsOpen && (
         <div className="fox-sidebar-list-pane" hidden={collapsed}>
+        <ContactSidebar activeId={activeConversationId} />
         {conversationList}
         </div>
       )}</> : sidebarMode === 'local-knowledge' ? <LocalKnowledgeSidebarNavigation collapsed={collapsed} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} navigate={onNavigate} hideLibrary={notificationsOpen} onCreate={() => { if (onCreateLocalKnowledge) onCreateLocalKnowledge(); else onNavigate('local-knowledge') }} /> : !notificationsOpen ? <>

@@ -1,3 +1,4 @@
+import { useContacts } from '@/features/companions/context'
 import { ActionBarPrimitive, MessagePrimitive, useAui, useAuiState } from '@assistant-ui/react'
 import type { TextMessagePartProps, Attachment as AuiAttachment } from '@assistant-ui/react'
 import { UserMessageBubble } from '../components/UserMessageBubble'
@@ -27,6 +28,7 @@ function FoxUserAttachment({ attachment }: { attachment: AuiAttachment }) {
  * editing reruns from this message and truncates everything after it.
  */
 export function FoxUserMessage() {
+  const companion = useContacts()
   const aui = useAui()
   const messageId = useAuiState((state) => state.message.id)
   const isEditing = useAuiState((state) => state.message.composer.isEditing)
@@ -47,10 +49,10 @@ export function FoxUserMessage() {
         {!isEditing && <div className="fox-user-meta">
             <ActionBarPrimitive.Root autohide="never" className="fox-user-actions">
               <FoxCopyMessageButton onCopy={() => copyMessageResponse(aui.message.getState().content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n\n'))} />
-              <button type="button" className="fox-thread-action-button" disabled={running} aria-label="从此消息创建分支" title="从此消息创建分支" onClick={() => requestConversationFork(aui.message.getState().id)}>
+              {!companion?.privateChat && <button type="button" className="fox-thread-action-button" disabled={running} aria-label="从此消息创建分支" title="从此消息创建分支" onClick={() => requestConversationFork(aui.message.getState().id)}>
                 <GitFork size={13} />
-              </button>
-              {isLatestUser && <ActionBarPrimitive.Edit asChild disabled={running}>
+              </button>}
+              {!companion?.privateChat && isLatestUser && <ActionBarPrimitive.Edit asChild disabled={running}>
                   <button type="button" className="fox-thread-action-button" aria-label="编辑并重新发送" title="编辑并重新发送"><FileEdit size={13} /></button>
                 </ActionBarPrimitive.Edit>}
             </ActionBarPrimitive.Root>

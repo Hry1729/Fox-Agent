@@ -80,7 +80,7 @@ export const EMPTY_CONVERSATION_MESSAGES: ConversationMessage[] = []
 export const EMPTY_CONVERSATION_ATTACHMENTS: AttachmentRecord[] = []
 export const EMPTY_RUNTIME_APPROVALS: ApprovalRecord[] = []
 
-export type RightMode = 'activity' | 'changes' | 'browser' | 'files' | 'knowledge' | 'agents'
+export type RightMode = 'companion' | 'activity' | 'changes' | 'browser' | 'files' | 'knowledge' | 'agents'
 export interface OpenFileTab {
   id: string
   path: string

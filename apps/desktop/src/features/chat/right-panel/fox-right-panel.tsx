@@ -1,3 +1,5 @@
+import { useContacts } from '@/features/companions/context'
+import { ContactProfile } from '@/features/companions/profile'
 import { type ActivityDetailPanelProps } from '../components/ActivityDetailPanel'
 import { FOX_ASSISTANT_AVATAR } from '../components/FoxAssistantAvatar'
 import { safeDiagnosticText, toolFailurePresentation } from '../run-status-facts'
@@ -760,7 +762,7 @@ function ContextContent({ mode, detail, fileTabs, activeFileTabId, activity, onO
   return null
 }
 
-const rightItems: Array<[RightMode, string, ReactNode]> = [
+const baseRightItems: Array<[RightMode, string, ReactNode]> = [
   ['knowledge', '资料库', <BookOpen size={16} />],
   ['files', '文件', <Folders size={16} />],
   ['changes', '更改', <FileEdit size={16} />],
@@ -776,7 +778,10 @@ export function RightPanel({ mode, tabs, detail, activity, width, compact = fals
   const activeChildAgentRun = activeChildAgent
     ? detail?.childRuns.find((run) => run.childRunId === activeChildAgent.run.childRunId) ?? activeChildAgent.run
     : null
+  const companion = useContacts()
+  const rightItems: typeof baseRightItems = companion?.privateChat ? [['companion','联系人资料',<Bot size={16} />],...baseRightItems] : baseRightItems
   const homeItemCounts: Record<RightMode, number> = {
+    companion: 0,
     knowledge: detail?.knowledgeBindings.filter((binding) => binding.enabled !== false).length ?? 0,
     files: detail?.artifacts.length ?? 0,
     changes: detail?.toolCalls.filter((item) => isChangeOrCommandTool(item.toolName)).length ?? 0,
@@ -820,7 +825,7 @@ export function RightPanel({ mode, tabs, detail, activity, width, compact = fals
           <button type="button" className="is-sidebar-open" aria-label="关闭面板" title="关闭面板" onClick={onCollapse}><PanelRight size={14} /></button>
         </div>
       </div>
-      {mode === 'agents' && activeChildAgent && activeChildAgentRun
+      {mode === 'companion' && companion?.current ? <ContactProfile key={companion.current.id} contact={companion.current} /> : mode === 'agents' && activeChildAgent && activeChildAgentRun
         ? <ChildAgentConversationPanel key={activeChildAgentRun.childRunId} run={activeChildAgentRun} avatarIndex={activeChildAgent.avatarIndex} onBack={onBackChildAgent} />
         : mode
         ? <ContextContent mode={mode} detail={detail} activity={activity} fileTabs={fileTabs} activeFileTabId={activeFileTabId} onOpenFile={onOpenFile} onOpenEvidence={onOpenEvidence} onOpenChildAgent={onOpenChildAgent} />

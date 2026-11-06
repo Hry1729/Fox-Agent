@@ -1,3 +1,4 @@
+import { AddContactAction } from '@/features/companions/chat-controls'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Brain, CalendarDays, CheckCircle2, Clock3, Code2, Copy, Database, Download, FileUp, Folder, Globe2, History, Images, Info, LoaderCircle, MessageSquareText, Pencil, Plus, Puzzle, RefreshCw, RotateCcw, Search, Settings2, Sparkles, Trash2, Wrench } from 'lucide-react'
 import { notify as toast } from '@/features/notifications'
@@ -102,7 +103,7 @@ function AgentMemoryManager({ agent }: { agent: AgentRecord }) {
       desktopClient.listMemories(),
       desktopClient.listProjects(),
     ])
-    setMemories(records)
+    setMemories(records.filter(memory=>memory.scope !== 'agent' || !memory.scopeKey.startsWith('cmp_')))
     setProjects(projectRecords)
     setLoadError(null)
   }
@@ -239,7 +240,7 @@ function AgentMemoryManager({ agent }: { agent: AgentRecord }) {
     <Card className="fox-memory-privacy-note"><Brain size={18} /><p><b>长期记忆</b><span>模型只能提交候选；只有已确认且启用的条目会被有界召回。Fox 不会自动保存整段对话。{agent.runtimeType !== 'pi' ? ' 当前远程 Runtime 仅支持查看和治理，尚不注入本机记忆。' : ''}</span></p></Card>
     {loading ? <SkeletonContent label="正在读取记忆…" lines={4} /> : loadError ? <FoxEmptyState variant="error" title="记忆加载失败" description={loadError} action={<Button variant="outline" size="sm" onClick={() => void refresh().catch((cause) => setLoadError(cause instanceof Error ? cause.message : String(cause)))}>重试</Button>} /> : visibleMemories.length === 0 ? <FoxEmptyState variant={query.trim() ? 'search' : 'empty'} title={query.trim() ? '没有匹配的记忆' : '暂无记忆'} description={query.trim() ? '换个关键词再试。' : '你可以主动创建；Agent 提交的候选也会出现在这里等待确认。'} /> : <div className="fox-memory-list">{visibleMemories.map((memory) => <Card key={memory.id} className={`fox-memory-card is-${memory.state}`}>
       <header><div><Badge variant={memory.state === 'conflict' ? 'destructive' : 'secondary'}>{memoryStateLabels[memory.state]}</Badge><span>{memoryKindLabels[memory.kind]}</span><span>{scopeName(memory)}</span></div>{memory.state === 'confirmed' && <Switch checked={memory.enabled} aria-label={`${memory.canonicalKey} 记忆启用状态`} onCheckedChange={(enabled) => void mutate(() => desktopClient.setMemoryEnabled(memory.id, enabled, memory.version), enabled ? '记忆已启用' : '记忆已禁用')} />}</header>
-      <h3>{memory.canonicalKey}</h3><p>{memory.content}</p>
+      <h3>{memory.canonicalKey}</h3><p>{memory.content}</p>{memory.sourceLabel && <small>由{memory.sourceLabel}记下</small>}
       {memory.evidenceExcerpt && <blockquote>证据：{memory.evidenceExcerpt}</blockquote>}
       <small>来源：{memory.createdBy === 'agent' ? 'Agent 候选' : '用户'} · 置信度 {Math.round(memory.confidence * 100)}% · 召回 {memory.recallCount} 次 · 最近 {memoryTime(memory.lastRecalledAt)}</small>
       <footer>
@@ -837,6 +838,7 @@ export function AgentDetailDialog({ agent, open, onOpenChange, onManage, onUse }
             {agent.runtimeType === 'pi' && <Button variant="outline" onClick={() => onManage(agent)}><Settings2 size={14} />管理专家</Button>}
             <span />
             <Button variant="outline" onClick={() => onOpenChange(false)}>关闭</Button>
+            <AddContactAction agent={agent} onOpened={() => onOpenChange(false)} />
             <Button disabled={!agent.available} onClick={() => onUse(agent)}><Sparkles size={14} />开始对话</Button>
           </DialogFooter>
         </>}
@@ -1348,6 +1350,7 @@ export function AgentDetailPage({ sidebarCollapsed, onSidebar, navigate, agentId
 
               <Card className="fox-agent-manage-zone-card">
                 <header><h2><Settings2 size={15} />专家操作</h2></header>
+                <AddContactAction agent={view} />
                 <div className="fox-agent-manage-zone-actions">
                   <Button variant="outline" size="sm" disabled={editor.saving} onClick={() => void copyManage()}><Copy size={13} />复制专家</Button>
                   {agent.runtimeType === 'pi' && <Button variant="outline" size="sm" disabled={editor.packageBusy} onClick={() => void editor.exportPackage()}><Download size={13} />导出专家</Button>}

@@ -24,7 +24,7 @@ export interface MessageActionsProps extends Omit<
   onCopy: () => void;
   onReactionChange: (reaction: Reaction) => void;
   onRegenerate?: () => void;
-  onMore: () => void;
+  onMore?: () => void;
   moreLabel?: string;
   moreIcon?: ReactNode;
   busy?: boolean;
@@ -120,7 +120,7 @@ export function MessageActions({
           )}
         />
       </button>}
-      <button
+      {onMore && <button
         type="button"
         aria-label={moreLabel}
         disabled={running}
@@ -128,7 +128,7 @@ export function MessageActions({
         className={buttonClassName}
       >
         {moreIcon ?? <EllipsisIcon className="size-3.5" />}
-      </button>
+      </button>}
     </div>
   );
 }

@@ -385,8 +385,9 @@ export function desktopErrorDetails(cause: unknown): DesktopErrorDetails {
   }
 }
 
-async function command<T>(name: string, request?: unknown): Promise<T> {
-  const response = await invoke<ApiResponse<T>>(name, request === undefined ? {} : { request })
+export async function command<T>(name: string, request?: unknown, direct = false): Promise<T> {
+  const args = direct ? request as Record<string, unknown> : { request }
+  const response = await invoke<ApiResponse<T>>(name, request === undefined ? {} : args)
   if (!response.ok) throw new DesktopCommandError(response.error)
   return response.data
 }

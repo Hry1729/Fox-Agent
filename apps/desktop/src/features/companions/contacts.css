@@ -1,0 +1,25 @@
+.fox-contact-sidebar { padding: 0 4px 10px; }
+.fox-contact-row { display:flex; align-items:center; gap:2px; padding:0 3px; border-radius:var(--fox-radius-control,6px); }
+.fox-contact-row:hover,.fox-contact-row:focus-within,.fox-contact-row.is-active { background:var(--accent); }
+.fox-contact-link,.fox-contact-heading { display:flex; align-items:center; gap:8px; padding:5px 4px; min-width:0; text-align:left; }
+.fox-contact-link { flex:1; }
+.fox-contact-link > span:not(.fox-contact-avatar) { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.fox-contact-link small { margin-left:auto; font-size:11px; color:var(--muted-foreground); }
+.fox-contact-avatar { width:22px; height:22px; object-fit:cover; border-radius:6px; flex:none; }
+.fox-contact-avatar.is-letter { display:grid; place-items:center; background:var(--muted); font-size:12px; }
+.fox-contact-row > .fox-icon-button { opacity:0; }
+.fox-contact-row:hover > .fox-icon-button,.fox-contact-row:focus-within > .fox-icon-button { opacity:1; }
+.fox-contact-panel { overflow:auto; min-height:0; padding:14px; font-size:13px; }
+.fox-contact-section { display:grid; gap:8px; padding:10px 0; min-width:0; overflow-wrap:anywhere; }
+.fox-contact-section + .fox-contact-section,.fox-contact-panel details { border-top:1px solid var(--border); }
+.fox-contact-section h3,.fox-contact-panel summary { font-weight:600; }
+.fox-contact-section label { display:grid; gap:3px; }
+.fox-contact-panel input:not([type="checkbox"]),.fox-contact-panel textarea,.fox-contact-panel select { background:var(--background); border:1px solid var(--border); border-radius:var(--fox-radius-control,6px); padding:5px 8px; width:100%; min-width:0; }
+.fox-contact-panel textarea { min-height:64px; resize:vertical; }
+.fox-contact-actions,.fox-contact-banner,.fox-contact-footer { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+.fox-contact-banner { padding:8px 16px; border-bottom:1px solid var(--border); font-size:13px; }
+.fox-contact-footer button { color:var(--muted-foreground); font-size:12px; padding:2px 6px; }
+.fox-contact-panel details { padding:10px 0; }
+.fox-contact-panel summary { cursor:pointer; }
+.fox-contact-entry { padding:8px 0; border-bottom:1px solid var(--border); }
+.fox-contact-entry p { white-space:pre-wrap; }
