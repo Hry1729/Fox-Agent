@@ -18,8 +18,14 @@ let liveProfile
 if (argv.at(-2) === '--live-profile') liveProfile = argv.splice(-2)[1]
 const dev = argv.at(-1) === '--dev'
 if (dev) argv.pop()
+const devPort = Number(process.env.FOX_CONTACTS_DEV_PORT || 1421)
+const m2 = argv.at(-1) === '--m2'
+if (m2) {
+  argv.pop()
+  assert.ok(dev && liveProfile, 'M2 requires --dev and an installed --live-profile')
+}
 if (argv.length && !(argv.length === 2 && argv[0] === '--exe') && !(argv.length === 4 && argv[0] === '--exe' && argv[2] === '--sidecar')) {
-  throw new Error('Usage: node scripts/windows-test/Run-ContactsM1.mjs [--exe candidate.exe [--sidecar candidate-runtime.exe] [--dev] [--live-profile installed-fox.db]]')
+  throw new Error('Usage: node scripts/windows-test/Run-ContactsM1.mjs [--exe candidate.exe [--sidecar candidate-runtime.exe] [--m2] [--dev] [--live-profile installed-fox.db]]')
 }
 const directory = await mkdtemp(join(tmpdir(), 'fox-contacts-m1-'))
 const evidence = { revision: spawnSync('git', ['rev-parse', 'HEAD'], {cwd:repo,encoding:'utf8'}).stdout?.trim(), started: new Date().toISOString(), checks: [] }
@@ -77,7 +83,7 @@ function stop(child) {
 async function attach(cdp) {
   const target = await poll('isolated WebView',async () => {
     const views = await (await fetch('http://127.0.0.1:' + cdp + '/json', {signal:AbortSignal.timeout(2000)})).json()
-    const origins = dev ? ['http://127.0.0.1:1421'] : ['http://tauri.localhost','https://tauri.localhost','tauri://localhost']
+    const origins = dev ? ['http://127.0.0.1:' + devPort] : ['http://tauri.localhost','https://tauri.localhost','tauri://localhost']
     return views.find(v => v.type === 'page' && origins.some(origin => v.url === origin || v.url.startsWith(origin + '/')))
   })
   const ws = new WebSocket(target.webSocketDebuggerUrl)
@@ -124,11 +130,11 @@ async function desktop() {
   if(dev) {
     const desktop = join(repo,'apps/desktop')
     const probe = createServer()
-    await new Promise((ok,fail) => { probe.once('error',fail); probe.listen(1421,'127.0.0.1',ok) })
+    await new Promise((ok,fail) => { probe.once('error',fail); probe.listen(devPort,'127.0.0.1',ok) })
     await new Promise(ok => probe.close(ok))
-    bridge = start(process.execPath,[join(repo,'scripts/windows-test/contacts-m1-dev-webview.mjs')],env,'vite',desktop,true)
+    bridge = start(process.execPath,[join(repo,'scripts/windows-test/contacts-m1-dev-webview.mjs')],{...env,FOX_CONTACTS_DEV_PORT:String(devPort)},'vite',desktop,true)
     bridge.on('message', item => { if(item.ready) bridge.ready = Date.now() })
-    await poll('candidate frontend',async () => (await fetch('http://127.0.0.1:1421/')).ok)
+    await poll('candidate frontend',async () => (await fetch('http://127.0.0.1:' + devPort + '/')).ok)
   }
   const cdp = await port()
   if (sidecar) env.FOX_RUNTIME_EXECUTABLE = sidecar
@@ -157,6 +163,20 @@ async function desktop() {
   db = new DatabaseSync(join(data,'fox.db'),{readOnly:true})
   const chat = builtin.conversationId
   const expert = await invoke('companion_add_from_expert',{request:{expertId:'fox-debugger'}})
+  let restartCount = 0
+  async function restartDesktop(whileStopped) {
+    stop(app)
+    children.splice(children.indexOf(app), 1)
+    if (whileStopped) await whileStopped()
+    bridge.ready = 0
+    app = start(exe, [], appEnv, 'desktop-restart-' + ++restartCount, repo)
+    await poll('restarted WebView', () => bridge.ready && Date.now() - bridge.ready >= 1000)
+  }
+  if (m2) {
+    const { checkM2 } = await import('./contacts-m2.mjs')
+    evidence.liveModel = await checkM2({source: liveProfile, invoke, db, check, expert, directory, poll, restartDesktop, endpoint})
+    return
+  }
   if (liveProfile) {
     const { checkLiveModel } = await import('./contacts-live-model.mjs')
     evidence.liveModel = await checkLiveModel({ source: liveProfile, invoke, db, check, builtin, expert, directory, poll })
@@ -226,7 +246,6 @@ async function desktop() {
     return {refused:receipts.map(({tool,state}) => ({tool,state}))}
   })
   if(dev) await check('A20 zero-byte refusal, confirmed repair and safe allocated takeover',async () => {
-    let restart = 0
     const fixture = join(data,'fox.db')
     const mapping = () => db.prepare("SELECT runtime_session_id,native_session_path,status,context_generation FROM runtime_sessions WHERE conversation_id=? AND runtime_type='pi'").get(chat)
     const history = () => db.prepare('SELECT COUNT(*) AS n FROM messages WHERE conversation_id=?').get(chat).n
@@ -234,17 +253,14 @@ async function desktop() {
       const current = mapping()
       const path = await realpath(current.native_session_path)
       assert.ok(path.toLowerCase().startsWith((await realpath(join(data,'runtime-sessions'))).toLowerCase() + '\\'))
-      stop(app)
-      const at = children.indexOf(app); if(at >= 0) children.splice(at,1)
-      if(empty) await truncate(path,0); else await unlink(path)
-      const writeDb = new DatabaseSync(fixture)
-      try {
-        assert.equal(writeDb.prepare("UPDATE runtime_sessions SET status='allocated' WHERE conversation_id=? AND runtime_type='pi'")
-          .run(chat).changes,1)
-      } finally {writeDb.close()}
-      bridge.ready = 0
-      app = start(exe,[],appEnv,'desktop-restart-' + ++restart,repo)
-      await poll('restarted WebView',() => bridge.ready && Date.now()-bridge.ready>=1000)
+      await restartDesktop(async () => {
+        if(empty) await truncate(path,0); else await unlink(path)
+        const writeDb = new DatabaseSync(fixture)
+        try {
+          assert.equal(writeDb.prepare("UPDATE runtime_sessions SET status='allocated' WHERE conversation_id=? AND runtime_type='pi'")
+            .run(chat).changes,1)
+        } finally {writeDb.close()}
+      })
       return {current,path}
     }
     const request = {request:{conversationId:chat}}

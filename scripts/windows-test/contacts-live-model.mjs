@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-export async function checkLiveModel({ source, invoke, db, check, builtin, expert, directory, poll }) {
+export async function connectLiveModel({ source, invoke, db, check, poll }, overrides = {}) {
   const installed = new DatabaseSync(source, { readOnly: true })
   let service
   try {
@@ -12,7 +12,7 @@ export async function checkLiveModel({ source, invoke, db, check, builtin, exper
       context_window AS contextWindow,max_output_tokens AS maxOutputTokens FROM model_service WHERE enabled=1`).get()
   } finally { installed.close() }
   assert.ok(service, '安装版 Fox 没有启用的全局模型')
-  await invoke('model_service_save', { request: service })
+  await invoke('model_service_save', { request: { ...service, ...overrides } })
   const configured = await invoke('model_service_get')
   assert.equal(configured.modelId, service.modelId)
 
@@ -44,6 +44,12 @@ export async function checkLiveModel({ source, invoke, db, check, builtin, exper
     assert.equal(retry.status, 'completed', JSON.stringify({ first, retry }))
     return { ...retry, firstAttempt: first }
   }
+  return { model: service.modelId, exchange }
+}
+
+export async function checkLiveModel(context) {
+  const { invoke, db, check, builtin, expert, directory } = context
+  const { model, exchange } = await connectLiveModel(context)
   const shared = () => db.prepare("SELECT content FROM memory_entities WHERE scope='global' AND state='confirmed' AND enabled=1 AND deleted_at IS NULL").all().map(row => row.content)
   const quote = 'XQ-' + randomUUID().slice(0, 8)
   // Run all independent scenarios even if the model misses one of them.
@@ -97,5 +103,5 @@ export async function checkLiveModel({ source, invoke, db, check, builtin, exper
     return turn
   })
   if (failures.length) throw new Error(failures.join('\n'))
-  return { model: service.modelId }
+  return { model }
 }
