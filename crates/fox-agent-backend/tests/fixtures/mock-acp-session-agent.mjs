@@ -9,6 +9,7 @@
 //   reconnect   -> Codex warning + "Reconnecting..." notices, then waits
 //   (session/set_mode is accepted unless modeId is "refuse")
 //   hang        -> text, then never answers (ignores session/cancel)
+//   hang-on-stop -> stays alive through stdin EOF and SIGTERM, until force-killed
 //   crash       -> text, then exits with code 3
 //   maxtokens   -> text, stop max_tokens
 //   stderr-fail -> writes secret-bearing lines (plus a ~2000-byte line and
@@ -115,6 +116,11 @@ rl.on('line', line => {
       // turn waits (like slow) until cancelled.
       text(sessionId, 'Model metadata for `deepseek-flash` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.\n')
       text(sessionId, 'Reconnecting... 1/5 (stream disconnected before completion)\n')
+    } else if (prompt === 'hang-on-stop') {
+      process.on('SIGTERM', () => {})
+      setTimeout(() => process.exit(1), 30_000)
+      prompts.set(sessionId, 'hang')
+      text(sessionId, 'waiting for forced stop')
     } else if (prompt === 'slow' || prompt === 'hang') {
       text(sessionId, `working:${prompt}`)
       if (prompt === 'hang') prompts.set(sessionId, 'hang')

@@ -1188,7 +1188,7 @@ async fn l3_stop_does_not_block_the_runtime() {
     let launcher = MockLauncher::default();
     launcher.revoked.store(true, Ordering::SeqCst);
     let (runtime, sink) = new_runtime(launcher.clone());
-    runtime.start_turn(turn("l3", "l3-run", "hang", AgentBackend::Pi, None)).unwrap();
+    runtime.start_turn(turn("l3", "l3-run", "hang-on-stop", AgentBackend::Pi, None)).unwrap();
     sink.wait_for("l3-run", "message.delta").await;
     let ticks = Arc::new(AtomicUsize::new(0));
     let ticker = {
@@ -1204,6 +1204,7 @@ async fn l3_stop_does_not_block_the_runtime() {
     let report = runtime.close_conversation("l3", "test stop").await.expect("a live process");
     let elapsed = started.elapsed();
     ticker.abort();
+    assert!(report.force_killed, "the fixture must exercise the forced stop path");
     assert!(report.confirmation.is_confirmed(), "{:?}", report.confirmation);
     let expected = (elapsed.as_millis() / 20) as usize;
     assert!(ticks.load(Ordering::SeqCst) * 3 >= expected, "runtime starved during stop: {} ticks in {elapsed:?}", ticks.load(Ordering::SeqCst));
