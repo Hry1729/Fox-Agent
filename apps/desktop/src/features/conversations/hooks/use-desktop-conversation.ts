@@ -1302,9 +1302,13 @@ export function useDesktopConversation(): DesktopConversationState {
       })
       const isYuxi = activeConversation.conversation.agentId.startsWith('yuxi:')
       const extractedContext = !isYuxi ? await extractedAttachmentContext(files) : ''
-      const attachmentNote = attachments.length && !isYuxi
-        ? `\n\nFox attachments: use attachment_compute for whole-file code calculations; read_attachment for source text:\n${attachments.map((item) => `- ${item.id}: ${item.displayName}`).join('\n')}`
-        : ''
+      let attachmentNote = ''
+      if (attachments.length && activeConversation.companionId) {
+        const paths = attachments.map(item => JSON.stringify('收到的文件/' + item.displayName))
+        attachmentNote = '\n\n用户已加入以下工作目录文件。可用 read 按相对路径读取：\n' + paths.join('\n')
+      } else if (attachments.length && !isYuxi) {
+        attachmentNote = `\n\nFox attachments: use attachment_compute for whole-file code calculations; read_attachment for source text:\n${attachments.map((item) => `- ${item.id}: ${item.displayName}`).join('\n')}`
+      }
       await Promise.all([runtimeListenerReadyRef.current, workListenerReadyRef.current])
       uiDispatchStartedRef.current.set(activeConversation.conversation.id, performance.now())
       const started = await desktopClient.startRun({

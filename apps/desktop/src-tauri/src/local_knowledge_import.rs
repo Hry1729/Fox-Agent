@@ -1679,7 +1679,7 @@ fn validate_source_path(path: &Path) -> Result<(), ImportError> {
     Ok(())
 }
 
-fn validate_path_component(value: impl AsRef<OsStr>, label: &str) -> Result<(), ImportError> {
+pub(crate) fn validate_path_component(value: impl AsRef<OsStr>, label: &str) -> Result<(), ImportError> {
     let value = value
         .as_ref()
         .to_str()

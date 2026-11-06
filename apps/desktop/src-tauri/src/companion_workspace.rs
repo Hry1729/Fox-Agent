@@ -4,7 +4,7 @@ use crate::database::{ApiResponse, Database};
 use std::{
     ffi::OsString,
     fs::{self, File},
-    io::{self, ErrorKind},
+    io::{self, ErrorKind, Read},
     path::{Component, Path, PathBuf},
 };
 use tauri::State;
@@ -103,14 +103,7 @@ pub(crate) fn require_for_chat(
     data_dir: &Path,
     conversation: &str,
 ) -> Result<(), String> {
-    let id: Option<String> = database.with_connection(|db| {
-        db.query_row(
-            "SELECT companion_id FROM conversations WHERE id=?1",
-            [conversation],
-            |row| row.get(0),
-        )
-    })?;
-    if let Some(id) = id {
+    if let Some(id) = database.conversation_companion_id(conversation)? {
         ready_root(database, data_dir, &id)?;
     }
     Ok(())
@@ -209,17 +202,22 @@ pub(crate) fn check_run_tool(
 
 fn import_one(inbox: &Path, source: &Path) -> Result<PathBuf, String> {
     let name = source.file_name().ok_or("缺少文件名")?;
-    let mut reader =
+    let reader =
         File::open(source).map_err(|e| format!("无法打开 {}：{e}", source.display()))?;
     if !reader.metadata().map_err(|e| e.to_string())?.is_file() {
         return Err("请选择普通文件".into());
     }
+    copy_to_inbox(inbox, Path::new(name), reader)
+}
+
+pub(crate) fn copy_to_inbox(inbox: &Path, filename: &Path, mut reader: impl Read) -> Result<PathBuf, String> {
+    let name = filename.as_os_str();
     for index in 0u64.. {
         let mut candidate = OsString::from(name);
         if index > 0 {
-            candidate = source.file_stem().unwrap_or(name).to_os_string();
+            candidate = filename.file_stem().unwrap_or(name).to_os_string();
             candidate.push(format!(" ({index})"));
-            if let Some(extension) = source.extension() {
+            if let Some(extension) = filename.extension() {
                 candidate.push(".");
                 candidate.push(extension);
             }
@@ -240,18 +238,18 @@ fn import_one(inbox: &Path, source: &Path) -> Result<PathBuf, String> {
     unreachable!()
 }
 
+pub(crate) fn inbox(database: &Database, data_dir: &Path, id: &str) -> Result<PathBuf, String> {
+    ready_root(database, data_dir, id)?;
+    checked_dir(data_dir, &companion_workspace(data_dir, id).join("收到的文件"), true)
+}
+
 fn import_files(
     database: &Database,
     data_dir: &Path,
     id: &str,
     sources: &[PathBuf],
 ) -> Result<Vec<PathBuf>, String> {
-    ready_root(database, data_dir, id)?;
-    let inbox = checked_dir(
-        data_dir,
-        &companion_workspace(data_dir, id).join("收到的文件"),
-        true,
-    )?;
+    let inbox = inbox(database, data_dir, id)?;
     let mut imported = Vec::new();
     for source in sources {
         match import_one(&inbox, source) {

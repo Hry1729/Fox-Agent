@@ -54,7 +54,7 @@ fn on_db<T>(
 }
 
 fn hash(plan: &Plan) -> DeletionResult<String> {
-    Ok(hex::encode(Sha256::digest(serde_json::to_vec(plan)?)))
+    Ok(hex::encode(Sha256::digest(crate::canonical_json::to_vec(plan)?)))
 }
 
 fn normalized(path: &Path) -> io::Result<PathBuf> {
@@ -293,7 +293,7 @@ fn collect(db: &Database, data: &Path, id: &str, expected: &str) -> Result<(), S
         let now = now_ms();
         tx.execute("INSERT INTO companion_deletions(companion_id,template_agent_id,display_name,plan_json,plan_hash,state,started_at)
             VALUES(?1,?2,?3,?4,?5,'deleting',?6) ON CONFLICT(companion_id) DO NOTHING",
-            params![id,plan.template_agent_id,plan.display_name,serde_json::to_string(&plan)?,fingerprint,now])?;
+            params![id,plan.template_agent_id,plan.display_name,crate::canonical_json::to_string(&plan)?,fingerprint,now])?;
         tx.execute(
             "UPDATE companion_profiles SET deleting_at=?2 WHERE id=?1",
             params![id, now],
