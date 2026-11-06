@@ -2362,8 +2362,14 @@ impl RuntimeHost {
         &self,
         conversation_id: &str,
     ) -> Result<session_lifecycle::ResetAvailability, String> {
-        if self.database.companion_chat_state(conversation_id)?.is_some() {
-            return Ok(ResetAvailability::unsupported("companion.reset_unsupported", "固定私聊仅在模型上下文无法恢复时提供修复。"));
+        if let Some(state) = self.database.companion_chat_state(conversation_id)? {
+            if state != crate::database::CompanionChatState::Active {
+                return Ok(ResetAvailability::unsupported("companion.inactive", "请先恢复联系人，再重置私聊上下文。"));
+            }
+            let available = self.companion_workspace_availability(conversation_id)?;
+            if !available.supported {
+                return Ok(available);
+            }
         }
         let runtime_type = self.database.conversation_runtime_type(conversation_id)?;
         let mapping = self.database.get_runtime_session(conversation_id)?;
@@ -2386,6 +2392,10 @@ impl RuntimeHost {
         if self.database.conversation_has_active_run(chat)? {
             return Ok(ResetAvailability::unsupported("session.reset_run_active", "请先停止当前生成。"));
         }
+        self.companion_workspace_availability(chat)
+    }
+
+    fn companion_workspace_availability(&self, chat: &str) -> Result<ResetAvailability, String> {
         let root = self.sessions_dir.parent().ok_or("无法定位 Fox 数据目录")?;
         if let Err(error) = crate::companion_workspace::require_for_chat(&self.database, root, chat) {
             return Ok(ResetAvailability::unsupported("companion.workspace_unavailable", error));

@@ -953,7 +953,9 @@ export function Workbench() {
   const resetManagedConversation = async (conversation: ConversationSummary) => {
     const confirmed = await confirmDialog({
       title: '重置会话上下文',
-      description: '将开始一个新的 Pi 会话。历史消息、专家绑定、记忆与知识库绑定都会保留；旧会话文件仍保留在磁盘上，直到永久删除对话。',
+      description: desktopConversation.detail?.conversation.id === conversation.id && desktopConversation.detail.companionId
+        ? '小狐会从下一条消息开始新的模型上下文。聊天记录、笔记、工作文件和项目授权都会保留。'
+        : '将开始一个新的 Pi 会话。历史消息、专家绑定、记忆与知识库绑定都会保留；旧会话文件仍保留在磁盘上，直到永久删除对话。',
       confirmLabel: '重置上下文',
     })
     if (!confirmed) return
@@ -1777,7 +1779,9 @@ export function Workbench() {
           /></Suspense>}
           <TimelineRuntimeContext.Provider value={timelineRuntimeContextValue}>
           <ComposerRuntimeContext.Provider value={composerRuntimeContextValue}>
-          {workspacePage ?? <>{privateChat ? <ContactTopbar /> : !timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onRightSidebarCollapse={collapseRightSidebar} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || modelService.service?.modelId || (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) || '未配置模型'} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onResetContext={(conversation) => void resetManagedConversation(conversation)} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} projects={projects} onChangeProject={(conversation, root, mode) => void handleTopbarChangeProject(conversation, root, mode)} onPickProjectFolder={(conversation) => void handleTopbarPickProject(conversation)} />}
+          {workspacePage ?? <>{privateChat ? <ContactTopbar detail={desktopConversation.detail} onReset={() => {
+            if (desktopConversation.detail) void resetManagedConversation(desktopConversation.detail.conversation)
+          }} /> : !timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onRightSidebarCollapse={collapseRightSidebar} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || modelService.service?.modelId || (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) || '未配置模型'} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onResetContext={(conversation) => void resetManagedConversation(conversation)} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} projects={projects} onChangeProject={(conversation, root, mode) => void handleTopbarChangeProject(conversation, root, mode)} onPickProjectFolder={(conversation) => void handleTopbarPickProject(conversation)} />}
 {privateChat && <ContactRepairBanner detail={desktopConversation.detail} />}
 {contact && <ImportSuggestion key={contact.id} contact={contact}/>}
 {grantCandidate && desktopConversation.detail?.conversation.projectId && <ProjectGrantPrompt key={desktopConversation.detail.conversation.id+grantCandidate.id} contact={grantCandidate} conversationId={desktopConversation.detail.conversation.id} projectId={desktopConversation.detail.conversation.projectId}/>}

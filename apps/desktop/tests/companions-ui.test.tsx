@@ -3,7 +3,7 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { SharedDecision } from '../src/features/companions/shared-decision'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { ContactSidebar, ContactRepairBanner, AddContactAction } from '../src/features/companions/chat-controls'
+import { ContactSidebar, ContactTopbar, ContactRepairBanner, AddContactAction } from '../src/features/companions/chat-controls'
 import { ContactWriteCards, WriteCallsContext } from '../src/features/companions/chat-cards'
 import { ContactsContext, type ContactsContextValue } from '../src/features/companions/context'
 import type { Companion } from '../src/features/companions/api'
@@ -41,6 +41,13 @@ describe('联系人桌面组件', () => {
     const detail = { conversation: { id: 'chat' }, contextRepair: { available: false } } as ConversationDetail
     expect(render(<ContactRepairBanner detail={detail} />)).toBe('')
     expect(render(<ContactRepairBanner detail={{ ...detail, contextRepair: { available: true } }} />)).toContain('修复后继续')
+  })
+  test('主动重置只在 Host 开放时显示，运行期间禁用', () => {
+    const detail = { contextReset: { supported: true, reason: null, code: null } } as ConversationDetail
+    expect(render(<ContactTopbar detail={null} onReset={noop} />)).not.toContain('重置上下文')
+    expect(render(<ContactTopbar detail={detail} onReset={noop} />)).toContain('重置上下文')
+    const blocked = { ...detail, contextResetBlockedReason: '请先停止当前生成' }
+    expect(render(<ContactTopbar detail={blocked} onReset={noop} />)).toContain('disabled')
   })
   test('写入卡只为本次新增提供撤销，忽略其他 Run 的工具', () => {
     const call = { id: 'a', toolName: 'memory_write', runId: 'run', result: { status: 'created', memoryId: 'new' } } as ToolCallRecord

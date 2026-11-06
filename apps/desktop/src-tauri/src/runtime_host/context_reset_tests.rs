@@ -477,6 +477,50 @@ fn run_session_binding_is_idempotent_but_does_not_change_finished_runs() {
 /// Pre-fix: there was no reset at all, and the single row would have been
 /// overwritten (losing the old file's owner) if it existed.
 #[test]
+fn companion_session_reset_preserves_private_facts_and_the_other_contact() {
+    let fixture = Fixture::new("companion-session-reset");
+    let db = &fixture.database;
+    let owner = db.add_companion(&fixture.root, "fox-security").unwrap();
+    let other = db.seed_default_companion(&fixture.root).unwrap();
+    let chat = &owner.conversation_id;
+    let id = &owner.profile.id;
+    let workspace = crate::companion_workspace::repair(db, &fixture.root, id).unwrap();
+    let file = workspace.join("报价.txt");
+    std::fs::write(&file, "报价明细 7731").unwrap();
+    db.companion_note_save_user(id, None, None, "报价以含税金额为准", None, None).unwrap();
+    db.companion_topic_save(id, None, "报价明细", &[], "报价单编号 7731", None).unwrap();
+    let project = db.with_connection(|c| c.query_row(
+        "SELECT project_id FROM conversations WHERE id=?", [&fixture.conversation_id], |r| r.get::<_, String>(0),
+    )).unwrap();
+    db.companion_grant_project(id, &project, true).unwrap();
+    let run = db.create_run(chat, "保存报价", None).unwrap().run.id;
+    db.mark_run_failed(&run, "run.test", "测试已结束").unwrap();
+    let notes = db.companion_runtime_notes(chat, "报价").unwrap().unwrap();
+    let grants = db.companion_grants_list(id).unwrap();
+    let history = db.load_conversation_history(chat, i64::MAX, 100).unwrap();
+    assert!(!history.messages.is_empty());
+    assert_eq!(notes["notes"][0]["content"], "报价以含税金额为准");
+    assert_eq!(notes["topics"][0]["title"], "报价明细");
+    let old = fixture.file("contact-old.jsonl");
+    std::fs::write(&old, "旧会话记录").unwrap();
+    fixture.seed_mapping(chat, "owner-old", &old, 1, RuntimeSessionStatus::Ready);
+    fixture.seed_mapping(&other.conversation_id, "other-live", &fixture.file("other.jsonl"), 3, RuntimeSessionStatus::Allocated);
+
+    let outcome = fixture.lifecycle().reset(chat, &mut ScriptedRuntime::with(vec![Scripted::Created {
+        path: fixture.file("new.jsonl"), session_id: "owner-new".into(), persist: true,
+    }])).unwrap();
+
+    assert_eq!(outcome.context_generation, 2);
+    assert_eq!(db.get_runtime_session(&other.conversation_id).unwrap().unwrap().runtime_session_id, "other-live");
+    let after = db.load_conversation_history(chat, i64::MAX, 100).unwrap();
+    assert_eq!(serde_json::to_value(after.messages).unwrap(), serde_json::to_value(history.messages).unwrap());
+    assert_eq!(db.companion_runtime_notes(chat, "报价").unwrap().unwrap(), notes);
+    assert_eq!(db.companion_grants_list(id).unwrap(), grants);
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "报价明细 7731");
+    assert_eq!(std::fs::read_to_string(old).unwrap(), "旧会话记录");
+}
+
+#[test]
 fn two_resets_record_three_generations_and_keep_the_chat_intact() {
     let fixture = Fixture::new("two-resets");
     let expert = fixture

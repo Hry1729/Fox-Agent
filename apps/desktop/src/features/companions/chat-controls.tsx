@@ -60,11 +60,19 @@ export function AddContactAction({ agent, onOpened }: { agent: AgentRecord; onOp
   return <Button variant="outline" disabled={busy || Boolean(existing?.deletingAt)} onClick={() => void add()}>{existing?.deletingAt ? '正在删除' : existing?.archivedAt ? '恢复并打开' : existing ? '打开私聊' : '加为联系人'}</Button>
 }
 
-export function ContactTopbar() {
+export function ContactTopbar({ detail, onReset }: {
+  detail: ConversationDetail | null
+  onReset: () => void
+}) {
   const ctx = useContacts()
   return <header className="fox-chat-topbar"><button type="button" className="fox-contact-heading" onClick={ctx?.showProfile}>
     {ctx?.current ? <ContactAvatar contact={ctx.current} /> : <UserRound size={17} />}<strong>{ctx?.current?.displayName ?? '联系人'}</strong>
-  </button><button type="button" className="fox-icon-button" title="联系人资料" aria-label="联系人资料" onClick={ctx?.showProfile}><PanelRight size={16} /></button></header>
+    </button>
+    {detail?.contextReset?.supported && <Button
+      variant="ghost" size="sm" disabled={Boolean(detail.contextResetBlockedReason || ctx?.current?.activeRunStatus)}
+      title={detail.contextResetBlockedReason ?? undefined} onClick={onReset}
+    >重置上下文</Button>}
+    <button type="button" className="fox-icon-button" title="联系人资料" aria-label="联系人资料" onClick={ctx?.showProfile}><PanelRight size={16} /></button></header>
 }
 
 export function ContactRepairBanner({ detail }: { detail: ConversationDetail | null }) {
