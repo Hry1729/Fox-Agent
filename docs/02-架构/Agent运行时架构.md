@@ -75,7 +75,7 @@ Pi 是首个本地 Runtime Adapter，不是 Fox 对话架构本身。未来增�
 ### 启动、权限与凭据
 
 - **通用 ACP 后端**：三家共用 ACP 客户端与外部运行时（`acp.rs`、`external.rs`、`external_launch.rs`），各家差异在 `src/backends/{pi,codex,deepseek}.rs`。外部进程是 Fox Host 的普通子进程，放进 Job Object（Windows）/ 进程组（Unix）；Fox 不给它们套沙箱。
-- **安装**：Windows 上外部 Agent 从受管运行时包启动（当前 0.1.8，`launch.rs` `RUNTIME_PACKAGE_VERSION`；安装目录沿用历史名 `%ProgramFiles%\Fox\sandbox-runtime\<版本>`），不经 `npx`。`pnpm tauri:build:windows` 打的 NSIS 安装包会先安装运行时包（见 `docs/windows-bundled-sandbox-installer.md`），其他方式需另装；配置（模型服务或各自的登录）由用户完成，Fox 只检测并显示状态。
+- **安装**：Windows 上外部 Agent 从受管运行时包启动（当前 0.1.9，`launch.rs` `RUNTIME_PACKAGE_VERSION`；安装目录沿用历史名 `%ProgramFiles%\Fox\sandbox-runtime\<版本>`），不经 `npx`。`pnpm tauri:build:windows` 打的 NSIS 安装包会先安装运行时包（见 `docs/windows-bundled-sandbox-installer.md`），其他方式需另装；配置（模型服务或各自的登录）由用户完成，Fox 只检测并显示状态。
 - **私有 HOME**：按项目 × Agent 一份，HOME / USERPROFILE / XDG / CODEX_HOME / DSH_HOME 指向它（`external_home.rs`），不复制真实 HOME。
 - **Pi 配置来源**：从没选过时，如果 Fox 模型服务能给 Pi 用，默认把模型服务的 Key 写入该项目的私有 HOME，并记审计 `agent_backend.pi_source_defaulted_to_fox`；否则在建 Run 前拒绝（`agent_backend_pi_source_choice_required`）。设置页可切到本机 `~/.pi`（导入到所有项目的私有 HOME）。
 - **权限**：选项列表由 `native_permission.rs` 统一提供。Fox 与 Pi 是只读 / 询问 / 自动 / 完全访问四档（block 规则在所有档位生效）；Codex 是请求审批 / 帮我批准 / 完全访问权限（`session/set_mode` 立即生效）；dsh 是仅可查看 / 工作区完全修改 / 完全权限（下一轮重启 dsh 生效）。完全访问每个项目首次开启要二次确认。Codex、dsh 的 `request_permission` 显示为审批卡，Fox 不替它们自动允许。

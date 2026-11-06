@@ -20,7 +20,7 @@
     sha256), launch.rs RUNTIME_PACKAGE_VERSION and build-runtime-package.py DEFAULT_VERSION.
 
 .EXAMPLE
-    pwsh -File crates\fox-agent-backend\scripts\windows\build-runtime-release.ps1 -Version 0.1.8 -OutDir D:\releases
+    pwsh -File crates\fox-agent-backend\scripts\windows\build-runtime-release.ps1 -Version 0.1.9 -OutDir D:\releases
 #>
 param(
     [Parameter(Mandatory = $true)][string] $Version,

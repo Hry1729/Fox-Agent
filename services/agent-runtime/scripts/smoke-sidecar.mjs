@@ -62,7 +62,7 @@ try {
         baseUrl: 'faux://fox',
         modelId: 'fox-sidecar-smoke',
         apiType: 'faux',
-        contextWindow: 4096,
+        contextWindow: 32768,
         maxOutputTokens: 512,
       },
     },

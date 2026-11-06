@@ -120,7 +120,7 @@ fn select(database: &Database, update: SearchUpdate) -> Result<(), String> {
     } else {
         config.connection_value(config.provider)?;
     }
-    let value = serde_json::to_string(&config).map_err(|error| error.to_string())?;
+    let value = crate::canonical_json::to_string(&config).map_err(|error| error.to_string())?;
     save_with_keys(&mut model_service::KeyringStore, &plan, || database.set_app_setting(SETTING, &value))
         .map_err(|error| format!("搜索服务保存失败：{error:?}"))
 }

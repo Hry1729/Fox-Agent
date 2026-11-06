@@ -115,7 +115,7 @@ class VersionTest(unittest.TestCase):
             match = re.search(r'pub const RUNTIME_PACKAGE_VERSION: &str = "([^"]+)";', handle.read())
         self.assertIsNotNone(match, "RUNTIME_PACKAGE_VERSION not found in src/launch.rs")
         self.assertEqual(brp.DEFAULT_VERSION, match.group(1))
-        self.assertEqual(brp.DEFAULT_VERSION, "0.1.8")
+        self.assertEqual(brp.DEFAULT_VERSION, "0.1.9")
         # The installer pin names the same version (B5: 0.1.7, no srt, C3 pi-gate).
         release = os.path.join(os.path.dirname(os.path.dirname(brp.CRATE)), "apps", "desktop", "src-tauri", "windows", "sandbox-release.json")
         with open(release, encoding="utf-8") as handle:
