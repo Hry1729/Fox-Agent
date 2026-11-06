@@ -5,6 +5,7 @@ mod canonical_json;
 mod commands;
 mod database;
 mod data_paths;
+mod companion_notes_files;
 mod companion_workspace;
 mod data_compute;
 mod report_pdf;
@@ -203,6 +204,9 @@ pub fn run() {
             if let Err(error) = commands::companions::ensure_default(&database, &app_data_dir) {
                 eprintln!("无法初始化默认联系人：{error}");
             }
+            if let Err(error) = database.cleanup_companion_topic_files(&app_data_dir) {
+                eprintln!("联系人专题文件清理未完成：{error}");
+            }
             database.audit_interrupted_tasks()?;
             let runtime_sessions_dir = app_data_dir.join("runtime-sessions");
             std::fs::create_dir_all(&runtime_sessions_dir)?;
@@ -389,6 +393,25 @@ pub fn run() {
             commands::offline_evaluation_run,
             commands::user_profile_get,
             commands::user_profile_save,
+            commands::companion_notes::companion_notes_get,
+            commands::companion_notes::companion_note_save_user,
+            commands::companion_notes::companion_note_set_enabled,
+            commands::companion_notes::companion_note_draft_save,
+            commands::companion_notes::companion_note_draft_to_topic,
+            commands::companion_notes::companion_topic_read,
+            commands::companion_notes::companion_topic_save,
+            commands::companion_notes::companion_topic_delete,
+            commands::companion_notes::companion_note_request_resolve,
+            commands::companion_notes::companion_shared_request_resolve,
+            commands::companion_notes::companion_memory_undo,
+            commands::companion_notes::companion_note_move_undo,
+            commands::companion_notes::companion_note_delete,
+            commands::companion_notes::companion_note_clear,
+            commands::companion_notes::companion_note_confirm,
+            commands::companion_notes::companion_note_conflict_resolve,
+            commands::companion_notes::companion_grants_list,
+            commands::companion_notes::companion_grant_project,
+            commands::companion_notes::companion_revoke_project,
             commands::memories_list,
             commands::memory_create,
             commands::memory_confirm,

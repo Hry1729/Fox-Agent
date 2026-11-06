@@ -1,3 +1,4 @@
+import { selectCompanionTools } from './companion-tools.mjs'
 import { createInterface } from 'node:readline'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
@@ -763,6 +764,7 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     filePlacement: buildFilePlacement(request.payload?.projectContext),
     workSnapshot: request.payload?.workSnapshot,
     memoryContext: request.payload?.memoryContext,
+    companionContext: request.payload?.companionContext,
     previousRunBackgroundJobs: request.payload?.previousRunBackgroundJobs ?? null,
     assistantPackage: request.payload?.assistantPackage,
     skillPrompt: request.payload?.skillPrompt,
@@ -806,8 +808,9 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     request.payload?.assistantPackage,
     request.payload?.expertPackage,
   )
+  const companionTools = selectCompanionTools(catalogTools, toolDiagnostics, planningContext.companionContext)
   const profileToolSelection = applyExecutionProfileToTools(
-    [...toolDiagnostics.tools, ...continuationTools],
+    [...companionTools, ...continuationTools],
     activeExecutionProfile,
   )
   const projectSelection = selectToolsForProjectContext(

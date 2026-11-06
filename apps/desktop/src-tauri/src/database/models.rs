@@ -2965,6 +2965,9 @@ pub struct MemoryEntityRecord {
     pub content: String,
     pub state: String,
     pub enabled: bool,
+    pub source_companion_id: Option<String>,
+    pub source_label: Option<String>,
+    pub evidence_basis: Option<String>,
     pub source_conversation_id: Option<String>,
     pub source_message_id: Option<String>,
     pub source_run_id: Option<String>,
@@ -3046,6 +3049,7 @@ pub struct MemoryRecallBundle {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryListRequest {
+    pub companion_id: Option<String>,
     pub agent_id: Option<String>,
     pub project_id: Option<String>,
     #[serde(default)]

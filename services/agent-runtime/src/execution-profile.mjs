@@ -77,6 +77,8 @@ const READ_ONLY_SHADOW_TOOL_NAMES = new Set([
   'team_snapshot_get',
   'child_agent_list',
   'memory_search',
+  'note_search',
+  'note_read',
   'list_knowledge_bases',
   'search_knowledge',
   'read_knowledge_document',

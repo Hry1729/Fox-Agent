@@ -34,6 +34,7 @@ fn host_tool_is_supported(tool: &str) -> bool {
             | "call_mcp_tool"
             | "memory_search"
             | "memory_propose"
+            | "memory_write" | "note_organize" | "note_search" | "note_read"
             | "child_agent_list"
             | "child_run_start"
             | "child_run_collect"

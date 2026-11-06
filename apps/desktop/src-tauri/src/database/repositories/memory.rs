@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::cmp::Ordering;
 use uuid::Uuid;
 
-const MEMORY_SELECT: &str =
+pub(super) const MEMORY_SELECT: &str =
     "SELECT m.id, m.scope, m.scope_key, m.kind, m.canonical_key, m.content, m.state,
             m.enabled, m.source_conversation_id, m.source_message_id, m.source_run_id,
             m.evidence_excerpt, m.created_by, m.confidence, m.version, m.created_at,
@@ -20,7 +20,8 @@ const MEMORY_SELECT: &str =
                AND (c.existing_memory_id = m.id OR c.competing_memory_id = m.id)
              ORDER BY c.created_at DESC LIMIT 1),
             (SELECT COUNT(*) FROM memory_recalls r WHERE r.memory_id = m.id),
-            (SELECT MAX(recalled_at) FROM memory_recalls r WHERE r.memory_id = m.id)
+            (SELECT MAX(recalled_at) FROM memory_recalls r WHERE r.memory_id = m.id),
+            m.source_companion_id, coalesce(m.source_label,(SELECT p.display_name FROM companion_profiles p WHERE p.id=m.source_companion_id)), m.evidence_basis
      FROM memory_entities m";
 
 impl Database {
@@ -40,6 +41,9 @@ impl Database {
             let sql = format!(
                 "{MEMORY_SELECT}
                  WHERE (?1 = 1 OR m.deleted_at IS NULL)
+                   AND ((?5 IS NULL AND NOT (m.scope='agent' AND substr(m.scope_key,1,4)='cmp_'))
+                     OR (m.scope='agent' AND m.scope_key=?5))
+                   AND NOT EXISTS (SELECT 1 FROM companion_shared_requests sr WHERE sr.candidate_memory_id=m.id AND sr.status IN ('open','stale','rejected'))
                    AND (?2 = '' OR m.scope = 'global' OR (m.scope = 'agent' AND m.scope_key = ?2))
                    AND (?3 = '' OR m.scope = 'global' OR (m.scope = 'project' AND m.scope_key = ?3))
                    AND (?4 = '' OR lower(m.canonical_key) LIKE '%' || ?4 || '%'
@@ -51,7 +55,7 @@ impl Database {
             connection
                 .prepare(&sql)?
                 .query_map(
-                    params![request.include_deleted, agent_id, project_id, query],
+                    params![request.include_deleted, agent_id, project_id, query, request.companion_id],
                     memory_from_row,
                 )?
                 .collect()
@@ -75,6 +79,9 @@ impl Database {
         request: &CreateMemoryRequest,
     ) -> Result<MemoryEntityRecord, String> {
         let scope_key = normalize_scope_key(&request.scope, request.scope_key.as_deref())?;
+        if request.scope == "agent" && scope_key.starts_with("cmp_") {
+            return Err("companion.notes_dedicated_entry 请在联系人的资料页管理笔记".into());
+        }
         let evidence = request.evidence_excerpt.as_deref().unwrap_or("");
         validate_memory_fields(
             &request.scope,
@@ -267,6 +274,7 @@ impl Database {
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
             let before = load_memory(&transaction, memory_id)?;
+            require_general_entry(&transaction, &before)?;
             if before.deleted_at.is_some() {
                 return Err(rusqlite::Error::InvalidQuery);
             }
@@ -305,6 +313,7 @@ impl Database {
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
             let before = load_memory(&transaction, &request.memory_id)?;
+            require_general_entry(&transaction, &before)?;
             validate_memory_fields(
                 &before.scope,
                 &request.kind,
@@ -360,6 +369,7 @@ impl Database {
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
             let before = load_memory(&transaction, &request.memory_id)?;
+            require_general_entry(&transaction, &before)?;
             if before.deleted_at.is_some()
                 || before.state != "confirmed"
                 || before.version != request.expected_version
@@ -406,6 +416,7 @@ impl Database {
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
             let before = load_memory(&transaction, memory_id)?;
+            require_general_entry(&transaction, &before)?;
             if before.deleted_at.is_some() {
                 return Err(rusqlite::Error::InvalidParameterName(
                     "memory.already_deleted".to_owned(),
@@ -452,6 +463,8 @@ impl Database {
             }
             let existing = load_memory(&transaction, &conflict.existing_memory_id)?;
             let competing = load_memory(&transaction, &conflict.competing_memory_id)?;
+            require_general_entry(&transaction, &existing)?;
+            require_general_entry(&transaction, &competing)?;
             let result_id = if request.decision == "keep_existing" {
                 transaction.execute(
                     "UPDATE memory_entities
@@ -675,7 +688,7 @@ impl Database {
     }
 }
 
-fn memory_from_row(row: &Row<'_>) -> rusqlite::Result<MemoryEntityRecord> {
+pub(super) fn memory_from_row(row: &Row<'_>) -> rusqlite::Result<MemoryEntityRecord> {
     Ok(MemoryEntityRecord {
         id: row.get(0)?,
         scope: row.get(1)?,
@@ -700,10 +713,13 @@ fn memory_from_row(row: &Row<'_>) -> rusqlite::Result<MemoryEntityRecord> {
         open_conflict_id: row.get(20)?,
         recall_count: row.get(21)?,
         last_recalled_at: row.get(22)?,
+        source_companion_id: row.get(23)?,
+        source_label: row.get(24)?,
+        evidence_basis: row.get(25)?,
     })
 }
 
-fn load_memory(
+pub(super) fn load_memory(
     transaction: &Transaction<'_>,
     memory_id: &str,
 ) -> rusqlite::Result<MemoryEntityRecord> {
@@ -737,7 +753,7 @@ fn load_conflict(
     )
 }
 
-fn insert_revision(
+pub(super) fn insert_revision(
     transaction: &Transaction<'_>,
     after: &MemoryEntityRecord,
     actor: &str,
@@ -881,6 +897,18 @@ fn memory_score(query: &str, memory: &MemoryEntityRecord) -> (f64, usize) {
 
 fn parse_optional_json(value: Option<String>) -> Option<Value> {
     value.and_then(|text| serde_json::from_str(&text).ok())
+}
+
+fn require_general_entry(tx: &Transaction<'_>, memory: &MemoryEntityRecord) -> rusqlite::Result<()> {
+    let private_note = memory.scope == "agent" && memory.scope_key.starts_with("cmp_");
+    let pending_shared = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM companion_shared_requests WHERE candidate_memory_id=? AND status IN ('open','stale','rejected'))",
+        [&memory.id], |row| row.get::<_, bool>(0),
+    )?;
+    if private_note || pending_shared {
+        return Err(rusqlite::Error::InvalidParameterName("companion.notes_dedicated_entry 请在联系人的资料页管理笔记".into()));
+    }
+    Ok(())
 }
 
 fn normalize_memory_error(error: String) -> String {

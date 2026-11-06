@@ -629,7 +629,7 @@ fn builtin_tool_category(tool: &str) -> &'static str {
         "child_agent_list" | "child_run_start" | "child_run_collect" | "child_run_cancel" => {
             "Agent 编排"
         }
-        "memory_search" | "memory_propose" | "skill_load" => "记忆与上下文",
+        "memory_search" | "memory_propose" | "memory_write" | "note_organize" | "note_search" | "note_read" | "skill_load" => "记忆与上下文",
         "present_files" => "文件与办公",
         "list_knowledge_bases"
         | "search_knowledge"
@@ -676,6 +676,10 @@ fn builtin_tool_description(tool: &str) -> &'static str {
         "skill_load" => "按技能目录中的 ID 加载当前任务已启用技能的完整说明；仅返回只读文本，不会为 Run 新增任何工具授权。",
         "present_files" => "把已生成的文件声明为本次交给用户的最终文件，界面据此显示文件卡片；只声明已存在的普通文件，不检查文件内容。",
         "memory_search" => "按当前 Agent 与项目作用域检索已确认且启用的受治理记忆。",
+        "memory_write" => "在联系人私聊里记录笔记或有依据的共享偏好。",
+        "note_organize" => "将主笔记原文整理到专题。",
+        "note_search" => "搜索当前会话获准阅读的联系人笔记。",
+        "note_read" => "阅读当前会话获准访问的专题。",
         "memory_propose" => "基于当前 Run 的明确证据提交候选记忆，等待用户治理。",
         "list_knowledge_bases" => "列出当前可访问的本地与远程知识库。",
         "search_knowledge" => "在已授权知识库中检索与问题相关的内容。",

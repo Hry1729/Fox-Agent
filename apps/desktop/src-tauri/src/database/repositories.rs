@@ -139,6 +139,7 @@ pub(crate) use agent_backend::RunBackendIdentity;
 mod kernel_projection;
 mod kernel_display;
 pub(crate) use kernel_host::KernelHostScope;
+mod companion_notes;
 mod memory;
 mod observability;
 mod work_events;

@@ -971,11 +971,16 @@ pub(crate) fn conversation_prompt_context(
         let expert_binding = database
             .current_conversation_expert_binding(conversation_id)?;
         let assistant_skills = database.enabled_agent_skills(&assistant.id)?;
-        let configured_expert_skills = expert_binding
+        let mut configured_expert_skills = expert_binding
             .as_ref()
             .map(|binding| database.enabled_agent_skills(&binding.expert_id))
             .transpose()?
             .unwrap_or_default();
+        if !configured_expert_skills.is_empty() && database.companion_chat_state(conversation_id)?.is_some() {
+            let installed: HashSet<_> = crate::skills::scan_skills(skills_dir, &configured_expert_skills)?
+                .into_iter().filter(|skill| skill.record.valid).map(|skill| skill.record.id).collect();
+            configured_expert_skills.retain(|id| installed.contains(id));
+        }
         let enabled_mcps = database
             .list_mcp_servers()?
             .into_iter()
@@ -2001,6 +2006,15 @@ impl RuntimeHost {
             6_000,
         )?;
 
+        let mut companion_context = self.database.companion_runtime_notes(&started.run.conversation_id, text)?;
+        if let Some(context) = companion_context.as_mut().filter(|ctx| ctx["role"] == "owner") {
+            let allowed: Vec<_> = fox_engine_protocol::TOOL_CONTRACTS.iter()
+                .map(|contract| contract.0)
+                .filter(|name| crate::companion_workspace::allows_tool(name))
+                .collect();
+            context["allowedTools"] = json!(allowed);
+        }
+
         // Assembled once and borrowed by both prompt branches below, so the
         // Kernel and Legacy paths cannot disagree about what the model sees.
         let context = AgentPromptContext {
@@ -2069,6 +2083,7 @@ impl RuntimeHost {
                 "hostRuntimeCapabilities": host_runtime_capabilities(&runtime_shadow_hash(&format!("manifest|pi|v2|{}",self.capabilities_manifest_json().unwrap_or_default())), &control_binding.execution_profile_id),
                 "workSnapshot": work_snapshot,
                 "memoryContext": memory_context,
+                "companionContext": companion_context,
                 "previousRunBackgroundJobs": previous_run_jobs,
                 "promptBudget": { "maxPromptTokens": input_tokens },
                 "runBudget": self.run_budget_override.as_ref().map(|budget| {
@@ -5996,7 +6011,7 @@ fn run_status_is_terminal(status: &str) -> bool {
 }
 
 fn is_memory_tool(tool: &str) -> bool {
-    matches!(tool, "memory_search" | "memory_propose")
+    matches!(tool, "memory_search" | "memory_propose" | "memory_write" | "note_organize" | "note_search" | "note_read")
 }
 
 fn is_child_run_tool(tool: &str) -> bool {
@@ -6116,6 +6131,8 @@ fn execute_memory_tool_request(
 fn execute_memory_operation(database: &Database, conversation_id: &str, run_id: &str,
     tool: &str, input: &Value) -> Result<Value,String> {
         match tool {
+            "memory_write" | "note_organize" | "note_search" | "note_read" =>
+                database.companion_notes_tool(conversation_id, run_id, tool, input),
             "memory_search" => {
                 let query = input.get("query").and_then(Value::as_str).unwrap_or("");
                 let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
@@ -6565,6 +6582,13 @@ fn ensure_expert_tool_allowed(
     conversation_id: &str,
     tool: &str,
 ) -> Result<(), String> {
+    if matches!(tool, "memory_write" | "note_organize" | "note_search" | "note_read") {
+        let access = database.companion_note_access(conversation_id)?;
+        if access.is_some_and(|(_, owner)| owner || matches!(tool, "note_read" | "note_search")) {
+            return Ok(());
+        }
+        return Err("[companion.tool_not_available] 当前会话没有使用此笔记工具的权限。".into());
+    }
     let agent_id = database.conversation_agent_id(conversation_id)?;
     let assistant = database
         .get_agent(&agent_id)?

@@ -1,3 +1,4 @@
+import { companionMemoryPrompt } from './companion-memory-prompt.mjs'
 import { createHash } from 'node:crypto'
 import { hostRuntimeCapabilitiesPrompt } from './host-runtime-capabilities.mjs'
 import {
@@ -922,6 +923,7 @@ export function composeFoxPrompt({
   }
   const workSnapshot = context.workSnapshot || { goal: null, tasks: [], evidence: [] }
   const initialWorkSnapshotFragment = workSnapshotFragment(workSnapshot, WORK_SNAPSHOT_MAX_CHARS)
+  const companion = companionMemoryPrompt(context.companionContext)
   const memoryContext = context.memoryContext || { status: 'empty', query: '', items: [], totalChars: 0 }
   const expertBinding = context.expertBinding || null
   const expertPackage = context.expertPackage || null
@@ -1003,6 +1005,14 @@ export function composeFoxPrompt({
         jsonBlock(context.previousRunBackgroundJobs, 2_600),
       ].join('\n'), 3_000),
     })] : []),
+    ...(companion ? [typedSection({
+      id: 'companion_notes', kind: 'confirmed_memory', authority: 'runtime', priority: 90,
+      minimumChars: companion.required.length, maxChars: companion.required.length, content: companion.required,
+    })] : []),
+    ...(companion?.topics ? [typedSection({
+      id: 'companion_topics', kind: 'confirmed_memory', authority: 'runtime', priority: 65,
+      minimumChars: 256, maxChars: Math.max(256, companion.topics.length), content: companion.topics,
+    })] : []),
     ...(Array.isArray(memoryContext.items) && memoryContext.items.length > 0 ? [typedSection({
       id: 'confirmed_memory', kind: 'confirmed_memory', authority: 'runtime', priority: 65, minimumChars: 256, maxChars: 8_000,
       content: bounded([
@@ -1068,6 +1078,9 @@ export function composeFoxPrompt({
   validateTypedContextSet(sections.map((section) => section.fragment))
   const normalized = normalizedBudget(budget, stable.length)
   const fitted = fitContextSections(stable, sections, normalized.maxPromptChars)
+  if (companion && fitted.truncatedSections.includes('companion_notes')) {
+    throw new Error('[companion.note_context_budget] 当前模型的上下文空间不足以容纳完整主笔记，请整理主笔记或调整模型上下文。')
+  }
   if (WORK_SNAPSHOT_REQUIRED_PROFILE_IDS.has(executionProfileId)) {
     const sourceWorkSnapshot = sections.find((section) => section.kind === 'work_snapshot')
     const fittedWorkSnapshot = fitted.fragments.find((fragment) => fragment.kind === 'work_snapshot')

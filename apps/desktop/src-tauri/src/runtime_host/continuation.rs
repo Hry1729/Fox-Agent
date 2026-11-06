@@ -76,6 +76,8 @@ const READ_ONLY_PROFILE_TOOLS: &[&str] = &[
     "team_snapshot_get",
     "child_agent_list",
     "memory_search",
+    "note_search",
+    "note_read",
     "list_knowledge_bases",
     "search_knowledge",
     "read_knowledge_document",

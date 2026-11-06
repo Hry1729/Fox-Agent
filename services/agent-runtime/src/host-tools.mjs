@@ -1039,6 +1039,52 @@ export function createHostTools(requestHost) {
       }),
       execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'memory_propose', params, requestHost, signal),
     },
+    {
+      name: 'memory_write',
+      label: 'Write companion memory',
+      description: 'Add a main note, update or remove a named note, append to a topic, or save a stable fact about the user. For a clearly stated shared fact copy the complete first-person clause into content, supply the user quote, and distinguish a personal preference from a report or a one-time request. Report the returned status, including pending user confirmation.',
+      parameters: Type.Object({
+        target: Type.Union([Type.Literal('notes'), Type.Literal('topic'), Type.Literal('shared')]),
+        action: Type.Union([Type.Literal('add'), Type.Literal('patch'), Type.Literal('remove')]),
+        memoryId: Type.Optional(Type.String()),
+        canonicalKey: Type.Optional(Type.String({ maxLength: 160 })),
+        content: Type.Optional(Type.String({ maxLength: 4000 })),
+        kind: Type.Optional(Type.String()),
+        topic: Type.Optional(Type.String()),
+        aliases: Type.Optional(Type.Array(Type.String())),
+        basis: Type.Optional(Type.Union(['user_stated', 'assistant_inferred', 'attachment'].map(value => Type.Literal(value)))),
+        statement: Type.Optional(Type.Union(['self_stable','self_this_time','reported','unsure'].map(value => Type.Literal(value)))),
+        evidenceExcerpt: Type.Optional(Type.String({ maxLength: 1000 })),
+        sourceMessageId: Type.Optional(Type.String()),
+        changesExisting: Type.Optional(Type.Boolean()),
+      }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'memory_write', params, requestHost, signal),
+    },
+    {
+      name: 'note_organize',
+      label: 'Move main notes into a topic',
+      description: 'Move the specified main notes verbatim into a topic. Moving a user-written entry requires their confirmation.',
+      parameters: Type.Object({
+        memoryIds: Type.Array(Type.String(), { minItems: 1, maxItems: 20, uniqueItems: true }),
+        topic: Type.String(),
+        aliases: Type.Optional(Type.Array(Type.String())),
+      }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'note_organize', params, requestHost, signal),
+    },
+    {
+      name: 'note_search',
+      label: 'Search companion topics',
+      description: 'Find matching passages in the companion topics available to this conversation.',
+      parameters: Type.Object({ query: Type.String(), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })) }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'note_search', params, requestHost, signal),
+    },
+    {
+      name: 'note_read',
+      label: 'Read a companion topic',
+      description: 'Read the current topic by its identifier, title, or indexed file name. Use offset to continue a long topic.',
+      parameters: Type.Object({ topic: Type.String(), offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1 })) }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'note_read', params, requestHost, signal),
+    },
   ], { source: 'fox-host', execution: 'host', trusted: true })
 }
 

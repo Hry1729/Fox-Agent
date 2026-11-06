@@ -826,7 +826,7 @@ test('publishes governed memory tools and forwards candidate evidence unchanged'
   assert.equal(proposalSchema.evidenceExcerpt.maxLength, 1000)
   assert.deepEqual(
     runtimeToolNames().filter((name) => name.startsWith('memory_')),
-    ['memory_search', 'memory_propose'],
+    ['memory_search', 'memory_propose', 'memory_write'],
   )
 
   await search.execute('memory-search-1', { query: 'preferred editor', limit: 4 })

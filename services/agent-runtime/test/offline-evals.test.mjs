@@ -29,7 +29,7 @@ test('passes the Phase 0B full manifest with complete Runtime tool coverage', as
   const report = await runOfflineEvals()
   assert.equal(report.schemaVersion, 4)
   assert.equal(report.summary.suites, 9)
-  assert.equal(report.summary.total, 129) // catalog grew with four compute-job tools, then present_files
+  assert.equal(report.summary.total, 133)
   assert.equal(report.summary.failed, 0, JSON.stringify(report.suites.filter((suite) => suite.cases.some((item) => !item.passed)), null, 2))
   assert.equal(report.metadata.evaluatorVersion, 'fox-offline-evaluator-v8')
   const injectionCases = report.suites.find((suite) => suite.id === 'injection-boundary').cases
@@ -37,11 +37,11 @@ test('passes the Phase 0B full manifest with complete Runtime tool coverage', as
   assert.equal(injectionCases.every((item) => item.isolatedInHostWorkSnapshot && item.workSnapshotAuthorityCount === 1), true)
   assert.equal(injectionCases.some((item) => 'isolatedInWorkspaceContext' in item), false)
   assert.equal(report.baseline.manifest.id, 'phase-0b-full-baseline')
-  assert.equal(report.baseline.manifest.version, '2026-10-22.1') // present_files added to the canonical tool catalog
-  assert.equal(report.baseline.summary.total, 129)
+  assert.equal(report.baseline.manifest.version, '2026-11-06.1')
+  assert.equal(report.baseline.summary.total, 133)
   assert.deepEqual(
     Object.fromEntries(Object.entries(report.baseline.summary.byCategory).map(([category, summary]) => [category, summary.total])),
-    { simple: 10, medium: 89, complex: 25, recovery: 5 },
+    { simple: 10, medium: 93, complex: 25, recovery: 5 },
   )
   const runtimeToolCatalog = report.suites.find((suite) => suite.id === 'runtime-tool-catalog')
   assert.equal(runtimeToolCatalog.cases.length, RUNTIME_TOOL_CATALOG.length)
@@ -119,8 +119,8 @@ test('passes the Phase 0B full manifest with complete Runtime tool coverage', as
     { total: 6, passed: 6, failed: 0 },
   )
   assert.equal(report.metadata.datasetHash, '610af6adb505549587222e7410ac7003b46241b974174e2a96ccb01fddadf933')
-  assert.equal(report.metadata.manifestHash, '9db56ce775858d7d44e30e6e1b9db0eda42cac319c1d689baf082143b1405636') // manifest now includes the present_files catalog case
-  assert.equal(report.metadata.toolCatalogHash, '84827079a607a3c0617ed3b408bfe699836cb232bc45da68fcce7775c071654d') // present_files added to RUNTIME_TOOL_CATALOG (4b54e68)
+  assert.equal(report.metadata.manifestHash, 'b88e599a1e93b54728376732335045efb015862b3e6d8c563aaffc09ec07219e')
+  assert.equal(report.metadata.toolCatalogHash, '78341a28a0c8d9461717d00f4116007261a0188334bf3a78f5d3f3d9f7f4bbd2')
   assert.match(report.metadata.modelConfigHash, /^[a-f0-9]{64}$/)
   assert.match(report.metadata.environmentHash, /^[a-f0-9]{64}$/)
   assert.match(report.metadata.stablePromptHash, /^[a-f0-9]{16,64}$/)
@@ -142,7 +142,7 @@ test('passes the Phase 0B full manifest with complete Runtime tool coverage', as
   // identity moved with both.
   // 2026-10-31: the stable prompt moved with B4b (runtime-instructions.mjs,
   // 1e2db797), so the result identity moved with it (main push CI 41170749997).
-  assert.equal(report.resultHash, 'cfc2910de618b81ae87cabe888b659b1ebaa7dccfd1c73c63dd049ab792e1a04')
+  assert.equal(report.resultHash, '4d84f91f8082c30b6722f0d712aeae6b4dea0b9edfd3f49252197d842eadad16')
 })
 
 test('locks Graph review and final Acceptance schemas, profile boundary, and truthful completion Prompt', () => {

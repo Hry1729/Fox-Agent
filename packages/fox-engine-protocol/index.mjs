@@ -2843,6 +2843,30 @@ export const SCHEMA_BUNDLE = {
     },
     {
       "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "memory_write"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "note_organize"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "note_search"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "note_read"
+    },
+    {
+      "approval": "none",
       "category": "knowledge",
       "execution": "host",
       "name": "list_knowledge_bases"

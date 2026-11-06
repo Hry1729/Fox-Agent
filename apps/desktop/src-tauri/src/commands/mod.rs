@@ -1,3 +1,4 @@
+pub(crate) mod companion_notes;
 pub(crate) mod companions;
 pub(crate) mod agent_backend_routing;
 mod kernel_reliability;
@@ -611,7 +612,7 @@ pub fn user_profile_save(
 fn memory_error<T: Serialize>(error: String) -> ApiResponse<T> {
     let code = error
         .split_whitespace()
-        .find(|part| part.starts_with("memory."))
+        .find(|part| part.starts_with("memory.") || part.starts_with("companion."))
         .unwrap_or("memory.operation_failed")
         .trim_matches(|character: char| {
             !character.is_ascii_alphanumeric() && character != '.' && character != '_'
