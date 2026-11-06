@@ -251,10 +251,10 @@ fn project_reader_requires_both_grant_and_active_expert_and_cannot_write() {
     with_notes(|db, _, owner, chat| {
         db.companion_note_save_user(owner, None, None, "报价编号Q9854", None, None)
             .unwrap();
-        write(
+        let stored = write(
             db,
             chat,
-            json!({"target":"topic","action":"add","topic":"采购","content":"唯一编号 Q9854"}),
+            json!({"target":"topic","action":"add","topic":"采购","content":"专题独有编号 QTopic9854"}),
         );
         db.with_connection(|c|{
             c.execute_batch("INSERT INTO projects(id,name,root_path,created_at,updated_at) VALUES ('reader-project','reader','reader-root',1,1);
@@ -264,7 +264,7 @@ fn project_reader_requires_both_grant_and_active_expert_and_cannot_write() {
             Ok(())
         }).unwrap();
         assert!(db
-            .companion_runtime_notes("reader-chat", "Q9854")
+            .companion_runtime_notes("reader-chat", "QTopic9854")
             .unwrap()
             .is_none());
         db.companion_grant_project(owner, "reader-project", true)
@@ -277,7 +277,7 @@ fn project_reader_requires_both_grant_and_active_expert_and_cannot_write() {
             Ok(())
         }).unwrap();
         let view = db
-            .companion_runtime_notes("reader-chat", "Q9854")
+            .companion_runtime_notes("reader-chat", "QTopic9854")
             .unwrap()
             .unwrap();
         assert_eq!(view["role"], "reader");
@@ -285,7 +285,7 @@ fn project_reader_requires_both_grant_and_active_expert_and_cannot_write() {
         assert!(view["snippets"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("Q9854"));
+            .contains("QTopic9854"));
         assert!(db
             .companion_notes_tool(
                 "reader-chat",
@@ -308,6 +308,57 @@ fn project_reader_requires_both_grant_and_active_expert_and_cannot_write() {
                 &json!({"query":"Q9854"})
             )
             .is_err());
+
+        let topic = stored["topicId"].as_str().unwrap();
+        let filename = format!("{topic}.md");
+        for key in [topic, "采购", filename.as_str()] {
+            assert!(db
+                .companion_notes_tool(
+                    "reader-chat",
+                    "reader-run",
+                    "note_read",
+                    &json!({"topic":key})
+                )
+                .is_err());
+        }
+        assert!(db
+            .companion_runtime_notes("reader-chat", "QTopic9854")
+            .unwrap()
+            .is_none());
+        db.companion_grant_project(owner, "reader-project", true)
+            .unwrap();
+        for (conv, run) in [(chat, "notes-run"), ("reader-chat", "reader-run")] {
+            let search = db
+                .companion_notes_tool(conv, run, "note_search", &json!({"query":"QTopic9854"}))
+                .unwrap();
+            assert_eq!(search["items"][0]["topicId"], topic);
+            for key in [topic, "采购", filename.as_str()] {
+                let result = db
+                    .companion_notes_tool(conv, run, "note_read", &json!({"topic":key}))
+                    .unwrap();
+                assert!(result["content"].as_str().unwrap().contains("QTopic9854"));
+            }
+        }
+        db.companion_topic_delete(owner, topic, stored["contentSha256"].as_str().unwrap())
+            .unwrap();
+        for (conv, run) in [(chat, "notes-run"), ("reader-chat", "reader-run")] {
+            let view = db
+                .companion_runtime_notes(conv, "QTopic9854")
+                .unwrap()
+                .unwrap();
+            assert!(!view.to_string().contains("QTopic9854"));
+            assert_eq!(view["topics"], json!([]));
+            assert_eq!(view["snippets"], json!([]));
+            let search = db
+                .companion_notes_tool(conv, run, "note_search", &json!({"query":"QTopic9854"}))
+                .unwrap();
+            assert_eq!(search["items"], json!([]));
+            for key in [topic, "采购", filename.as_str()] {
+                assert!(db
+                    .companion_notes_tool(conv, run, "note_read", &json!({"topic":key}))
+                    .is_err());
+            }
+        }
     })
 }
 
@@ -435,4 +486,81 @@ fn deleted_topic_files_left_after_interruption_are_cleaned_at_startup() {
         assert!(!path.exists());
         assert!(keep.exists());
     })
+}
+
+#[test]
+fn foreign_topic_identifiers_cannot_be_used_to_create_or_organize_topics() {
+    with_notes(|db, root, owner, chat| {
+        let other = db.seed_default_companion(root).unwrap();
+        crate::companion_workspace::repair(db, root, &other.profile.id).unwrap();
+        let topic = db
+            .companion_topic_save(
+                &other.profile.id,
+                None,
+                "另一只联系人的专题",
+                &[],
+                "其他内容",
+                None,
+            )
+            .unwrap();
+        let foreign = topic["topicId"].as_str().unwrap();
+        let own = write(
+            db,
+            chat,
+            json!({"target":"notes","action":"add","canonicalKey":"own","content":"自己的内容"}),
+        );
+        let user = db
+            .companion_note_save_user(owner, None, None, "自己的手写内容", None, None)
+            .unwrap();
+        for target in [foreign.to_owned(), format!("{foreign}.md")] {
+            for (tool, input) in [
+                (
+                    "memory_write",
+                    json!({"target":"topic","action":"add","topic":target,"content":"追加"}),
+                ),
+                (
+                    "note_organize",
+                    json!({"memoryIds":[own["memoryId"]],"topic":target}),
+                ),
+                (
+                    "note_organize",
+                    json!({"memoryIds":[user["memoryId"]],"topic":target}),
+                ),
+            ] {
+                let error = db
+                    .companion_notes_tool(chat, "notes-run", tool, &input)
+                    .expect_err(tool);
+                assert!(error.contains("companion.topic_not_found"), "{error}");
+            }
+        }
+        let data = db.companion_notes_get(owner).unwrap();
+        assert_eq!(data["topics"], json!([]));
+        assert_eq!(data["requests"], json!([]));
+        assert_eq!(
+            db.companion_topic_read(&other.profile.id, foreign).unwrap()["content"],
+            "其他内容"
+        );
+    });
+}
+
+#[test]
+fn undo_does_not_reveal_whether_another_contact_owns_the_memory() {
+    with_notes(|db, root, _, chat| {
+        let other = db.seed_default_companion(root).unwrap();
+        let created = write(
+            db,
+            chat,
+            json!({"target":"notes","action":"add","content":"仅本人可见"}),
+        );
+        let mid = created["memoryId"].as_str().unwrap();
+        let foreign = db
+            .companion_memory_undo(&other.profile.id, mid, "notes-run")
+            .unwrap_err();
+        let missing = db
+            .companion_memory_undo(&other.profile.id, "not-found", "notes-run")
+            .unwrap_err();
+        assert_eq!(foreign, missing);
+        assert!(foreign.contains("memory.not_found"));
+        assert!(db.get_memory(mid).unwrap().unwrap().enabled);
+    });
 }

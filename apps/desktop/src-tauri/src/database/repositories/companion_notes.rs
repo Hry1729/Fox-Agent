@@ -387,13 +387,16 @@ impl Database {
         mid: &str,
         run: &str,
     ) -> Result<Value, String> {
-        self.note_tx(|tx|{
-            let m=load_memory(tx,mid)?;
-            let single:bool=tx.query_row("SELECT count(*)=1 AND max(action)='auto_confirmed' FROM memory_revisions WHERE memory_id=?",[mid],|r|r.get(0))?;
-            let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM memory_entities WHERE id=?1 AND source_companion_id=?2 AND
-                ((scope='agent' AND scope_key=?2) OR scope='global'))",params![mid,id],|r|r.get(0))?;
-            if !valid || !single || m.created_by!="agent" || m.version!=1 || m.source_run_id.as_deref()!=Some(run) || m.deleted_at.is_some() {return Err(denied("memory.undo_not_available"))}
-            remove(tx,&m,"user","undone")?;
+        self.note_tx(|tx| {
+            let memory=tx.query_row(&format!("{MEMORY_SELECT} WHERE m.id=?1 AND source_companion_id=?2
+                AND ((scope='agent' AND scope_key=?2) OR scope='global')"),
+                params![mid,id], memory_from_row).optional()?.ok_or_else(||denied("memory.not_found"))?;
+            let single:bool=tx.query_row("SELECT count(*)=1 AND max(action)='auto_confirmed' FROM memory_revisions WHERE memory_id=?",
+                [mid], |r|r.get(0))?;
+            if !single || memory.created_by!="agent" || memory.version!=1 || memory.source_run_id.as_deref()!=Some(run) || memory.deleted_at.is_some() {
+                return Err(denied("memory.undo_not_available"));
+            }
+            remove(tx,&memory,"user","undone")?;
             Ok(json!({"status":"removed","memoryId":mid}))
         })
     }

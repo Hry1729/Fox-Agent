@@ -189,6 +189,20 @@ pub(super) fn search(
     Ok(hits.into_iter().take(limit).map(|(_, v)| v).collect())
 }
 
+// A missing title may create a topic. An ID or managed filename can only select an existing one.
+fn write_target(tx: &Connection, owner: &str, name: &str) -> DbResult<Option<Topic>> {
+    let topic = locate(tx, owner, name)?;
+    let identifier = name
+        .strip_suffix(".md")
+        .unwrap_or(name)
+        .strip_prefix("ntp_")
+        .and_then(|suffix| Uuid::parse_str(suffix).ok());
+    if topic.is_none() && identifier.is_some() {
+        return Err(denied("companion.topic_not_found"));
+    }
+    Ok(topic)
+}
+
 pub(super) fn append(
     tx: &Transaction<'_>,
     owner: &str,
@@ -197,7 +211,7 @@ pub(super) fn append(
     content: &str,
     actor: &str,
 ) -> DbResult<Value> {
-    let mut t = match locate(tx, owner, title)? {
+    let mut t = match write_target(tx, owner, title)? {
         Some(t) => t,
         None => create(tx, owner, title, aliases, actor)?,
     };
@@ -219,6 +233,7 @@ pub(super) fn organize(
     if ids.is_empty() || ids.len() > 20 {
         return Err(denied("companion.invalid_move_count"));
     }
+    let target = write_target(tx, owner, topic)?;
     let mut movable = Vec::new();
     let mut requests = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -243,7 +258,7 @@ pub(super) fn organize(
     if movable.is_empty() {
         return Ok(json!({"status":"pending","requests":requests}));
     }
-    let mut t = match locate(tx, owner, topic)? {
+    let mut t = match target {
         Some(t) => t,
         None => create(tx, owner, topic, aliases, "agent")?,
     };
