@@ -56,3 +56,24 @@ test('the actual composer includes every main note or reports an insufficient bu
   assert.ok(result.dynamicTail.includes('尾'))
   assert.throws(() => composeFoxPrompt({ context, budget: { maxPromptChars: 2048 } }), /companion.note_context_budget/)
 })
+
+test('manual adoption places current expert instructions last in a private session', () => {
+  const prompt = '报价先按含税口径核对。'
+  const context = {
+    expertBinding: { activationSource: 'companion_template_update' },
+    expertPackage: { name: '采购专家', systemPrompt: prompt, packageManifest: { prompt, skills: ['采购技能'] } },
+    companionContext: { role: 'owner', displayName: '采购小狐', usedChars: 0, notes: [], topics: [], snippets: [] },
+  }
+  const current = composeFoxPrompt({ context }).dynamicTail
+  assert.ok(current.includes('采购技能'))
+  assert.ok(current.indexOf('用户已在联系人资料页采用新版专家模板') > current.indexOf('Current-turn diagnostics'))
+  assert.equal(current.split(prompt).length, 2)
+  const distinct = composeFoxPrompt({ context: { ...context,
+    expertPackage: { ...context.expertPackage, packageManifest: { prompt: '保存已审批的报价依据。' } },
+  } }).dynamicTail
+  assert.ok(distinct.includes('保存已审批的报价依据。'))
+  assert.ok(distinct.includes(prompt))
+  const original = composeFoxPrompt({ context: { ...context, expertBinding: { activationSource: 'companion_create' } } }).dynamicTail
+  assert.doesNotMatch(original, /已在联系人资料页采用新版专家模板/)
+  assert.ok(original.includes(prompt))
+})
