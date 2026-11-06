@@ -1,7 +1,7 @@
 // 模型 settings, service row「⋯」menu: the in-app confirmation must open every
 // time 删除 is chosen, including the second time the menu is opened (the menu's
 // close/focus restore used to race the confirm dialog). Confirming deletes the
-// service; the same deferral applies to 重命名 and its prompt dialog.
+// service.
 import { afterAll, afterEach, describe, expect, mock, test } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 
@@ -25,6 +25,12 @@ mock.module('../src/features/conversations/api/desktop-client', () => ({
   desktopClient: {
     ...actualDesktopClient.desktopClient,
     listModelProviders: async () => providers.map((item) => ({ ...item })),
+    saveModelProvider: async (request: { id: string; name: string }) => {
+      const existing = providers.find(item => item.id === request.id)
+      if (!existing) throw new Error('expected an existing service')
+      existing.name = request.name
+      return { ...existing }
+    },
     deleteModelProvider: async (id: string) => { deleted.push(id); providers = providers.filter((item) => item.id !== id); return true },
     getModelServiceStatus: async () => null,
     agentConfigOverview: async () => ({ services: [], agents: [] }),
@@ -32,7 +38,7 @@ mock.module('../src/features/conversations/api/desktop-client', () => ({
 }))
 
 const React = await import('react')
-const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react')
+const { act, cleanup, fireEvent, render, waitFor, within } = await import('@testing-library/react')
 const { ModelProvidersPage } = await import('../src/features/settings/settings-pages')
 const { TooltipProvider } = await import('../src/components/ui/tooltip')
 const { ConfirmDialogProvider } = await import('../src/components/ui/confirm-dialog')
@@ -88,16 +94,20 @@ describe('service row ⋯ menu', () => {
     await waitFor(() => expect(deleted).toEqual(['svc-test']))
   })
 
-  test('编辑 enters the same inline form on repeated menu opens', async () => {
+  test('编辑 preserves the service name on cancel and refreshes the renamed row on save', async () => {
     providers = [{ ...provider }]
     await mount()
-    for (let round = 0; round < 2; round += 1) {
+    for (const action of ['取消', '保存']) {
       await openMenuAndChoose('编辑')
       await waitFor(() => expect(document.querySelector('.fox-service-form')).toBeTruthy())
       expect(document.querySelector('[data-slot="sheet-content"]')).toBeNull()
-      const form = document.querySelector('.fox-service-form')!
-      await act(async () => { fireEvent.click(buttonIn(form, '取消')) })
+      const form = document.querySelector<HTMLElement>('.fox-service-form')!
+      const input = within(form).getByLabelText('服务名称') as HTMLInputElement
+      expect(input.value).toBe('测试服务')
+      await act(async () => { fireEvent.change(input, { target: { value: '改名后的服务' } }) })
+      await act(async () => { fireEvent.click(buttonIn(form, action)) })
       await waitFor(() => expect(document.querySelector('.fox-service-form')).toBeNull())
     }
+    await waitFor(() => expect(document.querySelector('[aria-label="管理 改名后的服务"]')).toBeTruthy())
   })
 })

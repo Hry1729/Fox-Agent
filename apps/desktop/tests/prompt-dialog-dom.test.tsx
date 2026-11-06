@@ -1,7 +1,4 @@
-// The shared in-app text prompt (`src/components/ui/prompt-dialog.tsx`), used by
-// 「重命名服务」 in the model services settings: Chinese title (not the dev server
-// address), prefilled value, Enter confirms, Escape / cancel / no provider /
-// unmount answer null, an empty or whitespace-only value cannot be confirmed.
+// The shared text prompt resolves with the entered value or null on cancellation.
 
 import { afterEach, describe, expect, test } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
@@ -154,21 +151,5 @@ describe('promptDialog', () => {
     await waitFor(() => expect(input().value).toBe('B'))
     await act(async () => { view.unmount() })
     expect(await second).toBeNull()
-  })
-})
-
-describe('rename service uses the in-app prompt', () => {
-  test('settings rename asks through promptDialog with the current name and syncs the list via save', async () => {
-    const { readFileSync } = await import('node:fs')
-    const { join } = await import('node:path')
-    const src = join(import.meta.dir, '..', 'src')
-    const settings = readFileSync(join(src, 'features/settings/settings-pages.tsx'), 'utf8')
-    expect(settings).toContain("from '@/components/ui/prompt-dialog'")
-    expect(settings).toMatch(/promptDialog\(\{ title: '重命名服务', label: '服务名称', defaultValue: provider\.name/)
-    // A cancelled or unchanged name saves nothing; a new one goes through
-    // resource.save, which refreshes the provider list.
-    expect(settings).toMatch(/if \(!name \|\| name === provider\.name\) return\s*const saved = await resource\.save\(\{ id: provider\.id, name,/)
-    const app = readFileSync(join(src, 'app', 'App.tsx'), 'utf8')
-    expect(app).toContain('<PromptDialogProvider />')
   })
 })

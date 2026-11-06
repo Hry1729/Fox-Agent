@@ -82,12 +82,10 @@ describe('no native confirm box in app code', () => {
     expect(hit("toast.error('保存失败')")).toBe(false)
   })
 
-  test('the in-app prompt provider is mounted at the app root and rename uses it', () => {
+  test('the in-app prompt provider is mounted at the app root', () => {
     const app = readFileSync(join(SRC, 'app', 'App.tsx'), 'utf8')
     expect(app).toContain("from '@/components/ui/prompt-dialog'")
     expect(app).toContain('<PromptDialogProvider />')
-    const settings = readFileSync(join(SRC, 'features/settings/settings-pages.tsx'), 'utf8')
-    expect(settings).toContain("title: '重命名服务'")
   })
 
   test('the in-app confirmation provider is mounted at the app root', () => {
@@ -99,7 +97,7 @@ describe('no native confirm box in app code', () => {
   test('the 12 former call sites use confirmDialog with Chinese titles', () => {
     const read = (path: string) => readFileSync(join(SRC, path), 'utf8')
     const sites: Array<[string, string[]]> = [
-      ['features/settings/settings-pages.tsx', ['删除服务']],
+      ['features/settings/model-agent/model-agent-page.tsx', ['删除服务']],
       // Batch 3: the connector list moved to the 插件 page and the
       // maintenance actions to the 数据与关于 page.
       ['features/settings/settings-plugins-page.tsx', ['删除连接器']],
@@ -123,7 +121,7 @@ describe('no native confirm box in app code', () => {
     expect(total).toBe(12)
     // Destructive actions use the destructive confirm button.
     const destructive: Array<[string, string]> = [
-      ['features/settings/settings-pages.tsx', '删除服务'],
+      ['features/settings/model-agent/model-agent-page.tsx', '删除服务'],
       ['features/settings/settings-plugins-page.tsx', '删除连接器'],
       ['features/settings/settings-data-page.tsx', '清理预览缓存'],
     ]

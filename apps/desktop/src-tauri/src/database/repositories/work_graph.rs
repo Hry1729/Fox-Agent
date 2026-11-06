@@ -9730,7 +9730,8 @@ mod tests {
             "managed-budget-override-attempt",
             "managed-budget-override-tool",
         );
-        let created_at = timestamp().parse::<i64>().unwrap();
+        // Approval wait is excluded, so exhaust the duration before the request.
+        let started_at = approval.requested_at - 30_001;
         database
             .with_connection(|connection| {
                 connection.execute(
@@ -9747,7 +9748,7 @@ mod tests {
                         fixture.run_id,
                         fixture.run_id,
                         fixture.conversation_id,
-                        created_at,
+                        started_at,
                     ],
                 )?;
                 // Child token/tool counters are observational for ordinary Child
@@ -9755,7 +9756,7 @@ mod tests {
                 // boundary and must be rechecked after human approval.
                 connection.execute(
                     "UPDATE runs SET started_at = ?2 WHERE id = ?1",
-                    params![fixture.run_id, created_at.saturating_sub(30_001)],
+                    params![fixture.run_id, started_at],
                 )?;
                 Ok(())
             })
