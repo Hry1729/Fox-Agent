@@ -134,9 +134,6 @@ pub fn mode_for_policy(policy: &HostPolicy) -> Result<CodexMode, PortError> {
 /// * `INITIAL_AGENT_MODE`: without it codex-acp starts in `agent` (automatic
 ///   reviewer) [M1: `currentModeId":"agent"`]; with it, `read-only` [M1].
 /// * `NO_BROWSER=1`: hides the browser ChatGPT login (README).
-/// * `CODEX_CONFIG`: merged into the Codex session config [S]. Turns off the
-///   model's server-side web search, which the local network sandbox does not
-///   cover. Requested only; not yet measured to take effect.
 ///
 /// Authentication is deliberately absent: codex-acp needs an `authenticate`
 /// call (or `DEFAULT_AUTH_REQUEST`) even when `OPENAI_API_KEY` is set [M1:
@@ -160,7 +157,6 @@ pub fn session_env_for_mode(mode: CodexMode) -> Vec<(String, String)> {
     vec![
         ("INITIAL_AGENT_MODE".into(), mode.id().into()),
         ("NO_BROWSER".into(), "1".into()),
-        ("CODEX_CONFIG".into(), json!({ "web_search": "disabled" }).to_string()),
     ]
 }
 
@@ -280,8 +276,7 @@ pub fn capabilities_for(initialize_response: &Value, mode: CodexMode, platform: 
             (ToolCategory::Shell, NoGate),
             // Local network is a sandbox matter (see below). The model's
             // server-side web search is not approved by the Host at all [S:
-            // webSearch items are reported, never asked]; it is only requested
-            // off via CODEX_CONFIG (unmeasured).
+            // webSearch items are reported, never asked]. Codex controls it.
             (ToolCategory::Network, NoGate),
             // Codex raises MCP tool approvals as elicitations mapped to
             // request_permission [S: buildMcpPermissionOptions], but when it

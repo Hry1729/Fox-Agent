@@ -27,6 +27,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
+import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
 import { FoxEmptyState } from '@/components/fox-ui/empty-state'
 import { SkeletonContent } from '@/components/ui/skeleton'
@@ -47,6 +48,7 @@ import {
 
 const iconMap: Record<string, LucideIcon> = {
   cable: Cable,
+  search: Search,
   database: Database,
   file: File,
   'file-text': FileText,
@@ -155,8 +157,6 @@ function InstalledPluginCard({
   onToggle: (enabled: boolean) => void
   onConfigure: () => void
 }) {
-  void busy
-  void onToggle
   void onConfigure
   const issue = card.incompatibilityReason
     ?? card.lastError
@@ -169,6 +169,9 @@ function InstalledPluginCard({
           <span className="fox-plugin-installed-card-title"><strong>{card.name}</strong></span>
         </span>
       </CardHeader>
+      {card.id.startsWith('search:') && card.activation.mode === 'global' && <span className="fox-plugin-card-state">
+        <Switch aria-label={`使用 ${card.name} 搜索`} checked={card.activation.enabled} disabled={busy} onCheckedChange={onToggle} />
+      </span>}
       <CardContent className="fox-shadcn-kb-content fox-plugin-card-content">
         <p className={`fox-agent-description ${issue ? 'fox-plugin-installed-card-error' : ''}`} role={issue ? 'alert' : undefined} title={issue ?? card.description}>{issue && <CircleAlert />}{issue ?? card.description}</p>
         <span className="fox-library-card-tags"><small>{pluginOriginLabel(card.origin)}</small><small>{pluginKindLabel(card.kind)}</small></span>
@@ -337,6 +340,7 @@ export function PluginCenterPage({ gateway: providedGateway, initialKind, initia
     try {
       if (card.activation.mode === 'global') {
         updateCard(await gateway.setActivation(card.id, { mode: 'global', enabled }))
+        if (card.id.startsWith('search:')) await reload()
       } else if (card.activation.mode === 'per_agent') {
         const agents = await gateway.agentScopeList(card.id)
         let next = card

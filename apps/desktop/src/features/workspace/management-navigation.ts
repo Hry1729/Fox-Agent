@@ -65,6 +65,7 @@ export const SETTINGS_WORKSPACE_VIEWS: readonly WorkspaceView[] = [
   'onboarding',
   'settings-ai',
   'settings-models',
+  'settings-search',
   'settings-yuxi',
   'settings-projects',
   'settings-conversation',

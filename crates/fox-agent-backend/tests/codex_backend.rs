@@ -135,7 +135,7 @@ fn host_policy_maps_to_mode_env_and_is_verified_fail_closed() {
     let policy = HostPolicy { cwd: "/w".into(), writable: false, network: false };
     let env = session_env(&policy).unwrap();
     assert!(env.contains(&("INITIAL_AGENT_MODE".to_string(), "read-only".to_string())));
-    assert!(env.iter().any(|(key, value)| key == "CODEX_CONFIG" && value.contains("\"web_search\":\"disabled\"")));
+    assert!(!env.iter().any(|(key, _)| key == "CODEX_CONFIG"));
     let networked = HostPolicy { network: true, ..policy.clone() };
     assert!(session_env(&networked).is_err(), "network on would need full access: refused, not widened");
 

@@ -41,7 +41,11 @@ pub fn external_access_mode(backend: AgentBackend, native_mode: &str) -> AccessM
 /// or declares (`present_files` records existing files, `ask_user` shows a
 /// card); none writes or runs anything.
 pub fn bridge_subject(tool: &str) -> Option<ToolSubject> {
-    fox_agent_backend::fox_mcp::TOOL_NAMES.contains(&tool).then_some(ToolSubject::Read)
+    match tool {
+        "fox_web_search" => Some(ToolSubject::Network),
+        name if fox_agent_backend::fox_mcp::TOOL_NAMES.contains(&name) => Some(ToolSubject::Read),
+        _ => None,
+    }
 }
 
 /// One engine decision for a bridge call (no I/O).
@@ -130,6 +134,15 @@ impl FoxToolHost for DesktopFoxTools {
             // the next call, as with PiNative).
             let stored = crate::commands::agent_backend_routing::stored_conversation_native_mode(&database, &context.conversation_id);
             let native_mode = native::effective_mode(context.backend, stored.as_deref(), false, &Default::default());
+            if tool == "fox_web_search" {
+                let mode = runtime.session_info(&context.conversation_id)
+                    .and_then(|info| info.native_mode).ok_or_else(|| ToolError::new("fox_mcp.no_active_run", "搜索会话已结束。"))?;
+                let mode = external_access_mode(context.backend, &mode);
+                let host = state.runtime_host.clone();
+                return tauri::async_runtime::spawn_blocking(move || host.external_web_search(
+                    &context.conversation_id, &run_id, &context.tool_call_id, arguments, mode, &runtime
+                )).await.map_err(|error| ToolError::new("tool.failed", error.to_string()))?.map_err(split_code);
+            }
             let project_root = database
                 .external_conversation_context(&context.conversation_id)
                 .map_err(|error| ToolError::new("storage.operation_failed", error))?
@@ -195,7 +208,7 @@ mod tests {
     fn bridge_tools_are_reads_in_every_tier_and_unknown_tools_are_refused() {
         let rules: Vec<PolicyRule> = vec![PolicyRule { id: "b".into(), effect: RuleEffect::Block, tool: "run_command".into(), pattern: "rm".into() }];
         for mode in [native::PI_READ_ONLY, native::PI_ASK, native::PI_ALLOW, native::PI_FULL] {
-            for tool in fox_agent_backend::fox_mcp::TOOL_NAMES {
+            for tool in fox_agent_backend::fox_mcp::TOOL_NAMES.into_iter().filter(|tool| *tool != "fox_web_search") {
                 assert_eq!(decide_bridge_call(AgentBackend::Pi, mode, tool, None, &rules), Ok(()), "{tool} in {mode}");
             }
         }

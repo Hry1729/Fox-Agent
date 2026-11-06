@@ -1,3 +1,5 @@
+pub(crate) mod verification_permissions;
+use verification_permissions::{SettingsApprovals, PendingApprovals};
 use crate::{app_state::AppState, database::{ApiResponse, Database, ModelProviderRecord}, external_backend::ExternalBackendHost, external_model, model_service};
 use fox_agent_backend::{agent_config::*, external_launch::HostLaunchConfig, login_source, onboarding::{self, ImportKind, ImportTarget, RealHome}, port::AgentBackend, provider_protocol::ProtocolProfile};
 use serde::{Deserialize, Serialize};
@@ -11,6 +13,7 @@ static VERIFY_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::s
 #[derive(Default)]
 pub struct AgentConfigControl {
     running: Mutex<HashMap<AgentBackend, watch::Sender<bool>>>,
+    pending_approvals: PendingApprovals,
     previews: Mutex<HashMap<AgentBackend, BTreeMap<String, String>>>,
 }
 
@@ -63,7 +66,15 @@ pub struct EnableRequest { backend: AgentBackend, enabled: bool }
 #[derive(Deserialize)]
 pub struct SaveBindingRequest { backend: AgentBackend, binding: BindingSource, #[serde(default)] developer: bool }
 #[derive(Deserialize)]
-pub struct VerifyRequest { backend: AgentBackend, depth: VerifyDepth, #[serde(default)] developer: bool }
+#[serde(rename_all = "camelCase")]
+pub struct VerifyRequest {
+    backend: AgentBackend,
+    depth: VerifyDepth,
+    #[serde(default)] developer: bool,
+    permission_mode: Option<String>,
+    #[serde(default)] confirm_full_access: bool,
+    approvals: Option<tauri::ipc::JavaScriptChannelId>,
+}
 
 #[derive(Debug)]
 struct ConfigError { code: &'static str, message: String }
@@ -243,18 +254,37 @@ fn verification_identity(database: &Database, config: &HostLaunchConfig, backend
 }
 
 #[tauri::command]
-pub async fn agent_config_verify(app: tauri::AppHandle, state: State<'_, AppState>, external: State<'_, ExternalBackendHost>, request: VerifyRequest) -> Result<ApiResponse<VerificationReport>, ()> {
+pub async fn agent_config_verify(webview: tauri::Webview, app: tauri::AppHandle, state: State<'_, AppState>, external: State<'_, ExternalBackendHost>, request: VerifyRequest) -> Result<ApiResponse<VerificationReport>, ()> {
+    let config = external.launch_config();
+    let approvals = if request.depth == VerifyDepth::Model || request.backend == AgentBackend::Fox {
+        None
+    } else {
+        if let Err(error) = external_only(request.backend) { return Ok(response(Err(error))); }
+        let context = fox_agent_backend::native_permission::CatalogContext {
+            full_access_forbidden: config.full_access_forbidden,
+            provider_base_url: external_model::catalog_provider_base_url(&state.database, request.backend),
+        };
+        let catalog = fox_agent_backend::native_permission::catalog(request.backend, &context);
+        let option = catalog.options.iter().find(|option| option.listed && Some(option.id) == request.permission_mode.as_deref() && option.disabled_reason.is_none());
+        let Some(option) = option else { return Ok(ApiResponse::failure("permission.invalid", "请选择这个 Agent 当前可用的验证权限。", false)); };
+        if option.full_access && !request.confirm_full_access {
+            return Ok(ApiResponse::failure("permission.full_access_confirmation_required", "请先确认本次验证使用完全访问权限。", false));
+        }
+        let Some(channel) = &request.approvals else { return Ok(ApiResponse::failure("permission.unavailable", "未连接验证审批界面。", true)); };
+        Some(SettingsApprovals { backend: request.backend, mode: option.id, channel: channel.channel_on(webview), pending: &state.agent_configuration.pending_approvals })
+    };
     let (sender, mut cancel) = watch::channel(false);
     {
         let mut running = state.agent_configuration.running.lock().unwrap();
         if running.contains_key(&request.backend) { return Ok(ApiResponse::failure("agent_verify.busy", "正在验证，请稍候。", true)); }
         running.insert(request.backend, sender);
     }
-    let result = verify_all(&state.database, external.launch_config(), &state.model_service_client, &request, &mut cancel, |report| {
+    let result = verify_all(&state.database, external.launch_config(), &state.model_service_client, &request, approvals.as_ref(), &mut cancel, |report| {
         let mut public = report.clone();
         if !request.developer { for layer in &mut public.layers { layer.code = None; layer.detail = None; } }
         let _ = app.emit("agent-config-verification", serde_json::json!({"backend":request.backend,"report":public}));
     }).await;
+    state.agent_configuration.pending_approvals.lock().unwrap().remove(&request.backend);
     state.agent_configuration.running.lock().unwrap().remove(&request.backend);
     Ok(response(result))
 }
@@ -312,7 +342,7 @@ async fn verify_model(database: &Database, config: &HostLaunchConfig, client: &m
     persist_report(database, request, report)
 }
 
-async fn verify_all(database: &Database, config: &HostLaunchConfig, client: &model_service::ModelServiceClient, request: &VerifyRequest, cancel: &mut watch::Receiver<bool>, mut progress: impl FnMut(&VerificationReport)) -> Result<VerificationReport, ConfigError> {
+async fn verify_all(database: &Database, config: &HostLaunchConfig, client: &model_service::ModelServiceClient, request: &VerifyRequest, approvals: Option<&SettingsApprovals<'_>>, cancel: &mut watch::Receiver<bool>, mut progress: impl FnMut(&VerificationReport)) -> Result<VerificationReport, ConfigError> {
     let mut report = verify_model(database, config, client, request, cancel).await?;
     progress(&report);
     if request.backend == AgentBackend::Fox || matches!(request.depth, VerifyDepth::Model) || report.layers[..2].iter().any(|layer| layer.status == VerificationStatus::Failed) { return Ok(report); }
@@ -326,8 +356,9 @@ async fn verify_all(database: &Database, config: &HostLaunchConfig, client: &mod
         })
     } else { None };
     if connection.is_none() && native_home.is_none() { return Err(ConfigError::new("agent_binding.native_required", "请先导入本机配置，再进行完整验证。")); }
-    let input = fox_agent_backend::verify_session::SessionVerification { config: config.clone(), backend: request.backend, login, native_home, with_tool: matches!(request.depth, VerifyDepth::Tool) };
-    let layers = fox_agent_backend::verify_session::verify_session(input, cancel, |layer| {
+    let approvals = approvals.ok_or_else(|| ConfigError::new("permission.unavailable", "未连接验证审批界面。"))?;
+    let input = fox_agent_backend::verify_session::SessionVerification { permission_mode: approvals.mode.into(), config: config.clone(), backend: request.backend, login, native_home, with_tool: matches!(request.depth, VerifyDepth::Tool) };
+    let layers = fox_agent_backend::verify_session::verify_session(input, cancel, approvals, |layer| {
         let at = if layer.layer == VerificationLayer::AgentOutput { 2 } else { 3 };
         report.layers[at] = layer.clone();
         progress(&report);
@@ -559,7 +590,7 @@ mod tests {
             fixture.bind_pi(&provider);
             if status == 401 { external_model::record_verified_connection(&fixture.database, &provider.api_type, &provider.base_url, "fixture-model", &provider.base_url).unwrap(); }
             let (_sender, mut cancel) = watch::channel(false);
-            let report = verify_model(&fixture.database, &fixture.config, &model_service::ModelServiceClient::new().unwrap(), &VerifyRequest { backend: AgentBackend::Pi, depth: VerifyDepth::Model, developer: false }, &mut cancel).await.unwrap();
+            let report = verify_model(&fixture.database, &fixture.config, &model_service::ModelServiceClient::new().unwrap(), &VerifyRequest { backend: AgentBackend::Pi, depth: VerifyDepth::Model, developer: false, permission_mode: None, approvals: None, confirm_full_access: false }, &mut cancel).await.unwrap();
             assert_eq!(report.layers[0].status, VerificationStatus::Passed);
             assert_eq!(report.layers[1].status, if status == 200 { VerificationStatus::Passed } else { VerificationStatus::Failed });
             assert_eq!(server.hits.load(Ordering::SeqCst), 1);
@@ -582,7 +613,7 @@ mod tests {
             while server.hits.load(Ordering::SeqCst) == 0 { tokio::time::sleep(Duration::from_millis(10)).await; }
             sender.send(true).unwrap();
         };
-        let request = VerifyRequest { backend: AgentBackend::Pi, depth: VerifyDepth::Model, developer: true };
+        let request = VerifyRequest { backend: AgentBackend::Pi, depth: VerifyDepth::Model, developer: true, permission_mode: None, approvals: None, confirm_full_access: false };
         let client = model_service::ModelServiceClient::new().unwrap();
         let (result, _) = tokio::join!(verify_model(&fixture.database, &fixture.config, &client, &request, &mut cancel), cancel_when_requested);
         assert_eq!(result.unwrap().layers[1].code.as_deref(), Some("agent_verify.cancelled"));

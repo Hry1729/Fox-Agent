@@ -608,6 +608,20 @@ pub fn permission_card(request: &Value) -> PermissionCard {
     }
 }
 
+/// Pi sends its tool input inside an extension confirmation dialog.
+pub fn backend_permission_card(backend: crate::port::AgentBackend, request: &Value) -> PermissionCard {
+    let mut card = permission_card(request);
+    if backend == crate::port::AgentBackend::Pi {
+        if let Some(gate) = crate::backends::pi::parse_tool_approval(request) {
+            if let Value::Object(mut input) = gate.input {
+                if let Some(cwd) = gate.cwd { input.insert("cwd".into(), json!(cwd)); }
+                card.input = Value::Object(input);
+            }
+        }
+    }
+    card
+}
+
 /// The native option that means "allow this once": `allow_once` kind first,
 /// then (only if nothing else allows) nothing. `allow_always` is never picked
 /// for a one-shot Fox approval.

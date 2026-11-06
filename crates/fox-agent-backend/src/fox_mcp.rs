@@ -91,7 +91,7 @@ pub mod rpc_code {
 }
 
 /// The tools the bridge offers, in `tools/list` order.
-pub const TOOL_NAMES: [&str; 5] = ["present_files", "list_knowledge_bases", "search_knowledge", "read_knowledge_document", "ask_user"];
+pub const TOOL_NAMES: [&str; 6] = ["present_files", "list_knowledge_bases", "search_knowledge", "read_knowledge_document", "ask_user", "fox_web_search"];
 
 fn knowledge_reference_schema() -> Value {
     json!({
@@ -190,6 +190,16 @@ pub fn tool_definitions() -> Vec<Value> {
                 },
                 "required": ["questions"],
                 "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "fox_web_search",
+            "title": "Fox 网页搜索",
+            "description": "Search the public web and return live titles, URLs and snippets. Prefer your own native web search when available. If this session has no working native search, call this Fox tool. Never use another route to bypass a denied search.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "query": { "type": "string", "minLength": 1 }, "maxResults": { "type": "integer", "minimum": 1, "maximum": 10 } },
+                "required": ["query"], "additionalProperties": false
             }
         }),
     ]
@@ -330,7 +340,7 @@ pub fn dispatch(session: &mut McpSession, message: &Value) -> Dispatch {
                     "protocolVersion": version,
                     "capabilities": { "tools": { "listChanged": false } },
                     "serverInfo": { "name": SERVER_INFO_NAME, "version": env!("CARGO_PKG_VERSION") },
-                    "instructions": "Fox Host tools. present_files hands finished files to the user as file cards; list_knowledge_bases / search_knowledge / read_knowledge_document read the conversation's knowledge bases; ask_user shows a question card, after which you end the turn and wait for the user's answer."
+                    "instructions": "Fox Host tools. present_files hands finished files to the user as file cards; list_knowledge_bases / search_knowledge / read_knowledge_document read the conversation's knowledge bases; ask_user shows a question card, after which you end the turn and wait for the user's answer. For web research use your native search if available, otherwise call fox_web_search. Respect a denied search and stop."
                 }),
             ))
         }

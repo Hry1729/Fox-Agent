@@ -1,6 +1,6 @@
 import { Button } from '@/components/ui/button'
 import type { VerificationReport } from './agent-config-types'
-const LAYERS = { config_saved: '配置已保存', model_request: '模型请求通过', agent_output: 'Agent 有输出', tool_call: '工具调用通过' } as const
+const LAYERS = { config_saved: '配置', model_request: '模型请求', agent_output: 'Agent 输出', tool_call: '工具调用' } as const
 export function VerificationLadder({ report, running, developer, onStop }: { report: VerificationReport | null; running: boolean; developer: boolean; onStop: () => void }) {
   return <section className="fox-agent-inline fox-verification" aria-label="分层验证结果">
     <div className="fox-model-actions"><b>{running ? '正在验证…' : '验证结果'}</b><span className="is-grow" />{running && <Button type="button" variant="outline" size="sm" onClick={onStop}>停止</Button>}</div>

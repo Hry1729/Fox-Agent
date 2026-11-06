@@ -56,7 +56,7 @@
 use crate::acp::{AcpConnection, BackendEvent, ProcessBaseline, SweepOutcome, TerminateReport};
 use crate::capability_view::PiLaunch;
 use crate::port::{AgentBackend, CapabilityDeclaration, StopConfirmation, STOP_UNCONFIRMED_REMEDY};
-use crate::projection::{allow_option, permission_card, permission_tool_kind, reject_option, AcpProjector, AutoPermission, PermissionCard, PermissionOption, TurnTerminal};
+use crate::projection::{allow_option, backend_permission_card, permission_tool_kind, reject_option, AcpProjector, AutoPermission, PermissionCard, PermissionOption, TurnTerminal};
 
 /// What the Host's own approval engine answered for one permission request
 /// ([`ExternalSink::host_permission_answer`]).
@@ -79,6 +79,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
+
+pub fn permission_decision(
+    backend: AgentBackend, mode: &str, request: &Value, options: &[PermissionOption], host: Option<HostPermissionAnswer>,
+) -> (AutoPermission, Option<Value>) {
+    match host {
+        Some(answer) => (answer.decision, Some(answer.policy)),
+        None => (crate::native_permission::answer(backend, mode, request, options), None),
+    }
+}
 
 /// How long a cancelled turn may take to end with `stopReason: cancelled`
 /// before the Host records the cancel outcome as unknown and stops the
@@ -1605,17 +1614,14 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                     let _ = connection.answer_permission(&native_request_id, None);
                     return;
                 };
-                let mut card = permission_card(&request);
+                let mut card = backend_permission_card(session.backend, &request);
                 let key = format!("acp-permission:{generation}:{native_request_id}");
                 let run_id = turn.run_id.clone();
                 // 所有后端都先问 Host。Pi 由审批引擎完整作答。Codex / dsh 只在命中
                 // block 时由 sink 返回拒绝；否则 None，再走 native_permission::answer
                 // （询问档出卡，不该问的档位 fail-closed 拒绝）。Fox 不替它们放行。
                 let host = self.inner.sink.host_permission_answer(&run_id, &session.conversation_id, session.backend, &turn.native_mode, &request, &card.options);
-                let (decision, policy) = match host {
-                    Some(answer) => (answer.decision, Some(answer.policy)),
-                    None => (crate::native_permission::answer(session.backend, &turn.native_mode, &request, &card.options), None),
-                };
+                let (decision, policy) = permission_decision(session.backend, &turn.native_mode, &request, &card.options, host);
                 if decision != AutoPermission::Ask {
                     let option = match &decision {
                         AutoPermission::Allow { option_id } => Some(option_id.as_str()),

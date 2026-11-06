@@ -113,10 +113,7 @@ test('publishes bounded schemas for the expanded Host capability tools', () => {
   assert.equal(webSearch.query.type, 'string')
   assert.equal(webSearch.maxResults.minimum, 1)
   assert.equal(webSearch.maxResults.maximum, 10)
-  assert.deepEqual(
-    webSearch.provider.anyOf.map(({ const: value }) => value),
-    ['auto', 'brave', 'tavily', 'exa', 'searxng', 'duckduckgo'],
-  )
+  assert.equal(webSearch.provider, undefined, 'the user selects the provider in Fox settings')
 
   const webRead = objectProperties(toolByName(tools, 'web_read').parameters)
   assert.equal(webRead.url.type, 'string')

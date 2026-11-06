@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { MoreHorizontal, Plus, Server } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -18,6 +18,9 @@ import type { AgentConfigOverview, AgentConfigStatus, AgentId, VerificationRepor
 import { ServiceForm } from './service-form'
 import { serviceDraft, providerIcon, type ServiceDraft } from './service-presets'
 import { AgentBindingForm } from './agent-binding-form'
+import { RuntimeApprovalPrompt } from '@/features/chat/components/RuntimeApprovalPrompt'
+import type { ApprovalRecord } from '@/features/conversations/model/types'
+import { FullVerificationControl } from './full-verification-control'
 import { VerificationLadder } from './verification-ladder'
 import './model-agent.css'
 
@@ -31,6 +34,11 @@ export function ModelAgentPage({ sidebarCollapsed, onSidebar }: { sidebarCollaps
   const [binding, setBinding] = useState<{ agent: AgentId; native: boolean } | null>(null)
   const [running, setRunning] = useState<AgentId | null>(null)
   const [reports, setReports] = useState<Partial<Record<AgentId, VerificationReport>>>({})
+  const [approval, setApproval] = useState<ApprovalRecord | null>(null)
+  const active = useRef<AgentId | null>(null)
+  useEffect(() => () => {
+    if (active.current) void desktopClient.agentConfigVerifyCancel(active.current).catch(() => {})
+  }, [])
   const [showReport, setShowReport] = useState<AgentId | null>(null)
   const [offers, setOffers] = useState<AgentConfigStatus[]>([])
   const [offerProvider, setOfferProvider] = useState('')
@@ -62,12 +70,14 @@ export function ModelAgentPage({ sidebarCollapsed, onSidebar }: { sidebarCollaps
     setDraft(next)
     setTargets(provider ? [...new Set(overview?.services.find(s => s.providerId === provider.id)?.matches.map(m => m.agent) ?? ['fox'] as AgentId[])] : ['fox'])
   }
-  const verify = async (agent: AgentId, depth: VerifyDepth = 'model') => {
-    if (running) return
+  const verify = async (agent: AgentId, depth: VerifyDepth = 'model', selection?: { permissionMode: string; confirmFullAccess: boolean }) => {
+    if (active.current) return
+    active.current = agent
+    setApproval(null)
     setRunning(agent); setShowReport(agent); setReports(previous => { const next = { ...previous }; delete next[agent]; return next }); setError('')
-    try { const report = await desktopClient.agentConfigVerify(agent, depth, developer); setReports(previous => ({ ...previous, [agent]: report })) }
+    try { const report = await desktopClient.agentConfigVerify(agent, depth, developer, selection && { ...selection, onApproval: setApproval }); setReports(previous => ({ ...previous, [agent]: report })) }
     catch (cause) { setError(configErrorText(cause)) }
-    finally { setRunning(null); await refresh() }
+    finally { active.current = null; setApproval(null); setRunning(null); await refresh() }
   }
   const save = async () => {
     if (!draft) return
@@ -135,7 +145,12 @@ export function ModelAgentPage({ sidebarCollapsed, onSidebar }: { sidebarCollaps
             {binding?.agent === agent.agent && <AgentBindingForm status={agent} providers={providers.items} developer={developer} initialNative={binding.native} onCancel={() => setBinding(null)} onDone={shouldVerify => { setBinding(null); void refresh(); if (shouldVerify) void verify(agent.agent) }} />}
             {(showReport === agent.agent || agent.verification) && <>
               <VerificationLadder report={running === agent.agent ? reports[agent.agent] ?? null : reports[agent.agent] ?? agent.verification} running={running === agent.agent} developer={developer} onStop={() => { void desktopClient.agentConfigVerifyCancel(agent.agent).catch(cause => setError(configErrorText(cause))) }} />
-              {agent.agent !== 'fox' && <div className="fox-model-actions fox-model-section"><Button variant="ghost" size="sm" disabled={running !== null} onClick={() => void verify(agent.agent, 'tool')}>完整验证：Agent 输出和工具调用</Button></div>}
+              {running === agent.agent && approval && <RuntimeApprovalPrompt key={approval.id} approval={approval} onResolve={async (id, decision) => {
+                const answered = await desktopClient.agentConfigVerifyAnswer(agent.agent, id, decision === 'allow_once')
+                if (answered) setApproval(current => current?.id === id ? null : current)
+                return answered
+              }} />}
+              {agent.agent !== 'fox' && <FullVerificationControl backend={agent.agent} busy={running !== null} onStart={(permissionMode, confirmFullAccess) => verify(agent.agent, 'tool', { permissionMode, confirmFullAccess })} />}
             </>}
           </div>)}
         </SettingsGroup>

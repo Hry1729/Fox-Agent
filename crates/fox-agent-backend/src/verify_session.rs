@@ -1,13 +1,12 @@
 //! A disposable ACP session for the explicit settings verification action.
 use crate::{
-    acp::{AcpConnection, BackendEvent},
+    acp::{AcpConnection, BackendEvent, WriteOutcome},
     agent_config::{LayerResult, VerificationLayer, VerificationStatus},
     external::{ExternalLauncher, LaunchRequest},
     external_home::DEFAULT_CONVERSATIONS_HOME_ID,
-    external_launch::{FullAccessSwitch, HostLaunchConfig, HostLauncher},
+    external_launch::{HostLaunchConfig, HostLauncher},
     onboarding::{self, ImportOptions, ImportTarget, RealHome},
     port::AgentBackend,
-    projection::permission_card,
     settlement::{PendingRegistry, TerminalArbiter},
     unified_login::UnifiedLogin,
 };
@@ -24,9 +23,14 @@ pub struct SessionVerification {
     /// An already imported private HOME, never an unapproved real-home source.
     pub native_home: Option<PathBuf>,
     pub with_tool: bool,
+    pub permission_mode: String,
 }
 
-pub async fn verify_session(input: SessionVerification, cancel: &mut watch::Receiver<bool>, mut progress: impl FnMut(&LayerResult)) -> [LayerResult; 2] {
+pub trait VerificationApprovals: Sync {
+    fn answer(&self, project: &Path, request: &Value) -> impl std::future::Future<Output = Result<Option<String>, String>> + Send;
+}
+
+pub async fn verify_session(input: SessionVerification, cancel: &mut watch::Receiver<bool>, approvals: &impl VerificationApprovals, mut progress: impl FnMut(&LayerResult)) -> [LayerResult; 2] {
     let mut layers = [
         LayerResult::new(VerificationLayer::AgentOutput, VerificationStatus::Skipped, None, None),
         LayerResult::new(VerificationLayer::ToolCall, VerificationStatus::Skipped, None, None),
@@ -55,7 +59,7 @@ pub async fn verify_session(input: SessionVerification, cancel: &mut watch::Rece
     let setup = async {
         if already_cancelled { return Err(Failure::cancelled()); }
         let session = launched.connection.new_session(request.project_root.clone()).await.map_err(Failure::agent)?;
-        if request.backend == AgentBackend::Codex { launched.connection.set_mode(&session, "read-only").await.map_err(Failure::agent)?; }
+        if request.backend == AgentBackend::Codex { launched.connection.set_mode(&session, request.native_mode()).await.map_err(Failure::agent)?; }
         if let Some(model) = launcher.selected_model(&request) { launched.connection.set_model(&session, &model).await.map_err(Failure::agent)?; }
         Ok(session)
     };
@@ -67,7 +71,7 @@ pub async fn verify_session(input: SessionVerification, cancel: &mut watch::Rece
     match session {
         Ok(session) => {
             session_id = session;
-            let first = turn(&launched.connection, &mut events, &session_id, "只回复 OK，不要调用任何工具。", &request.project_root, None, cancel, LIMIT.saturating_sub(started.elapsed())).await;
+            let first = turn(&launched.connection, &mut events, &session_id, "只回复 OK，不要调用任何工具。", &request.project_root, None, approvals, cancel, LIMIT.saturating_sub(started.elapsed())).await;
             layers[0] = match first {
                 Ok(()) => LayerResult::new(VerificationLayer::AgentOutput, VerificationStatus::Passed, None, Some(started.elapsed().as_millis() as i64)),
                 Err(error) => failed(VerificationLayer::AgentOutput, error, started),
@@ -77,8 +81,8 @@ pub async fn verify_session(input: SessionVerification, cancel: &mut watch::Rece
                 let tool_started = Instant::now();
                 layers[1] = LayerResult::new(VerificationLayer::ToolCall, VerificationStatus::Running, None, None);
                 progress(&layers[1]);
-                let prompt = "只读取当前目录中的 fox-verify.txt，并原样回复文件里的字符串。使用只读文件工具，不要修改文件，不要访问其他路径，不要联网。";
-                let result = turn(&launched.connection, &mut events, &session_id, prompt, &request.project_root, Some(&nonce), cancel, LIMIT).await;
+                let prompt = "只读取当前目录中的 fox-verify.txt，并原样回复文件里的字符串。使用你自己的工具，不要修改文件，不要访问其他路径，不要联网。";
+                let result = turn(&launched.connection, &mut events, &session_id, prompt, &request.project_root, Some(&nonce), approvals, cancel, LIMIT).await;
                 layers[1] = match result {
                     Ok(()) => LayerResult::new(VerificationLayer::ToolCall, VerificationStatus::Passed, None, Some(tool_started.elapsed().as_millis() as i64)),
                     Err(error) => failed(VerificationLayer::ToolCall, error, tool_started),
@@ -127,8 +131,6 @@ fn prepare_in(root: &Path, suffix: &str, input: SessionVerification) -> Result<P
     config.fox_data = root.join("data");
     config.state_root = config.fox_data.join("agent-state");
     config.native_login_home = None;
-    config.full_access = FullAccessSwitch::Off;
-    config.full_access_forbidden = true;
     let home = config.private_home_path(DEFAULT_CONVERSATIONS_HOME_ID, input.backend).map_err(|e| Failure::agent(e.message))?;
     crate::external_home::ensure_backend_home_dirs(input.backend, &home).map_err(|e| Failure::agent(e.to_string()))?;
     if let Some(source) = input.native_home {
@@ -141,8 +143,11 @@ fn prepare_in(root: &Path, suffix: &str, input: SessionVerification) -> Result<P
     } else {
         crate::login_source::choose_fox(input.backend, &config.state_root, &home, false).map_err(Failure::agent)?;
     }
-    let permission = if input.backend == AgentBackend::Pi { "read_only" } else { "read-only" };
-    let request = LaunchRequest { conversation_id: format!("verify-{suffix}"), backend: input.backend, project_uuid: Some(DEFAULT_CONVERSATIONS_HOME_ID.into()), project_root, session_key: format!("verify-{suffix}"), full_access_granted: false, unified_login: input.login, native_permission: Some(permission.into()) };
+    let full_access_granted = crate::native_permission::is_full_access(input.backend, &input.permission_mode);
+    let request = LaunchRequest { conversation_id: format!("verify-{suffix}"), backend: input.backend, project_uuid: Some(DEFAULT_CONVERSATIONS_HOME_ID.into()), project_root, session_key: format!("verify-{suffix}"), full_access_granted, unified_login: input.login, native_permission: Some(input.permission_mode.clone()) };
+    if request.native_mode() != input.permission_mode || (full_access_granted && config.full_access_forbidden) {
+        return Err(Failure::agent("该权限在当前配置下不可用。".into()));
+    }
     // Built-in file tools only. This disposable session receives no Fox MCP
     // token and cannot reach a user's conversations or workspace tools.
     Ok((HostLauncher { config, mcp: None }, request, root.to_owned(), nonce, input.with_tool))
@@ -160,7 +165,7 @@ fn failed(layer: VerificationLayer, error: Failure, started: Instant) -> LayerRe
     if !error.detail.is_empty() { result.detail = Some(crate::acp::redact_diagnostic_tail(&error.detail)); }
     result
 }
-async fn turn(connection: &AcpConnection, events: &mut mpsc::UnboundedReceiver<BackendEvent>, session: &str, prompt: &str, project: &Path, nonce: Option<&str>, cancel: &mut watch::Receiver<bool>, timeout: Duration) -> Result<(), Failure> {
+async fn turn(connection: &AcpConnection, events: &mut mpsc::UnboundedReceiver<BackendEvent>, session: &str, prompt: &str, project: &Path, nonce: Option<&str>, approvals: &impl VerificationApprovals, cancel: &mut watch::Receiver<bool>, timeout: Duration) -> Result<(), Failure> {
     if *cancel.borrow() { return Err(Failure::cancelled()); }
     connection.prompt(session, prompt).map_err(Failure::agent)?;
     let work = async {
@@ -178,10 +183,10 @@ async fn turn(connection: &AcpConnection, events: &mut mpsc::UnboundedReceiver<B
                     }
                 }
                 BackendEvent::PermissionRequested { native_request_id, request, .. } => {
-                    let card = permission_card(&request);
-                    let allow = nonce.is_some() && allows_verification_read(&request, project);
-                    let option = card.options.iter().find(|option| option.kind == if allow { "allow_once" } else { "reject_once" });
-                    connection.answer_permission(&native_request_id, option.map(|option| option.option_id.as_str())).map_err(Failure::agent)?;
+                    let option = approvals.answer(project, &request).await.map_err(Failure::agent)?;
+                    if !matches!(connection.answer_permission(&native_request_id, option.as_deref()).map_err(Failure::agent)?, WriteOutcome::Written) {
+                        return Err(Failure::agent("未能确认审批结果已送达 Agent。".into()));
+                    }
                 }
                 BackendEvent::TurnEnded { session_id, .. } if started && session_id == session => {
                     let success = nonce.map_or(!text.trim().is_empty(), |nonce| completed_tool && text.contains(nonce));
@@ -197,32 +202,5 @@ async fn turn(connection: &AcpConnection, events: &mut mpsc::UnboundedReceiver<B
     tokio::select! {
         _ = cancel.changed() => Err(Failure::cancelled()),
         outcome = tokio::time::timeout(timeout, work) => outcome.unwrap_or_else(|_| Err(Failure::timeout())),
-    }
-}
-
-fn allows_verification_read(request: &Value, project: &Path) -> bool {
-    let call = &request["toolCall"];
-    if call["kind"] != "read" { return false; }
-    let path = call.pointer("/rawInput/path").or_else(|| call.pointer("/rawInput/file_path")).or_else(|| call.pointer("/rawInput/filePath")).or_else(|| call.pointer("/locations/0/path")).and_then(Value::as_str);
-    let Some(path) = path else { return false; };
-    let path = Path::new(path);
-    let requested = if path.is_absolute() { path.to_owned() } else { project.join(path) };
-    match (requested.canonicalize(), project.join("fox-verify.txt").canonicalize()) { (Ok(actual), Ok(expected)) => actual == expected, _ => false }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn only_the_verification_file_gets_automatic_read_approval() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("fox-verify.txt"), "nonce").unwrap();
-        std::fs::write(root.path().join("other.txt"), "private").unwrap();
-        let request = |kind: &str, path: &str| serde_json::json!({"toolCall":{"kind":kind,"rawInput":{"path":path}}});
-        assert!(allows_verification_read(&request("read", "fox-verify.txt"), root.path()));
-        assert!(!allows_verification_read(&request("edit", "fox-verify.txt"), root.path()));
-        assert!(!allows_verification_read(&request("execute", "fox-verify.txt"), root.path()));
-        assert!(!allows_verification_read(&request("read", "other.txt"), root.path()));
-        assert!(!allows_verification_read(&request("read", "../fox-verify.txt"), root.path()));
     }
 }

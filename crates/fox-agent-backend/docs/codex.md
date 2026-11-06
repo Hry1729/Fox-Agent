@@ -1,3 +1,5 @@
+> **2026-11-06 网页搜索更新**：Fox 将服务端网页搜索交给 Codex 配置。下文阶段 0 记录中的 `CODEX_CONFIG={"web_search":"disabled"}` 仅描述当时的启动方式。具体模型和供应商的搜索支持需分别验证。
+>
 > **现状（2026-11-01）**：本页正文是外部 Agent 的接入与实测记录，按时间保留，其中「当前」字样只对应记录时点。现状：
 > - 内置主线是 PiNative。外部 Pi、Codex、dsh **已恢复为可选接入**：经通用 ACP 后端（`acp.rs` / `external.rs`，各家差异在 `src/backends/`），默认只有 Fox，用户先在电脑上安装和配置（Windows 受管运行时包 0.1.8），再在「设置 → Agent」打开开关；输入框上方不再有登录卡片。
 > - Fox 自身已不用沙箱：SRT、Windows ACL、网络代理、ACP stdio 桥已在 A1、B2 删除；外部 Agent 进程放进 Job Object / 进程组，取消时清扫本轮进程。下文凡写「在 srt 沙箱里运行」「共享 Host SRT」「网络审批」的内容都只是当时的记录。

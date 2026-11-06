@@ -77,9 +77,9 @@ try {
   for (const theme of ['graphite','paper','mist']) for (const dark of [false,true]) {
     await client.evaluate(`localStorage.setItem('fox.preferences.colorTheme','${theme}');localStorage.setItem('fox.theme','${dark?'dark':'light'}')`)
     await client.send('Page.navigate',{url:`http://127.0.0.1:${port}/`})
-    await waitFor(`!!document.querySelector('.fox-boot-shell')&&document.documentElement.dataset.colorTheme==='${theme}'&&document.documentElement.classList.contains('dark')===${dark}`, '启动页主题')
+    await waitFor(`!!document.querySelector('.fox-startup-body')&&document.documentElement.dataset.colorTheme==='${theme}'&&document.documentElement.classList.contains('dark')===${dark}`, '启动页主题')
     await screenshot(`boot-${theme}-${dark?'dark':'light'}`)
-    const colors = await client.evaluate(`(()=>{const c=getComputedStyle(document.querySelector('.fox-boot-shell'));return {color:c.color,background:c.backgroundImage}})()`)
+    const colors = await client.evaluate(`(()=>{const c=getComputedStyle(document.querySelector('.fox-startup-body'));return {color:c.color,background:c.backgroundImage}})()`)
     if (colors.background==='none') throw Error('启动页背景未加载')
     results.push({theme,dark,colors})
   }

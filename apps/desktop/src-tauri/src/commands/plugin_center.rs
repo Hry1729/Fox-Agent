@@ -231,6 +231,17 @@ fn aggregate_plugin_cards(
         merge_live_card(&mut cards, index, live);
     }
 
+    let selected = crate::search_service::load(database).map_err(PluginAdapterError::storage)?.provider;
+    for (provider, id, name, description) in crate::search_service::SearchProvider::PLUGINS {
+        cards.push(PluginCardView {
+            id: id.into(), kind: PluginKind::Tool, origin: PluginOrigin::Builtin,
+            category: "搜索服务".into(), name: name.into(), description: description.into(),
+            icon: Some("search".into()), version: None, install_status: PluginInstallStatus::Installed,
+            activation: PluginActivation::Global { enabled: selected == provider }, runtime_status: None,
+            permissions: vec![], compatible: true, last_error: None, incompatibility_reason: None,
+            installed_at: None, updated_at: None,
+        });
+    }
     for card in &mut cards {
         if let Some(installation) = installation_for(&installations, std::slice::from_ref(&card.id))
         {
@@ -340,6 +351,13 @@ fn set_plugin_activation(
                 "Skill 必须按 Agent 配置启用范围",
                 false,
             ));
+        }
+        (PluginKind::Tool, PluginActivationUpdate::Global { enabled }) if card.category == "搜索服务" => {
+            let (provider, _, _, _) = crate::search_service::SearchProvider::PLUGINS.into_iter()
+                .find(|(_, id, _, _)| *id == card.id)
+                .ok_or_else(|| PluginAdapterError::new("plugin.not_found", "搜索插件不存在", false))?;
+            crate::search_service::activate_plugin(database, provider, *enabled)
+                .map_err(|error| PluginAdapterError::new("plugin.search_configuration", error, false))?;
         }
         (PluginKind::Tool, _) => {
             return Err(PluginAdapterError::new(

@@ -10245,8 +10245,29 @@ fn execute_capability_tool_request(
         .get("tool")
         .and_then(Value::as_str)
         .ok_or_else(|| "capability tool request is missing tool".to_owned())?;
-    ensure_expert_tool_allowed(database, conversation_id, tool)?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    execute_capability_call(app, database, state, conversation_id, run_id, tool_call_id, tool, input, None)
+}
+
+impl RuntimeHost {
+    pub(crate) fn external_web_search(&self, conversation_id: &str, run_id: &str, call_id: &str, input: Value,
+        mode: approval_policy::AccessMode, runtime: &crate::external_backend::DesktopRuntime) -> Result<Value, String> {
+        let response = execute_capability_call(&self.app, &self.database, &self.state, conversation_id, run_id, call_id,
+            "web_search", input, Some((mode, runtime)))?;
+        if response.get("isError").and_then(Value::as_bool) == Some(true) {
+            return Err(response.get("error").map(Value::to_string).unwrap_or_else(|| "网页搜索失败。".into()));
+        }
+        response.get("result").cloned().ok_or_else(|| "搜索结果缺失。".into())
+    }
+}
+
+fn execute_capability_call(
+    app: &AppHandle, database: &Database, state: &Arc<Mutex<RuntimeHostState>>,
+    conversation_id: &str, run_id: &str, tool_call_id: &str, tool: &str, input: Value,
+    external: Option<(approval_policy::AccessMode, &crate::external_backend::DesktopRuntime)>,
+) -> Result<Value, String> {
+    use fox_agent_backend::external::ExternalSink;
+    ensure_expert_tool_allowed(database, conversation_id, tool)?;
     if let Some(response) =
         inspect_existing_host_tool_call(database, run_id, tool_call_id, tool, &input)?
     {
@@ -10269,7 +10290,16 @@ fn execute_capability_tool_request(
 
     // A1: the same engine as Host tools; the input-hash conversation grant
     // (TX-1) is gone, and command tools never take a conversation grant.
-    let policy = decide_tool_approval(database, conversation_id, tool, &input, prepared.preview(), None)?;
+    let policy = if let Some((mode, _)) = external {
+        let rules = database.policy_rules_for_conversation(conversation_id)?;
+        let decision = approval_policy::decide(&approval_policy::PolicyRequest {
+            tool, subject: &approval_policy::ToolSubject::Network, mode,
+            project_root: None, home: None, rules: &rules,
+        });
+        ToolApprovalPolicy { decision, has_project: false }
+    } else {
+        decide_tool_approval(database, conversation_id, tool, &input, prepared.preview(), None)?
+    };
     if let Some(refusal) = policy.refusal(tool) {
         if policy.decision.is_block() {
             let preview = prepared.preview();
@@ -10304,37 +10334,55 @@ fn execute_capability_tool_request(
             policy.decorate_request(&mut request, tool);
             let approval =
                 database.create_approval(&tool_call.id, &prepared.preview().summary, &request)?;
-            let (sender, receiver) = mpsc::channel();
-            state
-                .lock()
-                .map_err(|_| "runtime state lock is poisoned".to_owned())?
-                .pending_approvals
-                .lock()
-                .map_err(|_| "approval map is poisoned".to_owned())?
-                .insert(
-                    approval.id.clone(),
-                    PendingApproval {
-                        run_id: run_id.to_owned(),
-                        sender,
-                    },
-                );
-            let approval_id = approval.id.clone();
-            let _ = app.emit("fox://approval-requested", approval);
-            let approval_result = receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
-            if let Ok(runtime_state) = state.lock() {
-                if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
-                    pending.remove(&approval_id);
-                }
-            }
-            let approved = match approval_result {
-                Ok(approved) => approved,
-                Err(error) => {
-                    if let Ok(Some(resolved)) =
-                        database.resolve_approval(&approval_id, ApprovalDecision::Deny)
-                    {
-                        let _ = app.emit("fox://approval-resolved", resolved);
+            let approved = if let Some((_, runtime)) = external {
+                runtime.sink().emit(run_id, conversation_id, json!({
+                    "type": "run.waiting_approval", "approvalId": approval.id, "toolCallId": tool_call_id
+                }))?;
+                app.emit("fox://approval-requested", &approval).map_err(|e| e.to_string())?;
+                loop {
+                    if runtime.active_run_of(conversation_id).as_deref() != Some(run_id) {
+                        let _ = database.resolve_approval(&approval.id, ApprovalDecision::Deny);
+                        return Err("搜索已取消。".into());
                     }
-                    return Err(error);
+                    match database.approval_record(&approval.id)?.status.as_str() {
+                        "approved" => break true,
+                        "pending" => std::thread::sleep(Duration::from_millis(120)),
+                        _ => break false,
+                    }
+                }
+            } else {
+                let (sender, receiver) = mpsc::channel();
+                state
+                    .lock()
+                    .map_err(|_| "runtime state lock is poisoned".to_owned())?
+                    .pending_approvals
+                    .lock()
+                    .map_err(|_| "approval map is poisoned".to_owned())?
+                    .insert(
+                        approval.id.clone(),
+                        PendingApproval {
+                            run_id: run_id.to_owned(),
+                            sender,
+                        },
+                    );
+                let approval_id = approval.id.clone();
+                let _ = app.emit("fox://approval-requested", approval);
+                let approval_result = receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
+                if let Ok(runtime_state) = state.lock() {
+                    if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
+                        pending.remove(&approval_id);
+                    }
+                }
+                match approval_result {
+                    Ok(approved) => approved,
+                    Err(error) => {
+                        if let Ok(Some(resolved)) =
+                            database.resolve_approval(&approval_id, ApprovalDecision::Deny)
+                        {
+                            let _ = app.emit("fox://approval-resolved", resolved);
+                        }
+                        return Err(error);
+                    }
                 }
             };
             if !approved {
@@ -10350,7 +10398,7 @@ fn execute_capability_tool_request(
                 policy.decision.mode.as_str(), "proxy_fake_ip", allowance)?;
         }
 
-        capability_tools::execute(prepared)
+        capability_tools::execute(prepared, Some(database))
     })();
     finalize_host_tool_execution(
         database,

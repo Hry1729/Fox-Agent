@@ -14,6 +14,7 @@ mod expert_workflows;
 mod external_backend;
 mod external_model;
 mod agent_config;
+mod search_service;
 mod external_policy;
 mod external_tools;
 mod kernel;
@@ -172,9 +173,12 @@ pub fn run() {
             // exit instead.
             let mut startup_data_dir: Option<std::path::PathBuf> = None;
             let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-            let app_data_dir = std::env::var_os("FOX_DATA_DIR")
-                .map(std::path::PathBuf::from)
-                .unwrap_or(app.path().app_data_dir()?);
+            let app_data_dir = match std::env::var_os("FOX_DATA_DIR") {
+                Some(path) => std::path::PathBuf::from(path),
+                None => app.path().app_data_dir().map_err(|error| {
+                    format!("无法取得系统为 Fox 分配的数据目录。请检查当前用户的应用数据目录，或设置 FOX_DATA_DIR 后重试。原因：{error}")
+                })?,
+            };
             startup_data_dir = Some(app_data_dir.clone());
             std::fs::create_dir_all(&app_data_dir)?;
             let isolated_webview_dir = app_data_dir.join("webviews");
@@ -496,12 +500,15 @@ pub fn run() {
             commands::model_providers_list,
             commands::model_provider_save,
             commands::model_provider_delete,
+            search_service::search_service_get,
+            search_service::search_service_save,
             agent_config::agent_config_overview,
             agent_config::agent_enable_set,
             agent_config::agent_binding_save,
             agent_config::agent_binding_clear,
             agent_config::agent_config_verify,
             agent_config::agent_config_verify_cancel,
+            agent_config::verification_permissions::agent_config_verify_answer,
             agent_config::agent_import_preview,
             agent_config::agent_import_apply,
             // Four-agent plan v0.3.1, Host wiring first batch: backend picker state.

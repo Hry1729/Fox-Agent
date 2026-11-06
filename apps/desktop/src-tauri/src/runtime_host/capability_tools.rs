@@ -1,3 +1,4 @@
+use crate::search_service::SearchProvider;
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
 use crate::tool_host::ToolPreview;
@@ -76,7 +77,7 @@ pub(super) fn execute_with_cancellation(action: PreparedCapabilityTool, token: &
     }
     token.check()?;
     let _restore = Restore(EXECUTION_CONTROL.with(|slot| slot.replace(Some((token.clone(),Instant::now()+budget)))));
-    let result = execute(action);
+    let result = execute(action, None);
     check_execution_control()?;
     result
 }
@@ -216,16 +217,6 @@ impl PreparedCapabilityTool {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) enum SearchProvider {
-    Auto,
-    Brave,
-    Tavily,
-    Exa,
-    Searxng,
-    DuckDuckGo,
-}
-
-#[derive(Debug, Clone, Copy)]
 pub(super) enum WebReadFormat {
     Markdown,
     Text,
@@ -317,7 +308,7 @@ pub fn prepare(
     }
 }
 
-pub fn execute(action: PreparedCapabilityTool) -> Result<Value, String> {
+pub fn execute(action: PreparedCapabilityTool, database: Option<&crate::database::Database>) -> Result<Value, String> {
     check_execution_control()?;
     match action {
         PreparedCapabilityTool::WebSearch {
@@ -328,6 +319,7 @@ pub fn execute(action: PreparedCapabilityTool) -> Result<Value, String> {
             exclude_domains,
             ..
         } => execute_web_search(
+            database,
             &query,
             provider,
             max_results,
@@ -1057,14 +1049,20 @@ fn prepare_tabular_data(
 }
 
 fn execute_web_search(
+    database: Option<&crate::database::Database>,
     query: &str,
     provider: SearchProvider,
     max_results: usize,
     include_domains: &[String],
     exclude_domains: &[String],
 ) -> Result<Value, String> {
-    let requested_provider = provider;
-    let provider = resolve_search_provider(provider)?;
+    let config = database.map(crate::search_service::load).transpose()?.unwrap_or_default();
+    let requested_provider = if database.is_some() { config.provider } else { provider };
+    let provider = match requested_provider {
+        SearchProvider::Auto => SearchProvider::DuckDuckGo,
+        other => other,
+    };
+    let credential = config.connection_value(provider)?;
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(8))
         .timeout(bounded_timeout(Duration::from_secs(20))?)
@@ -1078,13 +1076,14 @@ fn execute_web_search(
     let filtered_query = search_query_with_domains(query, include_domains, exclude_domains);
     let (raw, provider_name, fallback_from) = match provider {
         SearchProvider::Brave => (
-            search_brave(&client, &filtered_query, max_results)?,
+            search_brave(&client, &credential, &filtered_query, max_results)?,
             "brave",
             None,
         ),
         SearchProvider::Tavily => (
             search_tavily(
                 &client,
+                &credential,
                 query,
                 max_results,
                 include_domains,
@@ -1096,6 +1095,7 @@ fn execute_web_search(
         SearchProvider::Exa => (
             search_exa(
                 &client,
+                &credential,
                 query,
                 max_results,
                 include_domains,
@@ -1105,7 +1105,7 @@ fn execute_web_search(
             None,
         ),
         SearchProvider::Searxng => (
-            search_searxng(&client, &filtered_query, max_results)?,
+            search_searxng(&client, &credential, &filtered_query, max_results)?,
             "searxng",
             None,
         ),
@@ -1198,44 +1198,7 @@ fn search_query_with_domains(
     terms.join(" ")
 }
 
-fn resolve_search_provider(provider: SearchProvider) -> Result<SearchProvider, String> {
-    if !matches!(provider, SearchProvider::Auto) {
-        ensure_provider_configured(provider)?;
-        return Ok(provider);
-    }
-    for candidate in [
-        SearchProvider::Brave,
-        SearchProvider::Tavily,
-        SearchProvider::Exa,
-        SearchProvider::Searxng,
-    ] {
-        if ensure_provider_configured(candidate).is_ok() {
-            return Ok(candidate);
-        }
-    }
-    Ok(SearchProvider::DuckDuckGo)
-}
-
-fn ensure_provider_configured(provider: SearchProvider) -> Result<(), String> {
-    let configured = match provider {
-        SearchProvider::Brave => env_non_empty("BRAVE_API_KEY"),
-        SearchProvider::Tavily => env_non_empty("TAVILY_API_KEY"),
-        SearchProvider::Exa => env_non_empty("EXA_API_KEY"),
-        SearchProvider::Searxng => env_non_empty("FOX_SEARXNG_URL"),
-        SearchProvider::DuckDuckGo => true,
-        SearchProvider::Auto => true,
-    };
-    configured.then_some(()).ok_or_else(|| {
-        format!(
-            "{} web search provider is not configured",
-            search_provider_name(provider)
-        )
-    })
-}
-
-fn search_brave(client: &Client, query: &str, max_results: usize) -> Result<Value, String> {
-    let key =
-        env::var("BRAVE_API_KEY").map_err(|_| "BRAVE_API_KEY is not configured".to_owned())?;
+fn search_brave(client: &Client, key: &str, query: &str, max_results: usize) -> Result<Value, String> {
     client
         .get("https://api.search.brave.com/res/v1/web/search")
         .header("X-Subscription-Token", key)
@@ -1250,13 +1213,12 @@ fn search_brave(client: &Client, query: &str, max_results: usize) -> Result<Valu
 
 fn search_tavily(
     client: &Client,
+    key: &str,
     query: &str,
     max_results: usize,
     include_domains: &[String],
     exclude_domains: &[String],
 ) -> Result<Value, String> {
-    let key =
-        env::var("TAVILY_API_KEY").map_err(|_| "TAVILY_API_KEY is not configured".to_owned())?;
     client
         .post("https://api.tavily.com/search")
         .json(&json!({
@@ -1278,12 +1240,12 @@ fn search_tavily(
 
 fn search_exa(
     client: &Client,
+    key: &str,
     query: &str,
     max_results: usize,
     include_domains: &[String],
     exclude_domains: &[String],
 ) -> Result<Value, String> {
-    let key = env::var("EXA_API_KEY").map_err(|_| "EXA_API_KEY is not configured".to_owned())?;
     client
         .post("https://api.exa.ai/search")
         .header("x-api-key", key)
@@ -1302,11 +1264,9 @@ fn search_exa(
         .map_err(|error| format!("Exa returned invalid JSON: {error}"))
 }
 
-fn search_searxng(client: &Client, query: &str, max_results: usize) -> Result<Value, String> {
-    let base =
-        env::var("FOX_SEARXNG_URL").map_err(|_| "FOX_SEARXNG_URL is not configured".to_owned())?;
+fn search_searxng(client: &Client, base: &str, query: &str, max_results: usize) -> Result<Value, String> {
     let mut url =
-        Url::parse(&base).map_err(|error| format!("FOX_SEARXNG_URL is invalid: {error}"))?;
+        Url::parse(base).map_err(|error| format!("FOX_SEARXNG_URL is invalid: {error}"))?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err("FOX_SEARXNG_URL must use http or https".to_owned());
     }
@@ -1641,10 +1601,7 @@ fn normalize_search_results(
         SearchProvider::Auto => None,
     }
     .ok_or_else(|| {
-        format!(
-            "{} response omitted results",
-            search_provider_name(provider)
-        )
+        format!("{provider:?} response omitted results")
     })?;
     Ok(items
         .iter()
@@ -3676,20 +3633,7 @@ fn process_timeout(input: &Value) -> Duration {
     )
 }
 
-fn env_non_empty(key: &str) -> bool {
-    env::var(key).is_ok_and(|value| !value.trim().is_empty())
-}
 
-fn search_provider_name(provider: SearchProvider) -> &'static str {
-    match provider {
-        SearchProvider::Auto => "auto",
-        SearchProvider::Brave => "brave",
-        SearchProvider::Tavily => "tavily",
-        SearchProvider::Exa => "exa",
-        SearchProvider::Searxng => "searxng",
-        SearchProvider::DuckDuckGo => "duckduckgo",
-    }
-}
 
 fn git_operation_name(operation: GitOperation) -> &'static str {
     match operation {
@@ -4025,7 +3969,7 @@ mod tests {
         registry.request_run_cancel("capability-scope");
         assert!(execute_with_cancellation(action(), &token, Duration::from_secs(2)).is_err());
         assert!(EXECUTION_CONTROL.with(|slot| slot.borrow().is_none()));
-        assert!(execute(action()).is_ok(), "legacy execution must not inherit another Run's cancellation");
+        assert!(execute(action(), None).is_ok(), "legacy execution must not inherit another Run's cancellation");
     }
 
     #[test]
@@ -4284,7 +4228,7 @@ mod tests {
                 ..
             }
         ));
-        assert!(ensure_provider_configured(SearchProvider::DuckDuckGo).is_ok());
+
     }
 
     /// stdout 远超额度时，stderr 仍占住自己的保底，1 KiB 必须原样留下。

@@ -281,6 +281,7 @@ export function Sidebar({
       label: '能力',
       items: [
         { view: 'settings-models' as const, label: '模型与 Agent', icon: Boxes },
+        { view: 'settings-search' as const, label: '搜索服务', icon: Globe2 },
         { view: 'settings-ai' as const, label: 'Agent', icon: Bot },
         { view: 'settings-extensions' as const, label: '插件', icon: BlocksIcon },
         { view: 'settings-yuxi' as const, label: '资料库', icon: LibraryBig },

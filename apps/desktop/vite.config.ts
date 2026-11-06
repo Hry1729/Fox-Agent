@@ -1,3 +1,4 @@
+import { startupLayout } from './scripts/startup-layout.mjs'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
@@ -51,6 +52,7 @@ export default defineConfig(({ mode }) => {
   return {
     root,
     plugins: [
+      startupLayout,
       react(),
       tailwindcss(),
       // Bounded, public-API-only watcher error handling. It never disables

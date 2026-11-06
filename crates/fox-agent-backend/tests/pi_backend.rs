@@ -93,7 +93,11 @@ fn gate_request(title: &str, message: &str, options: &[&str]) -> Value {
 #[test]
 fn tool_approval_is_decoded_only_from_the_fox_gate() {
     let message = r#"{"fox":"tool-approval","v":1,"toolCallId":"call_x","toolName":"bash","input":{"command":"ls"},"cwd":"/w"}"#;
-    let approval = parse_tool_approval(&gate_request("Fox approval: bash", message, &[OPTION_ALLOW_ONCE, OPTION_REJECT_ONCE]))
+    let request = gate_request("Fox approval: bash", message, &[OPTION_ALLOW_ONCE, OPTION_REJECT_ONCE]);
+    let card = fox_agent_backend::projection::backend_permission_card(fox_agent_backend::port::AgentBackend::Pi, &request);
+    assert_eq!(card.input["command"], "ls");
+    assert_eq!(card.input["cwd"], "/w");
+    let approval = parse_tool_approval(&request)
         .expect("gate request decoded");
     assert_eq!(approval.tool_call_id, "call_x");
     assert_eq!(approval.tool_name, "bash");

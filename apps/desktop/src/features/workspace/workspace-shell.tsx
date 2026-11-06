@@ -10,6 +10,7 @@ const AgentDetailPage = lazy(() => import('@/features/agents/agent-pages').then(
 const KnowledgeDetailPage = lazy(() => import('@/features/knowledge/knowledge-pages').then((module) => ({ default: module.KnowledgeDetailPage })))
 const KnowledgeGraphPage = lazy(() => import('@/features/knowledge/knowledge-pages').then((module) => ({ default: module.KnowledgeGraphPage })))
 const SettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.SettingsPage })))
+const SearchServicePage = lazy(() => import('@/features/settings/search-service-page'))
 const ModelProvidersPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.ModelProvidersPage })))
 const YuxiSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.YuxiSettingsPage })))
 const AgentSettingsPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.AgentSettingsPage })))
@@ -114,6 +115,8 @@ export function WorkspaceShell({
     rawWorkspacePage = <SettingsPage {...pageProps} dark={dark} onDark={onDark} />
   } else if (settingsView === 'settings-ai') {
     rawWorkspacePage = <AgentSettingsPage {...pageProps} section={settingsSection} agentId={activeView === 'settings-ai' ? activeEntityId ?? undefined : undefined} />
+  } else if (activeView === 'settings-search') {
+    rawWorkspacePage = <SearchServicePage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} />
   } else if (activeView === 'settings-models') {
     rawWorkspacePage = <ModelProvidersPage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} />
   } else if (activeView === 'settings-yuxi') {

@@ -1,22 +1,22 @@
-@font-face { font-family: 'Fox Vixa'; src: url('/fonts/vixa-loading.otf') format('opentype'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Fox Vixa'; src: url('/fonts/vixa-loading.otf') format('opentype'); font-weight: 400; font-style: normal; font-display: block; }
 .fox-startup-screen { --fox-loading-halo: color-mix(in oklch, var(--fox-avatar-color) 13%, transparent); --fox-loading-brand-mid: color-mix(in oklch, var(--brand) 65%, var(--background)); min-height: 100dvh; display: flex; flex-direction: column; background: var(--shell); color: var(--foreground); }
 [data-color-theme='paper'] .fox-startup-screen { --fox-loading-halo: color-mix(in oklch, var(--fox-avatar-color) 20%, transparent); }
 [data-color-theme='graphite'] .fox-startup-screen { --fox-loading-halo: color-mix(in oklch, var(--fox-avatar-color) 3.5%, transparent); }
-.fox-startup-titlebar { height: 30px; flex: none; display: flex; align-items: center; justify-content: space-between; font-size: 13px; font-weight: 600; }
+.fox-startup-titlebar { height: 30px; line-height: 1; flex: none; display: flex; align-items: center; justify-content: space-between; font-size: 13px; font-weight: 600; }
 .fox-startup-titlebar > span { display: flex; align-items: center; gap: 9px; padding-left: 8px; }
 .fox-startup-titlebar img { width: 19px; height: 19px; border-radius: 50%; }
 .fox-startup-titlebar > div { display: flex; height: 100%; }
-.fox-startup-titlebar button { display: grid; place-items: center; width: 46px; border: 0; background: transparent; color: var(--muted-foreground); }
+.fox-startup-titlebar button { display: grid; place-items: center; padding: 0; width: 46px; border: 0; background: transparent; color: var(--muted-foreground); }
 .fox-startup-titlebar button:hover { background: var(--muted); color: var(--foreground); }
 .fox-startup-titlebar svg { width: 15px; height: 15px; }
-.fox-startup-body { --fox-loading-ox: 50%; --fox-loading-oy: 38%; position: relative; flex: 1; min-height: calc(100dvh - 30px); overflow: hidden; background: radial-gradient(circle 380px at var(--fox-loading-ox) var(--fox-loading-oy), var(--fox-loading-halo), transparent), radial-gradient(1100px 640px at 50% -8%, var(--card), transparent 58%), var(--background); }
+.fox-startup-body { --fox-loading-ox: 50%; --fox-loading-oy: 38%; position: relative; flex: 1; display: grid; align-items: center; min-height: calc(100dvh - 30px); overflow: hidden; background: radial-gradient(circle 380px at var(--fox-loading-ox) var(--fox-loading-oy), var(--fox-loading-halo), transparent), radial-gradient(1100px 640px at 50% -8%, var(--card), transparent 58%), var(--background); }
 .fox-startup-body::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: radial-gradient(ellipse 85% 80% at 50% 40%, transparent 60%, color-mix(in oklch, var(--foreground) 3.5%, transparent)); }
-.fox-startup-hero { position: relative; z-index: 1; display: flex; align-items: center; flex-direction: column; gap: 22px; text-align: center; padding: min(17vw, 30vh) 24px 48px; }
+.fox-startup-hero { position: relative; z-index: 1; display: flex; align-items: center; flex-direction: column; gap: 22px; text-align: center; padding: 0 24px min(4dvh, 40px); }
 .fox-startup-brand { margin: 0; display: flex; align-items: baseline; justify-content: center; white-space: nowrap; line-height: 1.06; letter-spacing: -.03em; color: var(--brand); font: 400 clamp(64px, 11.875vw, 152px)/1.06 'Fox Vixa', sans-serif; }
 .fox-startup-brand > span { white-space: pre; }
 .fox-startup-avatar { display: block; flex: none; width: .46em; height: .46em; margin: 0 .02em; transform: translateY(-.015em); }
 .fox-startup-avatar .fox-blue-avatar, .fox-startup-avatar svg { display: block; width: 100%; height: 100%; overflow: visible; }
-.fox-startup-hero > p { margin: 0; font-size: 20px; color: var(--muted-foreground); }
+.fox-startup-hero > p { margin: 0; font-size: 20px; line-height: 1.5; color: var(--muted-foreground); }
 .fox-startup-progress { width: min(300px, 64vw); height: 7px; overflow: hidden; border-radius: 999px; background: var(--muted); }
 .fox-startup-progress > span { display: block; width: 55%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--brand), var(--fox-loading-brand-mid)); animation: fox-startup-load 1.8s ease-in-out infinite; }
 @keyframes fox-startup-load { from { transform: translateX(-30%); } to { transform: translateX(110%); } }

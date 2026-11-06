@@ -1,5 +1,5 @@
 import type { AgentConfigOverview, AgentConfigStatus, BindingSource, ExternalAgentId, ImportPreview, ImportApplyRequest, ImportApplied, VerificationReport, VerifyDepth } from '@/features/settings/model-agent/agent-config-types'
-import { invoke, isTauri } from '@tauri-apps/api/core'
+import { Channel, invoke, isTauri } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { snapshotForRun } from '../model/kernel-snapshot'
 import type { ReconciliationRequest, ReconciliationView, ReconciliationOptions } from '../model/reconciliation'
@@ -784,7 +784,12 @@ export const desktopClient = {
   agentEnableSet: (backend: ExternalAgentId, enabled: boolean) => command<void>('agent_enable_set', { backend, enabled }),
   agentBindingSave: (backend: ExternalAgentId, binding: BindingSource, developer = false) => command<AgentConfigStatus>('agent_binding_save', { backend, binding, developer }),
   agentBindingClear: (backend: ExternalAgentId, developer = false) => command<AgentConfigStatus>('agent_binding_clear', { backend, developer }),
-  agentConfigVerify: (backend: AgentBackendId, depth: VerifyDepth, developer = false) => command<VerificationReport>('agent_config_verify', { backend, depth, developer }),
+  agentConfigVerify: (backend: AgentBackendId, depth: VerifyDepth, developer = false, selection?: { permissionMode: string; confirmFullAccess: boolean; onApproval: (approval: ApprovalRecord) => void }) => {
+    const approvals = selection && new Channel<ApprovalRecord>(selection.onApproval)
+    return command<VerificationReport>('agent_config_verify', { backend, depth, developer, permissionMode: selection?.permissionMode, confirmFullAccess: selection?.confirmFullAccess, approvals })
+  },
+  agentConfigVerifyAnswer: (backend: AgentBackendId, id: string, approved: boolean) =>
+    command<boolean>('agent_config_verify_answer', { backend, id, approved }),
   agentConfigVerifyCancel: (backend: AgentBackendId) => command<boolean>('agent_config_verify_cancel', { backend }),
   agentImportPreview: (backend: ExternalAgentId, developer = false) => command<ImportPreview>('agent_import_preview', { backend, developer }),
   agentImportApply: (request: ImportApplyRequest) => command<ImportApplied>('agent_import_apply', request),

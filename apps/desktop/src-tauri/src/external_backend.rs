@@ -81,8 +81,21 @@ impl ExternalSink for DesktopSink {
             AgentBackend::Deepseek => "DeepSeek",
             AgentBackend::Fox => "Fox",
         });
-        let request = external_permission_request(label.unwrap_or("外部 Agent"), &backend, card);
-        let approval = self.database.create_approval(&tool.id, &card.title, &request)?;
+        let mut request = external_permission_request(label.unwrap_or("外部 Agent"), &backend, card);
+        let native_call = match (backend.as_str(), card.native_tool_call_id.as_deref()) {
+            ("codex", Some(id)) => self.database.get_runtime_tool_call(run_id, id)?,
+            _ => None,
+        };
+        let mut summary = card.title.clone();
+        // Codex MCP confirmations only carry an id. The preceding tool event has the server and query.
+        if let Some(query) = native_call.as_ref().and_then(|call| fox_search_query(&call.input)) {
+            summary = format!("Codex 请求使用 Fox 搜索：{query}");
+            request["title"] = json!("允许 Codex 调用 Fox 搜索？");
+            request["summary"] = json!(summary);
+            request["target"] = json!(query);
+            request["input"] = json!({"query": query});
+        }
+        let approval = self.database.create_approval(&tool.id, &summary, &request)?;
         let _ = self.emit(run_id, conversation_id, json!({ "type": "run.waiting_approval", "approvalId": approval.id, "toolCallId": key }));
         let _ = self.app.emit("fox://approval-requested", &approval);
         Ok(approval.id)
@@ -112,6 +125,14 @@ impl ExternalSink for DesktopSink {
         }
         None
     }
+}
+
+fn fox_search_query(input: &Value) -> Option<&str> {
+    if input.get("server")?.as_str()? != fox_agent_backend::fox_mcp::SERVER_NAME
+        || input.get("tool")?.as_str()? != "fox_web_search" {
+        return None;
+    }
+    input.pointer("/arguments/query")?.as_str()
 }
 
 pub type DesktopRuntime = ExternalRuntime<DesktopSink, HostLauncher>;
@@ -172,7 +193,7 @@ fn pi_project_rule_offer(card: &PermissionCard) -> Option<(Value, String, Option
 
 /// 外部审批卡的 request。不 eligible 时与原来完全一样；eligible 时在 allow_once 与 deny
 /// 之间插入 `allow_project_rule`，并带上 projectRule、policy 摘要、命令、cwd 和 hostExecution: null。
-fn external_permission_request(agent_label: &str, backend: &str, card: &PermissionCard) -> Value {
+pub(crate) fn external_permission_request(agent_label: &str, backend: &str, card: &PermissionCard) -> Value {
     let mut decisions: Vec<&str> = card.available_decisions.clone();
     let offer = pi_project_rule_offer(card);
     if offer.is_some() && !decisions.iter().any(|item| *item == "allow_project_rule") {
@@ -524,6 +545,11 @@ impl ExternalBackendHost {
             Ok(None) => return ApiResponse::success(false),
             Err(error) => return failure("approval.resolve_failed", error, true),
         };
+        if resolved.tool_name == "web_search" {
+            // Fox executes bridge searches and consumes the recorded decision itself.
+            let _ = self.app.emit("fox://approval-resolved", &resolved);
+            return ApiResponse::success(true);
+        }
         let approved = resolved.status == "approved";
         let outcome = self.runtime.answer(approval_id, approved);
         let written = matches!(outcome, AnswerOutcome::Written);

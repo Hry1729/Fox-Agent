@@ -323,17 +323,9 @@ export function createHostTools(requestHost) {
     {
       name: 'web_search',
       label: 'Search the web',
-      description: 'Search the live web. Fox includes a no-key DuckDuckGo fallback and can use a configured Brave, Tavily, Exa, or SearXNG provider when available.',
+      description: 'Search the live web. Fox uses the search service chosen in Settings; the default needs no API key.',
       parameters: Type.Object({
         query: Type.String(),
-        provider: Type.Optional(Type.Union([
-          Type.Literal('auto'),
-          Type.Literal('brave'),
-          Type.Literal('tavily'),
-          Type.Literal('exa'),
-          Type.Literal('searxng'),
-          Type.Literal('duckduckgo'),
-        ])),
         maxResults: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })),
         includeDomains: Type.Optional(Type.Array(Type.String())),
         excludeDomains: Type.Optional(Type.Array(Type.String())),
