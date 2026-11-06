@@ -32,7 +32,7 @@ fn user_evidence(
             return Ok((mid, body));
         }
     }
-    Err(denied("memory.evidence_mismatch"))
+    Err(denied("memory.evidence_mismatch 请逐字摘录用户原话。当前消息无需传 sourceMessageId，历史消息必须使用实际 ID。"))
 }
 
 pub(super) fn direct_statement(body: &str, excerpt: &str, content: &str) -> bool {
@@ -63,10 +63,14 @@ pub(super) fn direct_statement(body: &str, excerpt: &str, content: &str) -> bool
             return false;
         }
     }
+    let phrase = excerpt.trim_end_matches(punctuation);
+    if phrase.is_empty() {
+        return false;
+    }
     let Some(clause) = body
         .split(punctuation)
         .map(spaces)
-        .find(|part| part.contains(excerpt))
+        .find(|part| part.contains(phrase))
     else {
         return false;
     };
@@ -121,7 +125,10 @@ pub(super) fn write(
     let text = normalized(input.content.as_deref().unwrap_or(""));
     let key = input.canonical_key.as_deref().unwrap_or("").trim();
     let excerpt = spaces(input.evidence_excerpt.as_deref().unwrap_or(""));
-    if text.is_empty() || text.chars().count() > 1000 || key.is_empty() {
+    if key.is_empty() {
+        return Err(denied("memory.canonical_key_required 请提供表示偏好主题的 canonicalKey。"));
+    }
+    if text.is_empty() || text.chars().count() > 1000 {
         return Err(denied("memory.invalid_shared_content"));
     }
     let (mid, message) = user_evidence(

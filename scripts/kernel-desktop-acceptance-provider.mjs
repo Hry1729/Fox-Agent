@@ -1,6 +1,7 @@
 // Loopback-only, deterministic OpenAI-compatible provider for the isolated
 // desktop acceptance launcher. It never contacts a remote model or logs input.
 import http from 'node:http'
+import { dirname } from 'node:path'
 
 const port = Number(process.env.FOX_ACCEPTANCE_PROVIDER_PORT || 1433)
 const stats = { requests: 0, active: 0, completed: 0, disconnected: 0, tools: [] }
@@ -26,6 +27,28 @@ function responseFor(messages) {
   const userIndex = messages.findLastIndex(message => message.role === 'user')
   const user = content(messages[userIndex]?.content)
   const results = messages.slice(userIndex + 1).filter(message => message.role === 'tool')
+  if (process.env.FOX_CONTACTS_ACCEPTANCE === '1' && user.includes('[CONTACTS_M1_READ]')) {
+    if (!results.length) return { tool: 'read', input: { path: '收到的文件/proof.txt' } }
+    const found = results.some(message => content(message.content).includes('FOX_PRIVATE_PROOF_31'))
+    stats.contactReadEvidence = found
+    return { text: found ? '联系人工作目录读取成功。' : '未取得工作目录中的校验内容。' }
+  }
+  if (process.env.FOX_CONTACTS_ACCEPTANCE === '1' && user.includes('[CONTACTS_M1_OUTSIDE]')) {
+    const path = process.env.FOX_CONTACTS_OUTSIDE
+    const directory = dirname(path)
+    const probes = [
+      ['read',{path}], ['ls',{path:directory}], ['find',{path:directory,pattern:'*.txt'}],
+      ['grep',{path:directory,pattern:'FOX_OUTSIDE_PROOF_31'}], ['present_files',{files:[{path}]}],
+      ['write_file',{path,content:'unexpected change'}],
+      ['edit_file',{path,oldText:'FOX_OUTSIDE_PROOF_31',newText:'unexpected edit'}],
+    ]
+    if (results.length < probes.length) {
+      const [tool,input] = probes[results.length]
+      return {tool,input}
+    }
+    stats.outsideContentReturned = results.some(message => content(message.content).includes('FOX_OUTSIDE_PROOF_31'))
+    return { text: '已记录越界工具调用结果。' }
+  }
   if (user.includes('[KERNEL_CHILD_WORKER]')) {
     return results.length ? { text: '子任务已读取 proof.txt，独立执行完成。' }
       : { tool: 'read', input: { path: 'proof.txt' } }
@@ -120,6 +143,10 @@ const server = http.createServer(async (req, res) => {
   let parsed
   try { parsed = JSON.parse(body) } catch { res.writeHead(400); res.end(); return }
   if (!Array.isArray(parsed.messages)) { res.writeHead(400); res.end(); return }
+  if (process.env.FOX_CONTACTS_ACCEPTANCE === '1') {
+    stats.model = parsed.model
+    stats.availableTools = (parsed.tools ?? []).map(tool => tool.function?.name).filter(Boolean)
+  }
   const response = responseFor(parsed.messages)
   stats.requests++; stats.active++
   if (response.tool) stats.tools.push(response.tool)
