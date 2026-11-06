@@ -14,8 +14,8 @@ export async function checkM2(context) {
   const history = () => db.prepare('SELECT id,content FROM messages WHERE conversation_id=? ORDER BY ordinal').all(chat)
   const turn = text => exchange(chat, text)
   const challenge = 'CX-' + randomUUID().slice(0, 8)
-  const remember = '本次会话中唯一需要持续保留的验收交接号为 ' + challenge + '。不要使用工具或写入笔记，只回复已收到。'
-  const recall = '这次对话开头我给你的验收交接号是什么？仅回复完整编号，不要使用工具。'
+  const remember = '我们开始核对临时台账。本次会话中唯一需要持续保留的验收交接号为 ' + challenge + '。不要使用工具或写入笔记，只回复已收到。'
+  const recall = '刚才处理临时台账时，我让你保留的验收交接号是什么？请引用本次对话记录中的完整交接号，不用工具。'
   const verifyRecall = async () => {
     const result = await turn(recall)
     assert.ok(result.reply.includes(challenge), JSON.stringify(result))
@@ -101,6 +101,7 @@ export async function checkM2(context) {
     }
     const summaries = await compactions()
     assert.ok(summaries.length, 'No Pi compaction record after ' + runs.length + ' long turns')
+    assert.ok(summaries.some(summary => summary.summary.includes(challenge)), '压缩摘要未保存交接号')
     const native = await readFile(before.native_session_path)
     await restartDesktop()
     assert.deepEqual(await readFile(before.native_session_path), native)

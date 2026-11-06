@@ -35,6 +35,8 @@ test('the prompt distinguishes the read-only project view from a private profile
   assert.ok(owner.required.includes('当前私聊不支持定时任务'))
   assert.match(owner.required, /"author":"user"/)
   assert.match(owner.required, /note_organize/)
+  assert.match(owner.required, /本次会话的压缩摘要/)
+  assert.doesNotMatch(reader.required, /本次会话的压缩摘要/)
   assert.ok(!reader.required.includes('"author"'))
   assert.ok(reader.required.includes('只读') && reader.required.includes('先看结论') && reader.topics.includes('十月报价'))
   assert.ok(!reader.required.includes(facts.duty) && !reader.required.includes(facts.personaOverride))

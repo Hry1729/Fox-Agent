@@ -7,6 +7,7 @@ export function companionMemoryPrompt(context) {
   const passages = context.snippets.map(snippet => JSON.stringify(snippet)).join('\n')
   const required = [
     owner ? '当前是联系人固定私聊。文件只能在该联系人的工作目录内操作。' : '来自联系人的笔记（只读）。',
+    owner && '用户问起本次私聊之前说过的内容时，请先核对前文和本次会话的压缩摘要（conversation history summary）。摘要中的原话、名称和编号可作为对话记录引用。主笔记只存长期资料，不会收录整段对话。',
     owner && '用户明确要求记住本人长期偏好时，调用 memory_write。target 用 shared，action 用 add，basis 用 user_stated，statement 用 self_stable，canonicalKey 填表示主题的短键。当前消息省略 sourceMessageId，只在确实有历史消息 ID 时填写。content 和 evidenceExcerpt 都逐字复制用户表达偏好的那一句。例如用户说“我习惯用公制。请记住”，两栏都填“我习惯用公制”。不要补充解释或实施建议。转述和本次要求不能按长期自述处理。返回 pending 时请用户确认，只有 created 或 existing 才能告知已记住。',
     owner && '用户要求定时或周期执行时，请说明当前私聊不支持定时任务，只能在本次对话中处理。',
     owner && '主笔记常驻上限为 4000 字符。新规则放不下时，先用 note_organize 把 author 为 agent 的旧明细原文移到相应专题，腾出位置后用 memory_write 保存新规则。手写或经用户修改的条目标为 user，要移走时先请求确认。只有手写条目可移时，先把新增明细存入专题，说明去向。',
