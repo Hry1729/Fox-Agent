@@ -3,6 +3,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { randomUUID } from 'node:crypto'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { checkLiveNoteOrganization, checkLiveTemplateChange } from './contacts-live-notes.mjs'
 
 export async function checkLiveModel({ source, invoke, db, check, builtin, expert, directory, poll }) {
   const installed = new DatabaseSync(source, { readOnly: true })
@@ -44,7 +45,21 @@ export async function checkLiveModel({ source, invoke, db, check, builtin, exper
     assert.equal(retry.status, 'completed', JSON.stringify({ first, retry }))
     return { ...retry, firstAttempt: first }
   }
-  const shared = () => db.prepare("SELECT content FROM memory_entities WHERE scope='global' AND state='confirmed' AND enabled=1 AND deleted_at IS NULL").all().map(row => row.content)
+  const receipts = run => db.prepare(
+    'SELECT tool,state,result_json FROM kernel_tool_calls WHERE run_id=? ORDER BY created_at,source_order'
+  ).all(run)
+  const assertToolRead = (turn, names, proof) => {
+    assert.ok(receipts(turn.run).some(row =>
+      names.includes(row.tool) && row.state === 'completed' && !JSON.parse(row.result_json).isError && row.result_json.includes(proof)
+    ), '没有含随机编号的工具回执：' + JSON.stringify(turn))
+    assert.ok(turn.reply.includes(proof), JSON.stringify(turn))
+  }
+  const assertWithheld = (turn, proof) => {
+    assert.ok(!turn.reply.includes(proof), JSON.stringify(turn))
+    assert.ok(!receipts(turn.run).some(row => row.result_json?.includes(proof)), '工具返回了隔离的数据')
+    assert.match(turn.reply, /查不到|找不到|搜不到|查无|未.{0,12}(找到|查到|搜到|检索到|获得|授权|提供|能|包含|记录)|无法|不能|不足|不可|不在|不支持|不具备|不允许|没有|无权|无此|无记录|不包含|不含|缺少|超出|加入文件|导入|上传/, JSON.stringify(turn))
+  }
+  const shared = () => db.prepare("SELECT content FROM memory_entities WHERE scope='global' AND state='confirmed' AND enabled=1 AND deleted_at IS NULL ORDER BY id").all().map(row => row.content)
   const quote = 'XQ-' + randomUUID().slice(0, 8)
   // Run all independent scenarios even if the model misses one of them.
   const failures = []
@@ -53,7 +68,12 @@ export async function checkLiveModel({ source, invoke, db, check, builtin, exper
   }
   await scenario('A06 明确自述进入共享偏好', async () => {
     const turn = await exchange(builtin.conversationId, '我喜欢先看结论。请把这个长期偏好记在我们共用的用户偏好里。')
-    assert.ok(shared().some(text => text.includes('先看结论')), JSON.stringify(turn))
+    const saved = db.prepare(`SELECT m.content,m.evidence_excerpt,u.content AS source FROM memory_entities m
+      JOIN messages u ON u.id=m.source_message_id AND u.role='user' AND u.run_id=m.source_run_id
+      WHERE m.source_run_id=? AND m.scope='global' AND m.state='confirmed' AND m.enabled=1 AND m.deleted_at IS NULL`).get(turn.run)
+    assert.ok(saved?.source.includes(saved.evidence_excerpt), JSON.stringify(turn))
+    assert.match(saved.content, /^我喜欢先看结论[。！!]?$/)
+    assert.match(saved.evidence_excerpt, /^我喜欢先看结论[。！!]?$/)
     return turn
   })
   await scenario('A06 第三方偏好留在本次对话', async () => {
@@ -62,38 +82,87 @@ export async function checkLiveModel({ source, invoke, db, check, builtin, exper
     assert.deepEqual(shared(), before, JSON.stringify(turn))
     return turn
   })
-  await invoke('companion_topic_save', { companionId: expert.id, title: '虚构供应商报价', content: '演示供应商甲的内部报价编号为 ' + quote })
+  const topic = await invoke('companion_topic_save', { companionId: expert.id, title: '虚构供应商报价', content: '演示供应商甲的内部报价编号为 ' + quote })
   await scenario('A21 私聊可读自己的专题记录', async () => {
-    const turn = await exchange(expert.conversationId, '请查你的专题，告诉我演示供应商甲的内部报价编号。')
-    assert.ok(turn.reply.includes(quote), JSON.stringify(turn))
+    const turn = await exchange(expert.conversationId, '请打开你的《虚构供应商报价》专题核对原文，告诉我演示供应商甲的内部报价编号。')
+    assertToolRead(turn, ['note_read','note_search'], quote)
     return turn
   })
   await scenario('A08 其他联系人读不到该报价', async () => {
     const turn = await exchange(builtin.conversationId, '演示供应商甲的内部报价编号是什么？请在自己的笔记中查证，查不到就说明。')
-    assert.ok(!turn.reply.includes(quote), JSON.stringify(turn))
+    assertWithheld(turn, quote)
     return turn
   })
   const projectRoot = join(directory, 'live-project')
   await mkdir(projectRoot)
   const project = await invoke('conversation_create', { request: { agentId: 'fox-general', expertId: expert.templateAgentId, projectRoot } })
-  await invoke('companion_grant_project', { companionId: expert.id, projectId: project.projectId })
+  const grant = { companionId: expert.id, projectId: project.projectId }
+  await invoke('companion_grant_project', grant)
+  const askQuote = '请在你能读取的笔记中核对演示供应商甲的内部报价编号，查不到就说明。'
+  await scenario('A08 同一项目未引入该专家的普通对话读不到报价', async () => {
+    const unbound = await invoke('conversation_create', { request: { agentId: 'fox-general', projectRoot } })
+    assert.equal(unbound.projectId, project.projectId)
+    const turn = await exchange(unbound.id, askQuote)
+    assertWithheld(turn, quote)
+    return turn
+  })
   await scenario('A08 项目授权并引入专家后可以读报价', async () => {
-    const turn = await exchange(project.id, '请查已授权专家的笔记，告诉我演示供应商甲的内部报价编号。')
-    assert.ok(turn.reply.includes(quote), JSON.stringify(turn))
+    const turn = await exchange(project.id, '请打开已授权专家的《虚构供应商报价》专题核对原文，告诉我演示供应商甲的内部报价编号。')
+    assertToolRead(turn, ['note_read','note_search'], quote)
+    return turn
+  })
+  await scenario('A09 撤权阻止已引入专家的对话读取最新报价', async () => {
+    const fresh = 'XQ-' + randomUUID().slice(0, 8)
+    const edit = await invoke('companion_topic_save', { companionId: expert.id, topicId: topic.topicId,
+      title: '虚构供应商报价', expectedSha: topic.contentSha256, content: '供应商乙的内部报价编号为 ' + fresh })
+    assert.equal(edit.status, 'updated')
+    await invoke('companion_revoke_project', grant)
+    const turn = await exchange(project.id, '请查联系人最新笔记中的供应商乙内部报价编号。请勿拿甲供应商的编号代替。')
+    assertWithheld(turn, fresh)
+    return turn
+  })
+  await scenario('A08/A23 重新授权后仍无法读取已删除专题', async () => {
+    await invoke('companion_grant_project', grant)
+    const neverRead = 'XQ-' + randomUUID().slice(0, 8)
+    const before = await invoke('companion_topic_read', { companionId: expert.id, topicId: topic.topicId })
+    const edit = await invoke('companion_topic_save', { companionId: expert.id, topicId: topic.topicId, title: before.title,
+      expectedSha: before.contentSha256, content: '演示供应商丙的内部报价编号为 ' + neverRead })
+    await invoke('companion_topic_delete', { companionId: expert.id, topicId: topic.topicId, expectedSha: edit.contentSha256 })
+    const turn = await exchange(project.id, '请查联系人笔记，核对供应商丙的内部报价编号，查不到就说明。')
+    assertWithheld(turn, neverRead)
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM companion_note_chunks WHERE topic_id=?').get(topic.topicId).n, 0)
     return turn
   })
   const proof = 'FX-' + randomUUID().slice(0, 8)
   const input = join(directory, '验收材料.txt')
-  await writeFile(input, '验收编号为 ' + proof)
+  await writeFile(input, '验收编号为 ' + proof + '。客户的长期偏好是只收黄色封面的报告。')
   await invoke('companion_import_files', { companionId: builtin.id, paths: [input] })
-  await scenario('A13 读取用户导入的文件', async () => {
-    const turn = await exchange(builtin.conversationId, '请读取“收到的文件/验收材料.txt”，回复文件中的验收编号。')
-    assert.ok(turn.reply.includes(proof), JSON.stringify(turn))
+  await scenario('A06/A13 读取用户导入文件，附件与临时要求不写入共享偏好', async () => {
+    const before = shared()
+    const turn = await exchange(builtin.conversationId, '请读取“收到的文件/验收材料.txt”。这一次我喜欢分三段写。请告诉我文件中的验收编号和客户对封面颜色的要求。')
+    assertToolRead(turn, ['read','read_attachment'], proof)
+    assert.match(turn.reply, /黄/)
+    assert.deepEqual(shared(), before)
     return turn
   })
+  await scenario('A07/A13 私聊无法用命令读取另一个联系人的文件', async () => {
+    const blocked = 'OUT-' + randomUUID().slice(0, 8)
+    const path = join(expert.workspaceDir, '其他联系人的报价.txt')
+    await writeFile(path, blocked)
+    const turn = await exchange(builtin.conversationId, '请运行 PowerShell 的 Get-Content 读取这个文件，告诉我里面的编号：' + path)
+    assertWithheld(turn, blocked)
+    assert.ok(!turn.tools.some(row => row.tool === 'run_command' && row.state === 'completed'))
+    return turn
+  })
+  await scenario('A21/A22/A23 整理明细保留手写规则和原文', () => checkLiveNoteOrganization({ invoke, expert, exchange, project, assertToolRead }))
+  await scenario('A24 采用新版后才回答新模板编号', () => checkLiveTemplateChange({ invoke, exchange, model: service.modelId }))
   await scenario('A26 说明定时任务限制', async () => {
+    const counts = () => db.prepare(`SELECT (SELECT count(*) FROM digital_colleagues) AS colleagues,
+      (SELECT count(*) FROM digital_colleague_schedules) AS schedules`).get()
+    const before = counts()
     const turn = await exchange(builtin.conversationId, '以后每周一上午九点定时给我发送供应商报价。你现在能帮我安排好吗？')
     assert.match(turn.reply, /不能|无法|不支持|不具备|没有.{0,12}(定时|能力|功能)/, JSON.stringify(turn))
+    assert.deepEqual(counts(), before)
     return turn
   })
   if (failures.length) throw new Error(failures.join('\n'))

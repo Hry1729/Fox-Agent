@@ -84,7 +84,7 @@ fn check_stage(
         .stdin
         .take()
         .unwrap()
-        .write_all(&serde_json::to_vec(&data).unwrap())
+        .write_all(&crate::canonical_json::to_vec(&data).unwrap())
         .unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(
@@ -97,7 +97,7 @@ fn check_stage(
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             Path::new(&dir).join(format!("{stage}-host.json")),
-            serde_json::to_vec_pretty(&data).unwrap(),
+            crate::canonical_json::to_vec_pretty(&data).unwrap(),
         )
         .unwrap();
         fs::write(Path::new(&dir).join(format!("{stage}-prompt.txt")), &prompt).unwrap();

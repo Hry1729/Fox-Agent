@@ -172,23 +172,39 @@ async function desktop() {
     assert.equal(schema,106)
     return {schema,projectRoot:row.project_root}
   })
-  const [owned] = await invoke('companion_import_files',{companionId:builtin.id,paths:[proof]})
-  const [secondCopy] = await invoke('companion_import_files',{companionId:expert.id,paths:[proof]})
-  assert.notEqual(owned,secondCopy)
-  await check('A04 preserve imported copy on deletion',async () => {
-    const {planHash} = await invoke('companion_delete_preview',{companionId:expert.id})
-    const removed = await invoke('companion_delete',{companionId:expert.id,planHash})
-    assert.equal(await readFile(secondCopy,'utf8'),'FOX_PRIVATE_PROOF_31')
+  const dropped = { filename: basename(proof), mediaType: 'text/plain', dataUrl: 'data:text/plain;base64,' + (await readFile(proof)).toString('base64') }
+  const upload = (conversationId, files) => invoke('attachments_save', { request: { conversationId, files } })
+  const [attachment] = await upload(chat, [dropped])
+  await check('A04/A13 composer attachments survive contact deletion as independent workspace copies', async () => {
+    const [other] = await upload(expert.conversationId, [dropped])
+    const [duplicate] = await invoke('companion_import_files', { companionId: builtin.id, paths: [proof] })
+    const [renamed] = await upload(chat, [dropped])
+    assert.equal(basename(duplicate), 'proof (1).txt')
+    assert.equal(renamed.displayName, 'proof (2).txt')
+    const copy = join(builtin.workspaceDir, '收到的文件', attachment.displayName)
+    const otherCopy = join(expert.workspaceDir, '收到的文件', other.displayName)
+    assert.equal(await readFile(copy, 'utf8'), 'FOX_PRIVATE_PROOF_31')
+    await writeFile(otherCopy, '专家独立修改')
+    assert.equal(await readFile(other.storagePath, 'utf8'), 'FOX_PRIVATE_PROOF_31')
+    const invalid = { ...dropped, filename: '../outside.txt' }
+    await assert.rejects(() => upload(chat, [{ ...dropped, filename: 'rollback.txt' }, invalid]), /attachment.invalid_name/)
+    await assert.rejects(() => stat(join(builtin.workspaceDir, '收到的文件', 'rollback.txt')), { code: 'ENOENT' })
+    const {planHash} = await invoke('companion_delete_preview', {companionId:expert.id})
+    const removed = await invoke('companion_delete', {companionId:expert.id,planHash})
+    assert.equal(await readFile(otherCopy, 'utf8'), '专家独立修改')
+    await assert.rejects(() => stat(other.storagePath), { code: 'ENOENT' })
+    assert.equal(await readFile(proof, 'utf8'), 'FOX_PRIVATE_PROOF_31')
+    assert.equal(await readFile(copy, 'utf8'), 'FOX_PRIVATE_PROOF_31')
     assert.ok((await invoke('companion_retained_list')).some(item => item.companionId === expert.id))
-    return {keptWorkspace:expert.workspaceDir,files:removed.plan.workspaceFiles}
+    return { keptWorkspace: expert.workspaceDir, files: removed.plan.workspaceFiles, renamed: renamed.displayName }
   })
   const baseUrl = endpoint + '/' + randomUUID() + '/v1'
   const recordsExpert = await invoke('companion_add_from_expert',{request:{expertId:'fox-debugger'}})
   await checkContactRecords({invoke,db,check,expert:recordsExpert,builtin,directory})
   await invoke('model_service_save',{request:{name:'Contacts local acceptance',baseUrl,modelId:'fox-kernel-acceptance',
     apiType:'openai-completions',contextWindow:32000,maxOutputTokens:1024}})
-  const send = async text => {
-    const {run} = await invoke('run_start',{request:{conversationId:chat,text}})
+  const send = async (text, attachmentIds = []) => {
+    const {run} = await invoke('run_start',{request:{conversationId:chat,text,attachmentIds}})
     const row = await poll('PiNative run ' + run.id,() => {
       const r = db.prepare('SELECT status,error_code FROM runs WHERE id=?').get(run.id)
       return !['queued','running','cancelling','awaiting_confirmation'].includes(r.status) && r
@@ -200,7 +216,7 @@ async function desktop() {
     return run.id
   }
   await check('A07/A13/A25 actual model request and root-bound read',async () => {
-    const run = await send('[CONTACTS_M1_READ] 请读取收到的文件中的 proof.txt。')
+    const run = await send('[CONTACTS_M1_READ] 请读取收到的文件中的 proof.txt。', [attachment.id])
     const facts = await health()
     assert.equal(facts.model,'fox-kernel-acceptance')
     assert.equal(facts.contactReadEvidence,true)

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { contacts, type Companion } from './api'
+import { contacts, direct, type Companion } from './api'
 import { useContacts, showContactError } from './context'
 import { desktopErrorDetails } from '@/features/conversations/api/desktop-client'
 
@@ -10,6 +10,7 @@ export function ContactDelete({ contact, close }: { contact: Companion; close: (
   const [preview, setPreview] = useState<Awaited<ReturnType<typeof contacts.preview>> | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [retainedPath, setRetainedPath] = useState('')
   const [revision, setRevision] = useState(0)
   useEffect(() => {
     let current = true
@@ -20,11 +21,24 @@ export function ContactDelete({ contact, close }: { contact: Companion; close: (
   const remove = async () => {
     if (!preview) return
     setBusy(true)
-    try { await contacts.delete(contact.id, preview.planHash); ctx?.leave(contact); await ctx?.refresh(); close() }
+    try {
+      await contacts.delete(contact.id, preview.planHash)
+      setRetainedPath(preview.plan.workspacePath)
+    }
     catch (cause) { setPreview(null); setError(desktopErrorDetails(cause).message); void ctx?.refresh().catch(showContactError) }
     finally { setBusy(false) }
   }
   const plan = preview?.plan
+  if (retainedPath) {
+    const finish = () => { ctx?.leave(contact); void ctx?.refresh(); close() }
+    return <Dialog open onOpenChange={next => { if (!next) finish() }}><DialogContent>
+      <DialogHeader><DialogTitle>已删除{contact.displayName}</DialogTitle><DialogDescription>工作文件保留在此目录。</DialogDescription></DialogHeader>
+      <code>{retainedPath}</code><DialogFooter>
+        <Button variant="outline" onClick={() => void direct('companion_retained_open', { companionId: contact.id }).catch(showContactError)}>打开文件夹</Button>
+        <Button onClick={finish}>完成</Button>
+      </DialogFooter>
+    </DialogContent></Dialog>
+  }
   return <Dialog open onOpenChange={next => { if (!next && !busy) close() }}><DialogContent>
     <DialogHeader><DialogTitle>删除{contact.displayName}？</DialogTitle><DialogDescription>删除后无法撤销。以后再添加同一专家，会创建新的联系人。</DialogDescription></DialogHeader>
     {error ? <p role="alert">{error} <Button variant="ghost" onClick={() => setRevision(r => r + 1)}>重新预览</Button></p> : !plan ? <p role="status">正在核对删除清单…</p> : <div className="fox-contact-section">

@@ -457,8 +457,14 @@ impl Database {
             let Some((owner,writable))=access(tx,conversation_id)? else{return Ok(None)};
             let(name,duty,persona):(String,String,Option<String>)=tx.query_row("SELECT display_name,duty,persona_override FROM companion_profiles WHERE id=?",
                 [&owner],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
-            let notes:Vec<_>=owner_notes(tx,&owner)?.into_iter().filter(|m|m.state=="confirmed"&&m.enabled)
-                .map(|m|json!({"id":m.id,"content":m.content})).collect();
+            let mut notes = Vec::new();
+            for note in owner_notes(tx, &owner)?.into_iter().filter(|m| m.state == "confirmed" && m.enabled) {
+                let mut entry = json!({"id":note.id,"content":note.content});
+                if writable {
+                    entry["author"] = json!(if was_user_written(tx, &note)? { "user" } else { "agent" });
+                }
+                notes.push(entry);
+            }
             let hits=topics::search(tx,&owner,query,3)?;
             let mut remaining=1500usize;let mut snippets=Vec::new();
             for mut hit in hits {

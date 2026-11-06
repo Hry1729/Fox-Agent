@@ -1439,6 +1439,7 @@ export function Workbench() {
         return 'error' as const
       }
       if (!started) {
+        if (privateChat) await contactList.refresh()
         // 新对话在 Run 写入前失败时，send 已取消选中。清掉乐观消息，页面才仍是新对话。
         if (!desktopConversation.selectedConversationId) {
           setPendingUserMessage(null)

@@ -3504,10 +3504,33 @@ pub fn attachments_save(
     state: State<'_, AppState>,
     request: SaveAttachmentsRequest,
 ) -> ApiResponse<Vec<AttachmentRecord>> {
-    let directory = state
-        .data_dir
-        .join("attachments")
-        .join(&request.conversation_id);
+    let mut created = Vec::new();
+    let result = save_attachments(&state.database, &state.data_dir, request, &mut created);
+    if !result.ok {
+        for path in created {
+            if let Err(error) = fs::remove_file(&path) {
+                eprintln!("Fox could not remove an incomplete attachment {}: {error}", path.display());
+            }
+        }
+    }
+    result
+}
+
+fn save_attachments(
+    database: &crate::database::Database,
+    data_dir: &Path,
+    request: SaveAttachmentsRequest,
+    created: &mut Vec<PathBuf>,
+) -> ApiResponse<Vec<AttachmentRecord>> {
+    let inbox = match database.conversation_companion_id(&request.conversation_id) {
+        Ok(Some(id)) => match crate::companion_workspace::inbox(database, data_dir, &id) {
+            Ok(path) => Some(path),
+            Err(error) => return ApiResponse::failure("companion.workspace_unavailable", error, true),
+        },
+        Ok(None) => None,
+        Err(error) => return storage_error(error),
+    };
+    let directory = data_dir.join("attachments").join(&request.conversation_id);
     if let Err(error) = std::fs::create_dir_all(&directory) {
         return ApiResponse::failure("attachment.directory_failed", error.to_string(), true);
     }
@@ -3529,7 +3552,22 @@ pub fn attachments_save(
             return ApiResponse::failure("attachment.too_large", "单个附件不能超过 20 MB", false);
         }
         let id = Uuid::new_v4().to_string();
-        let filename_path = PathBuf::from(&file.filename);
+        let filename_path = Path::new(&file.filename);
+        let display_name = if let Some(inbox) = &inbox {
+            if crate::local_knowledge_import::validate_path_component(filename_path, "attachment name").is_err() {
+                return ApiResponse::failure("attachment.invalid_name", "附件文件名无效", false);
+            }
+            match crate::companion_workspace::copy_to_inbox(inbox, filename_path, bytes.as_slice()) {
+                Ok(path) => {
+                    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                    created.push(path);
+                    name
+                }
+                Err(error) => return ApiResponse::failure("companion.import_failed", error, true),
+            }
+        } else {
+            file.filename.clone()
+        };
         let extension = filename_path
             .extension()
             .and_then(|value| value.to_str())
@@ -3538,12 +3576,13 @@ pub fn attachments_save(
         if let Err(error) = std::fs::write(&path, &bytes) {
             return ApiResponse::failure("attachment.write_failed", error.to_string(), true);
         }
+        created.push(path.clone());
         let hash = format!("{:x}", Sha256::digest(&bytes));
         records.push(AttachmentRecord {
             id,
             conversation_id: request.conversation_id.clone(),
             message_id: request.message_id.clone(),
-            display_name: file.filename,
+            display_name,
             storage_path: path.to_string_lossy().into_owned(),
             media_type: file.media_type,
             byte_size: bytes.len() as i64,
@@ -3552,7 +3591,7 @@ pub fn attachments_save(
             created_at: crate::database::now_ms(),
         });
     }
-    match state.database.add_attachments(&records) {
+    match database.add_attachments(&records) {
         Ok(()) => ApiResponse::success(records),
         Err(error) => storage_error(error),
     }

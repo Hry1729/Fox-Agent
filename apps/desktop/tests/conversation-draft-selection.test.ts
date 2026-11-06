@@ -36,6 +36,7 @@ function harness(enabledAgents: readonly string[] = ['pi', 'codex', 'deepseek'])
     return index
   }
   let creates = 0
+  let runRequest: any
   let createdRequest: any
   let savedReferences: any
   let active: any
@@ -66,7 +67,11 @@ function harness(enabledAgents: readonly string[] = ['pi', 'codex', 'deepseek'])
       listArchivedConversations: async () => [],
       listTrashedConversations: async () => [],
       runtimeStatus: async () => ({}),
-      startRun: async () => ({ run: { id: 'run-1' }, userMessage: { id: 'message-1' }, attachments: [] }),
+      saveAttachments: async () => [{ id: 'attachment-1', displayName: '报价 (1).txt' }],
+      startRun: async (request: any) => {
+        runRequest = request
+        return { run: { id: 'run-1' }, userMessage: { id: 'message-1' }, attachments: [] }
+      },
     },
     optimisticRun: () => ({ id: 'pending-run-1' }),
     optimisticId: () => 'pending-message-1',
@@ -121,6 +126,7 @@ function harness(enabledAgents: readonly string[] = ['pi', 'codex', 'deepseek'])
     deliverDetail: (detail: any) => runtimeStreamOptions.setDetail(() => detail),
     creates: () => creates,
     submitted: () => ({ createdRequest, savedReferences }),
+    runRequest: () => runRequest,
   }
 }
 
@@ -128,6 +134,16 @@ describe('conversation navigation ownership', () => {
   const detail = (id: string) => ({
     conversation: { id, agentId: 'fox-general', permissionMode: 'ask', projectRoot: `D:/work/${id}` },
     messages: [], attachments: [], knowledgeBindings: [], expertBindings: [], lastRun: null,
+  })
+
+  test('a private chat sends the actual inbox filename returned for a dropped attachment', async () => {
+    const h = harness()
+    h.setConversationLoader(async id => ({ ...detail(id), companionId: 'cmp_a' }))
+    await h.render().openConversation('private')
+    await h.render().send('查看报价', undefined, [{ filename: '报价.txt', url: 'data:text/plain;base64,MQ==' }])
+    expect(h.runRequest().attachmentIds).toEqual(['attachment-1'])
+    expect(h.runRequest().runtimeText).toContain('收到的文件/报价 (1).txt')
+    expect(h.runRequest().runtimeText).not.toContain('attachment_compute')
   })
 
   test('late A load cannot replace a later B selection, including an A background update', async () => {
