@@ -5,7 +5,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { checkLiveNoteOrganization, checkLiveTemplateChange } from './contacts-live-notes.mjs'
 
-export async function checkLiveModel({ source, invoke, db, check, builtin, expert, directory, poll, selection }) {
+export async function checkLiveModel({ source, invoke, db, check, builtin, expert, directory, poll, endpoint, selection }) {
   const pattern = selection.filter ? new RegExp(selection.filter) : null
   console.log('真实模型验收范围：' + (pattern ? '局部筛选 ' + pattern.source : '全量'))
   const installed = new DatabaseSync(source, { readOnly: true })
@@ -190,7 +190,7 @@ export async function checkLiveModel({ source, invoke, db, check, builtin, exper
   })
   await scenario('A21/A22/A23 整理明细保留手写规则和原文', async () => {
     const project = await grantedProject()
-    return checkLiveNoteOrganization({ invoke, expert, exchange, project, assertToolRead })
+    return checkLiveNoteOrganization({ invoke, expert, exchange, project, assertToolRead, endpoint, service })
   })
   await scenario('A24 采用新版后才回答新模板编号', () => checkLiveTemplateChange({ invoke, exchange, model: service.modelId }))
   await scenario('A26 说明定时任务限制', async () => {

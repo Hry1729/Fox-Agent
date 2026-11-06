@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 
-export async function checkLiveNoteOrganization({ invoke, expert, exchange, project, assertToolRead }) {
+export async function checkLiveNoteOrganization({ invoke, expert, exchange, project, assertToolRead, endpoint, service }) {
   const owner = { companionId: expert.id }
   const notes = () => invoke('companion_notes_get', owner)
   const pin = '报价绝不能低于 85 折。'
@@ -9,10 +9,23 @@ export async function checkLiveNoteOrganization({ invoke, expert, exchange, proj
   assert.ok(written.memoryId)
   const code = 'QB-' + randomUUID().slice(0, 8)
   const detail = '演示供应商丁八月报价：满二十箱免运费，九月起按十箱一票结算，十月继续沿用；复核凭证号为 ' + code + '。'
-  const seeded = await exchange(expert.conversationId, '把这条业务明细逐字记到你自己的主笔记中：' + detail)
+  const local = { name: '联系人验收历史夹具', baseUrl: endpoint + '/' + randomUUID() + '/v1',
+    modelId: 'fox-kernel-acceptance', apiType: 'openai-completions', contextWindow: 32000, maxOutputTokens: 1024 }
+  let seeded
+  try {
+    const configured = await invoke('model_service_save', { request: local })
+    assert.equal(configured.credentialConfigured, false)
+    seeded = await exchange(expert.conversationId, '[CONTACTS_M1_SEED_NOTE]\n' + detail)
+    assert.equal(seeded.model, local.modelId)
+    assert.ok(seeded.tools.some(row => row.tool === 'memory_write' && row.state === 'completed'), JSON.stringify(seeded))
+  } finally {
+    const restored = await invoke('model_service_save', { request: service })
+    assert.equal(restored.modelId, service.modelId)
+  }
   const initial = await notes()
   const agentNote = initial.notes.find(note => note.content === detail)
-  assert.ok(agentNote, JSON.stringify(seeded))
+  assert.equal(agentNote?.sourceRunId, seeded.run, JSON.stringify(seeded))
+  assert.equal(agentNote.createdBy, 'agent')
 
   const filler = '逐行核对采购编号、含税总额、交付日期和签字记录。'.repeat(200)
   const remaining = 3999 - initial.usedChars
@@ -41,8 +54,9 @@ export async function checkLiveNoteOrganization({ invoke, expert, exchange, proj
 
   const turn = await exchange(project.id, '请打开已授权联系人的专题核对原文，演示供应商丁的复核凭证号是什么？')
   assertToolRead(turn, ['note_read', 'note_search'], code)
-  return { before: 3999, after: state.usedChars, moveId: move.id, declined: card.id,
-    turns: [seeded.run, organized.run, requested.run, turn.run] }
+  assert.ok([organized, requested, turn].every(result => result.model === service.modelId))
+  return { historyFixture: { run: seeded.run, model: seeded.model }, before: 3999, after: state.usedChars, moveId: move.id, declined: card.id,
+    liveTurns: [organized.run, requested.run, turn.run] }
 }
 
 export async function checkLiveTemplateChange({ invoke, exchange, model }) {
@@ -57,11 +71,22 @@ export async function checkLiveTemplateChange({ invoke, exchange, model }) {
   const owner = { companionId: contact.id }
   const template = await invoke('companion_template_status', { request: owner })
   assert.equal(template.updateAvailable, true)
-  const question = '请按当前专家说明给出你的内部工牌编号。'
+  assert.equal(template.boundSnapshot.systemPrompt, prompt(previous))
+  assert.equal(template.latestSnapshot.systemPrompt, prompt(next))
+  const question = '只回复当前专家说明中生效的内部工牌编号。'
   const before = await exchange(contact.conversationId, question)
-  assert.ok(before.reply.includes(previous) && !before.reply.includes(next), JSON.stringify(before))
+  assert.equal(answeredBadge(before.reply), previous, JSON.stringify(before))
   await invoke('companion_template_update', { request: { ...owner, expectedHash: template.latestHash } })
+  const adopted = await invoke('companion_template_status', { request: owner })
+  assert.equal(adopted.boundHash, template.latestHash)
+  assert.equal(adopted.boundSnapshot.systemPrompt, prompt(next))
   const after = await exchange(contact.conversationId, question)
-  assert.ok(after.reply.includes(next) && !after.reply.includes(previous), JSON.stringify(after))
-  return { before: before.run, after: after.run, hash: template.latestHash }
+  assert.equal(answeredBadge(after.reply), next, JSON.stringify(after))
+  return { before: { run: before.run, badge: previous, hash: template.boundHash },
+    after: { run: after.run, badge: next, hash: adopted.boundHash } }
+}
+
+function answeredBadge(reply) {
+  const firstLine = reply.trimStart().split(/\r?\n/, 1)[0]
+  return firstLine.match(/\bTPL-[0-9a-f]{8}\b/)?.[0]
 }
