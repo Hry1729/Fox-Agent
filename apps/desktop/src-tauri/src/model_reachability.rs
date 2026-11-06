@@ -133,7 +133,9 @@ mod tests {
 
     #[test]
     fn unresolvable_hosts_and_bad_addresses() {
-        assert_eq!(check_with("https://fox-unreachable.invalid/v1", false), Err(Unreachable::DnsFailed));
+        // 本机代理可能给 .invalid 返回地址。超出 DNS 长度上限的域名在解析阶段就会失败。
+        let too_long_for_dns = format!("https://{}invalid/v1", "fox.".repeat(64));
+        assert_eq!(check_with(&too_long_for_dns, false), Err(Unreachable::DnsFailed));
         assert_eq!(check_with("not a url", false), Err(Unreachable::InvalidAddress));
         assert_eq!(check_with("ftp://example.com", false), Err(Unreachable::InvalidAddress));
     }

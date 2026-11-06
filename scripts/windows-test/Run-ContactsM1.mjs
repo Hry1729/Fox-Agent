@@ -184,6 +184,13 @@ async function desktop() {
     evidence.liveModel = await checkLiveModel({ source: liveProfile, invoke, db, check, builtin, expert, directory, poll, endpoint, selection: evidence.liveSelection })
     return
   }
+  if (dev) await check('A11 open the built-in private chat, profile and notes through the desktop UI', async () => {
+    const profile = await invoke('acceptance.open_contact_notes', { displayName: builtin.displayName })
+    assert.equal(profile.name, builtin.displayName)
+    assert.equal(profile.workspace, builtin.workspaceDir)
+    assert.match(profile.usage, /主笔记\s*·\s*0\s*\/\s*4000\s*字/)
+    return profile
+  })
   await check('A01/A02 isolated startup and duplicate add',async () => {
     assert.equal(list.companions.filter(c => c.isDefault).length,1)
     const again = await invoke('companion_add_from_expert',{request:{expertId:'fox-debugger'}})

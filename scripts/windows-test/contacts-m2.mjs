@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, realpath, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { connectLiveModel } from './contacts-live-model.mjs'
+import { SessionManager } from '../../services/agent-runtime/src/pi-adapter.mjs'
 
 export async function checkM2(context) {
   const { invoke, db, check, expert, directory, restartDesktop } = context
@@ -86,31 +87,50 @@ export async function checkM2(context) {
     modelId:'fox-kernel-acceptance', apiType:'openai-completions', contextWindow:32000, maxOutputTokens:1024
   }})
   await checkReadyFaults(context, chat, mapping, history)
-  await connectLiveModel(context, { contextWindow: 24576, maxOutputTokens: 4096 })
+  await checkCompactedContact(context)
+  return { model }
+}
+
+export async function checkCompactedContact(context) {
+  const { invoke, db, check, restartDesktop } = context
+  const { exchange } = await connectLiveModel(context, { contextWindow: 24576, maxOutputTokens: 4096 })
+  const { companions } = await invoke('companions_list')
+  const chat = companions.find(contact => contact.isDefault).conversationId
+  const mapping = () => db.prepare("SELECT runtime_session_id,native_session_path,context_generation FROM runtime_sessions WHERE conversation_id=? AND runtime_type='pi'").get(chat)
+  const turn = text => exchange(chat, text)
   await check('A15 长对话真实压缩后重启并回忆交接号', async () => {
-    const seed = await turn(remember)
+    assert.equal(db.prepare('SELECT count(*) AS n FROM messages WHERE conversation_id=?').get(chat).n, 0)
+    const challenge = 'CX-' + randomUUID().slice(0, 8)
+    const seed = await turn('这份临时台账的验收交接号是 ' + challenge + '。请在本次对话中保留，不要写入笔记或调用工具。回复“收到”即可。')
     assert.equal(seed.tools.length, 0)
     const before = mapping()
-    const compactions = async () => (await readFile(before.native_session_path, 'utf8')).trim().split('\n')
-      .map(line => JSON.parse(line)).filter(record => record.type === 'compaction')
-    const runs = []
-    for (let i = 0; i < 12 && !(await compactions()).length; i++) {
+    const runs = [seed.run]
+    let summary
+    for (let i = 0; i < 12; i++) {
       const rows = Array.from({ length: 145 }, (_, j) => '样本' + (i * 145 + j + 1) + '：批次审核完成，无异常。')
-      const sent = await turn('以下是合成的临时台账。保留本次会话开头的验收交接号，台账明细可以略去。只回复确认。\n' + rows.join('\n'))
+      const sent = await turn('这是本批台账。明细可以略去，交接号仍用于最后验收。只回复“确认”，不要重复编号或调用工具。\n' + rows.join('\n'))
+      assert.equal(sent.tools.length, 0)
       runs.push(sent.run)
+      const manager = SessionManager.open(before.native_session_path)
+      const messages = manager.buildSessionContext().messages
+      summary = messages.find(message => message.role === 'compactionSummary')
+      // A retained user message or assistant reply could answer the question without the summary.
+      if (summary?.summary.includes(challenge) && messages.every(message =>
+        message === summary || !JSON.stringify(message).includes(challenge))) break
+      summary = null
     }
-    const summaries = await compactions()
-    assert.ok(summaries.length, 'No Pi compaction record after ' + runs.length + ' long turns')
-    assert.ok(summaries.some(summary => summary.summary.includes(challenge)), '压缩摘要未保存交接号')
+    assert.ok(summary, '未获得只在活动摘要中保留交接号的原生上下文')
     const native = await readFile(before.native_session_path)
     await restartDesktop()
-    assert.deepEqual(await readFile(before.native_session_path), native)
-    const reply = await verifyRecall()
     assert.deepEqual(mapping(), before)
-    return { contextWindow: 24576, runs, compactions: summaries.map(item => item.id), session: before.runtime_session_id, reply: reply.reply }
+    assert.deepEqual(await readFile(before.native_session_path), native)
+    const reply = await turn('我们这份台账的验收交接号是什么？请只回复完整编号，不用工具。')
+    assert.equal(reply.tools.length, 0, JSON.stringify(reply))
+    assert.equal(reply.reply.trim(), challenge, JSON.stringify(reply))
+    assert.deepEqual(mapping(), before)
+    return { contextWindow: 24576, runs, summaryChars: summary.summary.length,
+      session: before.runtime_session_id, recallRun: reply.run, reply: reply.reply }
   })
-
-  return { model }
 }
 
 async function checkReadyFaults({invoke, check, db, restartDesktop, directory, poll}, chat, mapping, history) {
