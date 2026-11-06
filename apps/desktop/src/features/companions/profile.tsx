@@ -9,6 +9,24 @@ import { showContactError, useContacts } from './context'
 import { ContactDelete } from './delete'
 import { ContactNotes } from './notes'
 
+function TemplateChanges({ template }: { template: TemplateStatus }) {
+  const before = template.boundSnapshot ?? {}
+  const after = template.latestSnapshot ?? {}
+  const rows = [
+    ['名称', before.name, after.name],
+    ['简介', before.description, after.description],
+    ['工作要求', before.systemPrompt, after.systemPrompt],
+    ['开场建议', before.openingSuggestions?.join('、'), after.openingSuggestions?.join('、')],
+    ['技能', before.packageManifest?.skills?.join('、'), after.packageManifest?.skills?.join('、')],
+    ['可用工具', before.packageManifest?.allowedTools?.join('、'), after.packageManifest?.allowedTools?.join('、')],
+    ['连接器', before.packageManifest?.mcpServers?.join('、'), after.packageManifest?.mcpServers?.join('、')],
+    ['版本', before.packageVersion, after.packageVersion],
+  ].filter(([, oldValue, newValue]) => oldValue !== newValue)
+  return rows.length ? <>{rows.map(([label, oldValue, newValue]) => <div key={label}>
+    <strong>{label}</strong><p>当前：{oldValue || '未设置'}</p><p>新版：{newValue || '未设置'}</p>
+  </div>)}</> : <p>专家模板的配置已更新。</p>
+}
+
 export function ContactProfile({ contact }: { contact: Companion }) {
   const ctx = useContacts()
   const [name, setName] = useState(contact.displayName)
@@ -49,7 +67,7 @@ export function ContactProfile({ contact }: { contact: Companion }) {
         {template?.boundSnapshot?.packageVersion != null && <small>当前版本 {String(template.boundSnapshot.packageVersion)}</small>}
         <p>{contact.isDefault ? '小狐的模板随 Fox 更新' : template?.updateAvailable ? '专家模板有新版' : '正在使用当前模板'}</p>
         {template?.updateAvailable && <details open={!template.dismissed}><summary>查看变化</summary>
-          {Object.keys(template.latestSnapshot ?? {}).filter(key => JSON.stringify(template.boundSnapshot?.[key]) !== JSON.stringify(template.latestSnapshot?.[key])).map(key => <div key={key}><strong>{key}</strong><p>{JSON.stringify(template.boundSnapshot?.[key])}</p><p>{JSON.stringify(template.latestSnapshot?.[key])}</p></div>)}
+          <TemplateChanges template={template} />
           <div className="fox-contact-actions"><Button size="sm" disabled={busy || Boolean(contact.activeRunStatus)} onClick={() => void run(() => decide(true))}>采用新版</Button><Button size="sm" variant="ghost" disabled={busy || template.dismissed} onClick={() => void run(() => decide(false))}>暂不更新</Button></div></details>}
       </section>
       <SettingsGroup title="对话设置"><SettingsRow title="使用全局模型" description={ctx?.model} />

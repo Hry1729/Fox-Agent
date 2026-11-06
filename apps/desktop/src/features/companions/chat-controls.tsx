@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { FolderOpen, MoreHorizontal, PanelRight, Pin, Plus, UserRound } from 'lucide-react'
+import { FolderLock, FolderOpen, MoreHorizontal, PanelRight, Pin, Plus, UserRound } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { notify as toast } from '@/features/notifications'
@@ -60,6 +60,15 @@ export function AddContactAction({ agent, onOpened }: { agent: AgentRecord; onOp
   return <Button variant="outline" disabled={busy || Boolean(existing?.deletingAt)} onClick={() => void add()}>{existing?.deletingAt ? '正在删除' : existing?.archivedAt ? '恢复并打开' : existing ? '打开私聊' : '加为联系人'}</Button>
 }
 
+export function ContactComposerFooter() {
+  const ctx = useContacts()
+  if (!ctx?.privateChat) return null
+  return <div className="fox-composer-draft-footer fox-contact-footer">
+    <button type="button" className="fox-composer-project-trigger" title={ctx.current?.workspaceDir} onClick={ctx.showProfile}><FolderLock size={13}/><span>工作目录</span></button>
+    <button type="button" className="fox-composer-project-trigger" onClick={ctx.showProfile}>{ctx.current && <ContactAvatar contact={ctx.current}/>}<span>{ctx.current?.displayName ?? '联系人'}</span></button>
+  </div>
+}
+
 export function ContactTopbar({ detail, onReset }: {
   detail: ConversationDetail | null
   onReset: () => void
@@ -89,7 +98,7 @@ export function ContactRepairBanner({ detail }: { detail: ConversationDetail | n
     try {
       if (workspace) await contacts.repairWorkspace(contact.id)
       else await contacts.repairContext(contact.conversationId)
-      await ctx.refresh(); await ctx.refreshConversation(); toast.success(workspace ? '工作目录已准备好' : '已开启新一代上下文')
+      await ctx.refresh(); await ctx.refreshConversation(); toast.success(workspace ? '工作目录已准备好' : '私聊已修复，可以继续发送消息')
     } catch (error) { showContactError(error) } finally { setBusy(false) }
   }
   return <aside className="fox-contact-banner" role="status"><FolderOpen size={16} />

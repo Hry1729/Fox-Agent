@@ -2847,6 +2847,11 @@ pub fn run_start(
             if let Err(error) = crate::companion_workspace::require_for_chat(&state.database, &state.data_dir, &request.conversation_id) {
                 return ApiResponse::failure("companion.workspace_unavailable", error, false);
             }
+            match state.runtime_host.companion_context_issue(&request.conversation_id) {
+                Ok(Some((code, reason))) => return ApiResponse::failure(code, format!("{reason}。请先修复私聊上下文。"), false),
+                Err(error) => return storage_error(error),
+                Ok(None) => {}
+            }
         }
         Err(error) => return storage_error(error),
         _ => {}
