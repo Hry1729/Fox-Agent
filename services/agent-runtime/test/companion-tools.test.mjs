@@ -32,8 +32,10 @@ test('the prompt distinguishes the read-only project view from a private profile
   const owner = companionMemoryPrompt({ ...facts, role: 'owner' })
   const reader = companionMemoryPrompt({ ...facts, role: 'reader' })
   assert.ok(owner.required.includes(facts.duty) && owner.required.includes('4/4000'))
+  assert.ok(owner.required.includes('当前私聊不支持定时任务'))
   assert.ok(reader.required.includes('只读') && reader.required.includes('先看结论') && reader.topics.includes('十月报价'))
   assert.ok(!reader.required.includes(facts.duty) && !reader.required.includes(facts.personaOverride))
+  assert.ok(!reader.required.includes('定时任务'))
   assert.equal(companionMemoryPrompt(null), null)
 })
 
