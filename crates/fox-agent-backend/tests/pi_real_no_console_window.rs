@@ -30,6 +30,8 @@ mod pi_real;
 mod windows_check {
     use super::pi_real::*;
     use std::collections::{HashMap, HashSet};
+    use std::io::Write;
+    use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
@@ -123,7 +125,11 @@ mod windows_check {
     /// The detector sees a console window from an unflagged cmd.exe.
     fn positive_control(baseline: &HashSet<usize>) -> Option<Vec<String>> {
         // Deliberately no CREATE_NO_WINDOW: this is the bug being detected.
-        let mut control = std::process::Command::new("cmd.exe").args(["/d", "/c", "ping -n 30 127.0.0.1 >nul"]).spawn().expect("start the control cmd.exe");
+        let mut control = Command::new("cmd.exe")
+            .args(["/d", "/q"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("start the control cmd.exe");
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut seen = None;
         while Instant::now() < deadline {
@@ -134,9 +140,9 @@ mod windows_check {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        let _ = fox_agent_backend::console::HideConsole::hide_console(&mut std::process::Command::new("taskkill")).args(["/PID", &control.id().to_string(), "/T", "/F"]).output();
-        let _ = control.kill();
-        let _ = control.wait();
+        // Windows Terminal can keep a tab open when its shell is killed.
+        control.stdin.take().unwrap().write_all(b"exit 0\r\n").expect("stop the control cmd.exe");
+        assert!(control.wait().expect("wait for control cmd.exe").success());
         // Let the control's console go away before the real run is sampled.
         let gone = Instant::now() + Duration::from_secs(10);
         while Instant::now() < gone && !offending(baseline).is_empty() {

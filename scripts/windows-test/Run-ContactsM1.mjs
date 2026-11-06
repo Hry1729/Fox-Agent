@@ -165,7 +165,10 @@ async function desktop() {
   const expert = await invoke('companion_add_from_expert',{request:{expertId:'fox-debugger'}})
   let restartCount = 0
   async function restartDesktop(whileStopped) {
-    stop(app)
+    // The title bar uses the same Tauri command. Wait for the old WebView to close before reopening its profile.
+    bridge.send({ id: randomUUID(), command: 'plugin:window|close', args: { label: 'main' } })
+    await poll('desktop close', () => app.exitCode !== null)
+    assert.equal(app.exitCode, 0)
     children.splice(children.indexOf(app), 1)
     if (whileStopped) await whileStopped()
     bridge.ready = 0

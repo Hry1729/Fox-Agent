@@ -3112,8 +3112,13 @@ mod tests {
         let command = "echo ready>started.txt & ping -n 30 127.0.0.1 > NUL";
         #[cfg(not(windows))]
         let command = "printf ready > started.txt; exec sleep 30";
-        let worker = thread::spawn(move || execute_command(command, &command_root, Duration::from_secs(60), Some(&token)));
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let (admitted, admission) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            let _budget = lock_reader_budget();
+            admitted.send(Instant::now()).unwrap();
+            execute_command(command, &command_root, Duration::from_secs(60), Some(&token))
+        });
+        let deadline = admission.recv().unwrap() + Duration::from_secs(5);
         while !root.join("started.txt").exists() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
