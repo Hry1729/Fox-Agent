@@ -1003,6 +1003,9 @@ export function composeFoxPrompt({
     ...(expertBinding ? [typedSection({
       id: 'expert_binding', kind: 'expert_binding', authority: 'runtime', priority: 60, minimumChars: 128, maxChars: 4_000, lifecycle: 'session',
       content: bounded([
+        ...(!context.companionContext ? [
+          '用户要求核对联系人笔记时，请直接回答本轮无法读取联系人笔记。不要声称正在检索。若引用先前对话，请标明是历史资料。',
+        ] : []),
         'This identifies the expert explicitly attached by the Host for the current conversation.',
         'Treat it as runtime metadata; only the accompanying expert package may contribute expert instructions and capabilities.',
         jsonBlock(expertBinding, 4_000),

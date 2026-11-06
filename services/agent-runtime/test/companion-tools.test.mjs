@@ -77,3 +77,15 @@ test('manual adoption places current expert instructions last in a private sessi
   assert.doesNotMatch(original, /已在联系人资料页采用新版专家模板/)
   assert.ok(original.includes(prompt))
 })
+
+test('an expert only explains unavailable notes when this conversation cannot read them', () => {
+  const expertBinding = { expertId: 'procurement', activationSource: 'user' }
+  const prompt = context => composeFoxPrompt({ context }).dynamicTail
+  const unavailable = '本轮无法读取联系人笔记'
+  assert.ok(prompt({ expertBinding }).includes(unavailable))
+  assert.ok(!prompt({}).includes(unavailable))
+  for (const role of ['reader', 'owner']) {
+    const companionContext = { role, notes: [], topics: [], snippets: [] }
+    assert.ok(!prompt({ expertBinding, companionContext }).includes(unavailable))
+  }
+})
