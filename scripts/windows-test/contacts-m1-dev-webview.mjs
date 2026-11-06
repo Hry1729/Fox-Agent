@@ -42,5 +42,6 @@ const bridge = {
   }
 }
 const server = await createServer({configFile:resolve(desktop,'vite.config.ts'),plugins:[bridge],
+  optimizeDeps:{entries:['index.html']},
   server:{host:'127.0.0.1',port:Number(process.env.FOX_CONTACTS_DEV_PORT || 1421),strictPort:true}})
 await server.listen()
