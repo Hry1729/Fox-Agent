@@ -250,7 +250,7 @@ function runtimeEvent(request, seqRef, type, payload = {}) {
   }))
 }
 
-function requestHost(request, type, payload, signal) {
+function requestHost(request, type, payload, signal, { keepOnRunCancel = false } = {}) {
   const message = createEnvelope('request', type, {
     conversationId: request.conversationId,
     runtimeSessionId: request.runtimeSessionId,
@@ -284,7 +284,7 @@ function requestHost(request, type, payload, signal) {
       runId: request.runId,
       conversationId: request.conversationId,
       runtimeSessionId: request.runtimeSessionId,
-      cleanup: ['tool_call.close', 'tool_call.cancel', 'model_request.complete'].includes(type),
+      cleanup: keepOnRunCancel || ['tool_call.close', 'tool_call.cancel', 'model_request.complete'].includes(type),
       resolve: (value) => settle(resolve, value),
       reject: (error) => settle(reject, error),
     })
@@ -693,7 +693,7 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     }, runScopedSignal(signal))
     return response.payload ?? { decision: 'block', message: 'Fox returned no preflight decision.' }
   }
-  const hostTransport = (type, payload, signal) => requestHost(request, type, payload, signal).catch(error => {
+  const hostTransport = (type, payload, signal, options) => requestHost(request, type, payload, signal, options).catch(error => {
     if (error.code === 'runtime.host_response_identity_mismatch') throw failRun(error.code, error.message)
     throw error
   })

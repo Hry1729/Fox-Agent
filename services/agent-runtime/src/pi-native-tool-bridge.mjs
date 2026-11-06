@@ -21,7 +21,8 @@ function canonical(value) {
 export const nativeToolInputDigest = (value) => 'sha256:' + createHash('sha256').update(canonical(value)).digest('hex')
 export const NATIVE_RESPONSE_DIGEST = 'foxNativeHostResponseDigest'
 export const NATIVE_NONEXECUTION = 'foxNativeNonExecution'
-const cleanupSignal = () => AbortSignal.timeout(5000)
+const CLEANUP_TIMEOUT_MS = 5000
+const cleanupSignal = () => AbortSignal.timeout(CLEANUP_TIMEOUT_MS)
 
 export function nativeHostToolResult(tool, payload, { runId, toolCallId }) {
   let result
@@ -245,6 +246,27 @@ export function createNativeToolBridge({ requestHost, runId, contextGeneration, 
     return responsePayload(TOOL_CALL_CANCEL, response, 'ToolCallCancelResponse')
   }
 
+  async function executeForegroundCommand(batch, callId, payload, signal) {
+    // A cancel acknowledgement can precede process exit. Keep the execute
+    // request alive for the Host receipt before Pi releases this session.
+    const receipt = new AbortController()
+    let timer
+    const stop = () => {
+      timer = setTimeout(() => receipt.abort(), CLEANUP_TIMEOUT_MS)
+      track(cancel(batch, callId)).catch(() => receipt.abort())
+    }
+    signal?.addEventListener('abort', stop, { once: true })
+    try {
+      return await requestHost(TOOL_CALL_EXECUTE, payload, receipt.signal, { keepOnRunCancel: true })
+    } catch (error) {
+      if (!signal?.aborted) await cancel(batch, callId)
+      throw error
+    } finally {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', stop)
+    }
+  }
+
   /**
    * The SDK enters this after arguments are validated, so a call that never
    * arrives here either named an unknown tool or failed validation.
@@ -294,15 +316,20 @@ export function createNativeToolBridge({ requestHost, runId, contextGeneration, 
         const payload = { runId, batchId: batch.batchId, callId: hostCallId(toolCallId), tool: tool.name, input: args ?? {} }
         assertRequestPayload(TOOL_CALL_EXECUTE, payload)
         let response
-        try {
-          response = await requestHost(TOOL_CALL_EXECUTE, payload, signal)
-        } catch (error) {
-          await cancel(batch, toolCallId)
-          throw error
-        }
-        if (signal?.aborted) {
-          await cancel(batch, toolCallId)
-          throw new Error(`tool call ${toolCallId} was aborted during execution`)
+        if (tool.name === 'run_command' && (args?.action ?? 'sync') === 'sync') {
+          response = await executeForegroundCommand(batch, toolCallId, payload, signal)
+          if (signal?.aborted && response.payload?.isError !== true) signal.throwIfAborted()
+        } else {
+          try {
+            response = await requestHost(TOOL_CALL_EXECUTE, payload, signal)
+          } catch (error) {
+            await cancel(batch, toolCallId)
+            throw error
+          }
+          if (signal?.aborted) {
+            await cancel(batch, toolCallId)
+            throw new Error(`tool call ${toolCallId} was aborted during execution`)
+          }
         }
         // The Host answer carries the same payload the Legacy execute path
         // decodes, so result storage and failure diagnostics stay identical.
