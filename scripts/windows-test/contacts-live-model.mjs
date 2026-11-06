@@ -29,7 +29,7 @@ export async function connectLiveModel({ source, invoke, db, check, poll }, over
     const end = await poll('模型回答 ' + run.id, () => {
       const row = db.prepare('SELECT status,model,error_code FROM runs WHERE id=?').get(run.id)
       return ['completed','failed','interrupted','cancelled'].includes(row?.status) && row
-    })
+    }, 300_000)
     const tools = db.prepare('SELECT tool,state FROM kernel_tool_calls WHERE run_id=? ORDER BY created_at,source_order').all(run.id)
     if (end.status !== 'completed') return { run: run.id, ...end, tools }
     const reply = db.prepare("SELECT content FROM messages WHERE run_id=? AND role='assistant' ORDER BY ordinal DESC LIMIT 1").get(run.id)
@@ -49,7 +49,9 @@ export async function connectLiveModel({ source, invoke, db, check, poll }, over
 }
 
 export async function checkLiveModel(context) {
-  const { invoke, db, check, builtin, expert, directory } = context
+  const { invoke, db, check, builtin, expert, directory, selection } = context
+  const pattern = selection.filter ? new RegExp(selection.filter) : null
+  console.log('真实模型验收范围：' + (pattern ? '局部筛选 ' + pattern.source : '全量'))
   const { model, exchange } = await connectLiveModel(context)
   const receipts = run => db.prepare(
     'SELECT tool,state,result_json FROM kernel_tool_calls WHERE run_id=? ORDER BY created_at,source_order'
@@ -70,7 +72,20 @@ export async function checkLiveModel(context) {
   // Run all independent scenarios even if the model misses one of them.
   const failures = []
   const scenario = async (label, action) => {
-    try { await check(label, action) } catch (error) { failures.push(label + ' ' + error.message) }
+    if (pattern && !pattern.test(label)) {
+      selection.skipped.push(label)
+      console.log('[跳过] ' + label)
+      return
+    }
+    selection.selected.push(label)
+    console.log('[开始] ' + label)
+    try {
+      await check(label, action)
+      console.log('[通过] ' + label)
+    } catch (error) {
+      console.log('[失败] ' + label + ' ' + error.message)
+      failures.push(label + ' ' + error.message)
+    }
   }
   await scenario('A06 明确自述进入共享偏好', async () => {
     const turn = await exchange(builtin.conversationId, '我喜欢先看结论。请把这个长期偏好记在我们共用的用户偏好里。')
@@ -88,24 +103,38 @@ export async function checkLiveModel(context) {
     assert.deepEqual(shared(), before, JSON.stringify(turn))
     return turn
   })
-  const topic = await invoke('companion_topic_save', { companionId: expert.id, title: '虚构供应商报价', content: '演示供应商甲的内部报价编号为 ' + quote })
+  let topic
+  const quoteTopic = async () => {
+    topic ??= await invoke('companion_topic_save', { companionId: expert.id, title: '虚构供应商报价',
+      content: '演示供应商甲的内部报价编号为 ' + quote })
+    return topic
+  }
   await scenario('A21 私聊可读自己的专题记录', async () => {
+    await quoteTopic()
     const turn = await exchange(expert.conversationId, '请打开你的《虚构供应商报价》专题核对原文，告诉我演示供应商甲的内部报价编号。')
     assertToolRead(turn, ['note_read','note_search'], quote)
     return turn
   })
   await scenario('A08 其他联系人读不到该报价', async () => {
+    await quoteTopic()
     const turn = await exchange(builtin.conversationId, '演示供应商甲的内部报价编号是什么？请在自己的笔记中查证，查不到就说明。')
     assertWithheld(turn, quote)
     return turn
   })
   const projectRoot = join(directory, 'live-project')
-  await mkdir(projectRoot)
-  const project = await invoke('conversation_create', { request: { agentId: 'fox-general', expertId: expert.templateAgentId, projectRoot } })
-  const grant = { companionId: expert.id, projectId: project.projectId }
-  await invoke('companion_grant_project', grant)
+  let expertProject
+  const grantedProject = async () => {
+    if (!expertProject) {
+      await mkdir(projectRoot, { recursive: true })
+      expertProject = await invoke('conversation_create', { request: { agentId: 'fox-general', expertId: expert.templateAgentId, projectRoot } })
+    }
+    await invoke('companion_grant_project', { companionId: expert.id, projectId: expertProject.projectId })
+    return expertProject
+  }
   const askQuote = '请在你能读取的笔记中核对演示供应商甲的内部报价编号，查不到就说明。'
   await scenario('A08 同一项目未引入该专家的普通对话读不到报价', async () => {
+    await quoteTopic()
+    const project = await grantedProject()
     const unbound = await invoke('conversation_create', { request: { agentId: 'fox-general', projectRoot } })
     assert.equal(unbound.projectId, project.projectId)
     const turn = await exchange(unbound.id, askQuote)
@@ -113,22 +142,27 @@ export async function checkLiveModel(context) {
     return turn
   })
   await scenario('A08 项目授权并引入专家后可以读报价', async () => {
+    await quoteTopic()
+    const project = await grantedProject()
     const turn = await exchange(project.id, '请打开已授权专家的《虚构供应商报价》专题核对原文，告诉我演示供应商甲的内部报价编号。')
     assertToolRead(turn, ['note_read','note_search'], quote)
     return turn
   })
   await scenario('A09 撤权阻止已引入专家的对话读取最新报价', async () => {
+    const topic = await quoteTopic()
+    const project = await grantedProject()
     const fresh = 'XQ-' + randomUUID().slice(0, 8)
     const edit = await invoke('companion_topic_save', { companionId: expert.id, topicId: topic.topicId,
       title: '虚构供应商报价', expectedSha: topic.contentSha256, content: '供应商乙的内部报价编号为 ' + fresh })
     assert.equal(edit.status, 'updated')
-    await invoke('companion_revoke_project', grant)
+    await invoke('companion_revoke_project', { companionId: expert.id, projectId: project.projectId })
     const turn = await exchange(project.id, '请查联系人最新笔记中的供应商乙内部报价编号。请勿拿甲供应商的编号代替。')
     assertWithheld(turn, fresh)
     return turn
   })
   await scenario('A08/A23 重新授权后仍无法读取已删除专题', async () => {
-    await invoke('companion_grant_project', grant)
+    const topic = await quoteTopic()
+    const project = await grantedProject()
     const neverRead = 'XQ-' + randomUUID().slice(0, 8)
     const before = await invoke('companion_topic_read', { companionId: expert.id, topicId: topic.topicId })
     const edit = await invoke('companion_topic_save', { companionId: expert.id, topicId: topic.topicId, title: before.title,
@@ -139,11 +173,11 @@ export async function checkLiveModel(context) {
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM companion_note_chunks WHERE topic_id=?').get(topic.topicId).n, 0)
     return turn
   })
-  const proof = 'FX-' + randomUUID().slice(0, 8)
-  const input = join(directory, '验收材料.txt')
-  await writeFile(input, '验收编号为 ' + proof + '。客户的长期偏好是只收黄色封面的报告。')
-  await invoke('companion_import_files', { companionId: builtin.id, paths: [input] })
   await scenario('A06/A13 读取用户导入文件，附件与临时要求不写入共享偏好', async () => {
+    const proof = 'FX-' + randomUUID().slice(0, 8)
+    const input = join(directory, '验收材料.txt')
+    await writeFile(input, '验收编号为 ' + proof + '。客户的长期偏好是只收黄色封面的报告。')
+    await invoke('companion_import_files', { companionId: builtin.id, paths: [input] })
     const before = shared()
     const turn = await exchange(builtin.conversationId, '请读取“收到的文件/验收材料.txt”。这一次我喜欢分三段写。请告诉我文件中的验收编号和客户对封面颜色的要求。')
     assertToolRead(turn, ['read','read_attachment'], proof)
@@ -160,8 +194,11 @@ export async function checkLiveModel(context) {
     assert.ok(!turn.tools.some(row => row.tool === 'run_command' && row.state === 'completed'))
     return turn
   })
-  await scenario('A21/A22/A23 整理明细保留手写规则和原文', () => checkLiveNoteOrganization({ invoke, expert, exchange, project, assertToolRead }))
-  await scenario('A24 采用新版后才回答新模板编号', () => checkLiveTemplateChange({ invoke, exchange, model: service.modelId }))
+  await scenario('A21/A22/A23 整理明细保留手写规则和原文', async () => {
+    const project = await grantedProject()
+    return checkLiveNoteOrganization({ invoke, expert, exchange, project, assertToolRead })
+  })
+  await scenario('A24 采用新版后才回答新模板编号', () => checkLiveTemplateChange({ invoke, exchange, model }))
   await scenario('A26 说明定时任务限制', async () => {
     const counts = () => db.prepare(`SELECT (SELECT count(*) FROM digital_colleagues) AS colleagues,
       (SELECT count(*) FROM digital_colleague_schedules) AS schedules`).get()
@@ -171,6 +208,7 @@ export async function checkLiveModel(context) {
     assert.deepEqual(counts(), before)
     return turn
   })
+  assert.ok(selection.selected.length, '筛选条件没有匹配任何用例：' + selection.filter)
   if (failures.length) throw new Error(failures.join('\n'))
   return { model }
 }

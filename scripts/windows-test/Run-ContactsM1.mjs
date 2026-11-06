@@ -38,8 +38,8 @@ const check = async (name, action) => {
   catch (error) { evidence.checks.push({name, status:'failed', error:error.message}); throw error }
 }
 
-async function poll(label, action) {
-  const until = Date.now() + timeout
+async function poll(label, action, waitMs = timeout) {
+  const until = Date.now() + waitMs
   let last = ''
   while (Date.now() < until) {
     try { const value = await action(); if (value) return value } catch (error) { last = error.message }
@@ -179,7 +179,9 @@ async function desktop() {
   }
   if (liveProfile) {
     const { checkLiveModel } = await import('./contacts-live-model.mjs')
-    evidence.liveModel = await checkLiveModel({ source: liveProfile, invoke, db, check, builtin, expert, directory, poll })
+    const filter = process.env.FOX_CONTACTS_LIVE_FILTER?.trim() || null
+    evidence.liveSelection = { scope: filter ? 'partial' : 'full', filter, selected: [], skipped: [] }
+    evidence.liveModel = await checkLiveModel({ source: liveProfile, invoke, db, check, builtin, expert, directory, poll, selection: evidence.liveSelection })
     return
   }
   await check('A01/A02 isolated startup and duplicate add',async () => {
