@@ -1155,7 +1155,7 @@ mod tests {
         let root = Path::new(binding.permission.project_root.as_ref().unwrap()).canonicalize().unwrap();
         for path in [outside.join("secret.txt"), link.join("secret.txt")] {
             let path = path.to_str().unwrap();
-            assert!(crate::runtime_host::approval_policy::check_hard_root(&root,path).is_err());
+            assert!(crate::companion_workspace::check_hard_root(&root,path).is_err());
             assert!(crate::runtime_host::present_files::resolve_declared_files(
                 &json!({"files":[{"path":path}]}), root.to_str()).is_err());
         }

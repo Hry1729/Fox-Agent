@@ -127,6 +127,16 @@ pub(crate) fn allows_tool(tool: &str) -> bool {
     )
 }
 
+pub(crate) fn check_hard_root(root: &Path, path: &str) -> Result<(), String> {
+    let target = crate::tool_host::canonical_file_identity(root, path)?;
+    if crate::runtime_host::approval_policy::path_boundary(Path::new(&target), Some(root), None)
+        .is_some()
+    {
+        return Err("私聊只能写入本联系人工作目录内的普通文件".into());
+    }
+    Ok(())
+}
+
 pub(crate) fn check_run_tool(
     database: &Database,
     data_dir: &Path,
@@ -194,7 +204,7 @@ pub(crate) fn check_run_tool(
         let path = input["path"]
             .as_str()
             .ok_or(("companion.path_blocked", "缺少文件路径".into()))?;
-        crate::runtime_host::approval_policy::check_hard_root(&root, path)
+        check_hard_root(&root, path)
             .map_err(|e| ("companion.path_blocked", e))?;
     }
     Ok(())
