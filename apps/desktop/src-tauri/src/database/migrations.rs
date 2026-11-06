@@ -7067,6 +7067,8 @@ enum MigrationTarget {
     V98,
     #[cfg(test)]
     V101,
+    #[cfg(test)]
+    V105,
 }
 
 fn run_with_target(connection: &mut Connection, now: i64, target: MigrationTarget) -> Result<()> {
@@ -7545,6 +7547,11 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     // permission table stays in place, unread.
     apply_migration(&transaction,PERMISSION_RULES_SCHEMA_VERSION,MIGRATION_104_PERMISSION_RULES,now)?;
     apply_migration(&transaction, AGENT_BINDINGS_SCHEMA_VERSION, MIGRATION_105_AGENT_BINDINGS, now)?;
+    #[cfg(test)]
+    if matches!(_target, MigrationTarget::V105) {
+        return finish_transaction(transaction);
+    }
+    apply_migration(&transaction, COMPANIONS_SCHEMA_VERSION, MIGRATION_106_COMPANIONS, now)?;
     finish_transaction(transaction)
 }
 
@@ -8043,6 +8050,397 @@ const _: () = assert!(DATABASE_SCHEMA_VERSION >= NATIVE_APPROVAL_COMMAND_SCHEMA_
 
 pub(crate) const PERMISSION_RULES_SCHEMA_VERSION: i64 = 104;
 const _: () = assert!(DATABASE_SCHEMA_VERSION >= PERMISSION_RULES_SCHEMA_VERSION);
+
+pub(crate) const COMPANIONS_SCHEMA_VERSION: i64 = 106;
+const _: () = assert!(DATABASE_SCHEMA_VERSION >= COMPANIONS_SCHEMA_VERSION);
+const MIGRATION_106_COMPANIONS: &str = r#"
+CREATE TRIGGER agents_reserved_companion_prefix
+BEFORE INSERT ON agents
+WHEN substr(NEW.id, 1, 4) = 'cmp_'
+BEGIN
+    SELECT RAISE(ABORT, 'agent_id_reserved_prefix');
+END;
+
+CREATE TABLE companion_profiles (
+    id TEXT PRIMARY KEY CHECK (substr(id, 1, 4) = 'cmp_' AND length(id) > 4),
+    template_agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+    display_name TEXT NOT NULL CHECK (length(trim(display_name)) BETWEEN 1 AND 40),
+    avatar_ref TEXT NOT NULL DEFAULT '',
+    duty TEXT NOT NULL DEFAULT '',
+    persona_override TEXT,
+    workspace_dir TEXT NOT NULL,
+    notes_dir TEXT NOT NULL,
+    workspace_state TEXT NOT NULL DEFAULT 'pending'
+        CHECK (workspace_state IN ('pending', 'ready', 'failed', 'missing')),
+    workspace_error TEXT,
+    is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+    pinned_at INTEGER,
+    last_read_ordinal INTEGER NOT NULL DEFAULT 0 CHECK (last_read_ordinal >= 0),
+    template_notice_dismissed_hash TEXT,
+    archived_at INTEGER,
+    deleting_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX idx_companion_profiles_template
+    ON companion_profiles(template_agent_id);
+CREATE UNIQUE INDEX idx_companion_profiles_active_name
+    ON companion_profiles(lower(trim(display_name)))
+    WHERE archived_at IS NULL AND deleting_at IS NULL;
+CREATE UNIQUE INDEX idx_companion_profiles_single_default
+    ON companion_profiles(is_default) WHERE is_default = 1;
+CREATE INDEX idx_companion_profiles_sidebar
+    ON companion_profiles(archived_at, pinned_at DESC, updated_at DESC);
+
+CREATE TABLE companion_deletions (
+    companion_id TEXT PRIMARY KEY CHECK (substr(companion_id, 1, 4) = 'cmp_'),
+    template_agent_id TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    retained_workspace_path TEXT,
+    plan_json TEXT NOT NULL,
+    plan_hash TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('deleting', 'done')),
+    error TEXT,
+    files_collected_at INTEGER,
+    db_purged_at INTEGER,
+    started_at INTEGER NOT NULL,
+    finished_at INTEGER,
+    retained_dismissed_at INTEGER
+);
+
+CREATE TABLE companion_deletion_files (
+    companion_id TEXT NOT NULL REFERENCES companion_deletions(companion_id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('attachment', 'artifact', 'compute_dir', 'managed_backup')),
+    disposition TEXT NOT NULL CHECK (disposition IN ('remove', 'retain')),
+    state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'removed', 'kept')),
+    error TEXT,
+    PRIMARY KEY (companion_id, path)
+);
+
+CREATE TRIGGER companion_deletion_files_before_purge
+BEFORE INSERT ON companion_deletion_files
+WHEN NOT EXISTS (SELECT 1 FROM companion_deletions d
+                 WHERE d.companion_id = NEW.companion_id AND d.state = 'deleting'
+                   AND d.files_collected_at IS NULL AND d.db_purged_at IS NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'companion_deletion_files_too_late');
+END;
+
+CREATE TRIGGER companion_deletions_done_guard
+BEFORE UPDATE OF state ON companion_deletions
+WHEN NEW.state = 'done' AND (
+       NEW.db_purged_at IS NULL
+    OR EXISTS (SELECT 1 FROM companion_deletion_files f
+               WHERE f.companion_id = NEW.companion_id
+                 AND f.disposition = 'remove' AND f.state = 'pending'))
+BEGIN
+    SELECT RAISE(ABORT, 'companion_deletion_incomplete');
+END;
+
+CREATE TRIGGER companion_deletions_default_guard
+BEFORE INSERT ON companion_deletions
+WHEN EXISTS (SELECT 1 FROM companion_profiles p
+             WHERE p.id = NEW.companion_id AND p.is_default = 1)
+BEGIN
+    SELECT RAISE(ABORT, 'companion_default_not_deletable');
+END;
+
+CREATE TRIGGER companion_profiles_delete_guard
+BEFORE DELETE ON companion_profiles
+WHEN OLD.is_default = 1
+  OR NOT EXISTS (SELECT 1 FROM companion_deletions d
+                 WHERE d.companion_id = OLD.id AND d.state = 'deleting'
+                   AND d.files_collected_at IS NOT NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'companion_delete_requires_flow');
+END;
+
+CREATE TRIGGER companion_profiles_template_immutable
+BEFORE UPDATE OF template_agent_id ON companion_profiles
+WHEN NEW.template_agent_id IS NOT OLD.template_agent_id
+BEGIN
+    SELECT RAISE(ABORT, 'companion_template_immutable');
+END;
+
+CREATE TRIGGER companion_profiles_default_flag_immutable
+BEFORE UPDATE OF is_default ON companion_profiles
+WHEN NEW.is_default IS NOT OLD.is_default
+BEGIN
+    SELECT RAISE(ABORT, 'companion_default_flag_immutable');
+END;
+
+ALTER TABLE conversations ADD COLUMN companion_id TEXT
+    REFERENCES companion_profiles(id) ON DELETE RESTRICT;
+CREATE UNIQUE INDEX idx_conversations_companion
+    ON conversations(companion_id) WHERE companion_id IS NOT NULL;
+
+CREATE TRIGGER conversations_companion_insert_guard
+BEFORE INSERT ON conversations
+WHEN NEW.companion_id IS NOT NULL AND (
+       NEW.agent_backend <> 'fox'
+    OR NEW.conversation_kind <> 'primary'
+    OR NEW.project_id IS NOT NULL
+    OR NEW.parent_conversation_id IS NOT NULL
+    OR NEW.trashed_at IS NOT NULL
+    OR NEW.archived <> 0
+    OR NEW.full_access <> 0
+)
+BEGIN
+    SELECT RAISE(ABORT, 'companion_chat_invalid_shape');
+END;
+
+CREATE TRIGGER conversations_companion_immutable
+BEFORE UPDATE OF companion_id ON conversations
+WHEN NEW.companion_id IS NOT OLD.companion_id
+BEGIN
+    SELECT RAISE(ABORT, 'companion_binding_immutable');
+END;
+
+CREATE TRIGGER conversations_companion_lifecycle
+BEFORE UPDATE OF trashed_at, archived ON conversations
+WHEN OLD.companion_id IS NOT NULL
+ AND (NEW.trashed_at IS NOT NULL OR NEW.archived <> 0)
+BEGIN
+    SELECT RAISE(ABORT, 'companion_chat_lifecycle');
+END;
+
+CREATE TRIGGER conversations_companion_project
+BEFORE UPDATE OF project_id, project_root ON conversations
+WHEN OLD.companion_id IS NOT NULL
+ AND (NEW.project_id IS NOT NULL OR NEW.project_root IS NOT OLD.project_root)
+BEGIN
+    SELECT RAISE(ABORT, 'companion_chat_project_locked');
+END;
+
+CREATE TRIGGER conversations_companion_full_access
+BEFORE UPDATE OF full_access ON conversations
+WHEN OLD.companion_id IS NOT NULL AND NEW.full_access <> 0
+BEGIN
+    SELECT RAISE(ABORT, 'companion_chat_full_access_refused');
+END;
+
+CREATE TRIGGER conversations_companion_no_delete
+BEFORE DELETE ON conversations
+WHEN OLD.companion_id IS NOT NULL
+ AND NOT EXISTS (SELECT 1 FROM companion_deletions d
+                 WHERE d.companion_id = OLD.companion_id AND d.state = 'deleting'
+                   AND d.files_collected_at IS NOT NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'companion_chat_delete_refused');
+END;
+
+CREATE TRIGGER messages_companion_append_only
+BEFORE DELETE ON messages
+WHEN EXISTS (SELECT 1 FROM conversations c
+             WHERE c.id = OLD.conversation_id AND c.companion_id IS NOT NULL)
+ AND NOT EXISTS (SELECT 1 FROM conversations c
+                 JOIN companion_deletions d ON d.companion_id = c.companion_id
+                 WHERE c.id = OLD.conversation_id AND d.state = 'deleting')
+BEGIN
+    SELECT RAISE(ABORT, 'companion_chat_append_only');
+END;
+
+ALTER TABLE memory_entities ADD COLUMN moved_at INTEGER;
+ALTER TABLE memory_entities ADD COLUMN moved_topic_id TEXT;
+ALTER TABLE memory_entities ADD COLUMN source_companion_id TEXT;
+ALTER TABLE memory_entities ADD COLUMN source_label TEXT;
+ALTER TABLE memory_entities ADD COLUMN evidence_basis TEXT
+    CHECK (evidence_basis IS NULL OR evidence_basis IN ('user_stated', 'assistant_inferred', 'attachment'));
+
+CREATE TRIGGER memory_companion_notes_owner
+BEFORE INSERT ON memory_entities
+WHEN NEW.scope = 'agent' AND substr(NEW.scope_key, 1, 4) = 'cmp_' AND (
+       NOT EXISTS (SELECT 1 FROM companion_profiles p
+                   WHERE p.id = NEW.scope_key AND p.deleting_at IS NULL)
+    OR (NEW.source_conversation_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM conversations c
+            WHERE c.id = NEW.source_conversation_id AND c.companion_id = NEW.scope_key))
+)
+BEGIN
+    SELECT RAISE(ABORT, 'memory_companion_owner_mismatch');
+END;
+
+CREATE TRIGGER memory_companion_notes_scope_immutable
+BEFORE UPDATE OF scope, scope_key, source_conversation_id ON memory_entities
+WHEN (substr(OLD.scope_key, 1, 4) = 'cmp_' OR substr(NEW.scope_key, 1, 4) = 'cmp_')
+ AND (NEW.scope IS NOT OLD.scope OR NEW.scope_key IS NOT OLD.scope_key
+      OR (NEW.source_conversation_id IS NOT NULL
+          AND NEW.source_conversation_id IS NOT OLD.source_conversation_id))
+BEGIN
+    SELECT RAISE(ABORT, 'memory_companion_scope_immutable');
+END;
+
+CREATE TRIGGER memory_companion_notes_hard_delete
+BEFORE DELETE ON memory_entities
+WHEN OLD.scope = 'agent' AND substr(OLD.scope_key, 1, 4) = 'cmp_'
+ AND NOT EXISTS (SELECT 1 FROM companion_deletions d
+                 WHERE d.companion_id = OLD.scope_key AND d.state = 'deleting')
+BEGIN
+    SELECT RAISE(ABORT, 'memory_companion_hard_delete_refused');
+END;
+
+CREATE TRIGGER memory_companion_notes_budget_insert
+AFTER INSERT ON memory_entities
+WHEN NEW.scope = 'agent' AND substr(NEW.scope_key, 1, 4) = 'cmp_'
+ AND (SELECT COALESCE(SUM(length(m.content)), 0) FROM memory_entities m
+      WHERE m.scope = 'agent' AND m.scope_key = NEW.scope_key
+        AND m.state = 'confirmed' AND m.enabled = 1
+        AND m.deleted_at IS NULL AND m.moved_at IS NULL) > 4000
+BEGIN
+    SELECT RAISE(ABORT, 'companion_note_budget_exceeded');
+END;
+
+CREATE TRIGGER memory_companion_notes_budget_update
+AFTER UPDATE OF content, state, enabled, deleted_at, moved_at ON memory_entities
+WHEN NEW.scope = 'agent' AND substr(NEW.scope_key, 1, 4) = 'cmp_'
+ AND (SELECT COALESCE(SUM(length(m.content)), 0) FROM memory_entities m
+      WHERE m.scope = 'agent' AND m.scope_key = NEW.scope_key
+        AND m.state = 'confirmed' AND m.enabled = 1
+        AND m.deleted_at IS NULL AND m.moved_at IS NULL) > 4000
+BEGIN
+    SELECT RAISE(ABORT, 'companion_note_budget_exceeded');
+END;
+
+CREATE INDEX idx_memory_entities_companion_notes
+    ON memory_entities(scope_key, deleted_at, moved_at, state, enabled)
+    WHERE scope = 'agent' AND substr(scope_key, 1, 4) = 'cmp_';
+
+CREATE TABLE companion_note_topics (
+    id TEXT PRIMARY KEY CHECK (substr(id, 1, 4) = 'ntp_'),
+    companion_id TEXT NOT NULL REFERENCES companion_profiles(id) ON DELETE CASCADE,
+    title TEXT NOT NULL CHECK (length(trim(title)) BETWEEN 1 AND 60),
+    file_name TEXT NOT NULL,
+    aliases_json TEXT NOT NULL DEFAULT '[]',
+    created_by TEXT NOT NULL CHECK (created_by IN ('user', 'agent')),
+    revision INTEGER NOT NULL DEFAULT 1,
+    content_sha256 TEXT NOT NULL,
+    char_count INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    deleted_at INTEGER,
+    UNIQUE (companion_id, file_name)
+);
+CREATE UNIQUE INDEX idx_companion_note_topics_title
+    ON companion_note_topics(companion_id, lower(trim(title))) WHERE deleted_at IS NULL;
+
+CREATE TABLE companion_note_chunks (
+    topic_id TEXT NOT NULL REFERENCES companion_note_topics(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    heading TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL,
+    bigrams TEXT NOT NULL,
+    topic_revision INTEGER NOT NULL,
+    PRIMARY KEY (topic_id, ordinal)
+);
+
+CREATE TABLE companion_note_moves (
+    id TEXT PRIMARY KEY,
+    companion_id TEXT NOT NULL REFERENCES companion_profiles(id) ON DELETE CASCADE,
+    topic_id TEXT NOT NULL REFERENCES companion_note_topics(id) ON DELETE CASCADE,
+    run_id TEXT,
+    memory_ids_json TEXT NOT NULL,
+    topic_sha_before TEXT,
+    topic_sha_after TEXT,
+    state TEXT NOT NULL CHECK (state IN ('applied', 'failed', 'undone', 'topic_deleted')),
+    error TEXT,
+    created_at INTEGER NOT NULL,
+    undone_at INTEGER
+);
+
+CREATE TRIGGER companion_note_topics_soft_delete
+AFTER UPDATE OF deleted_at ON companion_note_topics
+WHEN OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL
+BEGIN
+    DELETE FROM companion_note_chunks WHERE topic_id = NEW.id;
+    UPDATE companion_note_moves SET state = 'topic_deleted'
+     WHERE topic_id = NEW.id AND state = 'applied';
+    UPDATE memory_entities SET enabled = 0, deleted_at = NEW.deleted_at
+     WHERE scope = 'agent' AND scope_key = NEW.companion_id
+       AND moved_topic_id = NEW.id AND deleted_at IS NULL;
+END;
+
+CREATE TRIGGER companion_note_topics_no_undelete
+BEFORE UPDATE OF deleted_at ON companion_note_topics
+WHEN OLD.deleted_at IS NOT NULL AND NEW.deleted_at IS NOT OLD.deleted_at
+BEGIN
+    SELECT RAISE(ABORT, 'companion_topic_deleted_final');
+END;
+
+CREATE TRIGGER companion_note_chunks_live_topic
+BEFORE INSERT ON companion_note_chunks
+WHEN EXISTS (SELECT 1 FROM companion_note_topics t
+             WHERE t.id = NEW.topic_id AND t.deleted_at IS NOT NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'companion_topic_deleted');
+END;
+
+CREATE TABLE companion_note_requests (
+    id TEXT PRIMARY KEY,
+    companion_id TEXT NOT NULL REFERENCES companion_profiles(id) ON DELETE CASCADE,
+    memory_id TEXT NOT NULL REFERENCES memory_entities(id) ON DELETE CASCADE,
+    expected_version INTEGER NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('patch', 'remove', 'move')),
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    run_id TEXT,
+    status TEXT NOT NULL CHECK (status IN ('open', 'approved', 'rejected', 'stale')),
+    created_at INTEGER NOT NULL,
+    resolved_at INTEGER
+);
+CREATE INDEX idx_companion_note_requests_open
+    ON companion_note_requests(companion_id, status) WHERE status = 'open';
+
+CREATE TABLE companion_note_drafts (
+    companion_id TEXT PRIMARY KEY REFERENCES companion_profiles(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    char_count INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE companion_project_grants (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    companion_id TEXT NOT NULL REFERENCES companion_profiles(id) ON DELETE CASCADE,
+    granted_at INTEGER NOT NULL,
+    revoked_at INTEGER
+);
+CREATE UNIQUE INDEX idx_companion_project_grants_live
+    ON companion_project_grants(project_id, companion_id) WHERE revoked_at IS NULL;
+
+CREATE TRIGGER companion_project_grants_guard
+BEFORE INSERT ON companion_project_grants
+WHEN NOT EXISTS (SELECT 1 FROM companion_profiles p
+                 WHERE p.id = NEW.companion_id AND p.is_default = 0 AND p.deleting_at IS NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'companion_grant_invalid_target');
+END;
+
+-- An empty match set represents a first preference; matching words only offer alternatives.
+CREATE TABLE companion_shared_requests (
+    id TEXT PRIMARY KEY,
+    companion_id TEXT NOT NULL REFERENCES companion_profiles(id) ON DELETE CASCADE,
+    candidate_memory_id TEXT NOT NULL UNIQUE REFERENCES memory_entities(id) ON DELETE CASCADE,
+    candidate_version INTEGER NOT NULL CHECK (candidate_version > 0),
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'added', 'replaced', 'rejected', 'stale')),
+    replaced_memory_id TEXT,
+    created_at INTEGER NOT NULL,
+    resolved_at INTEGER,
+    CHECK ((status = 'open') = (resolved_at IS NULL)),
+    CHECK ((status = 'replaced') = (replaced_memory_id IS NOT NULL)),
+    FOREIGN KEY (id, replaced_memory_id)
+        REFERENCES companion_shared_request_matches(request_id, memory_id)
+);
+
+CREATE TABLE companion_shared_request_matches (
+    request_id TEXT NOT NULL REFERENCES companion_shared_requests(id) ON DELETE CASCADE,
+    memory_id TEXT NOT NULL,
+    expected_version INTEGER NOT NULL CHECK (expected_version > 0),
+    PRIMARY KEY (request_id, memory_id)
+);
+CREATE INDEX idx_companion_shared_requests_open
+    ON companion_shared_requests(companion_id) WHERE status = 'open';
+"#;
 
 pub(crate) const AGENT_BINDINGS_SCHEMA_VERSION: i64 = 105;
 const _: () = assert!(DATABASE_SCHEMA_VERSION >= AGENT_BINDINGS_SCHEMA_VERSION);
@@ -8721,7 +9119,7 @@ mod stage_two_runtime_session_migration_tests {
         // 99 only adds the retired-generation ledger; the v98 mapping itself is
         // unchanged. This test still pins the mapping's version and the
         // database's current version, so a version bump is never silent.
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::AGENT_BINDINGS_SCHEMA_VERSION);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::COMPANIONS_SCHEMA_VERSION);
 
         let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
         let columns: Vec<String> = database
@@ -8770,7 +9168,7 @@ mod runtime_session_generation_migration_tests {
             assert!(!upper.contains(forbidden), "the migration must not contain {forbidden}");
         }
         assert_eq!(RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION, 99);
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::AGENT_BINDINGS_SCHEMA_VERSION);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::COMPANIONS_SCHEMA_VERSION);
     }
 
     /// A v98 database keeps its single live mapping at generation 1 and gains an
@@ -16422,7 +16820,8 @@ mod delivery_acceptance_migration_tests {
         assert_eq!(NATIVE_APPROVAL_COMMAND_SCHEMA_VERSION, 103);
         // v104: A1 permission rules, full-access flag and auto-allow audit.
         assert_eq!(PERMISSION_RULES_SCHEMA_VERSION, 104);
-        assert_eq!(DATABASE_SCHEMA_VERSION, AGENT_BINDINGS_SCHEMA_VERSION);
+        assert_eq!(AGENT_BINDINGS_SCHEMA_VERSION, 105);
+        assert_eq!(DATABASE_SCHEMA_VERSION, COMPANIONS_SCHEMA_VERSION);
 
         // The old rows are untouched.
         let title: String = connection
@@ -16642,3 +17041,5 @@ mod agent_backend_migration_tests {
         assert!(error.to_string().to_ascii_lowercase().contains("check"), "{error}");
     }
 }
+#[cfg(test)]
+mod companion_migration_tests;

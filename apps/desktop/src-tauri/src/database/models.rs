@@ -3,6 +3,29 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CompanionProfile {
+    pub id: String,
+    pub template_agent_id: String,
+    pub display_name: String,
+    pub avatar_ref: String,
+    pub duty: String,
+    pub persona_override: Option<String>,
+    pub workspace_dir: String,
+    pub notes_dir: String,
+    pub workspace_state: String,
+    pub workspace_error: Option<String>,
+    pub is_default: bool,
+    pub pinned_at: Option<i64>,
+    pub last_read_ordinal: i64,
+    pub template_notice_dismissed_hash: Option<String>,
+    pub archived_at: Option<i64>,
+    pub deleting_at: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentRecord {
     pub id: String,
     pub name: String,
@@ -3135,4 +3158,11 @@ impl<T: Serialize> ApiResponse<T> {
             }),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompanionChatState {
+    Active,
+    Archived,
+    Deleting,
 }
