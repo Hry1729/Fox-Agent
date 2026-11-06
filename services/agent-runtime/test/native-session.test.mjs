@@ -86,8 +86,8 @@ async function initialize(runtime, baseUrl) {
   assert.equal(ready.type, 'ready', JSON.stringify(ready))
 }
 
-function prompt(runtime, { conversationId, runtimeSessionId, runId, text }) {
-  runtime.send('prompt', { conversationId, runtimeSessionId, runId, payload: { text, projectContext: { projectRoot: null } } })
+function prompt(runtime, { conversationId, runtimeSessionId, runId, text, ...context }) {
+  runtime.send('prompt', { conversationId, runtimeSessionId, runId, payload: { text, projectContext: { projectRoot: null }, ...context } })
   return runtime.waitFor((message) => message.runId === runId && message.payload?.type === 'run.completed')
 }
 
@@ -141,6 +141,62 @@ test('a pi-native session writes a real JSONL file and takes over the context', 
   assert.ok(sent.includes('第一轮回复'), 'and the first answer')
   const afterTwo = await readFile(sessionPath, 'utf8')
   assert.ok(afterTwo.split('\n').filter(Boolean).length > firstFile.split('\n').filter(Boolean).length, 'both turns live in one Pi session file')
+})
+
+test('the provider gets the adopted contact template and drops revoked private notes on the same native session', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-contact-prompt-'))
+  const provider = await startProvider('上次使用的模板编号是 CARD-OLD。')
+  const runtime = startRuntime()
+  t.after(async () => {
+    await runtime.close()
+    provider.close()
+    await rm(directory, { recursive: true, force: true })
+  })
+  await initialize(runtime, provider.baseUrl)
+  async function newChat(id) {
+    const identity = { conversationId: 'chat-' + id, runtimeSessionId: 'session-' + id }
+    const request = runtime.send('create_session', { ...identity,
+      payload: { sessionFormat: 'pi-native', cwd: directory, sessionDir: join(directory, id) } })
+    const created = await runtime.waitFor(message => message.requestId === request.id)
+    assert.equal(created.type, 'session_created', JSON.stringify(created))
+    return identity
+  }
+  async function sent(identity, runId, context) {
+    await prompt(runtime, { ...identity, runId, text: '请核对本轮规则。', ...context })
+    const { messages } = provider.requests.at(-1)
+    assert.equal(messages[0].role, 'system')
+    assert.equal(messages.filter(m => m.role === 'system').length, 1)
+    return { head: messages[0].content, history: messages.slice(1) }
+  }
+  const note = (role, content) => ({ role, displayName: '测试专家', allowedTools: [],
+    notes: [{ id: 'n1', author:'user', content }], topics: [], snippets: [], usedChars: content.length })
+  const expert = badge => ({ systemPrompt: '当前工牌为 ' + badge + '。' })
+  const contact = await newChat('contact')
+  const before = await sent(contact, 'run-contact-old', {
+    expertPackage: expert('CARD-OLD'), companionContext: note('owner', 'NOTE-OLD') })
+  assert.match(before.head, /CARD-OLD/)
+  assert.match(before.head, /NOTE-OLD/)
+  const adopted = await sent(contact, 'run-contact-new', {
+    expertPackage: expert('CARD-NEW'), companionContext: note('owner', 'NOTE-NEW') })
+  assert.match(adopted.head, /CARD-NEW/)
+  assert.match(adopted.head, /NOTE-NEW/)
+  assert.doesNotMatch(adopted.head, /CARD-OLD|NOTE-OLD/)
+  assert.ok(adopted.history.some(m => m.role === 'assistant' && m.content.includes('CARD-OLD')))
+  assert.match(adopted.head, /本轮专家模板/)
+
+  const project = await newChat('project')
+  const projectExpert = { expertPackage: expert('PROJECT-CARD') }
+  const normal = await sent(project, 'run-project-normal', projectExpert)
+  assert.match(normal.head, /PROJECT-CARD/)
+  assert.doesNotMatch(normal.head, /本轮专家模板|READER-PRIVATE/)
+  const granted = await sent(project, 'run-project-granted', {
+    ...projectExpert, companionContext: note('reader', 'READER-PRIVATE') })
+  assert.match(granted.head, /READER-PRIVATE/)
+  assert.doesNotMatch(granted.head, /本轮专家模板/)
+  const revoked = await sent(project, 'run-project-revoked', projectExpert)
+  assert.match(revoked.head, /PROJECT-CARD/)
+  assert.doesNotMatch(revoked.head, /READER-PRIVATE|本轮专家模板/)
+  assert.equal(revoked.history.filter(m => m.role === 'assistant').length, 2)
 })
 
 test('a damaged, missing or foreign session file is a distinguishable failure', async (context) => {
