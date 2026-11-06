@@ -19,6 +19,14 @@ pub(crate) fn default_conversation_workspace(data_dir: &Path, conversation_id: &
     conversation_workspaces_root(data_dir).join(conversation_id)
 }
 
+pub(crate) fn companion_workspace(data_dir: &Path, id: &str) -> PathBuf {
+    data_dir.join("companions").join(id).join("workspace")
+}
+
+pub(crate) fn companion_notes_dir(data_dir: &Path, id: &str) -> PathBuf {
+    data_dir.join("companions").join(id).join("notes")
+}
+
 /// Directories under the data root that every Fox run relies on.
 pub(crate) fn run_directories(data_dir: &Path) -> Vec<PathBuf> {
     vec![

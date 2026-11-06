@@ -5,6 +5,7 @@ mod canonical_json;
 mod commands;
 mod database;
 mod data_paths;
+mod companion_workspace;
 mod data_compute;
 mod report_pdf;
 mod digital_colleagues;
@@ -199,6 +200,9 @@ pub fn run() {
                 )
             })?;
             database.repair_interrupted_runs()?;
+            if let Err(error) = commands::companions::ensure_default(&database, &app_data_dir) {
+                eprintln!("无法初始化默认联系人：{error}");
+            }
             database.audit_interrupted_tasks()?;
             let runtime_sessions_dir = app_data_dir.join("runtime-sessions");
             std::fs::create_dir_all(&runtime_sessions_dir)?;
@@ -275,6 +279,7 @@ pub fn run() {
                 skills_dir,
             ));
             // AppState 注册之后才能派发：调度器拉起的 Run 会调用 app.state::<AppState>()。
+            commands::companion_deletions::resume_pending(&app.state::<AppState>());
             app.state::<AppState>().runtime_host.start_digital_colleague_scheduler();
             // Not fatal: a broken preview cache directory (e.g. a file at
             // cache/knowledge-preview) is logged here and reported with its
@@ -326,6 +331,18 @@ pub fn run() {
             commands::agents_list,
             commands::agent_save,
             commands::agent_copy,
+            commands::companions::companions_list,
+            commands::companions::companion_ensure_default,
+            commands::companions::companion_add_from_expert,
+            commands::companions::companion_open,
+            commands::companions::companion_update_profile,
+            commands::companions::companion_set_pinned,
+            commands::companions::companion_mark_read,
+            commands::companions::companion_archive,
+            commands::companions::companion_restore,
+            commands::companions::companion_template_status,
+            commands::companions::companion_template_update,
+            commands::companions::companion_template_dismiss,
             commands::agent_delete,
             expert_packages::expert_package_inspect,
             expert_packages::expert_package_install,
@@ -387,6 +404,15 @@ pub fn run() {
             app_capabilities::project_path_update,
             app_capabilities::project_archive,
             app_capabilities::project_root_open,
+            companion_workspace::companion_workspace_repair,
+            companion_workspace::companion_import_files,
+            companion_workspace::companion_export_file,
+            commands::companion_deletions::companion_delete_preview,
+            commands::companion_deletions::companion_delete,
+            commands::companion_deletions::companion_delete_resume,
+            commands::companion_deletions::companion_retained_list,
+            commands::companion_deletions::companion_retained_open,
+            commands::companion_deletions::companion_retained_dismiss,
             app_capabilities::digital_colleague_run_detail,
             app_capabilities::app_notifications_list,
             app_capabilities::app_notification_read,
@@ -427,6 +453,7 @@ pub fn run() {
             commands::conversation_restore,
             commands::conversation_fork,
             commands::conversation_reset_context,
+            commands::companion_context_repair,
             commands::conversation_delete,
             commands::conversation_purge,
             commands::attachments_save,

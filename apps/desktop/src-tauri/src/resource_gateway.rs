@@ -1146,6 +1146,19 @@ mod tests {
         std::os::unix::fs::symlink(&outside,&link).unwrap();
         assert!(execute(&binding,"grep",&json!({"path":".","pattern":"must"}),&token).unwrap_err().contains("outside"));
         assert!(execute(&binding,"read",&json!({"path":outside.join("secret.txt")}),&token).is_err());
+        for tool in ["ls", "find", "grep"] {
+            for path in [&outside, &link] {
+                assert!(execute(&binding,tool,&json!({"path":path,"pattern":"secret"}),&token).is_err(),
+                    "{tool} crossed the frozen workspace through {}", path.display());
+            }
+        }
+        let root = Path::new(binding.permission.project_root.as_ref().unwrap()).canonicalize().unwrap();
+        for path in [outside.join("secret.txt"), link.join("secret.txt")] {
+            let path = path.to_str().unwrap();
+            assert!(crate::runtime_host::approval_policy::check_hard_root(&root,path).is_err());
+            assert!(crate::runtime_host::present_files::resolve_declared_files(
+                &json!({"files":[{"path":path}]}), root.to_str()).is_err());
+        }
     }
 
     #[test]

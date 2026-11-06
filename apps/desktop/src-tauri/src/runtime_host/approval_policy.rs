@@ -1619,6 +1619,14 @@ const SHELL_PROFILES: [&str; 10] = [
     "microsoft.powershell_profile.ps1", "profile.ps1", "config.fish",
 ];
 
+pub(crate) fn check_hard_root(root: &Path, path: &str) -> Result<(), String> {
+    let target = crate::tool_host::canonical_file_identity(root, path)?;
+    if path_boundary(Path::new(&target), Some(root), None).is_some() {
+        return Err("私聊只能写入本联系人工作目录内的普通文件".into());
+    }
+    Ok(())
+}
+
 /// `Some(finding)` when the path is outside the project or protected.
 fn path_boundary(path: &Path, project_root: Option<&Path>, _home: Option<&Path>) -> Option<&'static str> {
     let normalized = normalize(path);

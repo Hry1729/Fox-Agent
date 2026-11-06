@@ -116,7 +116,7 @@ impl Database {
             self.with_connection(|connection| {
                 connection.query_row(
                     "SELECT agent_id, project_id FROM conversations
-                 WHERE id = ?1 AND trashed_at IS NULL",
+                 WHERE id = ?1 AND trashed_at IS NULL AND companion_id IS NULL",
                     [conversation_id],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
@@ -577,8 +577,8 @@ impl Database {
         let max_chars = max_chars.clamp(512, 12_000);
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
-            let (agent_id, project_id): (String, Option<String>) = transaction.query_row(
-                "SELECT agent_id, project_id FROM conversations
+            let (agent_id, project_id): (Option<String>, Option<String>) = transaction.query_row(
+                "SELECT CASE WHEN companion_id IS NULL THEN agent_id END, project_id FROM conversations
                  WHERE id = ?1 AND trashed_at IS NULL",
                 [conversation_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),

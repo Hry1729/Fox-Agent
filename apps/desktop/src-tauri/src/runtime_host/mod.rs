@@ -1117,13 +1117,17 @@ impl session_lifecycle::SessionRuntimeLink for HostSessionLink<'_> {
 }
 
 impl RuntimeHost {
+    pub(crate) fn companion_transition(&self) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+        self.run_transition.lock().map_err(|_| "运行时状态锁已损坏".to_owned())
+    }
+
     pub(crate) fn execute_job_operation(&self, conversation: &str, run_id: &str, tool: &str, input: &Value) -> Result<Value,String> {
         run_bound_conversation(&self.database,run_id,Some(conversation))?;
         let binding=self.database.run_control_binding(run_id)?.ok_or("job operation needs a frozen Run")?;
         if kernel_authority::is_retired_kernel(Some(&binding)) {
             return Err(kernel_authority::retired_route_error());
         }
-        self.ensure_runtime_tool_allowed(run_id,tool,RuntimeToolIngress::Execute).map_err(|(_,e)|e)?;
+        self.ensure_runtime_tool_allowed(run_id,tool,RuntimeToolIngress::Execute, Some(input)).map_err(|(_,e)|e)?;
         let elapsed=if binding.executor_route.is_some() { native_model_budget::elapsed_ms(&self.database, run_id)? } else { 0 };
         let token=self.state.lock().map_err(|_| "runtime state poisoned")?.cancellation.run_token(run_id).ok();
         let budget=std::time::Duration::from_millis(binding.budgets.limit_operation_ms(binding.budgets.tool_execution_ms, elapsed).max(0) as u64);
@@ -2232,6 +2236,21 @@ impl RuntimeHost {
         Ok(())
     }
 
+    pub(crate) fn archive_companion(
+        &self,
+        companion_id: &str,
+    ) -> Result<crate::database::companions::CompanionView, crate::database::companions::CompanionError> {
+        use crate::database::companions::CompanionError;
+        let _transition = self.run_transition.lock()
+            .map_err(|_| CompanionError::Storage("运行时状态锁已损坏".into()))?;
+        let record = self.database.companion_profile(companion_id)?;
+        if record.active_run_status.is_some() {
+            return Err(CompanionError::RunActive);
+        }
+        self.close_conversation_session(&record.conversation_id).map_err(CompanionError::Storage)?;
+        self.database.archive_companion(companion_id)
+    }
+
     fn live_runtime_session_id(&self, conversation_id: &str) -> Option<String> {
         let state = self.state.lock().ok()?;
         let worker = state.worker.as_ref()?;
@@ -2249,21 +2268,36 @@ impl RuntimeHost {
         &self,
         conversation_id: &str,
     ) -> Result<session_lifecycle::ResetOutcome, session_lifecycle::ResetRefusal> {
-        // The reset creates the new session through the worker, and the next
-        // Run reuses it there before Pi has written the file.
-        self.ensure_worker(conversation_id)
-            .map_err(session_lifecycle::ResetRefusal::failed)?;
-        let _transition = self
-            .run_transition
-            .lock()
-            .map_err(|_| session_lifecycle::ResetRefusal::failed("运行时状态锁已损坏"))?;
-        let active = self
-            .database
-            .conversation_has_active_run(conversation_id)
-            .map_err(session_lifecycle::ResetRefusal::failed)?;
-        if active {
-            return Err(session_lifecycle::ResetRefusal::run_active());
+        self.replace_context(conversation_id, false)
+    }
+
+    pub(crate) fn repair_companion_context(
+        &self,
+        conversation_id: &str,
+    ) -> Result<session_lifecycle::ResetOutcome, session_lifecycle::ResetRefusal> {
+        self.replace_context(conversation_id, true)
+    }
+
+    fn replace_context(
+        &self,
+        conversation_id: &str,
+        repair: bool,
+    ) -> Result<session_lifecycle::ResetOutcome, session_lifecycle::ResetRefusal> {
+        use session_lifecycle::ResetRefusal;
+        let _transition = self.run_transition.lock()
+            .map_err(|_| ResetRefusal::failed("运行时状态锁已损坏"))?;
+        if self.database.conversation_has_active_run(conversation_id).map_err(ResetRefusal::failed)? {
+            return Err(ResetRefusal::run_active());
         }
+        let available = if repair {
+            self.companion_repair_availability(conversation_id)
+        } else {
+            self.context_reset_availability(conversation_id)
+        }.map_err(ResetRefusal::failed)?;
+        if let Some(refusal) = available.refusal() {
+            return Err(refusal);
+        }
+        self.ensure_worker(conversation_id).map_err(ResetRefusal::failed)?;
         self.close_conversation_session(conversation_id).map_err(session_lifecycle::ResetRefusal::failed)?;
         let lease = kernel_run_lock::KernelRunLock::acquire(&self.sessions_dir, &format!("native-session:{conversation_id}"))
             .map_err(session_lifecycle::ResetRefusal::failed)?;
@@ -2313,12 +2347,35 @@ impl RuntimeHost {
         &self,
         conversation_id: &str,
     ) -> Result<session_lifecycle::ResetAvailability, String> {
+        if self.database.companion_chat_state(conversation_id)?.is_some() {
+            return Ok(ResetAvailability::unsupported("companion.reset_unsupported", "固定私聊仅在模型上下文无法恢复时提供修复。"));
+        }
         let runtime_type = self.database.conversation_runtime_type(conversation_id)?;
         let mapping = self.database.get_runtime_session(conversation_id)?;
         Ok(session_lifecycle::reset_availability(
             &runtime_type,
             mapping.as_ref(),
         ))
+    }
+
+    pub(crate) fn companion_repair_availability(&self, chat: &str) -> Result<ResetAvailability, String> {
+        let state = self.database.companion_chat_state(chat)?;
+        if state != Some(crate::database::CompanionChatState::Active) {
+            return Ok(ResetAvailability::unsupported("companion.repair_not_needed", "仅可修复使用中的联系人私聊。"));
+        }
+        let record = self.database.get_runtime_session(chat)?;
+        let live = self.live_runtime_session_id(chat);
+        if !session_lifecycle::context_irrecoverable(record.as_ref(), live.as_deref()) {
+            return Ok(ResetAvailability::unsupported("companion.repair_not_needed", "当前私聊无需修复。"));
+        }
+        if self.database.conversation_has_active_run(chat)? {
+            return Ok(ResetAvailability::unsupported("session.reset_run_active", "请先停止当前生成。"));
+        }
+        let root = self.sessions_dir.parent().ok_or("无法定位 Fox 数据目录")?;
+        if let Err(error) = crate::companion_workspace::require_for_chat(&self.database, root, chat) {
+            return Ok(ResetAvailability::unsupported("companion.workspace_unavailable", error));
+        }
+        Ok(ResetAvailability::supported())
     }
 
     fn session_lifecycle(&self) -> session_lifecycle::SessionLifecycle<'_> {
@@ -2835,7 +2892,10 @@ impl RuntimeHost {
         run_id: &str,
         tool: &str,
         ingress: RuntimeToolIngress,
+        input: Option<&Value>,
     ) -> Result<(), (&'static str, String)> {
+        let data_dir = self.sessions_dir.parent().ok_or(("companion.workspace_unavailable", "缺少数据目录".into()))?;
+        crate::companion_workspace::check_run_tool(&self.database, data_dir, run_id, tool, input)?;
         let (active_profile_id, capabilities) = {
             let state = self.state.lock().map_err(|_| {
                 (
@@ -2900,7 +2960,7 @@ impl RuntimeHost {
                 "runtime.tool_event.tool_missing",
                 "Runtime tool event omitted a non-empty tool name".to_owned(),
             ))?;
-        self.ensure_runtime_tool_allowed(run_id, tool, RuntimeToolIngress::Event)?;
+        self.ensure_runtime_tool_allowed(run_id, tool, RuntimeToolIngress::Event, None)?;
         self.ensure_delegated_tool_allowed(tool)
             .map_err(|error| ("runtime.tool_event.delegated_scope_denied", error))?;
         let conversation_id = self
@@ -3728,6 +3788,7 @@ impl RuntimeHost {
                         run_id,
                         tool,
                         RuntimeToolIngress::Preflight,
+                        envelope.payload.as_ref().and_then(|payload| payload.get("input")),
                     ) {
                         let response = HostResponse::for_request(
                             &envelope,
@@ -3872,7 +3933,7 @@ impl RuntimeHost {
                                 Err(("runtime.native_proxy_required", "Routed Runs must use the registered native tool proxy".into()))
                             } else { Ok(()) }
                         })
-                        .and_then(|_| runtime_host.ensure_runtime_tool_allowed(run_id, tool, ingress))
+                        .and_then(|_| runtime_host.ensure_runtime_tool_allowed(run_id, tool, ingress, envelope.payload.as_ref().and_then(|payload| payload.get("input"))))
                         .and_then(|_| {
                             if readonly_execution {
                                 require_rust_reader_binding(&database, &envelope).map(|_| ()).map_err(|error| ("resource_gateway.binding_rejected", error))

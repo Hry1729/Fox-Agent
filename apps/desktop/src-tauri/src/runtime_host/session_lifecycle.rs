@@ -313,6 +313,30 @@ pub(crate) fn open_decision(
     OpenDecision::Resume
 }
 
+fn classify_open(
+    mapping: Option<&RuntimeSessionRecord>,
+    persisted: bool,
+    recorded_file_exists: bool,
+    live_runtime_session_id: Option<&str>,
+) -> OpenDecision {
+    match open_decision(mapping, persisted) {
+        OpenDecision::Refuse { code: SESSION_NOT_PERSISTED, .. }
+            if mapping.is_some_and(|record| record.native_path().is_some()
+                && allocated_mapping_is_live(record, live_runtime_session_id)) => OpenDecision::ReuseLive,
+        OpenDecision::Refuse { code: SESSION_NOT_PERSISTED, .. }
+            if mapping.is_some_and(|record| adoption_is_safe(record, recorded_file_exists)) => OpenDecision::Adopt,
+        other => other,
+    }
+}
+
+pub(crate) fn context_irrecoverable(mapping: Option<&RuntimeSessionRecord>, live: Option<&str>) -> bool {
+    let Some(record) = mapping.filter(|record| record.is_native()) else { return false };
+    let path = record.native_path();
+    let persisted = path.as_deref().is_some_and(native_session_file_is_persisted);
+    let exists = path.is_some_and(|path| std::fs::symlink_metadata(path).is_ok());
+    matches!(classify_open(Some(record), persisted, exists, live), OpenDecision::Refuse { .. })
+}
+
 /// Runtime events that prove Pi has written its session file.
 ///
 /// `run.started` is emitted *before* the first message is appended, so it is
@@ -414,27 +438,7 @@ impl<'a> SessionLifecycle<'a> {
             }
             _ => (false, false),
         };
-        let decision = match open_decision(mapping.as_ref(), persisted) {
-            OpenDecision::Refuse { code: SESSION_NOT_PERSISTED, .. }
-                if mapping.as_ref().is_some_and(|record| {
-                    allocated_mapping_is_live(record, live_runtime_session_id)
-                }) =>
-            {
-                OpenDecision::ReuseLive
-            }
-            // The worker that created the generation is gone, so the live id
-            // proves nothing — but Pi still never wrote this generation's file,
-            // so there is no context to lose: adopt the session Pi creates now
-            // instead of forcing a second reset.
-            OpenDecision::Refuse { code: SESSION_NOT_PERSISTED, .. }
-                if mapping.as_ref().is_some_and(|record| {
-                    adoption_is_safe(record, recorded_file_exists)
-                }) =>
-            {
-                OpenDecision::Adopt
-            }
-            other => other,
-        };
+        let decision = classify_open(mapping.as_ref(), persisted, recorded_file_exists, live_runtime_session_id);
         match decision {
             OpenDecision::Create => self.create(conversation_id, link),
             OpenDecision::Resume => {

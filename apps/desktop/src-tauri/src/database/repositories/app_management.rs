@@ -536,7 +536,7 @@ impl Database {
                 let mut statement = connection.prepare(
                     "SELECT c.id, c.title, COALESCE(p.name, '普通对话'), c.updated_at
                      FROM conversations c LEFT JOIN projects p ON p.id = c.project_id
-                     WHERE c.archived = 0 AND c.trashed_at IS NULL AND c.conversation_kind = 'primary'
+                     WHERE c.companion_id IS NULL AND c.archived = 0 AND c.trashed_at IS NULL AND c.conversation_kind = 'primary'
                        AND (c.title LIKE ?1 ESCAPE '\\' OR EXISTS(
                             SELECT 1 FROM messages m WHERE m.conversation_id = c.id
                               AND m.content LIKE ?1 ESCAPE '\\'))
@@ -581,7 +581,7 @@ impl Database {
                 let mut statement = connection.prepare(
                     "SELECT a.id, a.display_name, COALESCE(c.title, '文件产物'), a.created_at, c.id
                      FROM artifacts a JOIN conversations c ON c.id = a.conversation_id
-                     WHERE c.archived = 0 AND c.trashed_at IS NULL
+                     WHERE c.companion_id IS NULL AND c.archived = 0 AND c.trashed_at IS NULL
                        AND a.display_name LIKE ?1 ESCAPE '\\'
                      ORDER BY a.created_at DESC LIMIT ?2")?;
                 results.extend(statement.query_map(params![pattern, limit as i64], |row| Ok(GlobalSearchRecord {
@@ -595,7 +595,7 @@ impl Database {
                      FROM work_tasks t
                      JOIN goals g ON g.id = t.goal_id
                      JOIN conversations c ON c.id = g.conversation_id
-                     WHERE c.archived = 0 AND c.trashed_at IS NULL
+                     WHERE c.companion_id IS NULL AND c.archived = 0 AND c.trashed_at IS NULL
                        AND (t.title LIKE ?1 ESCAPE '\\' OR t.detail LIKE ?1 ESCAPE '\\')
                      ORDER BY t.updated_at DESC LIMIT ?2")?;
                 results.extend(statement.query_map(params![pattern, limit as i64], |row| Ok(GlobalSearchRecord {

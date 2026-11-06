@@ -757,7 +757,7 @@ fn validate_tool_policy(host: &super::RuntimeHost, envelope: &RuntimeEnvelope,
     let ingress = if crate::resource_gateway::is_reader(&request.tool) {
         super::RuntimeToolIngress::Preflight
     } else { super::RuntimeToolIngress::Execute };
-    host.ensure_runtime_tool_allowed(&request.run_id, &request.tool, ingress)
+    host.ensure_runtime_tool_allowed(&request.run_id, &request.tool, ingress, Some(&request.input))
         .map_err(|(code, error)| format!("{code}: {error}"))?;
     host.ensure_delegated_tool_allowed(&request.tool)?;
     super::ensure_expert_tool_allowed(&host.database, envelope.conversation_id.as_deref().unwrap_or_default(), &request.tool)?;

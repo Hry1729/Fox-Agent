@@ -1,7 +1,7 @@
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
 use super::{
-    migrations, AgentRecord, AgentResourceRecord, AgentResourcesRecord, ArtifactDeliveryView, ArtifactRecord,
+    migrations, CompanionChatState, AgentRecord, AgentResourceRecord, AgentResourcesRecord, ArtifactDeliveryView, ArtifactRecord,
     AttachmentRecord, ConversationDetail, ConversationExpertBinding,
     ConversationExpertBindingError, ConversationRuntimeRecord, ConversationSummary,
     ExpertPackageVersionRecord, ExternalRunRecord, InstallExpertPackageVersionRequest,
@@ -34,6 +34,7 @@ mod agent_config;
 mod artifact_delivery_view;
 mod app_management;
 mod bundled_capabilities;
+pub(crate) mod companions;
 mod computed_artifacts;
 mod delivery_acceptance;
 mod child_runs;
@@ -2052,6 +2053,39 @@ impl Database {
         })
     }
 
+    pub(crate) fn conversation_companion_id(&self, chat: &str) -> Result<Option<String>, String> {
+        self.with_connection(|connection| connection.query_row(
+            "SELECT companion_id FROM conversations WHERE id = ?1", [chat], |row| row.get(0),
+        ))
+    }
+
+    pub(crate) fn companion_chat_state(&self, chat: &str) -> Result<Option<CompanionChatState>, String> {
+        self.with_connection(|connection| {
+            connection.query_row(
+                "SELECT p.deleting_at IS NOT NULL, p.archived_at IS NOT NULL
+                 FROM conversations c JOIN companion_profiles p ON p.id = c.companion_id
+                 WHERE c.id = ?1",
+                [chat],
+                |row| Ok(if row.get(0)? {
+                    CompanionChatState::Deleting
+                } else if row.get(1)? {
+                    CompanionChatState::Archived
+                } else {
+                    CompanionChatState::Active
+                }),
+            ).optional()
+        })
+    }
+
+    pub(crate) fn companion_name_for_template(&self, agent_id: &str) -> Result<Option<String>, String> {
+        self.with_connection(|connection| {
+            connection.query_row(
+                "SELECT display_name FROM companion_profiles WHERE template_agent_id = ?1",
+                [agent_id], |row| row.get(0),
+            ).optional()
+        })
+    }
+
     pub fn list_conversations(&self) -> Result<Vec<ConversationSummary>, String> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
@@ -2066,7 +2100,7 @@ impl Database {
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
                  LEFT JOIN kernel_execution_policies kep ON kep.conversation_id = c.id
-                 WHERE c.conversation_kind = 'primary' AND c.archived = 0 AND c.trashed_at IS NULL
+                 WHERE c.companion_id IS NULL AND c.conversation_kind = 'primary' AND c.archived = 0 AND c.trashed_at IS NULL
                  ORDER BY c.pinned DESC, COALESCE(c.last_message_at, c.created_at) DESC",
             )?;
             let mut records: Vec<ConversationSummary> = statement
@@ -2091,7 +2125,7 @@ impl Database {
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
                  LEFT JOIN kernel_execution_policies kep ON kep.conversation_id = c.id
-                 WHERE c.conversation_kind = 'primary' AND c.archived = 1 AND c.trashed_at IS NULL
+                 WHERE c.companion_id IS NULL AND c.conversation_kind = 'primary' AND c.archived = 1 AND c.trashed_at IS NULL
                  ORDER BY COALESCE(c.archived_at, c.updated_at) DESC",
             )?;
             let mut records: Vec<ConversationSummary> = statement
@@ -2116,7 +2150,7 @@ impl Database {
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
                  LEFT JOIN kernel_execution_policies kep ON kep.conversation_id = c.id
-                 WHERE c.conversation_kind = 'primary' AND c.trashed_at IS NOT NULL
+                 WHERE c.companion_id IS NULL AND c.conversation_kind = 'primary' AND c.trashed_at IS NOT NULL
                  ORDER BY c.trashed_at DESC",
             )?;
             let mut records: Vec<ConversationSummary> = statement
@@ -2360,7 +2394,7 @@ impl Database {
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
                  LEFT JOIN kernel_execution_policies kep ON kep.conversation_id = c.id
-                 WHERE c.conversation_kind = 'primary' AND c.archived = 0 AND c.trashed_at IS NULL AND (
+                 WHERE c.companion_id IS NULL AND c.conversation_kind = 'primary' AND c.archived = 0 AND c.trashed_at IS NULL AND (
                        c.title LIKE ?1 ESCAPE '\\'
                     OR COALESCE(p.root_path, c.project_root, '') LIKE ?1 ESCAPE '\\'
                     OR a.name LIKE ?1 ESCAPE '\\'
@@ -2585,46 +2619,7 @@ impl Database {
             return Err(ConversationExpertBindingError::RemoteUnavailable);
         }
 
-        let now = now_ms();
-        transaction.execute(
-            "UPDATE conversation_expert_bindings
-             SET state = 'replaced', deactivated_at = ?2
-             WHERE conversation_id = ?1 AND state = 'active'",
-            params![conversation_id, now],
-        )?;
-        let id = Uuid::new_v4().to_string();
-        let package_snapshot = agent_package_snapshot(&expert);
-        let package_hash = package_snapshot_hash(&package_snapshot);
-        let display_snapshot_json = json!({
-            "id": expert_id,
-            "name": expert.name,
-            "description": expert.description,
-            "icon": expert.icon,
-            "category": expert.category,
-            "agentKind": expert.agent_kind,
-            "invocationMode": expert.invocation_mode,
-            "visibility": expert.visibility,
-            "packageVersion": expert.package_version,
-        });
-        transaction.execute(
-            "INSERT INTO conversation_expert_bindings(
-                id, conversation_id, expert_id, state, activation_source, expert_version,
-                package_hash, package_snapshot_json, display_snapshot_json, activated_at,
-                deactivated_at
-             ) VALUES (?1, ?2, ?3, 'active', ?4, ?5, ?6, ?7, ?8, ?9, NULL)",
-            params![
-                id,
-                conversation_id,
-                expert_id,
-                activation_source,
-                expert.package_version,
-                package_hash,
-                package_snapshot.canonical_string(),
-                display_snapshot_json.canonical_string(),
-                now
-            ],
-        )?;
-        let binding = query_conversation_expert_binding(&transaction, &id)?;
+        let binding = activate_expert_binding(&transaction, conversation_id, &expert, activation_source)?;
         transaction.commit()?;
         Ok(binding)
     }
@@ -5648,6 +5643,12 @@ impl Database {
 
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
+            if transaction.query_row(
+                "SELECT companion_id IS NOT NULL FROM conversations WHERE id = ?1",
+                [conversation_id], |row| row.get::<_, bool>(0),
+            )? {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
             let (target_ordinal, target_created_at, target_role): (i64, i64, String) = transaction
                 .query_row(
                     "SELECT ordinal, created_at, role FROM messages
@@ -7925,7 +7926,9 @@ fn create_run_in_transaction(
                 END,
                 c.title
          FROM conversations c JOIN agents a ON a.id = c.agent_id
-         WHERE c.id = ?1 AND c.archived = 0 AND c.trashed_at IS NULL",
+         WHERE c.id = ?1 AND c.archived = 0 AND c.trashed_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM companion_profiles cp WHERE cp.id = c.companion_id
+                           AND (cp.archived_at IS NOT NULL OR cp.deleting_at IS NOT NULL))",
         params![conversation_id, requested_model],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
@@ -8363,6 +8366,54 @@ pub(crate) fn agent_package_snapshot(agent: &AgentRecord) -> Value {
 
 pub(crate) fn package_snapshot_hash(package_snapshot: &Value) -> String {
     hex::encode(Sha256::digest(package_snapshot.canonical_string().as_bytes()))
+}
+
+fn activate_expert_binding(
+    connection: &rusqlite::Transaction<'_>,
+    conversation_id: &str,
+    expert: &AgentRecord,
+    activation_source: &str,
+) -> rusqlite::Result<ConversationExpertBinding> {
+    let now = now_ms();
+    connection.execute(
+        "UPDATE conversation_expert_bindings
+         SET state = 'replaced', deactivated_at = ?2
+         WHERE conversation_id = ?1 AND state = 'active'",
+        params![conversation_id, now],
+    )?;
+    let id = Uuid::new_v4().to_string();
+    let package_snapshot = agent_package_snapshot(expert);
+    let package_hash = package_snapshot_hash(&package_snapshot);
+    let display_snapshot_json = json!({
+        "id": expert.id,
+        "name": expert.name,
+        "description": expert.description,
+        "icon": expert.icon,
+        "category": expert.category,
+        "agentKind": expert.agent_kind,
+        "invocationMode": expert.invocation_mode,
+        "visibility": expert.visibility,
+        "packageVersion": expert.package_version,
+    });
+    connection.execute(
+        "INSERT INTO conversation_expert_bindings(
+            id, conversation_id, expert_id, state, activation_source, expert_version,
+            package_hash, package_snapshot_json, display_snapshot_json, activated_at,
+            deactivated_at
+         ) VALUES (?1, ?2, ?3, 'active', ?4, ?5, ?6, ?7, ?8, ?9, NULL)",
+        params![
+            id,
+            conversation_id,
+            expert.id,
+            activation_source,
+            expert.package_version,
+            package_hash,
+            package_snapshot.canonical_string(),
+            display_snapshot_json.canonical_string(),
+            now
+        ],
+    )?;
+    query_conversation_expert_binding(connection, &id)
 }
 
 fn conversation_expert_binding_lock_reason(

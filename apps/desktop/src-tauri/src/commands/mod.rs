@@ -1,3 +1,4 @@
+pub(crate) mod companions;
 pub(crate) mod agent_backend_routing;
 mod kernel_reliability;
 mod kernel_reconciliation;
@@ -72,6 +73,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
 
 pub(crate) mod plugin_center;
+pub(crate) mod companion_deletions;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -133,9 +135,17 @@ pub(crate) struct ConversationLoadResponse {
     /// Where the Host offers a context reset for this conversation. The menu
     /// item mirrors this fact; the command still refuses on its own.
     context_reset: crate::runtime_host::ResetAvailability,
+    context_repair: ContextRepair,
+    companion_id: Option<String>,
     /// Why a reset is unavailable *right now* (an active Run), if it is. The
     /// support boundary above is durable; this one is per-instant.
     context_reset_blocked_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ContextRepair {
+    available: bool,
+    reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -289,7 +299,7 @@ pub fn project_folder_pick() -> ApiResponse<Option<String>> {
 }
 
 #[cfg(windows)]
-fn pick_save_file_windows(filename: &str) -> Result<Option<PathBuf>, String> {
+pub(crate) fn pick_save_file_windows(filename: &str) -> Result<Option<PathBuf>, String> {
     use windows::core::{HRESULT, HSTRING};
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
@@ -1031,6 +1041,11 @@ pub fn agent_copy(
 
 #[tauri::command]
 pub fn agent_delete(state: State<'_, AppState>, request: AgentIdRequest) -> ApiResponse<bool> {
+    match state.database.companion_name_for_template(&request.agent_id) {
+        Ok(Some(name)) => return ApiResponse::failure("companion.template_in_use", format!("请先删除联系人「{name}」。"), false),
+        Ok(None) => {}
+        Err(error) => return storage_error(error),
+    }
     state
         .database
         .delete_agent(&request.agent_id)
@@ -1496,6 +1511,9 @@ pub fn conversation_permission_update(
     // confirmation; the project remembers it afterwards. A conversation with
     // no project confirms every time.
     if mode.full_access() {
+        if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false) {
+            return refusal;
+        }
         let access = match state.database.conversation_access(&request.conversation_id) {
             Ok(access) => access,
             Err(error) => return storage_error(error),
@@ -1916,6 +1934,9 @@ pub fn conversation_expert_bind(
     state: State<'_, AppState>,
     request: ConversationExpertBindRequest,
 ) -> ApiResponse<ConversationExpertBinding> {
+    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false) {
+        return refusal;
+    }
     match state.database.bind_conversation_expert(
         &request.conversation_id,
         &request.expert_id,
@@ -1931,6 +1952,9 @@ pub fn conversation_expert_remove(
     state: State<'_, AppState>,
     request: ConversationIdRequest,
 ) -> ApiResponse<ConversationExpertBinding> {
+    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false) {
+        return refusal;
+    }
     match state
         .database
         .remove_conversation_expert(&request.conversation_id)
@@ -1950,6 +1974,9 @@ pub async fn conversation_rename(
     state: State<'_, AppState>,
     request: RenameConversationRequest,
 ) -> Result<ApiResponse<ConversationSummary>, String> {
+    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false) {
+        return Ok(refusal);
+    }
     let title = request.title.trim();
     if title.is_empty() {
         return Ok(ApiResponse::failure(
@@ -2031,6 +2058,9 @@ pub fn conversation_change_project(
     state: State<'_, AppState>,
     request: ChangeConversationProjectRequest,
 ) -> ApiResponse<ConversationSummary> {
+    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false) {
+        return refusal;
+    }
     let project_root = match normalize_project_root(request.project_root.as_deref()) {
         Ok(project_root) => project_root,
         Err(error) => return ApiResponse::failure("conversation.invalid_project_root", error, false),
@@ -2095,6 +2125,9 @@ pub fn conversation_pin(
     state: State<'_, AppState>,
     request: UpdateConversationPinnedRequest,
 ) -> ApiResponse<ConversationSummary> {
+    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false) {
+        return refusal;
+    }
     match state
         .database
         .set_conversation_pinned(&request.conversation_id, request.pinned)
@@ -2111,6 +2144,9 @@ pub fn conversation_archive(
     external: State<'_, crate::external_backend::ExternalBackendHost>,
     request: ConversationIdRequest,
 ) -> ApiResponse<ConversationSummary> {
+    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false) {
+        return refusal;
+    }
     match state
         .database
         .conversation_has_active_run(&request.conversation_id)
@@ -2175,6 +2211,9 @@ pub fn conversation_fork(
     state: State<'_, AppState>,
     request: ConversationForkRequest,
 ) -> ApiResponse<ConversationSummary> {
+    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false) {
+        return refusal;
+    }
     match state
         .database
         .conversation_has_active_run(&request.conversation_id)
@@ -2254,6 +2293,14 @@ pub fn conversation_load(
                             return ApiResponse::failure("session.reset_status_unavailable", error, true)
                         }
                     };
+                    let companion_id = match state.database.conversation_companion_id(&request.conversation_id) {
+                        Ok(id) => id,
+                        Err(error) => return storage_error(error),
+                    };
+                    let context_repair = match state.runtime_host.companion_repair_availability(&request.conversation_id) {
+                        Ok(status) => ContextRepair { available: status.supported, reason: status.reason },
+                        Err(error) => return storage_error(error),
+                    };
                     let context_reset_blocked_reason = match state
                         .database
                         .conversation_has_active_run(&request.conversation_id)
@@ -2268,6 +2315,8 @@ pub fn conversation_load(
                         kernel_snapshot,
                         context_reset,
                         context_reset_blocked_reason,
+                        context_repair,
+                        companion_id,
                     })
                 }
                 Err(error) => storage_error(error),
@@ -2312,6 +2361,9 @@ pub async fn conversation_delete(
     external: State<'_, crate::external_backend::ExternalBackendHost>,
     request: ConversationIdRequest,
 ) -> Result<ApiResponse<bool>, String> {
+    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false) {
+        return Ok(refusal);
+    }
     match state
         .database
         .conversation_has_active_run(&request.conversation_id)
@@ -2345,6 +2397,9 @@ pub async fn conversation_purge(
     state: State<'_, AppState>,
     request: ConversationIdRequest,
 ) -> Result<ApiResponse<bool>, String> {
+    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false) {
+        return Ok(refusal);
+    }
     match state
         .database
         .conversation_is_trashed(&request.conversation_id)
@@ -2466,6 +2521,21 @@ pub async fn conversation_reset_context(
     )
 }
 
+#[tauri::command]
+pub async fn companion_context_repair(
+    state: State<'_, AppState>,
+    request: ConversationIdRequest,
+) -> Result<ApiResponse<ConversationContextReset>, String> {
+    Ok(match state.runtime_host.repair_companion_context(&request.conversation_id) {
+        Ok(outcome) => ApiResponse::success(ConversationContextReset {
+            conversation_id: request.conversation_id,
+            context_generation: outcome.context_generation,
+            runtime_session_id: outcome.runtime_session_id,
+        }),
+        Err(refusal) => ApiResponse::failure(&refusal.code, refusal.message, false),
+    })
+}
+
 fn remove_managed_file(data_dir: &std::path::Path, path: &std::path::Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
@@ -2494,6 +2564,28 @@ mod command_tests {
     use serde_json::json;
     use std::path::Path;
     use uuid::Uuid;
+
+    #[test]
+    fn companion_chat_refuses_normal_actions_and_stays_out_of_normal_search() {
+        let root = std::env::temp_dir().join(format!("fox-companion-guard-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let database = crate::database::Database::open(root.join("fox.db")).unwrap();
+        let private = database.seed_default_companion(&root).unwrap();
+        let ordinary = database.create_conversation("fox-general", Some("普通对话"), None, None).unwrap();
+        let chat = &private.conversation_id;
+        assert!(super::protect_companion_chat::<()>(&database, &ordinary.id, false).is_none());
+        let refusal = super::protect_companion_chat::<()>(&database, chat, true).unwrap();
+        assert_eq!(refusal.error.unwrap().code, "companion.chat_append_only");
+        assert!(database.list_conversations().unwrap().iter().all(|c| &c.id != chat));
+        assert!(database.search_conversations("小狐", 20).unwrap().iter().all(|c| &c.id != chat));
+        assert!(database.global_search("小狐", 20).unwrap().iter().all(|hit| &hit.id != chat));
+        assert!(database.rewind_run(chat, "missing", "补充说明", None).is_err());
+        database.archive_companion(&private.profile.id).unwrap();
+        assert!(database.create_run_checked(chat, "归档期间不能发送", None).is_err());
+        assert!(database.load_conversation(chat).unwrap().messages.is_empty());
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn kernel_cancel_command_routes_before_legacy_writes_and_never_falls_back() {
@@ -2745,6 +2837,19 @@ pub fn run_start(
     state: State<'_, AppState>,
     request: StartRunRequest,
 ) -> ApiResponse<StartRunResult> {
+    match state.database.companion_chat_state(&request.conversation_id) {
+        Ok(Some(crate::database::CompanionChatState::Archived)) =>
+            return ApiResponse::failure("companion.archived", "请先恢复这个联系人再发送消息。", false),
+        Ok(Some(crate::database::CompanionChatState::Deleting)) =>
+            return ApiResponse::failure("companion.deleting", "联系人正在删除，无法发送消息。", false),
+        Ok(Some(crate::database::CompanionChatState::Active)) => {
+            if let Err(error) = crate::companion_workspace::require_for_chat(&state.database, &state.data_dir, &request.conversation_id) {
+                return ApiResponse::failure("companion.workspace_unavailable", error, false);
+            }
+        }
+        Err(error) => return storage_error(error),
+        _ => {}
+    }
     // Plan 5.4: route by the conversation's frozen backend before any run row
     // or attachment binding is written. A non-Fox conversation is refused here
     // (disabled / not yet wired); a mismatched `agentBackend` is misrouted.
@@ -2998,6 +3103,9 @@ pub async fn run_rewind(
     state: State<'_, AppState>,
     request: RewindRunRequest,
 ) -> Result<ApiResponse<StartRunResult>, String> {
+    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, true) {
+        return Ok(refusal);
+    }
     let mut runtime_text = request
         .runtime_text
         .clone()
@@ -4423,6 +4531,19 @@ pub async fn goal_running_set(
         goal,
         started_run: dispatched.data,
     }))
+}
+
+fn protect_companion_chat<T: Serialize>(db: &crate::database::Database, chat: &str, rewind: bool) -> Option<ApiResponse<T>> {
+    match db.companion_chat_state(chat) {
+        Ok(None) => None,
+        Ok(Some(_)) if rewind => Some(ApiResponse::failure(
+            "companion.chat_append_only", "固定私聊保留原消息，请发送新消息纠正。", false,
+        )),
+        Ok(Some(_)) => Some(ApiResponse::failure(
+            "companion.chat_protected", "请在联系人资料页管理固定私聊。", false,
+        )),
+        Err(error) => Some(storage_error(error)),
+    }
 }
 
 fn storage_error<T: serde::Serialize>(error: String) -> ApiResponse<T> {
@@ -5953,7 +6074,7 @@ pub(crate) fn open_downloaded_file(_path: &Path, _reveal: bool) -> Result<(), St
 }
 
 #[cfg(windows)]
-fn replace_download_file(source: &Path, destination: &Path) -> Result<(), String> {
+pub(crate) fn replace_download_file(source: &Path, destination: &Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::GetLastError;
@@ -5982,7 +6103,7 @@ fn replace_download_file(source: &Path, destination: &Path) -> Result<(), String
 }
 
 #[cfg(not(windows))]
-fn replace_download_file(source: &Path, destination: &Path) -> Result<(), String> {
+pub(crate) fn replace_download_file(source: &Path, destination: &Path) -> Result<(), String> {
     std::fs::rename(source, destination).map_err(|error| format!("无法完成下载文件：{error}"))
 }
 

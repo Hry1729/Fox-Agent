@@ -10,6 +10,7 @@ pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 106;
 pub(crate) use repositories::{AcceptanceBinding, AcceptanceRow, AcceptanceWrite};
 pub(crate) use repositories::kernel_execution_admission;
 pub(crate) use repositories::permission_rules::{ConversationAccess, PermissionAuditRecord, PermissionRuleRecord};
+pub(crate) use repositories::companions;
 pub(crate) use repositories::RunBackendIdentity;
 pub(crate) use repositories::{EXECUTOR_ROUTE_RETIRED, EXECUTOR_ROUTE_RETIRED_MESSAGE, EXECUTOR_ROUTE_UNKNOWN};
 pub(crate) use repositories::kernel_reconciliation::*;
