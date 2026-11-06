@@ -181,7 +181,7 @@ async function desktop() {
     const { checkLiveModel } = await import('./contacts-live-model.mjs')
     const filter = process.env.FOX_CONTACTS_LIVE_FILTER?.trim() || null
     evidence.liveSelection = { scope: filter ? 'partial' : 'full', filter, selected: [], skipped: [] }
-    evidence.liveModel = await checkLiveModel({ source: liveProfile, invoke, db, check, builtin, expert, directory, poll, selection: evidence.liveSelection })
+    evidence.liveModel = await checkLiveModel({ source: liveProfile, invoke, db, check, builtin, expert, directory, poll, endpoint, selection: evidence.liveSelection })
     return
   }
   await check('A01/A02 isolated startup and duplicate add',async () => {

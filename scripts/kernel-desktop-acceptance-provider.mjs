@@ -27,6 +27,13 @@ function responseFor(messages) {
   const userIndex = messages.findLastIndex(message => message.role === 'user')
   const user = content(messages[userIndex]?.content)
   const results = messages.slice(userIndex + 1).filter(message => message.role === 'tool')
+  const seed = user.match(/^\[CONTACTS_M1_SEED_NOTE\]\r?\n([^\r\n]+)$/)
+  if (process.env.FOX_CONTACTS_ACCEPTANCE === '1' && seed) {
+    if (!results.length) return { tool: 'memory_write', input: {
+      target: 'notes', action: 'add', content: seed[1], canonicalKey: 'prior_supplier_quote',
+    } }
+    return { text: '历史笔记写入调用已结束。' }
+  }
   if (process.env.FOX_CONTACTS_ACCEPTANCE === '1' && user.includes('[CONTACTS_M1_READ]')) {
     if (!results.length) return { tool: 'read', input: { path: '收到的文件/proof.txt' } }
     const found = results.some(message => content(message.content).includes('FOX_PRIVATE_PROOF_31'))

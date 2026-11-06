@@ -45,14 +45,14 @@ export async function connectLiveModel({ source, invoke, db, check, poll }, over
     assert.equal(retry.status, 'completed', JSON.stringify({ first, retry }))
     return { ...retry, firstAttempt: first }
   }
-  return { model: service.modelId, exchange }
+  return { model: service.modelId, service, exchange }
 }
 
 export async function checkLiveModel(context) {
-  const { invoke, db, check, builtin, expert, directory, selection } = context
+  const { invoke, db, check, builtin, expert, directory, endpoint, selection } = context
   const pattern = selection.filter ? new RegExp(selection.filter) : null
   console.log('真实模型验收范围：' + (pattern ? '局部筛选 ' + pattern.source : '全量'))
-  const { model, exchange } = await connectLiveModel(context)
+  const { model, service, exchange } = await connectLiveModel(context)
   const receipts = run => db.prepare(
     'SELECT tool,state,result_json FROM kernel_tool_calls WHERE run_id=? ORDER BY created_at,source_order'
   ).all(run)
@@ -196,7 +196,7 @@ export async function checkLiveModel(context) {
   })
   await scenario('A21/A22/A23 整理明细保留手写规则和原文', async () => {
     const project = await grantedProject()
-    return checkLiveNoteOrganization({ invoke, expert, exchange, project, assertToolRead })
+    return checkLiveNoteOrganization({ invoke, expert, exchange, project, assertToolRead, endpoint, service })
   })
   await scenario('A24 采用新版后才回答新模板编号', () => checkLiveTemplateChange({ invoke, exchange, model }))
   await scenario('A26 说明定时任务限制', async () => {
