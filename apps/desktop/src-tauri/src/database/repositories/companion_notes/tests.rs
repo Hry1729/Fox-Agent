@@ -193,6 +193,8 @@ fn reported_negative_temporary_and_rephrased_statements_require_confirmation() {
     ] {
         assert!(!shared::direct_statement(message, excerpt, text));
     }
+    assert!(shared::direct_statement("我喜欢先看结论。请记住这条长期偏好。", "我喜欢先看结论。", "我喜欢先看结论。"));
+    assert!(!shared::direct_statement("我喜欢先看结论。请记住这条长期偏好。", "我喜欢先看结论。", "我喜欢先看结论，再展开细节。"));
     assert!(shared::direct_statement(
         "我喜欢先看结论。",
         "我喜欢先看结论",
