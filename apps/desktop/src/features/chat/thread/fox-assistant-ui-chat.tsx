@@ -1,5 +1,6 @@
 import { AssistantRuntimeProvider } from '@assistant-ui/react'
-import type { ArtifactRecord, ConversationMessage } from '../../conversations/model/types'
+import type { ApprovalDecision, ArtifactRecord, ConversationMessage } from '../../conversations/model/types'
+import { useContacts } from '@/features/companions/context'
 import { useDesktopConversation } from '../../conversations/hooks/use-desktop-conversation'
 import { type RuntimeSource } from '../timeline/fox-runtime-process-model'
 import type { GoalProgressData } from '../hooks/use-goal-progress'
@@ -11,6 +12,8 @@ import { useFoxRuntime, type FoxRuntimeCallbacks } from './use-fox-runtime'
 type DesktopConversationState = ReturnType<typeof useDesktopConversation>
 
 export interface AssistantUiChatProps {
+  onResolveApproval?: (id: string, decision: ApprovalDecision) => void | Promise<boolean>
+  onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>
   statusBar?: import('react').ReactNode
   /** 待处理的审批卡（UI 1104-07 移入对话流）。 */
   approvalSlot?: import('react').ReactNode
@@ -39,7 +42,8 @@ export interface AssistantUiChatProps {
  * `useDesktopConversation`) stays here, so legacy-composer sends still stream
  * into the assistant-ui message list.
  */
-export default function AssistantUiChat({ statusBar, approvalSlot, conversation, callbacks, pendingMessage, isSendDisabled, suggestions, onStart, planRevision, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer }: AssistantUiChatProps) {
+export default function AssistantUiChat({ statusBar, approvalSlot, conversation, callbacks, pendingMessage, isSendDisabled, suggestions, onStart, planRevision, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer, onResolveApproval, onSubmitQuestion }: AssistantUiChatProps) {
+  const companion = useContacts()
   const runtime = useFoxRuntime(conversation, callbacks, { pendingMessage, isSendDisabled })
   // The workbench provides knowledge bindings and the open-source action through
   // this context for the whole chat stage; reuse them instead of new props.
@@ -81,6 +85,8 @@ export default function AssistantUiChat({ statusBar, approvalSlot, conversation,
     return () => { mounted = false }
   }, [hasRuntimeEvents])
   const fox = useMemo(() => ({
+    contactChat: companion?.privateChat && detail && detail.conversation.id === companion.current?.conversationId
+      ? { detail, onResolveApproval, onSubmitQuestion } : undefined,
     events,
     eventsByRun,
     toolCalls,
@@ -92,7 +98,7 @@ export default function AssistantUiChat({ statusBar, approvalSlot, conversation,
     onOpenArtifact,
     onOpenFileInSidebar,
     onRevealFileInExplorer,
-  }), [events, eventsByRun, toolCalls, attachmentNames, attachmentsByMessage, timelineContext.knowledgeBindings, timelineContext.onOpenSource, groupHelpers, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer])
+  }), [companion?.privateChat, companion?.current?.conversationId, detail, onResolveApproval, onSubmitQuestion, events, eventsByRun, toolCalls, attachmentNames, attachmentsByMessage, timelineContext.knowledgeBindings, timelineContext.onOpenSource, groupHelpers, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer])
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <FoxThread statusBar={statusBar} approvalSlot={approvalSlot} fox={fox} suggestions={suggestions} onStart={onStart} planRevision={planRevision} turnRailMessages={detail?.messages} turnRailArtifacts={detail?.artifacts} />

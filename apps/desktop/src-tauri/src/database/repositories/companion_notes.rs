@@ -258,13 +258,22 @@ impl Database {
     pub(crate) fn companion_notes_get(&self, id: &str) -> Result<Value, String> {
         self.note_tx(|tx|{
             require_profile(tx,id)?;
-            let requests=json_rows(tx,"SELECT json_object('id',q.id,'memoryId',q.memory_id,'expectedVersion',q.expected_version,'action',q.action,'payload',json(q.payload_json),'content',m.content)
-                FROM companion_note_requests q JOIN memory_entities m ON m.id=q.memory_id WHERE q.companion_id=? AND q.status='open' ORDER BY q.created_at",[id])?;
+            let request_history=json_rows(tx,"SELECT json_object('id',q.id,'memoryId',q.memory_id,'expectedVersion',q.expected_version,'action',q.action,'payload',json(q.payload_json),'content',COALESCE((SELECT json_extract(r.after_json,'$.content') FROM memory_revisions r WHERE r.memory_id=q.memory_id AND json_extract(r.after_json,'$.version')=q.expected_version LIMIT 1),m.content),'status',q.status,'resolvedAt',q.resolved_at)
+                FROM companion_note_requests q JOIN memory_entities m ON m.id=q.memory_id WHERE q.companion_id=? ORDER BY q.created_at",[id])?;
+            let requests:Vec<_>=request_history.iter().filter(|item|item["status"]=="open").collect();
+            let shared_history=shared::list(tx,id)?;
+            let shared_requests:Vec<_>=shared_history.iter().filter(|item|item["status"]=="open").collect();
             let moves=json_rows(tx,"SELECT json_object('id',id,'topicId',topic_id,'memoryIds',json(memory_ids_json),'state',state,'createdAt',created_at)
                 FROM companion_note_moves WHERE companion_id=? ORDER BY created_at DESC",[id])?;
             let draft:Option<String>=tx.query_row("SELECT content FROM companion_note_drafts WHERE companion_id=?",[id],|r|r.get(0)).optional()?;
+            let write_receipts=json_rows(tx,"SELECT json_object('memoryId',m.id,'runId',m.source_run_id,'status',CASE
+                WHEN EXISTS(SELECT 1 FROM memory_revisions r WHERE r.memory_id=m.id AND r.action='undone') THEN 'undone'
+                WHEN m.version=1 AND m.deleted_at IS NULL THEN 'created' ELSE 'changed' END)
+                FROM memory_entities m WHERE m.source_companion_id=? AND m.created_by='agent'
+                AND EXISTS(SELECT 1 FROM memory_revisions r WHERE r.memory_id=m.id AND r.action='auto_confirmed')",[id])?;
             Ok(json!({"notes":owner_notes(tx,id)?,"usedChars":used_chars(tx,id)?,"limit":4000,"draft":draft,"topics":topics::list(tx,id)?,
-                "moves":moves,"requests":requests,"sharedRequests":shared::list(tx,id)?}))
+                "moves":moves,"requests":requests,"sharedRequests":shared_requests,
+                "requestHistory":request_history,"sharedRequestHistory":shared_history,"writeReceipts":write_receipts}))
         })
     }
 

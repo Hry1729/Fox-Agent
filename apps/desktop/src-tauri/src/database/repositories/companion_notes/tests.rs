@@ -60,6 +60,17 @@ fn private_notes_are_owner_scoped_and_user_confirmations_check_versions() {
         db.companion_note_request_resolve(owner, third["requestId"].as_str().unwrap(), true)
             .unwrap();
         assert_eq!(db.get_memory(mid).unwrap().unwrap().content, "新报价");
+        let reopened = Database::open(root.join("fox.db")).unwrap();
+        let saved = reopened.companion_notes_get(owner).unwrap();
+        assert_eq!(saved["requests"], json!([]));
+        for (request, status, original) in [(&pending, "rejected", "私人报价"), (&second, "stale", "私人报价"), (&third, "approved", "刚刚修改")] {
+            let receipt = saved["requestHistory"].as_array().unwrap().iter()
+                .find(|row| row["id"] == request["requestId"]).unwrap();
+            assert_eq!(receipt["status"], status);
+            assert_eq!(receipt["content"], original);
+            assert!(receipt["resolvedAt"].as_i64().is_some());
+        }
+        drop(reopened);
         let other = db.seed_default_companion(root).unwrap();
         assert!(db
             .companion_note_delete(&other.profile.id, Some(mid), Some(3))
@@ -77,11 +88,17 @@ fn private_notes_are_owner_scoped_and_user_confirmations_check_versions() {
         assert_eq!(created["status"], "created");
         assert_eq!(write(db, chat, note.clone())["status"], "existing");
         let new_id = created["memoryId"].as_str().unwrap();
+        assert_eq!(db.companion_notes_get(owner).unwrap()["writeReceipts"][0]["status"], "created");
         assert!(db
             .companion_memory_undo(owner, new_id, "another-run")
             .is_err());
         db.companion_memory_undo(owner, new_id, "notes-run")
             .unwrap();
+        let reopened = Database::open(root.join("fox.db")).unwrap();
+        let saved = reopened.companion_notes_get(owner).unwrap();
+        assert_eq!(saved["writeReceipts"][0]["memoryId"], new_id);
+        assert_eq!(saved["writeReceipts"][0]["status"], "undone");
+        drop(reopened);
         assert_eq!(write(db, chat, note)["code"], "memory.user_deleted");
         let another = write(
             db,
@@ -99,7 +116,7 @@ fn private_notes_are_owner_scoped_and_user_confirmations_check_versions() {
 
 #[test]
 fn shared_confirmation_can_keep_both_reject_partial_evidence_and_replace_only_one() {
-    with_notes(|db, _, owner, chat| {
+    with_notes(|db, root, owner, chat| {
         let a = "我喜欢报告先写结论";
         let b = "我喜欢报告附原始数据";
         let c = "我喜欢报告先列预算";
@@ -160,6 +177,16 @@ fn shared_confirmation_can_keep_both_reject_partial_evidence_and_replace_only_on
         )
         .unwrap();
         assert!(!db.get_memory(old).unwrap().unwrap().enabled);
+        let reopened = Database::open(root.join("fox.db")).unwrap();
+        let saved = reopened.companion_notes_get(owner).unwrap();
+        assert_eq!(saved["sharedRequests"], json!([]));
+        for (id, status) in [(&card["id"], "added"), (&pending["id"], "replaced")] {
+            let receipt = saved["sharedRequestHistory"].as_array().unwrap().iter()
+                .find(|row| &row["id"] == id).unwrap();
+            assert_eq!(receipt["status"], status);
+            assert!(receipt["resolvedAt"].as_i64().is_some());
+        }
+        drop(reopened);
         assert!(
             db.get_memory(added["memoryId"].as_str().unwrap())
                 .unwrap()

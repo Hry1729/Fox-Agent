@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>开源联系人项目审批卡对比</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;background:#f4f3f0;color:#222;font-family:'Microsoft YaHei','Segoe UI',sans-serif}main{width:1600px;padding:42px 56px 34px}h1{margin:0;font-size:32px;font-weight:650;letter-spacing:.5px}.sub{margin:12px 0 28px;color:#64635f;font-size:16px;line-height:1.7}.top{display:grid;grid-template-columns:1fr 1fr;gap:36px}h2{margin:0 0 5px;font-size:23px;font-weight:650}.source{margin:0 0 15px;color:#66645e;font-size:14px}.frame{overflow:hidden;position:relative;width:100%;height:414px;border:1px solid #d9d8d3;background:#0b0d0f}.frame img{display:block;position:absolute;max-width:none}.rakazo img{width:1440px;left:-251px;top:-13px}.question{background:#080808}.question img{width:1152px;left:-318px;top:-90px}.caption{margin:13px 0 0;font-size:16px;line-height:1.65}.note{margin:6px 0 0;color:#6e6559;font-size:14px;line-height:1.65}.wide{margin-top:30px;padding-top:25px;border-top:1px solid #cecdc7}.strip{display:block;width:100%;height:auto;border:1px solid #d9d8d3}.strip+.strip{margin-top:14px}.foot{margin-top:25px;padding-top:17px;border-top:1px solid #cecdc7;display:flex;justify-content:space-between;gap:30px;font-size:13px;color:#6c6a64;line-height:1.65}a{color:inherit;text-underline-offset:3px}.tag{display:inline-block;margin-left:10px;color:#6d6451;font-size:14px;font-weight:400}
+.frame{height:462px}
+</style></head>
+<body><main>
+<h1>开源联系人项目 · 审批与询问界面</h1>
+<p class="sub">项目仓库原图裁切，保留原有内容与样式。下方说明为中文解读。两套项目，三种界面；不是 Fox 设计稿。</p>
+<div class="top">
+<section>
+<h2>01　Rakazo <span class="tag">发送邮件前确认</span></h2>
+<p class="source">来源：项目官网示例素材 · approval.png</p>
+<div class="frame rakazo"><img alt="Rakazo 邮件发送审批，显示正文预览和三项选择" src="https://raw.githubusercontent.com/elie222/rakazo/096162c1f5099c2841648c119f50c337572c7011/apps/www/public/graphics/chat/approval.png"></div>
+<p class="caption">先说明“发送前请确认”，展示收件人、主题和正文，再提供“仅允许一次 / 总是允许 / 拒绝”。</p>
+<p class="note">这是官网示例图。当前源码已将审批按钮改为横排；处理后显示“已允许一次”或“已拒绝”等结果。</p>
+</section>
+<section>
+<h2>02　OpenMausBot <span class="tag">补充：提问选择卡</span></h2>
+<p class="source">来源：官方文档截图 · 这是询问卡，不是权限审批</p>
+<div class="frame question"><img alt="OpenMausBot 聊天中的问题与选项，支持输入自己的回答" src="https://raw.githubusercontent.com/milind-soni/OpenMausBot/1bc4749aa8307d7d6998bf86de4ef6478460dd93/docs/screenshots/approval-card.png"></div>
+<p class="caption">直接问“你主要想让我帮什么忙？”，下面给几个选项，也允许自己输入回答。</p>
+<p class="note">适合参考联系人“向你提问”的方式：问题、选项和自由回答都留在聊天里。</p>
+</section>
+</div>
+<section class="wide">
+<h2>03　OpenMausBot <span class="tag">输入框上方的紧凑审批条</span></h2>
+<p class="source">来源：项目仓库界面截图 · 同一审批的浅色与深色版本</p>
+<img class="strip" alt="浅色审批条：Tide 请求运行 npm run build，拒绝、总是允许、仅允许一次" src="https://raw.githubusercontent.com/milind-soni/OpenMausBot/1bc4749aa8307d7d6998bf86de4ef6478460dd93/docs/pr-screenshots/bot-colour-buttons/approval-light-teal-after.png">
+<img class="strip" alt="同一审批条的深色版本" src="https://raw.githubusercontent.com/milind-soni/OpenMausBot/1bc4749aa8307d7d6998bf86de4ef6478460dd93/docs/pr-screenshots/bot-colour-buttons/approval-dark-teal-after.png">
+<p class="caption">把“谁想做什么”和三个按钮压成一行，放在输入框上方。占用空间少，但命令文本仍有明显的工具界面感。</p>
+</section>
+<footer class="foot">
+<span>图源：<a href="https://github.com/elie222/rakazo/blob/096162c1f5099c2841648c119f50c337572c7011/apps/www/public/graphics/chat/approval.png">elie222/rakazo</a> · <a href="https://github.com/milind-soni/OpenMausBot/tree/1bc4749aa8307d7d6998bf86de4ef6478460dd93/docs/pr-screenshots/bot-colour-buttons">milind-soni/OpenMausBot</a><br>截图用于比较项目现有表达；未运行项目后台，也未触发任何真实审批。</span>
+<span>源码核对：2026-11-07<br>Rakazo 096162c1 · OpenMausBot 1bc4749a</span>
+</footer>
+</main></body></html>

@@ -18,6 +18,7 @@ import { FeedbackDialog as FeedbackDialogSurface } from '@/components/assistant-
 import { StoppedRun } from '@/components/assistant-ui/elements/error-state'
 import { ErrorPrompt } from '../demo/fox-demo-prompts'
 import { formatDateTime } from '@/lib/time-format'
+import { ContactAssistantMessage } from '@/features/companions/chat-message'
 
 const FOX_PART_COMPONENTS = {
   Text: FoxTextPart,
@@ -61,6 +62,11 @@ function FoxFeedbackDialog({ open, onOpenChange, messageId, onSaved }: { open: b
  */
 export function FoxAssistantMessage() {
   const companion = useContacts()
+  return companion?.privateChat ? <ContactAssistantMessage /> : <FoxStandardAssistantMessage />
+}
+
+function FoxStandardAssistantMessage() {
+  const companion = useContacts()
   const aui = useAui()
   const { assistantName } = useContext(TimelineRuntimeContext)
   const messageId = useAuiState((state) => state.message.id)
@@ -99,7 +105,7 @@ export function FoxAssistantMessage() {
           </ActionBarPrimitive.Root>
           <div className="fox-message-meta">
             <span>{assistantName || 'Fox 默认助手'}</span>
-            <span>{replyTime}</span>
+            <time className="fox-message-time" dateTime={createdAt instanceof Date ? createdAt.toISOString() : undefined}>{replyTime}</time>
             {cancelled && <span className="fox-message-cancelled-meta">已取消</span>}
             {interrupted && <span className="fox-message-failure-meta">运行中断</span>}
             {failed && <span className="fox-message-failure-meta">运行失败</span>}

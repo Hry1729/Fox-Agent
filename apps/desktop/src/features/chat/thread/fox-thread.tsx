@@ -8,6 +8,7 @@ import { FoxAssistantMessage } from './fox-assistant-message'
 import { FoxThreadContext, type FoxThreadContextValue } from './fox-thread-context'
 import { FoxUserMessage } from './fox-user-message'
 import './fox-thread.css'
+import { ContactOrphanDecisions } from '@/features/companions/chat-decisions'
 
 export interface FoxThreadProps {
   statusBar?: import('react').ReactNode
@@ -80,8 +81,8 @@ function FoxBottomDock({ plan }: { plan?: GoalProgressData['planRevisions'][numb
 export default function FoxThread({ statusBar, approvalSlot, fox, suggestions, onStart, planRevision, turnRailMessages, turnRailArtifacts }: FoxThreadProps) {
   return (
     <FoxThreadContext.Provider value={fox}>
-      <div className="fox-thread">
-        <ConversationTurnRail messages={turnRailMessages ?? []} artifacts={turnRailArtifacts ?? []} />
+      <div className={`fox-thread${fox.contactChat ? ' is-contact-chat' : ''}`}>
+        {!fox.contactChat && <ConversationTurnRail messages={turnRailMessages ?? []} artifacts={turnRailArtifacts ?? []} />}
         <ThreadPrimitive.Root className="fox-thread-root">
           <ThreadPrimitive.Viewport className="fox-thread-viewport" autoScroll>
             {/* Hybrid rollback: the empty conversation keeps the classic
@@ -93,11 +94,12 @@ export default function FoxThread({ statusBar, approvalSlot, fox, suggestions, o
             <ThreadPrimitive.If empty={false}>
               <div className="fox-thread-date"><span>今天</span></div>
               <ThreadPrimitive.Messages components={{ UserMessage: FoxUserMessage, AssistantMessage: FoxAssistantMessage }} />
+              {fox.contactChat && <ContactOrphanDecisions />}
               {approvalSlot && <div className="fox-thread-approval">{approvalSlot}</div>}
-              {statusBar}
+              {!fox.contactChat && statusBar}
             </ThreadPrimitive.If>
           </ThreadPrimitive.Viewport>
-          <FoxBottomDock plan={planRevision} />
+          <FoxBottomDock plan={fox.contactChat ? undefined : planRevision} />
         </ThreadPrimitive.Root>
       </div>
     </FoxThreadContext.Provider>

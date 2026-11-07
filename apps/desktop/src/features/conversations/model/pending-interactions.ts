@@ -98,14 +98,47 @@ function hasLegacyResponse(detail: ConversationDetail, requested: RunEventRecord
   ))
 }
 
-export function pendingRuntimeQuestion(detail: ConversationDetail | null): RuntimeQuestionRequest | null {
+function pendingQuestionRecord(detail: ConversationDetail | null) {
   if (!detail) return null
   const events = [...detail.runtimeEvents].sort(eventOrder)
   const requests = events.filter((item) => item.eventType === 'user.question.requested').reverse()
   for (const requested of requests) {
     if (requestIsClosed(events, requested) || hasLegacyResponse(detail, requested)) continue
     const questions = parseQuestions(requested.event)
-    if (questions.length) return { runId: requested.runId, questions }
+    if (questions.length) return { requested, questions }
   }
   return null
+}
+
+export function pendingRuntimeQuestion(detail: ConversationDetail | null): RuntimeQuestionRequest | null {
+  const current = pendingQuestionRecord(detail)
+  return current ? { runId: current.requested.runId, questions: current.questions } : null
+}
+
+export interface RuntimeQuestionHistory extends RuntimeQuestionRequest {
+  requestId: string
+  createdAt: number
+  status: 'pending' | 'answered' | 'closed'
+  answerText: string
+}
+
+export function runtimeQuestionHistory(detail: ConversationDetail): RuntimeQuestionHistory[] {
+  const events = [...detail.runtimeEvents].sort(eventOrder)
+  const active = pendingQuestionRecord(detail)?.requested
+  return events.filter(event => event.eventType === 'user.question.requested').flatMap(requested => {
+    const questions = parseQuestions(requested.event)
+    if (!questions.length) return []
+    const next = events.find(event => event.runId === requested.runId && event.seq > requested.seq && event.eventType === 'user.question.requested')
+    const response = events.find(event => event.runId === requested.runId && event.seq > requested.seq
+      && (!next || event.seq < next.seq) && event.eventType === 'user.question.responded')
+    const answer = detail.messages.find(message => message.role === 'user' && (response?.event.childRunId
+      ? message.runId === response.event.childRunId
+      : message.createdAt > requested.createdAt && (!next || message.createdAt < next.createdAt)
+        && questions.every(question => message.content.includes(`${question.question}：`) || message.content.includes(`${question.question}:`))))
+    const requestId = `${requested.runId}:${requested.seq}`
+    return [{ runId: requested.runId, requestId, questions, createdAt: requested.createdAt,
+      status: active?.runId === requested.runId && active.seq === requested.seq ? 'pending' as const : response || answer ? 'answered' as const : 'closed' as const,
+      answerText: answer?.content ?? '',
+    }]
+  })
 }

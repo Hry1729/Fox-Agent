@@ -61,6 +61,9 @@ export interface CompanionNotes {
   moves: Array<{ id: string; topicId: string; state: string }>
   requests: Array<{ id: string; memoryId: string; action: string; content: string; payload?: { content?: string; topic?: string } }>
   sharedRequests: Array<{ id: string; content: string; evidenceExcerpt: string; matches: Array<{ id: string; content: string }> }>
+  requestHistory?: Array<CompanionNotes['requests'][number] & { status: 'open' | 'approved' | 'rejected' | 'stale'; resolvedAt: number | null }>
+  sharedRequestHistory?: Array<CompanionNotes['sharedRequests'][number] & { status: 'open' | 'added' | 'replaced' | 'rejected' | 'stale'; resolvedAt: number | null }>
+  writeReceipts?: Array<{ memoryId: string; runId: string; status: 'created' | 'undone' | 'changed' }>
 }
 export type CompanionGrant = { id: string; projectId: string; projectName: string; grantedAt: number }
 export type RetainedWorkspace = { companionId: string; displayName: string; workspacePath: string }

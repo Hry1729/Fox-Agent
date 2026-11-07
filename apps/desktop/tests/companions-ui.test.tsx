@@ -49,12 +49,13 @@ describe('联系人桌面组件', () => {
     const blocked = { ...detail, contextResetBlockedReason: '请先停止当前生成' }
     expect(render(<ContactTopbar detail={blocked} onReset={noop} />)).toContain('disabled')
   })
-  test('写入卡只为本次新增提供撤销，忽略其他 Run 的工具', () => {
+  test('写入卡等待持久化状态，忽略其他 Run 的工具', () => {
     const call = { id: 'a', toolName: 'memory_write', runId: 'run', result: { status: 'created', memoryId: 'new' } } as ToolCallRecord
     const cards = (items: ToolCallRecord[]) => render(<WriteCallsContext.Provider value={items}><ContactWriteCards runId="run" /></WriteCallsContext.Provider>)
-    expect(cards([call])).toContain('撤销')
+    expect(cards([call])).toContain('已记住')
+    expect(cards([call])).not.toContain('撤销')
     const existing = cards([{ ...call, result: { status: 'existing', memoryId: 'old' } }, { ...call, id: 'b', runId: 'other' }])
-    expect(existing).toContain('之前已经记过')
+    expect(existing).toBe('')
     expect(existing).not.toContain('撤销')
   })
 })

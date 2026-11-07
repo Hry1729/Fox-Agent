@@ -6,19 +6,25 @@ import { desktopErrorDetails } from '@/features/conversations/api/desktop-client
 import type { ToolCallRecord } from '@/features/conversations/model/types'
 import { contacts, direct, type CompanionNotes, type Companion } from './api'
 import { showContactError, useContacts } from './context'
+import { ContactChoice, ContactDecision } from './chat-decision'
 
 export const WriteCallsContext = createContext<ToolCallRecord[]>([])
 const labels: Record<string, string> = { created: '已记住', existing: '之前已经记过', updated: '已更新', removed: '已删除', conflict: '这条记忆与已有内容冲突', pending: '需要确认', refused: '未写入', applied: '已整理到专题' }
+
+export function contactWriteCallNeedsCard(call: ToolCallRecord) {
+  const value = call.result as { status?: string; memoryId?: string; details?: { status?: string; memoryId?: string } } | null
+  const result = value?.status ? value : value?.details
+  return Boolean(result && (result.status === 'created' && result.memoryId || ['pending', 'conflict', 'refused'].includes(result.status ?? '')))
+}
 
 export function ContactWriteCards({ runId }: { runId: string | null }) {
   const calls = useContext(WriteCallsContext)
   const contact = useContacts()?.current
   if (!contact || !runId) return null
-  return <>{calls.filter(c => c.runId === runId).map(call => <WriteResult key={call.id} contact={contact} call={call} />)}</>
+  return <>{calls.filter(c => c.runId === runId && contactWriteCallNeedsCard(c)).map(call => <WriteResult key={call.id} contact={contact} call={call} />)}</>
 }
 
 function WriteResult({ contact, call }: { contact: Companion; call: ToolCallRecord }) {
-  const [done, setDone] = useState('')
   const [busy, setBusy] = useState(false)
   const [records, setRecords] = useState<CompanionNotes | null>(null)
   const [error, setError] = useState('')
@@ -28,29 +34,56 @@ function WriteResult({ contact, call }: { contact: Companion; call: ToolCallReco
   const requestKey = [result?.requestId, ...(result?.requests ?? []).map(q => q.requestId)].filter(Boolean).join(',')
   const pending = Boolean(requestKey)
   useEffect(() => {
-    if (!pending) return
+    if (!pending && status !== 'created') return
     let live = true
     contacts.notes(contact.id).then(next => { if (live) setRecords(next) }).catch(e => { if (live) setError(desktopErrorDetails(e).message) })
     return () => { live = false }
-  }, [contact.id, pending, requestKey])
+  }, [contact.id, pending, requestKey, status])
   if (!status || !result) return null
-  const questions = records?.requests.filter(r => requestKey.split(',').includes(r.id)) ?? []
-  const shared = records?.sharedRequests.find(r => r.id === result.requestId)
+  const receipt = records?.writeReceipts?.find(item => item.memoryId === result.memoryId && item.runId === call.runId)
+  const questions = (records?.requestHistory ?? records?.requests.map(request => ({ ...request, status: 'open' })) ?? [])
+    .filter(request => requestKey.split(',').includes(request.id))
+  const shared = (records?.sharedRequestHistory ?? records?.sharedRequests.map(request => ({ ...request, status: 'open' })) ?? [])
+    .find(request => request.id === result.requestId)
   const input = call.input as { content?: string } | null
-  const decide = async (name: string, data: Record<string, unknown>, label: string) => {
+  const decide = async (name: string, data: Record<string, unknown>) => {
     setBusy(true)
+    setError('')
     try {
-      const response = await direct<{ status?: string }>(name, { companionId: contact.id, ...data })
-      if (pending && response?.status !== 'stale') setRecords(await contacts.notes(contact.id))
-      if (questions.length <= 1 || response?.status === 'stale') setDone(response?.status === 'stale' ? '此确认已过期，请查看最新笔记' : label)
+      const response = await direct<{ status?: string; overBy?: number }>(name, { companionId: contact.id, ...data })
+      setRecords(await contacts.notes(contact.id))
+      if (response?.status === 'refused') setError(response.overBy ? `超过主笔记上限 ${response.overBy} 字，请先整理笔记。` : '此次操作未执行，请检查笔记后重试。')
     } catch (e) { setError(desktopErrorDetails(e).message) } finally { setBusy(false) }
   }
-  return <aside className="fox-contact-section fox-contact-entry"><strong>{done || labels[status] || status}</strong>{input?.content && <p>{input.content}</p>}
-    {status === 'refused' && <p>{result.overBy ? '超过主笔记上限 ' + result.overBy + ' 字' : result.code}</p>}
-    {!done && status === 'created' && result.memoryId && <Button variant="ghost" size="sm" disabled={busy} onClick={() => void decide('companion_memory_undo', { runId: call.runId, memoryId: result.memoryId }, '已撤销')}>撤销</Button>}
-    {!done && questions.map(q => <div key={q.id}><strong>{q.action === 'move' ? '确认移入专题' : q.action === 'remove' ? '确认删除笔记' : '确认改写笔记'}</strong><p>{q.content}</p>{q.action === 'patch' && <p>改为：{q.payload?.content}</p>}{q.action === 'move' && <p>目标专题：{q.payload?.topic}</p>}{[true, false].map(approve => <Button size="sm" variant="outline" key={String(approve)} disabled={busy} onClick={() => void decide('companion_note_request_resolve', { requestId: q.id, approve }, approve ? '已同意' : '已拒绝')}>{approve ? '同意' : '拒绝'}</Button>)}</div>)}
-    {!done && shared && <SharedDecision request={shared} busy={busy} onChoose={(decision, replaceMemoryId) => void decide('companion_shared_request_resolve', { requestId: shared.id, decision, replaceMemoryId }, decision === 'replace' ? '已替换' : decision === 'add' ? '已保存' : '已拒绝')} />}
-    {records && pending && !questions.length && !shared && !done && <small>已处理</small>}{error && <p role="alert">{error}</p>}</aside>
+  return <div className="fox-contact-write-results">
+    {!pending && <ContactDecision title={receipt?.status === 'undone' ? '已撤销' : labels[status] || '笔记已更新'}>
+      {input?.content && <p>{input.content}</p>}
+      {status === 'refused' && <p>{result.overBy ? '超过主笔记上限 ' + result.overBy + ' 字' : result.code}</p>}
+      {receipt?.status === 'created' && result.memoryId && <Button variant="ghost" size="sm" disabled={busy} onClick={() => void decide('companion_memory_undo', { runId: call.runId, memoryId: result.memoryId })}>撤销</Button>}
+    </ContactDecision>}
+    {questions.map(question => {
+      const action = question.action === 'move' ? '移动' : question.action === 'remove' ? '删除' : '改写'
+      const editable = question.status === 'open'
+      return <ContactDecision key={question.id} title={`可以${action}这条笔记吗？`}>
+        <p>{question.content}</p>
+        {question.action === 'patch' && <p>改为：{question.payload?.content}</p>}
+        {question.action === 'move' && <p>目标专题：{question.payload?.topic}</p>}
+        <div className="fox-contact-choices">{[true, false].map((approve, index) => <ContactChoice key={String(approve)} index={index}
+          selected={question.status === (approve ? 'approved' : 'rejected')} disabled={busy || !editable}
+          onClick={() => void decide('companion_note_request_resolve', { requestId: question.id, approve })}>
+          {approve ? `确认${action}` : `暂不${action}`}
+        </ContactChoice>)}</div>
+        {!editable && <p className="fox-contact-receipt" role="status">{question.status === 'approved' ? `已确认${action}` : question.status === 'rejected' ? `已选择暂不${action}` : '此确认已过期，请查看最新笔记'}</p>}
+      </ContactDecision>
+    })}
+    {shared && <ContactDecision title="要记住这个偏好吗？">
+      {shared.status === 'open' ? <SharedDecision chat request={shared} busy={busy} onChoose={(decision, replaceMemoryId) => void decide('companion_shared_request_resolve', { requestId: shared.id, decision, replaceMemoryId })} />
+        : <><p>{shared.content}</p><p className="fox-contact-receipt">{({ added: '已选择记住这条', replaced: '已选择替换已有记忆', rejected: '已选择暂不记住', stale: '此确认已过期，请查看最新笔记' } as Record<string, string>)[shared.status]}</p></>}
+    </ContactDecision>}
+    {pending && !records && !error && <p role="status">正在读取确认记录…</p>}
+    {records && pending && !questions.length && !shared && <p className="fox-contact-receipt">此确认已处理</p>}
+    {error && <p role="alert" className="fox-contact-decision-error">{error}</p>}
+  </div>
 }
 
 export function ImportSuggestion({ contact }: { contact: Companion }) {

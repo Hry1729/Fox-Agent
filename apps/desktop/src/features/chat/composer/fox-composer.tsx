@@ -511,7 +511,8 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
   // 审批在对话流里时，同一时刻仍只处理一件事：问题和目标确认要等审批处理完才出现在输入框位置。
   const composerApprovalPending = !approvalsInThread && pendingApprovals.length > 0
   const otherDecisionBlocked = approvalsInThread && pendingApprovals.length > 0
-  const decisionPending = demoApprovalPending || demoQuestionPending || composerApprovalPending || (!otherDecisionBlocked && (Boolean(activeQuestionRequest) || goalConfirmationPending || planRevisionPending || workflowGatePending))
+  const questionInThread = Boolean(companion?.privateChat && approvalsInThread)
+  const decisionPending = demoApprovalPending || demoQuestionPending || composerApprovalPending || (!otherDecisionBlocked && ((!questionInThread && Boolean(activeQuestionRequest)) || goalConfirmationPending || planRevisionPending || workflowGatePending))
   const approvalDecisionPending = demoApprovalPending || composerApprovalPending
 
   // Mid-run supplementary requests ("运行中补充要求"). One hook owns the durable

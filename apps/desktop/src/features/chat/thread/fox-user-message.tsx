@@ -8,6 +8,7 @@ import { FileEdit, GitFork } from 'lucide-react'
 import { File as MessageFile } from '@/components/assistant-ui/elements/file'
 import { copyMessageResponse } from '@/components/assistant-ui/elements/message-actions'
 import { FoxCopyMessageButton } from './fox-message-actions'
+import { formatDateTime } from '@/lib/time-format'
 
 /** Raw user text — never markdown-rendered, same as the legacy bubble. */
 function FoxUserText(part: TextMessagePartProps) {
@@ -31,6 +32,7 @@ export function FoxUserMessage() {
   const companion = useContacts()
   const aui = useAui()
   const messageId = useAuiState((state) => state.message.id)
+  const createdAt = useAuiState(state => state.message.createdAt)
   const isEditing = useAuiState((state) => state.message.composer.isEditing)
   const running = useAuiState(state => state.thread.isRunning)
   const isLatestUser = useAuiState(state => state.thread.messages.findLast(message => message.role === 'user')?.id === state.message.id)
@@ -47,6 +49,7 @@ export function FoxUserMessage() {
         <MessagePrimitive.Parts components={{ Text: FoxUserText }} />
         <FoxEditComposer />
         {!isEditing && <div className="fox-user-meta">
+            <time className="fox-message-time" dateTime={createdAt.toISOString()}>{formatDateTime(createdAt)}</time>
             <ActionBarPrimitive.Root autohide="never" className="fox-user-actions">
               <FoxCopyMessageButton onCopy={() => copyMessageResponse(aui.message.getState().content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n\n'))} />
               {!companion?.privateChat && <button type="button" className="fox-thread-action-button" disabled={running} aria-label="从此消息创建分支" title="从此消息创建分支" onClick={() => requestConversationFork(aui.message.getState().id)}>

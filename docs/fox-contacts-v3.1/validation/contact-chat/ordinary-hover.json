@@ -1,0 +1,29 @@
+{
+  "shown": {
+    "opacity": "1",
+    "rect": {
+      "x": 136,
+      "y": 183.5,
+      "width": 728,
+      "height": 595.7999877929688,
+      "top": 183.5,
+      "right": 864,
+      "bottom": 779.2999877929688,
+      "left": 136
+    }
+  },
+  "hidden": {
+    "opacity": "0",
+    "rect": {
+      "x": 136,
+      "y": 183.5,
+      "width": 728,
+      "height": 595.7999877929688,
+      "top": 183.5,
+      "right": 864,
+      "bottom": 779.2999877929688,
+      "left": 136
+    }
+  },
+  "keyboardFocus": "visible"
+}

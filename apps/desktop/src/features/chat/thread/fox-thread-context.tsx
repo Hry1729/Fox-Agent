@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react'
-import type { ArtifactRecord, AttachmentRecord, KnowledgeBindingRecord, RunEventRecord, ToolCallRecord } from '../../conversations/model/types'
+import type { ApprovalDecision, ArtifactRecord, AttachmentRecord, ConversationDetail, KnowledgeBindingRecord, RunEventRecord, ToolCallRecord } from '../../conversations/model/types'
 import type { RuntimeSource } from '../timeline/fox-runtime-process-model'
 
 /**
@@ -10,6 +10,11 @@ import type { RuntimeSource } from '../timeline/fox-runtime-process-model'
  * message parts read it with `useFoxThread`.
  */
 export interface FoxThreadContextValue {
+  contactChat?: {
+    detail: ConversationDetail
+    onResolveApproval?: (id: string, decision: ApprovalDecision) => void | Promise<boolean>
+    onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>
+  }
   /** All run events of the current conversation detail, in seq order. */
   events: RunEventRecord[]
   /** Events grouped by run id, memoized by the provider. */

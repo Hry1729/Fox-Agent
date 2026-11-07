@@ -74,7 +74,7 @@ export function ContactTopbar({ detail, onReset }: {
   onReset: () => void
 }) {
   const ctx = useContacts()
-  return <header className="fox-chat-topbar"><button type="button" className="fox-contact-heading" onClick={ctx?.showProfile}>
+  return <header className="fox-chat-topbar fox-contact-topbar"><button type="button" className="fox-contact-heading" onClick={ctx?.showProfile}>
     {ctx?.current ? <ContactAvatar contact={ctx.current} /> : <UserRound size={17} />}<strong>{ctx?.current?.displayName ?? '联系人'}</strong>
     </button>
     {detail?.contextReset?.supported && <Button

@@ -2,6 +2,8 @@
 .fox-contact-row { display:flex; align-items:center; gap:2px; padding:0 3px; border-radius:var(--fox-radius-control,6px); }
 .fox-contact-row:hover,.fox-contact-row:focus-within,.fox-contact-row.is-active { background:var(--accent); }
 .fox-contact-link,.fox-contact-heading { display:flex; align-items:center; gap:8px; padding:5px 4px; min-width:0; text-align:left; }
+.fox-contact-topbar { display: flex; }
+.fox-contact-topbar .fox-contact-heading { flex: 1; }
 .fox-contact-link { flex:1; }
 .fox-contact-link > span:not(.fox-contact-avatar) { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
 .fox-contact-link small { margin-left:auto; font-size:11px; color:var(--muted-foreground); }

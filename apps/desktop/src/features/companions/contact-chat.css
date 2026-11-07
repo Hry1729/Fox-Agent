@@ -1,0 +1,120 @@
+.fox-contact-work-status {
+  display: flex;
+  align-items: center;
+  gap: var(--fox-space-s);
+  min-height: 32px;
+  padding: 0 var(--fox-space-s) var(--fox-space-s);
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+}
+.fox-contact-work-status[data-working="true"] .fox-contact-avatar {
+  animation: fox-contact-working 1.8s ease-in-out infinite;
+}
+@keyframes fox-contact-working { 50% { opacity: 0.55; } }
+
+.is-contact-chat .fox-thread-viewport { gap: var(--fox-space-m); }
+.fox-contact-run { gap: var(--fox-space-xs); align-items: flex-start; }
+.fox-contact-message { max-width: 90%; min-width: 0; }
+.fox-contact-bubble {
+  padding: var(--fox-space-l) var(--fox-space-xl);
+  border-radius: var(--fox-radius-large);
+  background: var(--muted);
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.fox-contact-bubble .fox-answer-response { min-width: 0; }
+.fox-contact-bubble pre { max-width: 100%; overflow-x: auto; }
+.fox-contact-message-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--fox-space-xs);
+  min-height: 26px;
+  opacity: 0;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  transition: opacity var(--fox-duration-fast) var(--fox-ease-out);
+}
+.fox-contact-message:is(:hover, :focus-within) .fox-contact-message-meta { opacity: 1; }
+.is-contact-chat .fox-user-bubble { max-width: 85%; }
+.fox-contact-ended { color: var(--muted-foreground); font-size: var(--fox-type-caption); }
+
+.fox-contact-decision-entry { width: min(100%, 480px); }
+.fox-contact-decision {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--fox-space-m);
+  min-width: 0;
+  width: min(100%, 480px);
+  margin: var(--fox-space-xs) 0;
+  padding: var(--fox-space-xl);
+  border-radius: var(--fox-radius-large);
+  background: var(--muted);
+  font-size: var(--fox-type-body);
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+.fox-contact-decision header { display: grid; gap: var(--fox-space-xs); }
+.fox-contact-decision header strong { font-weight: 600; }
+.fox-contact-decision header p,
+.fox-contact-decision-note,
+.fox-contact-question > small { color: var(--muted-foreground); font-size: var(--fox-type-caption); }
+.fox-contact-choices { display: flex; flex-direction: column; gap: var(--fox-space-xs); }
+.fox-contact-choice {
+  display: flex;
+  align-items: center;
+  gap: var(--fox-space-s);
+  min-height: 40px;
+  width: 100%;
+  padding: var(--fox-space-s);
+  border: 1px solid transparent;
+  border-radius: var(--fox-radius-control);
+  background: color-mix(in srgb, var(--background) 45%, transparent);
+  text-align: left;
+  cursor: pointer;
+}
+.fox-contact-choice > span:nth-child(2) { flex: 1; min-width: 0; }
+.fox-contact-choice-key {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: var(--fox-radius-control);
+  background: var(--background);
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+}
+.fox-contact-choice:enabled:hover { background: var(--accent); }
+.fox-contact-choice[aria-pressed="true"] { border-color: var(--ring); background: var(--accent); }
+.fox-contact-choice:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.fox-contact-choice:disabled { cursor: default; }
+.fox-contact-choice:disabled:not([aria-pressed="true"]) { color: var(--muted-foreground); }
+.fox-contact-question { display: grid; gap: var(--fox-space-s); }
+.fox-contact-question input { background: var(--background); }
+.fox-contact-operation {
+  padding: var(--fox-space-s);
+  background: var(--background);
+  border-radius: var(--fox-radius-control);
+  font-size: var(--fox-type-caption);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 180px;
+  overflow: auto;
+}
+.fox-contact-receipt { display: flex; align-items: center; gap: var(--fox-space-s); }
+.fox-contact-answer-receipt { white-space: pre-wrap; }
+.fox-contact-decision-error { color: var(--destructive); }
+.fox-contact-decision > button { align-self: flex-end; }
+.fox-contact-decision .fox-approval-disclosure { font-size: var(--fox-type-caption); }
+
+@media (max-width: 600px) {
+  .fox-contact-message { max-width: 96%; }
+  .is-contact-chat .fox-user-bubble { max-width: 94%; }
+}
+@media (hover: none) { .fox-contact-message-meta { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .fox-contact-work-status[data-working="true"] .fox-contact-avatar { animation: none; }
+  .fox-contact-message-meta { transition: none; }
+}

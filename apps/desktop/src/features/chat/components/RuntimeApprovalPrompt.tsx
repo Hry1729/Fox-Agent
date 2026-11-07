@@ -22,6 +22,9 @@ import {
 import type { ApprovalDecision, ApprovalRecord } from '@/features/conversations/model/types'
 import type { GrantScope } from '@/components/assistant-ui/upstream/elements/permission-grant'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
+import { useContacts } from '@/features/companions/context'
+import { ContactApprovalCard } from '@/features/companions/chat-decision'
+import { approvalStatusLabel } from '@/features/conversations/model/approval-labels'
 
 /** A1: the Host's offer to save "always allow in this project" for a command. */
 export function projectRuleOffer(request: Record<string, unknown>): { tool: string; suggestedPrefix: string } | null {
@@ -71,10 +74,14 @@ function isReadScopeRequest(approval: ApprovalRecord, presentation: ReturnType<t
 export function RuntimeApprovalPrompt({
   approval,
   onResolve,
+  readOnly = false,
 }: {
   approval: ApprovalRecord
   onResolve: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>
+  readOnly?: boolean
 }) {
+  const contactMode = useContacts()?.privateChat
+  const active = !readOnly && (!contactMode || approval.status === 'pending')
   const developerUi = useDeveloperUi()
   const request = approval.request
   const presentation = approvalPresentation(approval)
@@ -88,7 +95,7 @@ export function RuntimeApprovalPrompt({
   const [rulePrefix, setRulePrefix] = useState(ruleOffer?.suggestedPrefix ?? '')
   const policyNote = commandPolicyNote(request as Record<string, unknown>)
   const allowWithProjectRule = async () => {
-    if (submittingRef.current || !rulePrefix.trim()) return
+    if (!active || submittingRef.current || !rulePrefix.trim()) return
     submittingRef.current = true
     setSubmitting(true)
     setError(null)
@@ -106,7 +113,7 @@ export function RuntimeApprovalPrompt({
     }
   }
   const resolve = async (decision: ApprovalDecision) => {
-    if (submittingRef.current) return
+    if (!active || submittingRef.current) return
     submittingRef.current = true
     setSubmitting(true)
     setError(null)
@@ -123,7 +130,7 @@ export function RuntimeApprovalPrompt({
       }
     }
   }
-  if (isReadScopeRequest(approval, presentation)) {
+  if (!contactMode && isReadScopeRequest(approval, presentation)) {
     const decisionScopes: Partial<Record<ApprovalDecision, GrantScope>> = { deny: 'denied', allow_once: 'once', allow_conversation: 'conversation' }
     const scopes = (['deny', 'allow_conversation', 'allow_once'] as const).filter(decision => allowedDecisions.includes(decision)).map(decision => decisionScopes[decision]).filter((scope): scope is GrantScope => Boolean(scope))
     const target = presentation.target
@@ -135,7 +142,7 @@ export function RuntimeApprovalPrompt({
   const title = repairOverride ? '追加修复' : replacement ? replacement.baselineVersion === 'missing' ? '新建文件' : '替换文件'
     : presentation.officeReuse ? '修改文档' : presentation.command ? '执行命令' : presentation.content !== undefined ? '写入文件'
       : /delete|remove/i.test(approval.toolName) ? '删除文件'
-        : /write|create|edit|save|patch/i.test(approval.toolName) ? '写入文件' : '执行操作'
+        : /write|create|edit|save|patch/i.test(approval.toolName) ? '写入文件' : isReadScopeRequest(approval, presentation) ? '读取文件' : '执行操作'
   const operationSummary = presentation.content !== undefined ? `拟写入 ${presentation.content.split('\n').length} 行。`
     : (presentation.summary || approval.toolName).replaceAll(presentation.target, '此目标')
   const briefScope = repairOverride ? repairDetails ? '仅追加本次修复。' : '审批详情不完整，请拒绝后重新发起。'
@@ -145,8 +152,13 @@ export function RuntimeApprovalPrompt({
           : allowedDecisions.includes('allow_conversation') ? '对话授权仅限此工具和此目标，可撤销。' : '仅授权本次操作。'
   const target = displayPath(replacement?.targetIdentity ?? presentation.officeReuse?.target ?? presentation.target)
   const operation = presentation.command && presentation.command !== target ? `${target}\n${presentation.command}` : target
+  const Card = contactMode ? ContactApprovalCard : ApprovalCard
+  const decision = approval.decision as { scope?: string; decision?: string } | null
+  const receipt = approval.status === 'approved'
+    ? decision?.scope === 'conversation' || decision?.decision === 'allow_conversation' ? '已选择：本次对话内允许' : '已选择：仅允许这一次'
+    : approval.status === 'pending' ? '此确认已结束' : approvalStatusLabel(approval.status)
   return (
-    <ApprovalCard state="request" title={title} icon={approvalCardIcon(title, approval.toolName)} subtitle={presentation.command ? '需要确认这条命令' : operationSummary} command={operation} description={repairOverride || replacement || presentation.officeReuse ? briefScope : undefined} busy={submitting} className="aui-approval-card fox-confirmation fox-runtime-confirmation is-compact"
+    <Card state={active ? 'request' : approval.status === 'denied' ? 'denied' : 'done'} statusLabel={receipt} title={title} icon={approvalCardIcon(title, approval.toolName)} subtitle={presentation.command ? '需要确认这条命令' : operationSummary} command={operation} description={repairOverride || replacement || presentation.officeReuse ? briefScope : undefined} busy={submitting} className="aui-approval-card fox-confirmation fox-runtime-confirmation is-compact"
       onDeny={() => void resolve('deny')}
       onAllowOnce={allowedDecisions.includes('allow_once') ? () => void resolve('allow_once') : undefined}
       onAllowConversation={allowedDecisions.includes('allow_conversation') ? () => void resolve('allow_conversation') : undefined}
@@ -155,7 +167,7 @@ export function RuntimeApprovalPrompt({
         <FoxDisclosure className="fox-approval-details-scroll fox-approval-disclosure" summary={presentation.content !== undefined ? <>查看内容 <span>{presentation.content.split('\n').length} 行</span></> : '查看操作详情'}>
         <div role="region" aria-label="审批详情">
         {policyNote && <p className="fox-approval-scope-note fox-approval-host-note">{policyNote}</p>}
-        {ruleOffer && <div className="fox-approval-project-rule">
+        {ruleOffer && active && <div className="fox-approval-project-rule">
           <label>
             <span>本项目总是允许以此开头的命令</span>
             <input aria-label="项目规则前缀" value={rulePrefix} disabled={submitting} onChange={event => setRulePrefix(event.currentTarget.value)} />

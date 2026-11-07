@@ -1,0 +1,24 @@
+# Rakazo 消息界面参考
+
+日期：2026 年 11 月 7 日。
+
+打开 [独立交互预览](index.html)，把鼠标移到气泡上，即可查看表情、回复和更多操作。右上角可切换浅色和深色。页面已将脚本和样式内嵌，可用浏览器直接打开，不需要登录、填写密钥或启动 Rakazo 后端。
+
+## 展示范围
+
+- [官网整体界面](rakazo-official-demo.png)：从 [Rakazo 官网](https://rakazo.com/) 的演示区域截图，用于了解联系人列表和聊天整体布局。
+- [静止状态](bubbles-rest.png)、[悬停状态](bubbles-hover.png)、[更多菜单](bubbles-menu.png)、[深色状态](bubbles-dark.png)：本地消息组件预览的浏览器截图。
+
+预览固定使用 Rakazo 提交 `171a20e389fe93296dc1f5b4224e76b00a029b36` 中的 `MessageView`、`MessageHoverActions`、`MessageHoverMetadata`、菜单、弹出层及主题文件。上游文件保存在 `upstream/`，许可证见 [LICENSE](upstream/LICENSE)。消息内容为示例，外层说明、主题按钮及组件适配由本次预览添加。
+
+适配范围：`compat.tsx` 为纯文本示例替代翻译、消息辅助接口、Markdown 和未展示的业务卡片；回复、未读和表情操作只显示预览提示。该页面用于看气泡和操作栏，没有连接模型、日历、文件或审批服务。原版整套 Rakazo 应用没有在本次启动。
+
+## 已查看的效果
+
+浏览器中已查看普通气泡、鼠标悬停操作栏、更多菜单和深色切换，并保存上述截图。构建命令 `node build.mjs` 已成功。这里是组件展示，不是 Rakazo 完整业务验收，也不是 Fox 桌面验收。
+
+`index.html` 可以独立使用。重建脚本会引用本机 Fox 工作树中已有的 esbuild 和 Tailwind，迁到另一台电脑时需调整 `build.mjs` 中的路径。
+
+## 对应方案
+
+[Fox 联系人功能补全方案](../../联系人功能补全方案-20261107.md) 已列出优先级、前后端工作、开源复用范围和验收条件。本次没有修改 Fox 产品代码。

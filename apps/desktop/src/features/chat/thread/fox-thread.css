@@ -168,7 +168,11 @@
   display: flex;
   justify-content: flex-end;
   margin-top: 2px;
+  align-items: center;
+  gap: var(--fox-space-s);
 }
+
+.fox-message-time { color: var(--muted-foreground); font-size: var(--fox-type-caption); }
 
 .fox-thread-msg .fox-user-meta .fox-user-actions {
   display: inline-flex;
@@ -179,18 +183,21 @@
 /* UI 1104-04：消息操作只在悬停这条消息时显示；用透明度隐藏而不是移除，Tab 仍能聚焦到按钮，
    聚焦时（:focus-within）整排显示。触屏设备（没有悬停）始终显示。 */
 .fox-thread-msg .fox-user-meta .fox-user-actions,
+.fox-thread-msg .fox-message-time,
 .fox-thread-msg .fox-message-footer > .fox-thread-actionbar {
   opacity: 0;
   transition: opacity var(--fox-duration-fast) var(--fox-ease-out);
 }
 
 .fox-thread-msg:is(:hover, :focus-within) .fox-user-meta .fox-user-actions,
+.fox-thread-msg:is(:hover, :focus-within) .fox-message-time,
 .fox-thread-msg:is(:hover, :focus-within) .fox-message-footer > .fox-thread-actionbar {
   opacity: 1;
 }
 
 @media (hover: none) {
   .fox-thread-msg .fox-user-meta .fox-user-actions,
+  .fox-thread-msg .fox-message-time,
   .fox-thread-msg .fox-message-footer > .fox-thread-actionbar {
     opacity: 1;
   }
@@ -198,6 +205,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .fox-thread-msg .fox-user-meta .fox-user-actions,
+  .fox-thread-msg .fox-message-time,
   .fox-thread-msg .fox-message-footer > .fox-thread-actionbar {
     transition: none;
   }

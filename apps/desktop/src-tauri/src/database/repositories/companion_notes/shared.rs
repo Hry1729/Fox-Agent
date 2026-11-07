@@ -196,11 +196,11 @@ pub(super) fn write(
 }
 
 pub(super) fn list(tx: &Connection, owner: &str) -> DbResult<Vec<Value>> {
-    json_rows(tx,"SELECT json_object('id',s.id,'candidateMemoryId',m.id,'content',m.content,'evidenceExcerpt',m.evidence_excerpt,
+    json_rows(tx,"SELECT json_object('id',s.id,'candidateMemoryId',m.id,'content',m.content,'evidenceExcerpt',m.evidence_excerpt,'status',s.status,'resolvedAt',s.resolved_at,
         'matches',json((SELECT json_group_array(json_object('id',x.memory_id,'content',old.content,'expectedVersion',x.expected_version))
         FROM companion_shared_request_matches x LEFT JOIN memory_entities old ON old.id=x.memory_id WHERE x.request_id=s.id)))
         FROM companion_shared_requests s JOIN memory_entities m ON m.id=s.candidate_memory_id
-        WHERE s.companion_id=? AND s.status='open' ORDER BY s.created_at",[owner])
+        WHERE s.companion_id=? ORDER BY s.created_at",[owner])
 }
 
 impl Database {

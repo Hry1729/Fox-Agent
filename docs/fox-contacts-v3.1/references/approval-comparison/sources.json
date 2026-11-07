@@ -1,0 +1,34 @@
+{
+  "checkedOn": "2026-11-07",
+  "method": "Load project-maintained images in a local comparison HTML page, crop their margins using CSS, then capture the page in Ego Browser. Product UI pixels are not redrawn. Chinese notes are outside the source images.",
+  "sources": [
+    {
+      "project": "Rakazo",
+      "kind": "Official website example asset",
+      "url": "https://github.com/elie222/rakazo/blob/096162c1f5099c2841648c119f50c337572c7011/apps/www/public/graphics/chat/approval.png",
+      "caveat": "This asset has vertically stacked buttons. Current AskCard.tsx and consequential-approval.spec.ts use horizontal wrapping buttons. The screenshot is not represented as a fresh runtime capture."
+    },
+    {
+      "project": "OpenMausBot",
+      "kind": "Repository UI verification screenshot, light theme",
+      "url": "https://github.com/milind-soni/OpenMausBot/blob/1bc4749aa8307d7d6998bf86de4ef6478460dd93/docs/pr-screenshots/bot-colour-buttons/approval-light-teal-after.png"
+    },
+    {
+      "project": "OpenMausBot",
+      "kind": "Repository UI verification screenshot, dark theme",
+      "url": "https://github.com/milind-soni/OpenMausBot/blob/1bc4749aa8307d7d6998bf86de4ef6478460dd93/docs/pr-screenshots/bot-colour-buttons/approval-dark-teal-after.png"
+    },
+    {
+      "project": "OpenMausBot",
+      "kind": "Official documentation screenshot, supplemental question card",
+      "url": "https://github.com/milind-soni/OpenMausBot/blob/1bc4749aa8307d7d6998bf86de4ef6478460dd93/docs/screenshots/approval-card.png",
+      "caveat": "Despite its filename, the visible UI is an onboarding choice question, not an action permission request."
+    }
+  ],
+  "sourceChecks": [
+    "https://github.com/elie222/rakazo/blob/096162c1f5099c2841648c119f50c337572c7011/apps/web/src/components/AskCard.tsx",
+    "https://github.com/elie222/rakazo/blob/096162c1f5099c2841648c119f50c337572c7011/apps/web/e2e/consequential-approval.spec.ts",
+    "https://github.com/elie222/rakazo/blob/096162c1f5099c2841648c119f50c337572c7011/docs/approvals.md",
+    "https://github.com/milind-soni/OpenMausBot/blob/1bc4749aa8307d7d6998bf86de4ef6478460dd93/src/components/PendingApproval.tsx"
+  ]
+}
