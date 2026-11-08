@@ -18,7 +18,8 @@ use crate::{
     app_state::AppState,
     database::{
         AgentIdRequest, AgentRecord, ApiResponse, AttachmentRecord, CancelRunRequest,
-        CleanupDataRequest, ConversationContextReset, ConversationDetail,
+        CleanupDataRequest, CompanionChatSearchRequest, ContactBubbleSearchPage,
+        ConversationContextReset, ConversationDetail,
         ConversationExpertBindRequest,
         ConversationExpertBinding, ConversationExpertBindingError, ConversationForkRequest,
         ConversationHistoryPage, ConversationHistoryRequest, ConversationIdRequest,
@@ -2357,6 +2358,24 @@ pub fn conversations_search(
 }
 
 #[tauri::command]
+pub fn companion_chat_search(
+    state: State<'_, AppState>,
+    request: CompanionChatSearchRequest,
+) -> ApiResponse<ContactBubbleSearchPage> {
+    match state.database.search_contact_bubbles(
+        &request.conversation_id,
+        &request.query,
+        request.since,
+        request.until,
+        request.limit.unwrap_or(50),
+        request.offset.unwrap_or(0),
+    ) {
+        Ok(page) => ApiResponse::success(page),
+        Err(error) => ApiResponse::failure("companion.search_failed", error, true),
+    }
+}
+
+#[tauri::command]
 pub async fn conversation_delete(
     state: State<'_, AppState>,
     external: State<'_, crate::external_backend::ExternalBackendHost>,
@@ -2889,6 +2908,35 @@ pub fn run_start(
         Ok(runtime) => runtime,
         Err(error) => return ApiResponse::failure("runtime.resolve_failed", error, false),
     };
+    // K5: resolve the effective model once, before any check or write. A
+    // companion's independent model wins over the global one; the same result
+    // feeds the image-capability check, the reachability precheck and the
+    // snapshot frozen onto the run below. A broken override refuses the send
+    // with its own reason instead of silently falling back to another model.
+    let effective_model = if runtime.runtime_type != "yuxi" {
+        let service = match state.database.resolve_effective_model(&request.conversation_id) {
+            Ok(service) => service,
+            Err(message) => return ApiResponse::failure("model.companion_unavailable", message, false),
+        };
+        // A Fox (PiNative) Run needs a model service. Without one the Run used
+        // to be created and then failed with an English "model service is not
+        // configured" (`runtime.start_failed`); refuse the send instead, before
+        // any Run or message is written, with the code the UI already maps to
+        // 「去模型服务」.
+        if let Some(refusal) = fox_model_service_refusal(Ok(service.is_some())) {
+            return refusal;
+        }
+        // 13.38 B4-5: an address that cannot be reached (refused, DNS, timeout)
+        // is refused here, before any Run or message exists, so the draft stays.
+        if let Some(service) = &service {
+            if let Some((code, message)) = crate::model_reachability::send_refusal(&service.base_url) {
+                return ApiResponse::failure(code, message, true);
+            }
+        }
+        service
+    } else {
+        None
+    };
     if runtime.runtime_type != "yuxi" && !request.attachment_ids.is_empty() {
         let mut pending_attachments = Vec::with_capacity(request.attachment_ids.len());
         for attachment_id in &request.attachment_ids {
@@ -2910,27 +2958,10 @@ pub fn run_start(
         }
         if let Err(error) = state
             .runtime_host
-            .validate_run_attachments(&request.conversation_id, &pending_attachments)
+            .validate_run_attachments(&request.conversation_id, &pending_attachments,
+                effective_model.as_ref().is_some_and(|service| service.supports_image_input))
         {
             return ApiResponse::failure("attachment.image_invalid", error, false);
-        }
-    }
-    // A Fox (PiNative) Run needs a model service. Without one the Run used
-    // to be created and then failed with an English "model service is not
-    // configured" (`runtime.start_failed`); refuse the send instead, before
-    // any Run or message is written, with the code the UI already maps to
-    // 「去模型服务」.
-    if runtime.runtime_type != "yuxi" {
-        let service = state.database.get_model_service();
-        if let Some(refusal) = fox_model_service_refusal(service.as_ref().map(|service| service.is_some()).map_err(Clone::clone)) {
-            return refusal;
-        }
-        // 13.38 B4-5: an address that cannot be reached (refused, DNS, timeout)
-        // is refused here, before any Run or message exists, so the draft stays.
-        if let Ok(Some(service)) = &service {
-            if let Some((code, message)) = crate::model_reachability::send_refusal(&service.base_url) {
-                return ApiResponse::failure(code, message, true);
-            }
         }
     }
     let started = match state.database.create_run_checked(
@@ -2941,6 +2972,16 @@ pub fn run_start(
         Ok(started) => started,
         Err(error) => return create_run_refusal(&state.data_dir, &error),
     };
+    // Freeze the resolved model before dispatch: queueing, retry and restart
+    // reuse this snapshot instead of re-reading the global model.
+    if let Some(service) = &effective_model {
+        if let Err(error) = state.database.freeze_run_model_snapshot(&started.run.id, service) {
+            let _ = state
+                .database
+                .mark_run_failed(&started.run.id, "model.snapshot_failed", &error);
+            return ApiResponse::failure("model.snapshot_failed", error, true);
+        }
+    }
 
     // #6: record the user's explicit budget choice before dispatch, so the frozen
     // binding uses exactly the window they picked (and an invalid choice fails

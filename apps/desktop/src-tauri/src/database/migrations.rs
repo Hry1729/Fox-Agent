@@ -7069,6 +7069,8 @@ enum MigrationTarget {
     V101,
     #[cfg(test)]
     V105,
+    #[cfg(test)]
+    V106,
 }
 
 fn run_with_target(connection: &mut Connection, now: i64, target: MigrationTarget) -> Result<()> {
@@ -7552,6 +7554,26 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
         return finish_transaction(transaction);
     }
     apply_migration(&transaction, COMPANIONS_SCHEMA_VERSION, MIGRATION_106_COMPANIONS, now)?;
+    #[cfg(test)]
+    if matches!(_target, MigrationTarget::V106) {
+        return finish_transaction(transaction);
+    }
+    // v107 (contacts C00/K1): the durable bubble projection. Additive: one
+    // table and two indexes. Messages, runs and events keep their existing
+    // shape; older builds simply ignore the table.
+    apply_migration(&transaction, CONTACT_BUBBLES_SCHEMA_VERSION, MIGRATION_107_CONTACT_BUBBLES, now)?;
+    // v108 (contacts K1): the backfill completion ledger. Additive: one table.
+    // A row means every message of the private chat has bubbles, so permanent
+    // operations (quote, favorite, mark unread) may rely on bubble identity.
+    apply_migration(&transaction, CONTACT_BUBBLE_BACKFILLS_SCHEMA_VERSION, MIGRATION_108_CONTACT_BUBBLE_BACKFILLS, now)?;
+    // v109 (contacts C04/K5): the companion model override and the frozen
+    // per-run model snapshot. Additive columns only; existing companions keep
+    // NULL (follow the global model) and existing runs resolve once at start.
+    apply_migration(&transaction, COMPANION_MODEL_SCHEMA_VERSION, MIGRATION_109_COMPANION_MODEL, now)?;
+    // v110 (contacts C02/K4): tool-level companion grants and the frozen
+    // per-run capability snapshot. Additive; existing companions get no new
+    // capabilities until the user enables them.
+    apply_migration(&transaction, COMPANION_TOOL_GRANTS_SCHEMA_VERSION, MIGRATION_110_COMPANION_TOOL_GRANTS, now)?;
     finish_transaction(transaction)
 }
 
@@ -9119,7 +9141,7 @@ mod stage_two_runtime_session_migration_tests {
         // 99 only adds the retired-generation ledger; the v98 mapping itself is
         // unchanged. This test still pins the mapping's version and the
         // database's current version, so a version bump is never silent.
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::COMPANIONS_SCHEMA_VERSION);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::COMPANION_TOOL_GRANTS_SCHEMA_VERSION);
 
         let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
         let columns: Vec<String> = database
@@ -16821,7 +16843,15 @@ mod delivery_acceptance_migration_tests {
         // v104: A1 permission rules, full-access flag and auto-allow audit.
         assert_eq!(PERMISSION_RULES_SCHEMA_VERSION, 104);
         assert_eq!(AGENT_BINDINGS_SCHEMA_VERSION, 105);
-        assert_eq!(DATABASE_SCHEMA_VERSION, COMPANIONS_SCHEMA_VERSION);
+        // v106: contacts; v107: the durable contact bubble projection;
+        // v108: the backfill completion ledger; v109: companion model override
+        // and the per-run model snapshot.
+        assert_eq!(COMPANIONS_SCHEMA_VERSION, 106);
+        assert_eq!(CONTACT_BUBBLES_SCHEMA_VERSION, 107);
+        assert_eq!(CONTACT_BUBBLE_BACKFILLS_SCHEMA_VERSION, 108);
+        assert_eq!(COMPANION_MODEL_SCHEMA_VERSION, 109);
+        assert_eq!(COMPANION_TOOL_GRANTS_SCHEMA_VERSION, 110);
+        assert_eq!(DATABASE_SCHEMA_VERSION, COMPANION_TOOL_GRANTS_SCHEMA_VERSION);
 
         // The old rows are untouched.
         let title: String = connection
@@ -17043,3 +17073,87 @@ mod agent_backend_migration_tests {
 }
 #[cfg(test)]
 mod companion_migration_tests;
+
+pub(crate) const CONTACT_BUBBLES_SCHEMA_VERSION: i64 = 107;
+const _: () = assert!(DATABASE_SCHEMA_VERSION >= CONTACT_BUBBLES_SCHEMA_VERSION);
+
+/// Durable contact bubble projection (plan C00/K1).
+///
+/// Identity, projection mode, segment range and delivery order are persistent
+/// facts. `content` and `fingerprint` may be recomputed from messages and run
+/// events, but a rebuild must never reselect the mode or renumber a bubble.
+const MIGRATION_107_CONTACT_BUBBLES: &str = r#"
+CREATE TABLE contact_bubbles (
+    bubble_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    run_id TEXT,
+    source_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    source_ordinal INTEGER NOT NULL,
+    author TEXT NOT NULL CHECK (author IN ('user', 'companion')),
+    projection TEXT NOT NULL CHECK (projection IN ('message', 'segmented', 'kernel')),
+    segment_start INTEGER,
+    segment_end INTEGER,
+    delivery_order INTEGER NOT NULL,
+    delivered_at INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX idx_contact_bubbles_conversation_order
+    ON contact_bubbles(conversation_id, delivery_order);
+CREATE INDEX idx_contact_bubbles_source_message
+    ON contact_bubbles(conversation_id, source_message_id);
+"#;
+
+pub(crate) const CONTACT_BUBBLE_BACKFILLS_SCHEMA_VERSION: i64 = 108;
+const _: () = assert!(DATABASE_SCHEMA_VERSION >= CONTACT_BUBBLE_BACKFILLS_SCHEMA_VERSION);
+
+/// Per-chat completion markers for the startup bubble backfill (plan K1).
+/// A row exists only after every message of the private chat has been
+/// projected; the batch writer is re-entrant, so an interrupted run resumes
+/// from the conversations still missing a marker.
+const MIGRATION_108_CONTACT_BUBBLE_BACKFILLS: &str = r#"
+CREATE TABLE contact_bubble_backfills (
+    conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+    completed_at INTEGER NOT NULL
+);
+"#;
+
+pub(crate) const COMPANION_MODEL_SCHEMA_VERSION: i64 = 109;
+const _: () = assert!(DATABASE_SCHEMA_VERSION >= COMPANION_MODEL_SCHEMA_VERSION);
+
+/// Companion model override and per-run model snapshot (plan C04/K5).
+///
+/// `model_provider_id` + `model_ref` reference a configured provider and one of
+/// its models; both NULL means follow the global model. Deliberately no foreign
+/// key: a deleted provider must leave the reference dangling so the send fails
+/// with an explicit reason instead of silently falling back to another model.
+/// `runs.model_snapshot` freezes the resolved service (credential references
+/// only, never a plaintext key) for the run's whole lifetime.
+const MIGRATION_109_COMPANION_MODEL: &str = r#"
+ALTER TABLE companion_profiles ADD COLUMN model_provider_id TEXT;
+ALTER TABLE companion_profiles ADD COLUMN model_ref TEXT;
+ALTER TABLE runs ADD COLUMN model_snapshot TEXT;
+"#;
+
+pub(crate) const COMPANION_TOOL_GRANTS_SCHEMA_VERSION: i64 = 110;
+const _: () = assert!(DATABASE_SCHEMA_VERSION >= COMPANION_TOOL_GRANTS_SCHEMA_VERSION);
+
+/// Tool-level companion capability grants (plan C02/K4).
+///
+/// The grant identity is (companion, connector instance, tool). `server_id`
+/// '@web' is the built-in web capability pair (web_search / web_read); every
+/// other value is an mcp_servers id. A grant is necessary but never sufficient:
+/// the catalog and every execution entry intersect it with the installed,
+/// enabled reality, and `runs.companion_tools_snapshot` freezes what the run
+/// started with so a mid-run grant cannot widen the current run.
+const MIGRATION_110_COMPANION_TOOL_GRANTS: &str = r#"
+CREATE TABLE companion_tool_grants (
+    companion_id TEXT NOT NULL REFERENCES companion_profiles(id) ON DELETE CASCADE,
+    server_id TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (companion_id, server_id, tool)
+);
+ALTER TABLE runs ADD COLUMN companion_tools_snapshot TEXT;
+"#;

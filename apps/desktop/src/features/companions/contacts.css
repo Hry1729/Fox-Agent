@@ -2,8 +2,46 @@
 .fox-contact-row { display:flex; align-items:center; gap:2px; padding:0 3px; border-radius:var(--fox-radius-control,6px); }
 .fox-contact-row:hover,.fox-contact-row:focus-within,.fox-contact-row.is-active { background:var(--accent); }
 .fox-contact-link,.fox-contact-heading { display:flex; align-items:center; gap:8px; padding:5px 4px; min-width:0; text-align:left; }
-.fox-contact-topbar { display: flex; }
-.fox-contact-topbar .fox-contact-heading { flex: 1; }
+.fox-contact-topbar { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 8px; }
+.fox-contact-topbar .fox-contact-heading {
+  justify-self: center;
+  flex: none;
+  height: 36px;
+  padding: 0 14px 0 5px;
+  border-radius: 18px;
+  background: var(--popover);
+  box-shadow: 0 0 0 1px var(--border), var(--shadow-sm);
+}
+.fox-contact-topbar .fox-contact-heading .fox-contact-avatar { width: 26px; height: 26px; border-radius: 50%; }
+.fox-contact-topbar .fox-contact-heading strong { font-size: 14px; font-weight: 600; white-space: nowrap; }
+.fox-contact-topbar-side { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.fox-contact-topbar-side.is-end { justify-self: end; }
+.fox-contact-more { position: relative; }
+.fox-contact-more > summary { list-style: none; cursor: pointer; }
+.fox-contact-more > summary::-webkit-details-marker { display: none; }
+.fox-contact-more-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  min-width: 168px;
+  padding: 4px;
+  border-radius: 10px;
+  background: var(--popover);
+  box-shadow: 0 0 0 1px var(--border), var(--shadow-md);
+}
+.fox-contact-more-menu > button,
+.fox-contact-more-empty {
+  display: flex;
+  width: 100%;
+  padding: 6px 9px;
+  border-radius: 7px;
+  font-size: 13px;
+  text-align: left;
+}
+.fox-contact-more-menu > button:hover { background: var(--accent); }
+.fox-contact-more-menu > button:disabled { opacity: .5; }
+.fox-contact-more-empty { color: var(--muted-foreground); }
 .fox-contact-link { flex:1; }
 .fox-contact-link > span:not(.fox-contact-avatar) { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
 .fox-contact-link small { margin-left:auto; font-size:11px; color:var(--muted-foreground); }
@@ -26,3 +64,67 @@
 .fox-contact-panel summary { cursor:pointer; }
 .fox-contact-entry { padding:8px 0; border-bottom:1px solid var(--border); }
 .fox-contact-entry p { white-space:pre-wrap; }
+
+.fox-contact-model-select { display: grid; gap: 3px; justify-items: end; }
+.fox-contact-model-select select { max-width: 240px; padding: 4px 8px; border: 1px solid var(--border); border-radius: var(--fox-radius-control, 6px); background: var(--background); font-size: 13px; }
+.fox-contact-model-select small { max-width: 240px; color: var(--muted-foreground); font-size: 11px; text-align: right; }
+.fox-contact-model-select .fox-contact-model-error { color: var(--destructive); }
+
+.fox-contact-search-bar,.fox-contact-search-chip {
+  justify-self: center;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 36px;
+  padding: 0 6px 0 12px;
+  border-radius: 18px;
+  background: var(--popover);
+  box-shadow: 0 0 0 1px var(--border), var(--shadow-sm);
+  color: var(--muted-foreground);
+}
+.fox-contact-search-bar { width: min(440px, 44vw); }
+.fox-contact-search-bar:focus-within { box-shadow: 0 0 0 2px var(--ring), var(--shadow-sm); }
+.fox-contact-search-bar input { flex: 1; min-width: 0; border: 0; background: transparent; font-size: 14px; color: var(--foreground); outline: none; }
+.fox-contact-search-bar .is-spinning { animation: fox-contact-search-spin 1s linear infinite; }
+@keyframes fox-contact-search-spin { to { transform: rotate(360deg); } }
+.fox-contact-search-chip { padding-left: 12px; font-size: 13px; }
+.fox-contact-search-chip b { max-width: 220px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--foreground); font-weight: 600; }
+.fox-contact-search-chip > span { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.fox-contact-search-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  width: min(620px, calc(100vw - 48px));
+  max-height: min(480px, 60vh);
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  background: var(--popover);
+  box-shadow: 0 0 0 1px var(--border), var(--shadow-lg);
+  overflow: hidden;
+}
+.fox-contact-search-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--muted-foreground); }
+.fox-contact-search-ranges { display: flex; gap: 2px; margin-left: auto; padding: 2px; border-radius: 8px; background: var(--muted); }
+.fox-contact-search-ranges > button { padding: 3px 8px; border-radius: 6px; font-size: 12px; color: var(--muted-foreground); white-space: nowrap; }
+.fox-contact-search-ranges > button[aria-pressed="true"] { background: var(--popover); color: var(--foreground); box-shadow: 0 0 0 1px var(--border), var(--shadow-sm); }
+.fox-contact-search-custom { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--muted-foreground); }
+.fox-contact-search-custom input { padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--background); font-size: 12px; color: var(--foreground); }
+.fox-contact-search-results { flex: 1; overflow: auto; padding: 6px; }
+.fox-contact-search-result { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 10px; width: 100%; padding: 7px 8px; border-radius: 9px; text-align: left; }
+.fox-contact-search-result.is-selected { background: var(--accent); }
+.fox-contact-search-result .fox-contact-avatar { width: 22px; height: 22px; border-radius: 50%; }
+.fox-contact-search-me { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--muted); font-size: 11px; color: var(--muted-foreground); }
+.fox-contact-search-body { min-width: 0; }
+.fox-contact-search-body b { display: block; font-size: 12px; font-weight: 600; }
+.fox-contact-search-body p { margin: 1px 0 0; font-size: 13px; color: var(--muted-foreground); overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
+.fox-contact-search-result time { font-size: 11px; color: var(--muted-foreground); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.fox-contact-search-panel mark,.fox-contact-search-chip mark { padding: 0 1px; border-radius: 3px; background: color-mix(in oklch, var(--brand) 26%, transparent); color: inherit; }
+.fox-contact-search-empty { margin: 0; padding: 22px 12px; text-align: center; font-size: 13px; color: var(--muted-foreground); }
+.fox-contact-search-foot { display: flex; gap: 14px; padding: 8px 14px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted-foreground); }
+.fox-contact-search-foot kbd { padding: 1px 4px; border: 1px solid var(--border); border-radius: 4px; background: var(--muted); font-family: inherit; font-size: 10px; }
+@media (prefers-reduced-motion: reduce) {
+  .fox-contact-search-bar .is-spinning { animation: none; }
+}

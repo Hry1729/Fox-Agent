@@ -15,6 +15,8 @@ export interface Companion {
   isDefault: boolean
   pinnedAt: number | null
   lastReadOrdinal: number
+  modelProviderId: string | null
+  modelRef: string | null
   unreadCount: number
   activeRunStatus: string | null
   archivedAt: number | null
@@ -74,6 +76,7 @@ export const contacts = {
   open: (companionId: string) => command<Companion>('companion_open', { companionId }),
   add: (expertId: string) => command<Companion>('companion_add_from_expert', { expertId }),
   profile: (companionId: string, edit: Partial<Pick<Companion, 'displayName' | 'avatarRef' | 'duty' | 'personaOverride'>>) => command<Companion>('companion_update_profile', { companionId, ...edit }),
+  setModel: (companionId: string, providerId: string | null, modelRef: string | null) => command<Companion>('companion_set_model', { companionId, providerId, modelRef }),
   pin: (companionId: string, pinned: boolean) => command<Companion>('companion_set_pinned', { companionId, pinned }),
   markRead: (companionId: string, ordinal: number) => command<Companion>('companion_mark_read', { companionId, ordinal }),
   archive: (companionId: string) => command<Companion>('companion_archive', { companionId }),

@@ -16,7 +16,7 @@ import type { ApprovalRecord, ConversationDetail, ConversationMessage, RunEventR
 const context: ContactsContextValue = {
   current: { id: 'contact', conversationId: 'chat', templateAgentId: 'expert', displayName: '资料伙伴', avatarRef: '📚',
     duty: '', personaOverride: null, workspaceDir: 'D:/contact', workspaceState: 'ready', workspaceError: null,
-    isDefault: false, pinnedAt: null, lastReadOrdinal: 0, unreadCount: 0, activeRunStatus: null, archivedAt: null, deletingAt: null },
+    isDefault: false, pinnedAt: null, lastReadOrdinal: 0, modelProviderId: null, modelRef: null, unreadCount: 0, activeRunStatus: null, archivedAt: null, deletingAt: null },
   privateChat: true, list: { companions: [], pendingDeletions: [] }, projects: [], model: 'test', permission: 'ask', error: '',
   refresh: async () => {}, refreshConversation: async () => {}, open: () => {}, add: () => {}, showProfile: () => {},
   leave: () => {}, setPermission: () => {}, openSharedMemory: () => {}, askToOrganize: () => {},
@@ -45,7 +45,7 @@ const renderChat = (snapshot: ConversationDetail) => withContact(<AssistantUiCha
 afterEach(() => { cleanup(); clearMocks() })
 
 describe('联系人按条送达', () => {
-  test('三条中途说明与最终回复各成气泡，流式预览和工具过程不进入聊天，历史分段相同', async () => {
+  test('三条中途说明与最终回复各成气泡，流式预览即用持久身份，工具过程不进入聊天，历史分段相同', async () => {
     const texts = ['我先看一下资料。', '发现了两处问题。', '正在核对最后一项。', '已经处理好了。\n\n```ts\nconst ready = true\n```']
     let snapshot = detail({ runtimeEvents: [event(1, 'tool.started', { tool: 'read_file', toolCallId: 'tool', input: { path: 'secret-process.txt' }, kernelCheckpointSeq: '2' })] })
     const view = render(renderChat(snapshot))
@@ -55,10 +55,13 @@ describe('联系人按条送达', () => {
       snapshot = { ...snapshot, messages: [...snapshot.messages, preview] }
       view.rerender(renderChat(snapshot))
       await act(async () => {})
-      expect(view.container.querySelectorAll('.fox-contact-bubble')).toHaveLength(index)
+      expect(view.container.querySelectorAll('.fox-contact-bubble')).toHaveLength(index + 1)
+      const liveIds = [...view.container.querySelectorAll('[data-contact-message-id]')].map(node => node.getAttribute('data-contact-message-id'))
+      expect(liveIds.at(-1)).toBe(`run:kernel:${checkpoint}:response`)
       snapshot = { ...snapshot, messages: snapshot.messages.map(item => item.id === preview.id ? { ...item, status: 'completed', kernelPreview: undefined } : item) }
       view.rerender(renderChat(snapshot))
       await waitFor(() => expect(view.container.querySelectorAll('.fox-contact-bubble')).toHaveLength(index + 1))
+      expect([...view.container.querySelectorAll('[data-contact-message-id]')].map(node => node.getAttribute('data-contact-message-id'))).toEqual(liveIds)
       expect(view.container.querySelector('[data-streaming="true"]')).toBeNull()
       expect(view.container.textContent).not.toContain('secret-process.txt')
       expect(view.container.textContent).not.toContain('处理过程')
@@ -73,12 +76,35 @@ describe('联系人按条送达', () => {
     expect(reopened.container.textContent).not.toContain('过程文件')
   })
 
+  test('已落库的气泡身份优先于按页重算，重开后仍是同一批气泡', async () => {
+    const bubble = (id: string, content: string, order: number) => ({
+      id, conversationId: 'chat', runId: 'run', messageId: 'kernel-message:run:2', sourceOrdinal: 2,
+      author: 'companion' as const, projection: 'segmented' as const, segmentStart: order, segmentEnd: order,
+      deliveryOrder: order, deliveredAt: 1700000000000 + order, content, fingerprint: '',
+    })
+    const settled = detail({
+      lastRun: { ...detail().lastRun!, status: 'completed' },
+      messages: [message(2, '第一条第二条')],
+      bubbles: [bubble('run:response:3', '第一条', 3), bubble('run:response:5', '第二条', 5)],
+    })
+    const view = render(renderChat(settled))
+    await waitFor(() => expect(view.container.querySelectorAll('.fox-contact-bubble')).toHaveLength(2))
+    expect([...view.container.querySelectorAll('[data-contact-message-id]')].map(node => node.getAttribute('data-contact-message-id')))
+      .toEqual(['run:response:3', 'run:response:5'])
+    expect(view.container.textContent).toContain('第一条')
+    view.unmount()
+    const reopened = render(renderChat(settled))
+    await waitFor(() => expect(reopened.container.querySelectorAll('.fox-contact-bubble')).toHaveLength(2))
+    expect([...reopened.container.querySelectorAll('[data-contact-message-id]')].map(node => node.getAttribute('data-contact-message-id')))
+      .toEqual(['run:response:3', 'run:response:5'])
+  })
+
   test('不按标点切分，不把内部思考变成气泡，重复内容保留真实消息数', () => {
     const saved = detail({ messages: [message(2, '<think>内部分析</think>正文。第二句。'), message(4, '正文。第二句。')] })
     const row = deriveFoxThreadMessages({ detail: saved })[0]
     expect(contactReplies(row, [])).toEqual([
-      { id: 'kernel-message:run:2', text: '正文。第二句。', createdAt: 1700000000002 },
-      { id: 'kernel-message:run:4', text: '正文。第二句。', createdAt: 1700000000004 },
+      { id: 'run:kernel:2:response', text: '正文。第二句。', createdAt: 1700000000002 },
+      { id: 'run:kernel:4:response', text: '正文。第二句。', createdAt: 1700000000004 },
     ])
   })
 

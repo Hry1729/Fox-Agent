@@ -153,12 +153,12 @@ pub(crate) fn check_run_tool(
     let Some((id, project_root)) = profile else {
         return Ok(());
     };
-    if !allows_tool(tool) {
-        return Err((
-            "companion.tool_not_available",
-            format!("私聊不可使用工具 {tool}"),
-        ));
-    }
+    // C02/K4: beyond the base file/note whitelist, a tool is callable only
+    // when the companion granted it, the run's frozen snapshot contains it,
+    // and the grant is still effective right now.
+    database
+        .ensure_companion_tool_granted(run, tool, input)
+        .map_err(|message| ("companion.tool_not_available", message))?;
     let root =
         ready_root(database, data_dir, &id).map_err(|e| ("companion.workspace_unavailable", e))?;
     if Path::new(&project_root) != companion_workspace(data_dir, &id) {

@@ -208,6 +208,26 @@ pub fn run() {
                 eprintln!("联系人专题文件清理未完成：{error}");
             }
             database.audit_interrupted_tasks()?;
+            // K1: project the bubbles of every private chat in the background.
+            // Each batch holds the database lock only for its own work and
+            // yields between batches; a failure is logged and resumed on the
+            // next launch, never blocking startup.
+            let bubble_backfill_database = database.clone();
+            if let Err(error) = std::thread::Builder::new()
+                .name("contact-bubble-backfill".to_owned())
+                .spawn(move || loop {
+                    match bubble_backfill_database.backfill_contact_bubbles_batch(8) {
+                        Ok(0) => break,
+                        Ok(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                        Err(error) => {
+                            eprintln!("联系人气泡后台回填未完成（下次启动续跑）：{error}");
+                            break;
+                        }
+                    }
+                })
+            {
+                eprintln!("无法启动联系人气泡回填线程：{error}");
+            }
             let runtime_sessions_dir = app_data_dir.join("runtime-sessions");
             std::fs::create_dir_all(&runtime_sessions_dir)?;
             let attachments_dir = app_data_dir.join("attachments");
@@ -340,6 +360,9 @@ pub fn run() {
             commands::companions::companion_add_from_expert,
             commands::companions::companion_open,
             commands::companions::companion_update_profile,
+            commands::companions::companion_set_model,
+            commands::companions::companion_capabilities_get,
+            commands::companions::companion_capability_set,
             commands::companions::companion_set_pinned,
             commands::companions::companion_mark_read,
             commands::companions::companion_archive,
@@ -468,6 +491,7 @@ pub fn run() {
             commands::conversation_load,
             commands::conversation_history,
             commands::conversations_search,
+            commands::companion_chat_search,
             commands::conversation_rename,
             commands::conversation_change_project,
             commands::conversation_pin,

@@ -27,6 +27,13 @@ export function contactReplies(message: FoxThreadMessage, events: readonly RunEv
     }
     if (reply.status === 'streaming') return []
     const text = splitAssistantContent(reply.content).answer
-    return text.trim() ? [{ id: reply.id, text, createdAt: reply.createdAt }] : []
+    if (!text.trim()) return []
+    // A settled Kernel round keeps the durable bubble identity it had as a
+    // live preview, so committing the run never remounts the bubble.
+    const prefix = `kernel-message:${reply.runId}:`
+    const checkpoint = reply.runId && reply.id.startsWith(prefix) ? reply.id.slice(prefix.length) : null
+    const id = checkpoint && /^[1-9]\d{0,18}$/.test(checkpoint)
+      ? `${reply.runId}:kernel:${checkpoint}:response` : reply.id
+    return [{ id, text, createdAt: reply.createdAt }]
   })
 }

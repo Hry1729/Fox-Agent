@@ -1,0 +1,15 @@
+const task = await taskSpace(1);
+const page = task.page('p1');
+await page.fill('loc=css:input[placeholder="查找项目…"]','没有匹配的项目');
+console.log(await page.evaluate(()=>({empty:document.querySelector('[cmdk-empty]')?.textContent,addVisible:document.querySelector('.fox-composer-project-add')?.getBoundingClientRect().height})));
+await page.click('loc=role:button[name="添加项目"]');
+console.log(await page.snapshot());
+await page.keyboard.press('Escape');
+await page.click('loc=role:button[name="04 取消状态与消息操作"]');
+await page.hover('loc=css:.design-heading');
+await page.waitForFunction(()=>[...document.querySelectorAll('.review-message-thread .fox-thread-actionbar,.review-message-thread .fox-user-actions')].every(e=>getComputedStyle(e).opacity==='0'));
+console.log(await page.evaluate(()=>[...document.querySelectorAll('.review-message-thread .fox-thread-actionbar,.review-message-thread .fox-user-actions')].map(e=>({kind:e.className,opacity:getComputedStyle(e).opacity}))));
+await page.hover('loc=css:.review-message-thread .fox-thread-msg:last-child');
+await page.waitForFunction(()=>getComputedStyle(document.querySelector('.review-message-thread .fox-thread-actionbar')).opacity==='1');
+console.log(await page.evaluate(()=>[...document.querySelectorAll('.review-message-thread .fox-thread-actionbar,.review-message-thread .fox-user-actions')].map(e=>({kind:e.className,opacity:getComputedStyle(e).opacity}))));
+console.log(await page.snapshot());

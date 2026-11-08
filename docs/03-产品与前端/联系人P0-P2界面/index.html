@@ -1,0 +1,893 @@
+<!doctype html>
+<html lang="zh-CN" data-color-theme="graphite">
+<head>
+<meta charset="utf-8" />
+<title>Fox 联系人 P0 至 P2 · 界面样稿</title>
+<link rel="stylesheet" href="../../../apps/desktop/node_modules/harmonyos-sans-sc-webfont-splitted/dist/Regular.css" />
+<link rel="stylesheet" href="../../../apps/desktop/node_modules/harmonyos-sans-sc-webfont-splitted/dist/Medium.css" />
+<link rel="stylesheet" href="../../../apps/desktop/node_modules/harmonyos-sans-sc-webfont-splitted/dist/Semibold.css" />
+<!-- Colours, radii and both modes come straight from the app. -->
+<link rel="stylesheet" href="../../../apps/desktop/src/styles/themes.css" />
+<script src="icons.js"></script>
+<script>
+  (() => {
+    const params = new URLSearchParams(location.search)
+    const theme = params.get('theme') || localStorage.getItem('fox-mock-theme') || 'graphite'
+    const mode = params.get('mode') || localStorage.getItem('fox-mock-mode') || 'light'
+    document.documentElement.dataset.colorTheme = theme
+    document.documentElement.classList.toggle('dark', mode === 'dark')
+  })()
+</script>
+<style>
+/* Same warm-ink Paper accent as the knowledge mockup, so both mockups agree. */
+:root[data-color-theme="paper"]:not(.dark) {
+  --primary: oklch(0.3 0.02 60); --primary-foreground: oklch(0.985 0.005 85);
+  --brand: oklch(0.3 0.02 60); --brand-foreground: oklch(0.985 0.005 85); --brand-soft: oklch(0.93 0.016 80);
+  --ring: oklch(0.62 0.03 65);
+}
+:root[data-color-theme="paper"].dark {
+  --primary: oklch(0.93 0.012 85); --primary-foreground: oklch(0.24 0.012 60);
+  --brand: oklch(0.9 0.015 85); --brand-foreground: oklch(0.24 0.012 60); --brand-soft: oklch(0.33 0.012 70);
+  --ring: oklch(0.6 0.02 75);
+}
+:root {
+  --content: var(--background);
+  --faint: color-mix(in oklch, var(--muted-foreground) 72%, transparent);
+  --hover: color-mix(in oklch, var(--muted) 78%, var(--card));
+  --selection: var(--card);
+  --shadow-sm: 0 1px 2px color-mix(in oklch, var(--foreground) 6%, transparent);
+  --shadow-md: 0 4px 16px color-mix(in oklch, var(--foreground) 9%, transparent);
+  --shadow-lg: 0 16px 45px color-mix(in oklch, var(--foreground) 12%, transparent);
+  --scrim: color-mix(in oklch, var(--background) 45%, transparent);
+  --mark: color-mix(in oklch, var(--brand) 16%, transparent);
+  /* Rakazo: the user's bubble is the strong one, the contact's sits on muted. */
+  --ub: var(--primary);
+  --ub-fg: var(--primary-foreground);
+  --cb: var(--muted);
+  font-family: "HarmonyOS Sans SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  font-synthesis: none;
+  color: var(--foreground);
+  -webkit-font-smoothing: antialiased;
+}
+.dark {
+  color-scheme: dark;
+  --content: var(--card);
+  --hover: color-mix(in oklch, var(--muted) 82%, var(--card));
+  --faint: color-mix(in oklch, var(--muted-foreground) 88%, var(--background));
+  --shadow-sm: 0 1px 2px color-mix(in oklch, black 30%, transparent);
+  --shadow-md: 0 6px 20px color-mix(in oklch, black 32%, transparent);
+  --shadow-lg: 0 18px 55px color-mix(in oklch, black 35%, transparent);
+  --scrim: color-mix(in oklch, black 40%, transparent);
+  --mark: color-mix(in oklch, var(--brand) 28%, transparent);
+  --ub: color-mix(in oklch, var(--foreground) 27%, var(--card));
+  --ub-fg: var(--foreground);
+  --cb: color-mix(in oklch, var(--foreground) 8%, var(--card));
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: color-mix(in oklch, var(--shell) 70%, var(--muted)); }
+svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+code, .mono { font-family: "Cascadia Mono", Consolas, monospace; font-size: 12px; }
+
+/* ---------- Doc shell (same as the knowledge mockup) ---------- */
+.doc { width: 1360px; margin: 0 auto; padding: 56px 40px 120px; }
+.doc-hero h1 { margin: 0 0 8px; font-size: 32px; font-weight: 600; letter-spacing: -.02em; }
+.doc-hero p { margin: 0; max-width: 860px; color: var(--muted-foreground); font-size: 14px; line-height: 1.75; }
+.doc-block { margin-top: 24px; padding: 28px 32px; border-radius: var(--fox-radius-large); background: var(--card); border: 1px solid var(--border); }
+.doc-block h2 { margin: 0 0 18px; font-size: 16px; font-weight: 600; }
+.principles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; }
+.principles b { display: block; margin-bottom: 6px; font-size: 14px; font-weight: 600; }
+.principles span { color: var(--muted-foreground); font-size: 13px; line-height: 1.7; }
+table.map { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.map th { padding: 0 16px 10px 0; color: var(--muted-foreground); font-size: 12px; font-weight: 500; text-align: left; }
+table.map td { padding: 12px 16px 12px 0; border-top: 1px solid var(--border); vertical-align: top; line-height: 1.65; color: var(--muted-foreground); }
+table.map td:first-child { color: var(--foreground); font-weight: 500; white-space: nowrap; }
+table.map td b { color: var(--foreground); font-weight: 500; }
+table.map td:last-child { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.glossary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0 32px; font-size: 13px; }
+.glossary div { display: flex; align-items: center; gap: 8px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.glossary s { color: var(--muted-foreground); text-decoration-color: var(--faint); }
+.glossary svg { width: 14px; height: 14px; color: var(--faint); }
+.doc-note { margin: 16px 0 0; color: var(--muted-foreground); font-size: 13px; line-height: 1.7; }
+.toc { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 24px; }
+.toc a { padding: 6px 12px; border-radius: var(--fox-radius-control); background: var(--card); border: 1px solid var(--border); color: var(--muted-foreground); font-size: 13px; text-decoration: none; }
+.toc a:hover { color: var(--foreground); }
+.frame { margin-top: 72px; scroll-margin-top: 80px; }
+.frame-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 18px; }
+.frame-head .no { color: var(--faint); font-size: 13px; font-variant-numeric: tabular-nums; }
+.frame-head h2 { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -.01em; }
+.frame-head p { margin: 0; color: var(--muted-foreground); font-size: 14px; }
+.frame-head .ids { margin-left: auto; display: flex; gap: 6px; }
+.frame-head .ids span { padding: 2px 8px; border-radius: var(--fox-radius-small); border: 1px solid var(--border); color: var(--muted-foreground); font-size: 12px; font-variant-numeric: tabular-nums; }
+.frame-row { display: flex; align-items: flex-start; gap: 32px; }
+.notes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 20px; }
+.frame-row .notes { grid-template-columns: 1fr; margin-top: 0; flex: 1; }
+.notes div { padding: 16px 18px; border-radius: var(--fox-radius-large); background: var(--card); border: 1px solid var(--border); }
+.notes h4 { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+.notes h4 svg { width: 14px; height: 14px; color: var(--muted-foreground); }
+.notes ul { margin: 0; padding-left: 18px; color: var(--muted-foreground); font-size: 13px; line-height: 1.75; }
+.switcher { position: fixed; top: 16px; right: 16px; z-index: 50; display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 12px; border-radius: var(--fox-radius-large); background: var(--popover); border: 1px solid var(--border); box-shadow: var(--shadow-md); font-size: 13px; color: var(--muted-foreground); }
+.switcher svg { width: 15px; height: 15px; }
+.switcher .seg button { font: inherit; }
+
+/* ---------- App window ---------- */
+.win { position: relative; width: 1280px; height: 800px; flex: none; display: flex; flex-direction: column; overflow: hidden; border-radius: 10px; background: var(--shell); border: 1px solid var(--border); box-shadow: var(--shadow-lg); color: var(--foreground); font-size: 13px; }
+.win.narrow { width: 390px; }
+.titlebar { height: 30px; flex: none; display: flex; align-items: center; justify-content: space-between; }
+.product { display: flex; align-items: center; gap: 10px; height: 100%; padding-left: 6px; }
+.product img { width: 19px; height: 19px; border-radius: 5px; }
+.product strong { font-size: 13px; font-weight: 600; }
+.product .pl { width: 28px; height: 28px; display: grid; place-items: center; color: var(--muted-foreground); }
+.product nav { display: flex; gap: 3px; margin-left: -4px; }
+.product nav span { height: 28px; display: inline-flex; align-items: center; padding: 0 7px; border-radius: 6px; color: var(--muted-foreground); }
+.wctl { display: flex; height: 100%; }
+.wctl span { width: 46px; display: grid; place-items: center; color: var(--muted-foreground); }
+.wctl svg { width: 15px; height: 15px; }
+.narrow .wctl span { width: 40px; }
+.app { flex: 1; min-height: 0; display: flex; }
+
+.side { width: 232px; flex: none; display: flex; flex-direction: column; padding: 0 12px 12px; }
+.mode-row { display: flex; align-items: center; gap: 4px; margin: 14px 4px 12px; }
+.tabs-sm { flex: none; white-space: nowrap; display: inline-flex; padding: 3px; border-radius: var(--fox-radius-card); background: var(--muted); }
+.tabs-sm span { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 10px; border-radius: calc(var(--fox-radius-card) - 2px); color: var(--muted-foreground); font-weight: 500; border: 1px solid transparent; }
+.tabs-sm span.on { background: var(--background); color: var(--foreground); border-color: var(--border); box-shadow: var(--shadow-sm); }
+.tabs-sm svg { width: 14px; height: 14px; }
+.sib { width: 32px; height: 32px; display: grid; place-items: center; border-radius: var(--fox-radius-control); color: var(--muted-foreground); position: relative; flex: none; }
+.sib .dot-red { position: absolute; top: 8px; right: 8px; width: 6px; height: 6px; border-radius: 50%; background: var(--destructive); }
+.nav { display: flex; flex-direction: column; gap: 2px; }
+.nav div { height: 32px; display: flex; align-items: center; gap: 9px; padding: 0 12px; border-radius: var(--fox-radius-card); color: var(--muted-foreground); font-weight: 500; }
+.nav div.em { color: var(--foreground); }
+.nav kbd { margin-left: auto; color: var(--faint); font: inherit; font-size: 12px; font-weight: 400; }
+.sec { display: flex; align-items: center; justify-content: space-between; margin: 20px 0 4px; padding: 0 4px 0 12px; color: var(--muted-foreground); font-size: 12px; }
+.sec svg { width: 14px; height: 14px; }
+.crow { position: relative; height: 34px; display: flex; align-items: center; gap: 9px; padding: 0 8px 0 10px; border-radius: var(--fox-radius-card); color: var(--foreground); }
+.crow.on { background: var(--selection); box-shadow: var(--shadow-sm); }
+.crow .nm { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.crow.quiet .nm { color: var(--muted-foreground); }
+.crow > svg { width: 13px; height: 13px; color: var(--faint); }
+.crow .spin { color: var(--muted-foreground); }
+.cnt { min-width: 18px; height: 18px; display: inline-grid; place-items: center; padding: 0 5px; border-radius: 9px; background: var(--foreground); color: var(--background); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.cnt.quiet { background: transparent; color: var(--muted-foreground); box-shadow: 0 0 0 1px var(--border) inset; }
+.need { height: 18px; display: inline-flex; align-items: center; padding: 0 6px; border-radius: 9px; background: color-mix(in oklch, var(--warning) 16%, transparent); color: var(--warning); font-size: 11px; font-weight: 500; }
+.convs div { height: 32px; display: flex; align-items: center; padding: 0 12px; border-radius: var(--fox-radius-card); color: var(--muted-foreground); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.foot { margin-top: auto; display: flex; align-items: center; gap: 8px; padding: 0 0 0 4px; }
+.foot img { width: 24px; height: 24px; border-radius: 50%; }
+.foot b { flex: 1; font-weight: 500; }
+
+.main { position: relative; flex: 1; min-width: 0; overflow: hidden; display: flex; background: var(--content); border-top: 1px solid var(--border); border-left: 1px solid var(--border); border-top-left-radius: var(--fox-radius-large); }
+.narrow .main { border-left: 0; border-top-left-radius: 0; }
+
+/* ---------- Generic controls ---------- */
+.grow { flex: 1; }
+.btn { height: 32px; display: inline-flex; align-items: center; gap: 6px; padding: 0 12px; border-radius: var(--fox-radius-control); border: 1px solid var(--border); background: var(--background); color: var(--foreground); font-size: 13px; font-weight: 500; white-space: nowrap; box-shadow: var(--shadow-sm); }
+.btn.primary { border-color: transparent; background: var(--primary); color: var(--primary-foreground); }
+.btn.ghost { border-color: transparent; background: transparent; box-shadow: none; color: var(--muted-foreground); }
+.btn.sm { height: 28px; padding: 0 10px; font-size: 12px; }
+.btn.danger { border-color: transparent; background: var(--destructive); color: white; }
+.btn svg { width: 15px; height: 15px; }
+.btn.sm svg { width: 14px; height: 14px; }
+.ib { width: 32px; height: 32px; display: inline-grid; place-items: center; flex: none; border-radius: var(--fox-radius-control); border: 1px solid transparent; color: var(--muted-foreground); }
+.ib.sm { width: 28px; height: 28px; }
+.ib.sm svg { width: 15px; height: 15px; }
+.ib.on { border-color: var(--border); background: var(--card); color: var(--foreground); }
+.dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--success); display: inline-block; }
+.dot.warn { background: var(--warning); }
+.dot.bad { background: var(--destructive); }
+.dot.hollow { background: transparent; box-shadow: 0 0 0 1.25px var(--muted-foreground) inset; }
+.status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: 12px; white-space: nowrap; }
+.status a, a.lk { color: var(--foreground); font-weight: 500; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--border); }
+.faint { color: var(--faint); }
+.muted { color: var(--muted-foreground); }
+mark { padding: 0 2px; border-radius: 3px; background: var(--mark); color: inherit; }
+.seg { display: inline-flex; padding: 3px; border-radius: var(--fox-radius-card); background: var(--muted); }
+.seg span, .seg button { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border: 1px solid transparent; border-radius: calc(var(--fox-radius-card) - 2px); background: transparent; color: var(--muted-foreground); font-size: 13px; font-weight: 500; }
+.seg .on { background: var(--background); color: var(--foreground); border-color: var(--border); box-shadow: var(--shadow-sm); }
+.seg small { color: var(--muted-foreground); font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.seg.xs span { height: 24px; padding: 0 8px; font-size: 12px; }
+.menu { position: absolute; z-index: 6; min-width: 196px; padding: 4px; border-radius: var(--fox-radius-card); background: var(--popover); border: 1px solid var(--border); box-shadow: var(--shadow-md); color: var(--popover-foreground); font-size: 13px; }
+.menu > div { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 8px; border-radius: var(--fox-radius-small); }
+.menu > div > svg { width: 15px; height: 15px; color: var(--muted-foreground); }
+.menu > div.on { background: var(--accent); }
+.menu > div small { margin-left: auto; padding-left: 16px; color: var(--faint); font-size: 12px; }
+.menu > div.off { color: var(--faint); }
+.menu .lbl { min-height: 26px; color: var(--muted-foreground); font-size: 12px; }
+.menu .two { align-items: flex-start; padding-top: 7px; padding-bottom: 7px; }
+.menu .two > svg { margin-top: 2px; }
+.menu .two b { display: block; font-weight: 400; }
+.menu .two em { display: block; margin-top: 1px; color: var(--muted-foreground); font-size: 12px; font-style: normal; }
+.menu .tick { width: 15px; height: 15px; flex: none; }
+.menu hr { margin: 4px -4px; border: 0; border-top: 1px solid var(--border); }
+.menu .danger, .menu .danger svg { color: var(--destructive); }
+.menu .hint { min-height: 0; padding: 6px 8px 4px; color: var(--faint); font-size: 12px; line-height: 1.6; }
+.sw { position: relative; width: 30px; height: 18px; flex: none; border-radius: 9px; background: var(--input); }
+.sw::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--background); box-shadow: var(--shadow-sm); }
+.sw.on { background: var(--primary); }
+.sw.on::after { left: 14px; background: var(--primary-foreground); }
+.cb { width: 16px; height: 16px; display: grid; place-items: center; flex: none; border-radius: 4px; border: 1px solid var(--input); background: var(--background); }
+.cb svg { width: 11px; height: 11px; stroke-width: 3; opacity: 0; }
+.cb.on { border-color: var(--primary); background: var(--primary); color: var(--primary-foreground); }
+.cb.on svg { opacity: 1; }
+.tag { height: 18px; display: inline-flex; align-items: center; padding: 0 6px; border-radius: var(--fox-radius-small); background: var(--muted); color: var(--muted-foreground); font-size: 11px; font-weight: 500; white-space: nowrap; }
+.scrim { position: absolute; inset: 0; z-index: 4; background: var(--scrim); backdrop-filter: blur(4px); }
+.dialog { position: absolute; top: 50%; left: 50%; z-index: 5; width: 440px; padding: 24px; transform: translate(-50%, -50%); border-radius: var(--fox-radius-overlay); background: var(--popover); border: 1px solid var(--border); box-shadow: var(--shadow-lg); }
+.dialog h3 { margin: 0; font-size: 16px; font-weight: 600; }
+.dialog .desc { margin: 6px 0 0; color: var(--muted-foreground); font-size: 13px; line-height: 1.7; }
+.dlist { margin-top: 16px; border-top: 1px solid var(--border); }
+.dlist div { display: flex; align-items: center; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.dlist div svg { width: 15px; height: 15px; color: var(--muted-foreground); }
+.dlist div span { flex: 1; }
+.dlist div small { color: var(--faint); font-size: 12px; }
+.dfoot { display: flex; align-items: center; gap: 8px; margin-top: 24px; }
+.toast { position: absolute; right: 20px; bottom: 20px; z-index: 8; width: 320px; display: flex; gap: 12px; padding: 14px 16px; border-radius: var(--fox-radius-card); background: var(--popover); border: 1px solid var(--border); box-shadow: var(--shadow-lg); }
+.toast img { width: 32px; height: 32px; border-radius: 50%; }
+.toast b { display: block; font-size: 13px; font-weight: 600; }
+.toast p { margin: 2px 0 0; color: var(--muted-foreground); font-size: 12px; line-height: 1.6; }
+.toast small { margin-left: auto; color: var(--faint); font-size: 11px; white-space: nowrap; }
+
+/* ---------- Contact chat ---------- */
+.chat { position: relative; flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.ctop { position: absolute; top: 0; left: 0; right: 0; z-index: 3; height: 84px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: start; gap: 8px; padding: 12px 12px 0 16px; background: linear-gradient(var(--content) 32%, transparent); }
+.ctop .l, .ctop .r { height: 36px; display: flex; align-items: center; gap: 2px; }
+.ctop .r { justify-content: flex-end; }
+.narrow .ctop { padding: 10px 6px 0; }
+.who { height: 36px; display: inline-flex; align-items: center; gap: 8px; padding: 0 14px 0 5px; border-radius: 18px; background: var(--popover); box-shadow: 0 0 0 1px var(--border), var(--shadow-sm); }
+.who img { width: 26px; height: 26px; border-radius: 50%; object-fit: cover; }
+.who b { font-size: 14px; font-weight: 600; white-space: nowrap; }
+.stream { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.lane { max-width: 720px; margin: 0 auto; padding: 0 32px; }
+.stream .lane { position: absolute; left: 0; right: 0; bottom: 8px; }
+.stream.top .lane { top: 60px; bottom: auto; }
+.day { margin: 22px 0 6px; color: var(--faint); font-size: 12px; text-align: center; }
+.unread-line { display: flex; align-items: center; gap: 12px; margin: 22px 0 4px; color: var(--muted-foreground); font-size: 12px; font-weight: 500; }
+.unread-line::before, .unread-line::after { content: ''; flex: 1; border-top: 1px solid var(--border); }
+.g { display: flex; gap: 10px; margin-top: 16px; }
+.g.me { justify-content: flex-end; }
+.gav { width: 28px; height: 28px; flex: none; border-radius: 50%; object-fit: cover; }
+.gcol { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; max-width: 80%; }
+.g.me .gcol { align-items: flex-end; max-width: 76%; }
+.src { display: flex; align-items: center; gap: 6px; margin: 2px 0 2px 2px; color: var(--muted-foreground); font-size: 12px; }
+.src svg { width: 13px; height: 13px; }
+.m { position: relative; max-width: 100%; }
+.m.rx-gap { margin-bottom: 12px; }
+.b { padding: 10px 16px; border-radius: 18px; background: var(--cb); color: var(--foreground); font-size: 14px; line-height: 22px; overflow-wrap: anywhere; }
+.g.me .b { background: var(--ub); color: var(--ub-fg); }
+.b p { margin: 0; }
+.b p + p, .b p + ul, .b ul + p { margin-top: 8px; }
+.b ul { margin: 0; padding-left: 18px; }
+.b.hit { box-shadow: 0 0 0 2px color-mix(in oklch, var(--ring) 55%, transparent); }
+.b.sel { background: color-mix(in oklch, var(--foreground) 7%, var(--cb)); }
+.mx .menu { top: calc(100% + 6px); left: 6px; }
+.mx .emo { top: auto; bottom: calc(100% + 6px); left: 6px; display: flex; gap: 2px; min-width: 0; padding: 6px; border-radius: 16px; }
+.mx .emo > div { width: 40px; height: 40px; justify-content: center; padding: 0; font-size: 20px; border-radius: 10px; }
+.b.hit mark { background: color-mix(in oklch, var(--brand) 26%, transparent); }
+.mx { position: absolute; bottom: 4px; left: 100%; display: none; align-items: center; gap: 0; padding-left: 6px; white-space: nowrap; color: var(--muted-foreground); }
+.g.me .mx { left: auto; right: 100%; padding: 0 6px 0 0; flex-direction: row-reverse; }
+.m.hov .mx { display: flex; }
+.mx .ib { width: 28px; height: 28px; }
+.mx .ib svg { width: 15px; height: 15px; stroke-width: 1.7; }
+.mx .ib.on { border-color: transparent; background: var(--accent); color: var(--foreground); }
+.mx time { padding: 0 6px; color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
+.rx { position: absolute; right: 12px; bottom: -14px; height: 24px; display: inline-flex; align-items: center; gap: 2px; padding: 0 7px; border-radius: 12px; background: var(--content); box-shadow: 0 0 0 1px var(--border), var(--shadow-sm); font-size: 13px; }
+.qref { max-width: 100%; display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 12px; box-shadow: 0 0 0 1px var(--border) inset; color: var(--muted-foreground); font-size: 12px; white-space: nowrap; overflow: hidden; }
+.qref svg { width: 12px; height: 12px; flex: none; }
+.qref b { color: var(--foreground); font-weight: 500; flex: none; }
+.qref span { overflow: hidden; text-overflow: ellipsis; }
+.art { width: 300px; display: flex; align-items: center; gap: 10px; margin-top: 2px; padding: 9px 8px 9px 12px; border-radius: var(--fox-radius-card); background: var(--content); box-shadow: 0 0 0 1px var(--border) inset; }
+.art > svg { width: 20px; height: 20px; color: var(--muted-foreground); }
+.art div { flex: 1; min-width: 0; }
+.art b { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13px; font-weight: 500; }
+.art small { color: var(--faint); font-size: 12px; }
+.notice { display: flex; justify-content: center; gap: 6px; margin: 18px 0 2px; color: var(--muted-foreground); font-size: 12px; }
+.notice svg { width: 13px; height: 13px; margin-top: 2px; color: var(--faint); }
+
+/* Decision card: the existing vertical-choice card, placed on the contact side. */
+.dc { width: 440px; display: flex; flex-direction: column; gap: 12px; padding: 18px 20px; border-radius: var(--fox-radius-large); background: var(--cb); }
+.dc header b { display: block; font-size: 14px; font-weight: 600; }
+.dc header small { display: block; margin-top: 2px; color: var(--muted-foreground); font-size: 12px; }
+.dc .op { padding: 10px 12px; border-radius: var(--fox-radius-control); background: var(--content); font-size: 13px; line-height: 1.7; }
+.dc .op small { display: block; margin-bottom: 2px; color: var(--faint); font-size: 12px; }
+.chs { display: flex; flex-direction: column; gap: 4px; }
+.chs div { min-height: 40px; display: flex; align-items: center; gap: 10px; padding: 0 8px; border-radius: var(--fox-radius-control); border: 1px solid transparent; background: color-mix(in oklch, var(--content) 55%, transparent); font-size: 13px; }
+.chs div.hov { background: var(--accent); }
+.chs i { width: 22px; height: 22px; display: grid; place-items: center; border-radius: var(--fox-radius-control); background: var(--content); color: var(--muted-foreground); font-size: 12px; font-style: normal; }
+.dc .more { display: flex; align-items: center; gap: 4px; color: var(--muted-foreground); font-size: 12px; }
+.dc .more svg { width: 13px; height: 13px; }
+.dc .rc { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.dc .rc svg { width: 15px; height: 15px; color: var(--success); }
+.dc.off { opacity: .72; }
+
+/* Task card */
+.tc { width: 380px; padding: 14px 14px 12px 16px; border-radius: var(--fox-radius-large); background: var(--content); box-shadow: 0 0 0 1px var(--border) inset, var(--shadow-sm); }
+.tc-h { display: flex; align-items: center; gap: 10px; }
+.tc-h .ic { width: 32px; height: 32px; display: grid; place-items: center; flex: none; border-radius: var(--fox-radius-card); background: var(--muted); }
+.tc-h b { display: block; font-size: 14px; font-weight: 600; }
+.tc-h small { color: var(--muted-foreground); font-size: 12px; }
+.tc dl { display: grid; grid-template-columns: 64px 1fr; gap: 6px 12px; margin: 14px 0 12px; font-size: 13px; }
+.tc dt { color: var(--muted-foreground); }
+.tc dd { margin: 0; }
+.tc-f { display: flex; align-items: center; gap: 4px; padding-top: 10px; border-top: 1px solid var(--border); }
+
+/* Composer */
+.dock { flex: none; padding: 0 0 12px; }
+.wstat { display: flex; align-items: center; gap: 8px; height: 32px; margin-bottom: 6px; padding: 0 6px; color: var(--muted-foreground); font-size: 12px; }
+.wstat img { width: 20px; height: 20px; border-radius: 50%; }
+.wstat img.pulse { opacity: .6; }
+.wstat .warn { color: var(--warning); font-weight: 500; }
+.comp { display: flex; align-items: center; gap: 4px; min-height: 50px; padding: 6px; border-radius: 25px; border: 1px solid var(--input); background: var(--background); box-shadow: var(--shadow-md); }
+.dark .comp { background: color-mix(in oklch, var(--foreground) 4%, var(--card)); }
+.comp .plus { width: 36px; height: 36px; display: grid; place-items: center; flex: none; border-radius: 50%; color: var(--muted-foreground); }
+.comp .plus svg { width: 20px; height: 20px; stroke-width: 1.6; }
+.comp .tx { flex: 1; min-width: 0; padding: 0 4px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 14px; line-height: 22px; color: var(--muted-foreground); }
+.comp .tx.typed { color: var(--foreground); }
+.comp .tx.typed::after { content: ''; display: inline-block; width: 1.5px; height: 17px; margin-left: 1px; vertical-align: -3px; background: var(--foreground); }
+.qd { display: flex; align-items: center; gap: 8px; margin: 0 14px 6px; padding: 6px 6px 6px 12px; border-radius: 14px; background: var(--muted); font-size: 12px; }
+.qd > svg { width: 14px; height: 14px; color: var(--muted-foreground); }
+.qd b { flex: none; font-weight: 500; }
+.qd span { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted-foreground); }
+.send { width: 36px; height: 36px; display: grid; place-items: center; flex: none; border-radius: 50%; background: var(--primary); color: var(--primary-foreground); }
+.cfoot { display: flex; align-items: center; justify-content: space-between; padding: 8px 6px 0; color: var(--muted-foreground); font-size: 12px; }
+.cfoot span { display: inline-flex; align-items: center; gap: 6px; }
+.cfoot svg { width: 13px; height: 13px; }
+.cfoot img { width: 16px; height: 16px; border-radius: 50%; }
+.jump { position: absolute; left: 50%; bottom: 12px; z-index: 3; display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; transform: translateX(-50%); border-radius: 15px; background: var(--popover); box-shadow: 0 0 0 1px var(--border), var(--shadow-md); color: var(--foreground); font-size: 12px; font-weight: 500; }
+.jump svg { width: 14px; height: 14px; }
+
+/* Search */
+.sbar { width: 520px; height: 36px; display: flex; align-items: center; gap: 8px; padding: 0 4px 0 14px; border-radius: 18px; border: 1px solid var(--ring); background: var(--background); box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 20%, transparent); font-size: 13px; color: var(--muted-foreground); }
+.sbar .q { flex: 1; color: var(--foreground); }
+.sbar .q::after { content: ''; display: inline-block; width: 1.5px; height: 15px; margin-left: 1px; vertical-align: -2px; background: var(--foreground); }
+.schip { display: flex; align-items: center; gap: 2px; height: 36px; padding: 0 4px 0 14px; border-radius: 18px; background: var(--popover); box-shadow: 0 0 0 1px var(--border), var(--shadow-sm); font-size: 12px; }
+.schip b { font-weight: 500; }
+.schip span { padding: 0 6px; color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
+.sres { position: absolute; top: 56px; left: 50%; z-index: 6; width: 620px; transform: translateX(-50%); padding: 6px; border-radius: var(--fox-radius-large); background: var(--popover); border: 1px solid var(--border); box-shadow: var(--shadow-lg); }
+.sres-h { display: flex; align-items: center; gap: 8px; padding: 6px 8px 10px; color: var(--muted-foreground); font-size: 12px; }
+.sr { position: relative; display: grid; grid-template-columns: 22px 1fr auto; gap: 10px; padding: 10px 10px 10px 8px; border-radius: var(--fox-radius-card); }
+.sr.on { background: var(--accent); }
+.sr img, .sr .me-av { width: 22px; height: 22px; border-radius: 50%; }
+.me-av { display: grid; place-items: center; background: var(--muted); color: var(--muted-foreground); font-size: 11px; font-weight: 600; }
+.sr b { font-size: 12px; font-weight: 500; color: var(--muted-foreground); }
+.sr p { margin: 2px 0 0; font-size: 13px; line-height: 1.7; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.sr time { color: var(--faint); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sres-f { display: flex; gap: 14px; padding: 10px 8px 4px; border-top: 1px solid var(--border); margin-top: 4px; color: var(--faint); font-size: 12px; }
+.kbd { padding: 0 5px; border-radius: var(--fox-radius-small); border: 1px solid var(--border); color: var(--muted-foreground); font-size: 11px; }
+
+/* ---------- Profile pane ---------- */
+.pane { position: relative; width: 360px; flex: none; display: flex; flex-direction: column; border-left: 1px solid var(--border); background: var(--pane); }
+:root { --pane: color-mix(in oklch, var(--muted) 45%, var(--background)); }
+.dark { --pane: color-mix(in oklch, var(--background) 55%, var(--card)); }
+.pane-x { position: absolute; top: 10px; right: 10px; z-index: 2; display: flex; gap: 2px; }
+.pane-h { display: flex; flex-direction: column; align-items: center; padding: 30px 24px 0; text-align: center; }
+.pane-h img { width: 64px; height: 64px; border-radius: 50%; object-fit: cover; }
+.pane-h b { margin-top: 10px; font-size: 17px; font-weight: 600; }
+.pane-h small { margin-top: 3px; color: var(--muted-foreground); font-size: 12px; line-height: 1.6; }
+.pane-sub { display: flex; align-items: center; gap: 6px; height: 52px; flex: none; padding: 0 10px 0 8px; }
+.pane-sub b { font-size: 14px; font-weight: 600; }
+.ptabs { display: flex; justify-content: center; gap: 2px; margin: 14px 0 2px; }
+.ptabs span { height: 28px; display: inline-flex; align-items: center; padding: 0 12px; border-radius: 14px; color: var(--muted-foreground); font-size: 13px; font-weight: 500; }
+.ptabs span.on { background: color-mix(in oklch, var(--foreground) 8%, transparent); color: var(--foreground); }
+.pbody { flex: 1; min-height: 0; overflow: hidden; padding: 0 16px 16px; }
+.glabel { margin: 16px 4px 6px; color: var(--muted-foreground); font-size: 12px; font-weight: 500; }
+.grp { border-radius: 12px; background: var(--content); border: 1px solid var(--border); }
+.grp > * + * { border-top: 1px solid var(--border); }
+.grp > :first-child { border-top-left-radius: 11px; border-top-right-radius: 11px; }
+.grp > :last-child { border-bottom-left-radius: 11px; border-bottom-right-radius: 11px; }
+.gr { position: relative; min-height: 44px; display: flex; align-items: center; gap: 10px; padding: 6px 10px 6px 12px; }
+.gr.hov { background: var(--hover); }
+.gr > svg:first-child { width: 16px; height: 16px; color: var(--muted-foreground); }
+.gr > .dot:first-child { margin: 0 5px; }
+.gr .k { flex: 1; min-width: 0; }
+.gr .k b { display: block; font-size: 13px; font-weight: 400; }
+.gr .k small { display: block; margin-top: 1px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted-foreground); font-size: 12px; }
+.gr .v { display: inline-flex; align-items: center; gap: 4px; color: var(--muted-foreground); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.gr .v svg { width: 15px; height: 15px; color: var(--faint); }
+.gr .menu { top: calc(100% - 4px); right: 6px; }
+.gr.sub { min-height: 34px; padding-left: 50px; }
+.gr .lg { width: 28px; height: 28px; display: grid; place-items: center; flex: none; border-radius: 50%; background: var(--muted); color: var(--foreground); }
+.gr .boundary { margin: 0; }
+.grp .lrow { padding: 8px 12px; border-bottom: 0; }
+.grp .lrow.hov { background: var(--hover); }
+.grp .lrow.hov::before { display: none; }
+.ptool { display: flex; align-items: center; gap: 8px; margin: 8px 4px 10px; }
+.srow { min-height: 48px; display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.srow:last-child { border-bottom: 0; }
+.srow > div:first-child { flex: 1; min-width: 0; }
+.srow b { display: block; font-size: 13px; font-weight: 500; }
+.srow small { display: block; margin-top: 2px; color: var(--muted-foreground); font-size: 12px; line-height: 1.55; }
+.srow > svg { width: 15px; height: 15px; color: var(--faint); }
+.pick { height: 28px; display: inline-flex; align-items: center; gap: 4px; padding: 0 6px 0 10px; border-radius: var(--fox-radius-control); color: var(--foreground); font-size: 13px; white-space: nowrap; }
+.pick.on { background: var(--accent); }
+.pick svg { width: 14px; height: 14px; color: var(--muted-foreground); }
+.pick em { color: var(--faint); font-style: normal; }
+.path { display: flex; align-items: center; gap: 8px; padding: 10px 0; }
+.path code { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted-foreground); }
+.boundary { display: flex; gap: 8px; margin: 6px 0 4px 26px; padding: 8px 10px; border-radius: var(--fox-radius-control); background: var(--muted); color: var(--muted-foreground); font-size: 12px; line-height: 1.6; }
+.boundary svg { width: 14px; height: 14px; margin-top: 2px; flex: none; }
+.conn { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.conn-h { display: flex; align-items: center; gap: 10px; }
+.conn-h .lg { width: 28px; height: 28px; display: grid; place-items: center; flex: none; border-radius: 8px; background: var(--muted); color: var(--foreground); font-size: 12px; font-weight: 600; }
+.conn-h div { flex: 1; min-width: 0; }
+.conn-h b { display: block; font-size: 13px; font-weight: 500; }
+.conn-h > svg { width: 15px; height: 15px; color: var(--muted-foreground); }
+.tools { margin: 8px 0 0 38px; }
+.tools div { height: 32px; display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.tools div span:nth-child(2) { flex: 1; }
+.tools div.off span:nth-child(2) { color: var(--muted-foreground); }
+.pfoot { padding: 4px 20px 16px; color: var(--faint); font-size: 12px; line-height: 1.6; }
+.lrow { position: relative; display: flex; align-items: center; gap: 10px; min-height: 56px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.lrow.hov::before { content: ''; position: absolute; inset: -1px -10px 0; z-index: 0; border-radius: var(--fox-radius-card); background: var(--hover); }
+.lrow > * { position: relative; z-index: 1; }
+.lrow > svg { width: 18px; height: 18px; color: var(--muted-foreground); }
+.lrow .tx { flex: 1; min-width: 0; }
+.lrow .tx b { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13px; font-weight: 500; }
+.lrow .tx small { display: block; margin-top: 2px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted-foreground); font-size: 12px; }
+.lrow .tx p { margin: 3px 0 0; font-size: 13px; line-height: 1.65; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.lrow .meta { color: var(--faint); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.lrow .acts { display: flex; gap: 0; }
+.lrow.gone .tx b { color: var(--muted-foreground); }
+.lrow.fav { align-items: flex-start; }
+.lrow.fav img, .lrow.fav .me-av { width: 22px; height: 22px; border-radius: 50%; margin-top: 2px; }
+.hgroup { margin: 18px 0 0; padding-bottom: 6px; border-bottom: 1px solid var(--border); color: var(--muted-foreground); font-size: 12px; font-weight: 500; }
+.hrow { display: grid; grid-template-columns: 6px 1fr auto; align-items: center; gap: 10px; min-height: 40px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.hrow small { display: block; color: var(--muted-foreground); font-size: 12px; }
+.hrow .t { color: var(--faint); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+
+
+/* Narrow (phone-width window) */
+.narrow .lane { padding: 0 14px; }
+.narrow .gcol { max-width: 86%; }
+.narrow .g.me .gcol { max-width: 84%; }
+.mxb { display: flex; align-items: center; gap: 0; margin-top: 2px; color: var(--muted-foreground); }
+.mxb .ib { width: 40px; height: 36px; }
+.mxb time { padding: 0 6px; color: var(--faint); font-size: 12px; }
+
+body.single { background: var(--shell); }
+body.single .doc { width: auto; padding: 0; margin: 0; }
+body.single .win { border: 0; border-radius: 0; box-shadow: none; }
+body.single .switcher { display: none; }
+</style>
+</head>
+<body>
+<div class="switcher" id="switcher"></div>
+<div class="doc" id="doc"></div>
+<script>
+const ASSET = '../../../apps/desktop/public'
+const I = (name, cls = '', style = '') => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true"${style ? ` style="${style}"` : ''}>${window.FOX_ICONS[name] || ''}</svg>`
+const AV = (file) => `${ASSET}/avatars/${file}`
+const C = {
+  zl: { name: '资料伙伴', img: AV('experts/Fox_ResearchAnalyst.png'), duty: '整理资料、核对数据' },
+  fox: { name: '小狐', img: AV('fox-assistant.png'), duty: 'Fox 默认联系人' },
+  zb: { name: '周报助手', img: AV('experts/Fox_ProjectManager.png'), duty: '汇总进度' },
+  fw: { name: '法务顾问', img: AV('experts/Fox_PolicyAdvisor.png'), duty: '审合同' },
+  cg: { name: '采购助理', img: AV('experts/Fox_BusinessManager.png'), duty: '比价下单' },
+}
+
+/* ---------------- Chrome ---------------- */
+// states: { key: 'unread:3' | 'work' | 'need' | 'muted:2' }
+function sidebar(active = 'zl', states = {}) {
+  const row = (k) => {
+    const c = C[k], s = states[k] || ''
+    let tail = ''
+    if (s.startsWith('unread')) tail = `<span class="cnt">${s.split(':')[1]}</span>`
+    if (s === 'work') tail = I('loader-circle', 'spin')
+    if (s === 'need') tail = `<span class="need">待确认</span>`
+    if (s.startsWith('muted')) tail = `${I('bell-off')}<span class="cnt quiet">${s.split(':')[1]}</span>`
+    return `<div class="crow ${active === k ? 'on' : ''} ${s.startsWith('muted') ? 'quiet' : ''}"><img class="gav" style="width:22px;height:22px;border-radius:50%" src="${c.img}" alt=""><span class="nm">${c.name}</span>${tail}</div>`
+  }
+  return `<aside class="side">
+    <div class="mode-row">
+      <div class="tabs-sm"><span class="on">${I('sparkles')}助手</span><span>${I('book-copy')}资料</span></div>
+      <div class="grow"></div><span class="sib">${I('search')}</span><span class="sib">${I('bell')}${states.bell ? '<i class="dot-red"></i>' : ''}</span>
+    </div>
+    <div class="nav"><div class="em">${I('message-circle-plus')}<span>新建对话</span><kbd>Ctrl N</kbd></div><div>${I('users')}<span>专家</span></div><div>${I('blocks')}<span>插件</span></div></div>
+    <div class="sec"><span>联系人</span><span class="sib" style="width:28px;height:28px">${I('plus')}</span></div>
+    ${['zl', 'fox', 'zb', 'fw', 'cg'].map(row).join('')}
+    <div class="sec"><span>对话</span></div>
+    <div class="convs"><div>季度预算口径确认</div><div>投标文件格式检查</div><div>会议纪要整理</div></div>
+    <div class="foot"><img src="${AV('defaults/fox_big_smile.png')}" alt=""><b>Hury</b><span class="sib">${I(document.documentElement.classList.contains('dark') ? 'moon' : 'sun')}</span><span class="sib">${I('settings')}</span></div>
+  </aside>`
+}
+const titlebar = (narrow) => `<header class="titlebar">
+  <div class="product"><img src="${AV('fox-assistant.png')}" alt=""><strong>Fox</strong>${narrow ? '' : `<span class="pl">${I('panel-left')}</span><nav><span>文件</span><span>编辑</span><span>视图</span><span>帮助</span></nav>`}</div>
+  <div class="wctl"><span>${I('minus')}</span><span>${I('square')}</span><span>${I('x')}</span></div>
+</header>`
+const win = ({ side = sidebar(), main, narrow = false }) => `<div class="win ${narrow ? 'narrow' : ''}">${titlebar(narrow)}<div class="app">${narrow ? '' : side}<main class="main">${main}</main></div></div>`
+
+/* ---------------- Chat pieces ---------------- */
+const acts = (k = {}) => `<div class="mx">${k.react === false ? '' : `<span class="ib ${k.on === 'react' ? 'on' : ''}">${I('smile')}</span>`}<span class="ib">${I('reply')}</span><span class="ib ${k.on === 'more' ? 'on' : ''}">${I('ellipsis')}</span><time>${k.time || '14:32'}</time>${k.pop || ''}</div>`
+// bubble: string or { t, hov, time, on, rx, hit }
+const bub = (x) => {
+  const o = typeof x === 'string' ? { t: x } : x
+  return `<div class="m ${o.hov ? 'hov' : ''} ${o.rx ? 'rx-gap' : ''}"><div class="b ${o.hit ? 'hit' : ''}">${o.t}</div>${acts(o)}${o.rx ? `<span class="rx">${o.rx}</span>` : ''}</div>`
+}
+const them = (list, { who = C.zl, src = '', extra = '' } = {}) => `<div class="g them"><img class="gav" src="${who.img}" alt=""><div class="gcol">${src ? `<div class="src">${src}</div>` : ''}${list.map(bub).join('')}${extra}</div></div>`
+const me = (list, { quote = '', extra = '' } = {}) => `<div class="g me"><div class="gcol">${quote}${extra}${list.map(bub).join('')}</div></div>`
+const art = (icon, name, sub) => `<div class="art">${I(icon)}<div><b>${name}</b><small>${sub}</small></div><span class="ib sm">${I('external-link')}</span></div>`
+const qref = (who, text) => `<div class="qref">${I('quote')}<b>${who}</b><span>${text}</span></div>`
+const topbar = (who = C.zl, mid = '', right = '', left = '') => `<div class="ctop">
+  <div class="l">${left}</div>
+  ${mid || `<div class="who"><img src="${who.img}" alt=""><b>${who.name}</b></div>`}
+  <div class="r">${right || `<span class="ib">${I('search')}</span><span class="ib">${I('ellipsis')}</span><span class="ib">${I('panel-right')}</span>`}</div>
+</div>`
+const dock = ({ status = '', quote = '', text = '', who = C.zl, narrow = false } = {}) => `<div class="dock"><div class="lane">
+  ${status}
+  ${quote}
+  <div class="comp"><span class="plus">${I('plus')}</span><div class="tx ${text ? 'typed' : ''}">${text || `给${who.name}发消息`}</div><span class="send ${text ? '' : 'off'}">${I('arrow-up')}</span></div>
+  ${narrow ? '' : `<div class="cfoot"><span>${I('folder-lock')}工作目录</span><span><img src="${who.img}" alt="">${who.name}</span></div>`}
+</div></div>`
+const working = (label, extra = '', who = C.zl) => `<div class="wstat"><img class="pulse" src="${who.img}" alt=""><span>${label}</span>${extra}<div class="grow"></div><span class="btn sm ghost">${I('square', '', 'width:11px;height:11px;fill:currentColor;stroke-width:1')}停止</span></div>`
+const waiting = (who = C.zl) => `<div class="wstat"><img src="${who.img}" alt=""><span class="warn">等你确认</span><span class="faint">· 确认后继续</span></div>`
+const chat = ({ top = topbar(), body, dockHtml = dock(), cls = '', overlay = '' }) => `<section class="chat">${top}<div class="stream ${cls}"><div class="lane">${body}</div></div>${dockHtml}${overlay}</section>`
+
+/* Shared conversation (C00) */
+const quoteSheet = art('file-spreadsheet', '供应商报价对比.xlsx', 'Excel · 18 KB · 刚刚生成')
+const convoToday = (h = {}) => `
+  <div class="day">昨天</div>
+  ${me(['下周要交采购比价，三家供应商的报价单我晚点发你。'])}
+  ${them(['好的。收到后我会先核对税率和运费，再整理成一张表。', '哪份报价单没写有效期，我会单独标出来。'])}
+  <div class="day">今天</div>
+  ${me(['帮我把这三家供应商的报价整理成对比表，含税价单独列一列。'], { extra: art('file-text', '三家报价单.zip', '我提供的文件 · 2.4 MB') })}
+  ${them([
+    { t: '收到，我先看一下三份报价。', ...(h.a || {}) },
+    { t: '华东机电的报价单没写税率，我先按 13% 估算，表里做了标注。', ...(h.b || {}) },
+    { t: '<p>整理好了。含税价最低的是华东机电，<b>12,800 元</b>。</p><ul><li>华东机电：12,800 元（税率为估算）</li><li>恒信设备：13,450 元</li><li>远航工业：14,020 元</li></ul>', ...(h.c || {}) },
+  ], { extra: quoteSheet })}`
+
+/* ---------------- Screens ---------------- */
+const s01 = () => win({ main: chat({
+  body: convoToday({ b: { hov: true, time: '14:32' } }) + me(['税率我去问一下。顺便帮我查查华东机电官网有没有公开的开票说明。']),
+  dockHtml: dock({ status: working('正在查网页', '<span class="faint">· 12 秒</span>') }),
+}) })
+
+const s02 = () => win({ main: chat({
+  body: convoToday({ b: { hov: true, on: 'more', time: '14:32', pop: `<div class="menu emo">${['👍', '❤️', '😂', '🎉', '😮', '👀'].map((e, i) => `<div class="${i === 0 ? 'on' : ''}">${e}</div>`).join('')}</div>
+    <div class="menu">
+      <div>${I('copy')}复制</div>
+      <div>${I('star')}收藏</div>
+      <div class="on">${I('message-square-dot')}标为未读</div>
+    </div>` }, c: { rx: '👍' } }) + me(['好的，表我先拿去用了。']),
+}) })
+
+const s03 = () => win({ main: chat({
+  body: `<div class="day">今天</div>` + them([
+    '收到，我先看一下三份报价。',
+    '华东机电的报价单没写税率，我先按 13% 估算，表里做了标注。',
+  ]) + me(['问到了，华东机电开的是 6% 的专票。'], { quote: qref('资料伙伴', '华东机电的报价单没写税率，我先按 13% 估算，表里做了标注。') })
+    + them(['明白，我按 6% 重新算。这样华东机电含税价是 12,080 元，还是最低。', { t: '表格已经更新，原来的估算标注也删掉了。', hov: true, time: '14:41' }], { extra: art('file-spreadsheet', '供应商报价对比.xlsx', 'Excel · 18 KB · 已更新') }),
+  dockHtml: dock({
+    quote: `<div class="qd">${I('reply')}<b>回复资料伙伴</b><span>明白，我按 6% 重新算。这样华东机电含税价是 12,080 元，还是最低。</span><span class="ib sm">${I('x')}</span></div>`,
+    text: '那把远航工业的运费也加进去再比一次',
+  }),
+}) })
+
+const s04 = () => win({ main: chat({
+  top: topbar(C.zl, `<div class="sbar">${I('search')}<span class="q">报价</span><span class="ib sm">${I('x')}</span></div>`, `<span class="ib">${I('panel-right')}</span>`),
+  body: convoToday() + me(['好的，表我先拿去用了。']),
+  overlay: `<div class="scrim" style="top:56px;backdrop-filter:none"></div><div class="sres">
+    <div class="sres-h"><span>4 条消息</span><span>·</span><span>只搜索和资料伙伴的私聊</span><div class="grow"></div><div class="seg xs"><span class="on">时间不限</span><span>最近 7 天</span><span>最近 30 天</span><span>${I('calendar-clock', '', 'width:13px;height:13px')}自定义</span></div></div>
+    <div class="sr"><img src="${C.zl.img}" alt=""><div><b>资料伙伴</b><p>整理好了。含税价最低的是华东机电，12,800 元……三家<mark>报价</mark>的差价主要在运费。</p></div><time>今天 14:33</time></div>
+    <div class="sr on"><span class="me-av">我</span><div><b>我</b><p>帮我把这三家供应商的<mark>报价</mark>整理成对比表，含税价单独列一列。</p></div><time>今天 14:30</time></div>
+    <div class="sr"><img src="${C.zl.img}" alt=""><div><b>资料伙伴</b><p>上次的投影仪<mark>报价</mark>我存在工作目录里了，有效期到 10 月底，过期需要重新询价。</p></div><time>10 月 12 日</time></div>
+    <div class="sr"><span class="me-av">我</span><div><b>我</b><p>恒信设备去年的<mark>报价</mark>单你还留着吗？</p></div><time>9 月 3 日</time></div>
+    <div class="sres-f"><span><span class="kbd">↑</span> <span class="kbd">↓</span> 选择</span><span><span class="kbd">Enter</span> 跳到这条消息</span><span><span class="kbd">Esc</span> 关闭</span></div>
+  </div>`,
+}) })
+
+const s05 = () => win({ main: chat({
+  top: topbar(C.zl, `<div class="schip">${I('search', '', 'width:13px;height:13px;color:var(--muted-foreground)')}<b style="margin-left:6px">报价</b><span>3 / 4</span><span class="ib sm">${I('chevron-up')}</span><span class="ib sm">${I('chevron-down')}</span><span class="ib sm">${I('x')}</span></div>`, `<span class="ib">${I('panel-right')}</span>`),
+  body: `<div class="day">10 月 12 日</div>`
+    + me(['上次那台投影仪的价格还有效吗？'])
+    + them(['我查了一下工作目录。', { t: '上次的投影仪<mark>报价</mark>我存在工作目录里了，有效期到 10 月底，过期需要重新询价。', hit: true }], { extra: art('file-text', '投影仪报价-恒信.pdf', 'PDF · 312 KB') })
+    + me(['好，到时候提醒我。'])
+    + `<div class="day">10 月 13 日</div>`
+    + them(['好的。月底前我会在这里提醒你。'])
+    + `<div class="day">10 月 20 日</div>`
+    + me(['三家的税率都问清楚了吗？']),
+  cls: 'top',
+  dockHtml: `<div style="position:relative">${dock()}</div>`,
+  overlay: `<span class="jump" style="bottom:100px">${I('arrow-down')}回到最新消息</span>`,
+}) })
+
+const s06 = () => win({ side: sidebar('zl', { zl: 'need' }), main: chat({
+  body: `<div class="day">今天</div>`
+    + them(['早上好，今天的下载目录整理完了：新增 14 个文件，已按项目归到 4 个文件夹，3 个重复文件放进了「待删除」。'], { src: `${I('calendar-clock')}定时任务 · 整理下载目录 · 09:00` , extra: art('file-text', '整理记录-11月7日.md', 'Markdown · 4 KB') })
+    + them([`<div class="dc">
+        <header><b>要在飞书发送这条消息吗？</b><small>飞书 · 发送消息 · 来自定时任务「每周项目周报」</small></header>
+        <div class="op"><small>发给 · 项目组（12 人）</small>本周完成：报价对比、合同初审。下周计划：确认华东机电的供货时间。附件：本周周报.docx</div>
+        <div class="chs"><div class="hov"><i>A</i><span>允许这一次</span></div><div><i>B</i><span>不发送</span></div></div>
+        <span class="more">${I('chevron-right')}查看操作详情</span>
+      </div>`].map(t => ({ t, react: false })).map(o => ({ ...o })), { src: `${I('calendar-clock')}定时任务 · 每周项目周报 · 17:30` }).replace('<div class="b ">', '<div>')
+    ,
+  dockHtml: dock({ status: waiting() }),
+}) })
+
+const s07 = () => win({ main: chat({
+  body: `<div class="day">今天</div>`
+    + me(['以后每个工作日早上 9 点帮我整理一下下载目录，按项目归档，重复的文件先别删。'])
+    + them(['好的，我建了一个定时任务。到时间我会自己开始，整理完把结果发到这里。'], {
+      extra: `<div class="tc">
+        <div class="tc-h"><span class="ic">${I('calendar-clock')}</span><div style="flex:1"><b>整理下载目录</b><small>按项目归档，重复文件只标记不删除</small></div><span class="status"><i class="dot"></i>已开启</span></div>
+        <dl><dt>什么时候</dt><dd>每个工作日 09:00</dd><dt>下次</dt><dd>11 月 10 日 周一 09:00 <span class="faint">· 本机时间</span></dd><dt>结果</dt><dd>发到这个私聊</dd></dl>
+        <div class="tc-f"><span class="btn sm">${I('play')}现在运行一次</span><span class="btn sm ghost">${I('pause')}暂停</span><div class="grow"></div><span class="ib sm">${I('pencil')}</span><span class="ib sm">${I('ellipsis')}</span></div>
+      </div>` })
+    + `<div class="notice">${I('info')}<span>11 月 8 日 09:00 没有运行：那时 Fox 没有打开。<a class="lk">现在运行一次</a></span></div>`,
+}) })
+
+/* Profile pane */
+const paneX = () => `<div class="pane-x"><span class="ib sm">${I('pencil')}</span><span class="ib sm">${I('ellipsis')}</span><span class="ib sm">${I('x')}</span></div>`
+const paneHead = (c = C.zl) => `${paneX()}<div class="pane-h"><img src="${c.img}" alt=""><b>${c.name}</b><small>帮你整理资料、核对报价和表格数据</small></div>`
+const tabs = (on) => `<div class="ptabs">${['资料', '笔记', '文件'].map((t) => `<span class="${on === t ? 'on' : ''}">${t}</span>`).join('')}</div>`
+const pane = (on, body, foot = '') => `<aside class="pane">${paneHead()}${tabs(on)}<div class="pbody">${body}</div>${foot}</aside>`
+const subpane = (title, body, foot = '') => `<aside class="pane"><div class="pane-sub"><span class="ib sm">${I('arrow-left')}</span><b>${title}</b><div class="grow"></div><span class="ib sm">${I('x')}</span></div><div class="pbody">${body}</div>${foot}</aside>`
+const sidechat = (opts = {}) => chat({ top: topbar(C.zl, '', `<span class="ib">${I('search')}</span><span class="ib">${I('ellipsis')}</span><span class="ib on">${I('panel-right')}</span>`), body: convoToday(), ...opts })
+const chev = I('chevron-right')
+const profileRows = ({ menu = '' } = {}) => `
+  <div class="glabel">对话</div>
+  <div class="grp">
+    <div class="gr"><span class="k"><b>模型</b></span><span class="pick ${menu ? 'on' : ''}">跟随全局 <em>· DeepSeek V3</em>${I('chevrons-up-down')}</span>${menu}</div>
+    <div class="gr"><span class="k"><b>提醒</b></span><span class="pick">全部提醒${I('chevrons-up-down')}</span></div>
+    <div class="gr"><span class="k"><b>读写工作目录外的文件</b></span><span class="pick">先问我${I('chevrons-up-down')}</span></div>
+  </div>
+  <div class="glabel">定时任务</div>
+  <div class="grp">
+    <div class="gr">${I('calendar-clock')}<span class="k"><b>整理下载目录</b><small>每个工作日 09:00</small></span><span class="sw on"></span></div>
+    <div class="gr">${I('calendar-clock')}<span class="k"><b>每周项目周报</b><small><span style="color:var(--warning)">等你确认发送</span> · 每周五 17:30</small></span><span class="sw on"></span></div>
+    <div class="gr"><span class="k muted">全部任务和运行记录</span><span class="v">3 个${chev}</span></div>
+  </div>
+  <div class="glabel">这个联系人</div>
+  <div class="grp">
+    <div class="gr">${I('blocks')}<span class="k"><b>可用能力</b></span><span class="v">网页、飞书${chev}</span></div>
+    <div class="gr">${I('book-copy')}<span class="k"><b>项目笔记授权</b></span><span class="v">2 个项目${chev}</span></div>
+    <div class="gr">${I('star')}<span class="k"><b>收藏</b></span><span class="v">4 条${chev}</span></div>
+    <div class="gr">${I('folder-open')}<span class="k"><b>工作目录</b><small class="mono">D:\\FoxData\\contacts\\资料伙伴</small></span><span class="v">${I('external-link')}</span></div>
+  </div>`
+
+const s08 = () => win({ main: sidechat() + pane('资料', profileRows()) })
+
+const s09 = () => win({ main: sidechat() + subpane('可用能力', `
+    <div class="glabel">网页</div>
+    <div class="grp">
+      <div class="gr">${I('search')}<span class="k"><b>网页搜索</b><small>用已配置的搜索服务查公开网页</small></span><span class="sw on"></span></div>
+      <div class="gr">${I('globe')}<span class="k"><b>读取网页</b><small>打开链接，读取正文</small></span><span class="sw on"></span></div>
+    </div>
+    <div class="glabel">连接器</div>
+    <div class="grp">
+      <div class="gr"><span class="lg">${I('message-square', '', 'width:14px;height:14px')}</span><span class="k"><b>飞书</b><small><span class="status"><i class="dot"></i>已连接 · 用 2 个，共 5 个</span></small></span><span class="v">${I('chevron-up')}</span></div>
+      <div class="gr sub"><span class="cb on">${I('check')}</span><span class="k">读取日历</span></div>
+      <div class="gr sub"><span class="cb on">${I('check')}</span><span class="k">发送消息</span><span class="tag">发送前问我</span></div>
+      <div class="gr sub"><span class="cb">${I('check')}</span><span class="k muted">创建文档</span></div>
+      <div class="gr sub"><span class="cb">${I('check')}</span><span class="k muted">修改日程</span><span class="tag">发送前问我</span></div>
+      <div class="gr sub"><span class="cb">${I('check')}</span><span class="k muted">搜索群消息</span></div>
+      <div class="gr"><span class="lg">${I('folder-open', '', 'width:14px;height:14px')}</span><span class="k"><b>本机文件助手</b><small><span class="status"><i class="dot hollow"></i>未启用</span></small></span><span class="v">${I('chevron-up')}</span></div>
+      <div class="gr sub" style="padding-top:2px;padding-bottom:10px;border-top:0"><div class="boundary">${I('info')}<span>它在这台电脑上运行。Fox 只能决定它能用哪些工具，管不住它自己能读写哪些文件。</span></div></div>
+      <div class="gr"><span class="lg">${I('github', '', 'width:14px;height:14px')}</span><span class="k"><b>GitHub</b><small><span class="status"><i class="dot hollow"></i>还没连接</span></small></span><a class="lk" style="font-size:12px">去连接</a></div>
+    </div>`,
+  `<div class="pfoot">从下一轮对话开始生效。已经在等你确认的操作，也会按新的设置重新检查。</div>`) })
+
+const s10 = () => win({ main: sidechat() + pane('资料', profileRows({ menu: `<div class="menu" style="width:300px">
+  <div class="two"><span class="tick">${I('check')}</span><div><b>跟随全局</b><em>现在是 DeepSeek V3，全局换了它也跟着换</em></div></div>
+  <hr>
+  <div class="lbl">DeepSeek</div>
+  <div><span class="tick"></span>DeepSeek V3<small>不能看图</small></div>
+  <div><span class="tick"></span>DeepSeek R1<small>不能看图</small></div>
+  <div class="lbl">通义千问</div>
+  <div class="on"><span class="tick"></span>Qwen Max<small>能看图</small></div>
+  <div class="lbl">本机 Ollama</div>
+  <div class="off"><span class="tick"></span>qwen2.5:14b<small>服务没有启动</small></div>
+  <hr>
+  <div class="hint">只影响下一轮对话，正在进行的任务继续用原来的模型。选中的模型用不了时会直接告诉你，不会偷偷换成别的。</div>
+</div>` })) })
+
+const s11 = () => win({ main: sidechat() + subpane('定时任务', `
+  <div class="ptool"><span class="muted" style="font-size:12px">3 个定时任务，2 个开着</span><div class="grow"></div><span class="btn sm primary">${I('plus')}新建任务</span></div>
+  <div class="grp">
+    <div class="gr hov">${I('calendar-clock')}<span class="k"><b>整理下载目录</b><small>每个工作日 09:00</small></span><span class="ib sm">${I('play')}</span><span class="ib sm">${I('ellipsis')}</span><span class="sw on"></span></div>
+    <div class="gr">${I('calendar-clock')}<span class="k"><b>每周项目周报</b><small><span style="color:var(--warning)">等你确认发送</span> · <a class="lk">去处理</a></small></span><span class="sw on"></span></div>
+    <div class="gr">${I('calendar-clock')}<span class="k"><b class="muted">季度报价复查</b><small>12 月 1 日 10:00 · 已暂停</small></span><span class="sw"></span></div>
+  </div>
+  <div class="glabel">最近运行</div>
+  <div class="grp">
+    <div class="gr"><i class="dot warn"></i><span class="k"><b>每周项目周报</b><small>等你确认</small></span><span class="v">今天 17:30</span></div>
+    <div class="gr"><i class="dot"></i><span class="k"><b>整理下载目录</b><small>完成 · <a class="lk">查看结果</a></small></span><span class="v">今天 09:00</span></div>
+    <div class="gr"><i class="dot hollow"></i><span class="k"><b>整理下载目录</b><small>没有运行：Fox 没有打开 · <a class="lk">现在运行一次</a></small></span><span class="v">11 月 8 日</span></div>
+    <div class="gr"><i class="dot bad"></i><span class="k"><b>每周项目周报</b><small>中断：Fox 被关闭 · <a class="lk">重新运行</a></small></span><span class="v">10 月 31 日</span></div>
+  </div>`,
+  `<div class="pfoot">Fox 开着、电脑没睡眠时才会按时运行。时间按本机时区（UTC+08:00）。</div>`) })
+
+const s12 = () => win({ main: sidechat() + pane('文件', `
+  <div class="ptool" style="margin-top:14px"><div class="seg xs"><span class="on">它做的 <small>5</small></span><span>我给的 <small>3</small></span></div><div class="grow"></div><span class="ib sm">${I('folder-open')}</span></div>
+  <div class="grp">
+    <div class="lrow hov">${I('file-spreadsheet')}<div class="tx"><b>供应商报价对比.xlsx</b><small>来自今天 14:33 的消息</small></div><div class="acts"><span class="ib sm">${I('corner-down-left')}</span><span class="ib sm">${I('download')}</span><span class="ib sm">${I('external-link')}</span></div></div>
+    <div class="lrow">${I('file-text')}<div class="tx"><b>整理记录-11月7日.md</b><small>来自定时任务「整理下载目录」</small></div><span class="meta">今天</span></div>
+    <div class="lrow">${I('file-text')}<div class="tx"><b>本周周报.docx</b><small>来自定时任务「每周项目周报」</small></div><span class="meta">11 月 1 日</span></div>
+    <div class="lrow gone">${I('file')}<div class="tx"><b>报价汇总-旧版.xlsx</b><small><span class="status"><i class="dot warn"></i>文件已不在工作目录</span></small></div><span class="meta">10 月 20 日</span></div>
+    <div class="lrow">${I('file-text')}<div class="tx"><b>投影仪报价-恒信.pdf</b><small>来自 10 月 12 日的消息</small></div><span class="meta">10 月 12 日</span></div>
+  </div>`,
+  `<div class="pfoot">另存为时由你选位置。直接放进工作目录、没有经过聊天的文件，请从右上角的文件夹图标打开查看。</div>`) })
+
+const s13 = () => win({ main: sidechat() + subpane('收藏', `
+  <div class="ptool"><span class="muted" style="font-size:12px">只是你自己的标记，不会写进它的笔记</span></div>
+  <div class="grp">
+    <div class="lrow fav hov"><img src="${C.zl.img}" alt=""><div class="tx"><p>整理好了。含税价最低的是华东机电，12,800 元。华东机电：12,800 元（税率为估算）……</p><small>今天 14:33</small></div><div class="acts"><span class="ib sm">${I('corner-down-left')}</span><span class="ib sm" style="color:var(--foreground)">${I('star', '', 'fill:currentColor')}</span></div></div>
+    <div class="lrow fav"><span class="me-av">我</span><div class="tx"><p>报价对比以后都按含税价排序，运费单独列。</p><small>11 月 3 日</small></div></div>
+    <div class="lrow fav"><img src="${C.zl.img}" alt=""><div class="tx"><p>上次的投影仪报价我存在工作目录里了，有效期到 10 月底，过期需要重新询价。</p><small>10 月 12 日</small></div></div>
+    <div class="lrow fav"><img src="${C.zl.img}" alt=""><div class="tx"><p>附件：三家报价单.zip</p><small>9 月 28 日</small></div></div>
+  </div>`) })
+
+const s14 = () => win({ side: sidebar('fw', { fox: 'unread:3', zb: 'work', zl: 'need', cg: 'muted:2', bell: true }), main: chat({
+  top: topbar(C.fw),
+  body: `<div class="day">昨天</div>`
+    + me(['这份采购合同帮我看一下付款条款。'], { extra: art('file-text', '采购合同-华东机电.docx', '我提供的文件 · 86 KB') })
+    + them(['看完了，有两处需要注意。'], { who: C.fw })
+    + `<div class="unread-line">新消息</div>`
+    + them(['第一，预付款比例是 50%，比你们以往的 30% 高。', '第二，违约金条款只约束买方，建议补上对卖方延期交货的约束。'], { who: C.fw }),
+  dockHtml: dock({ who: C.fw }),
+  overlay: `<div class="toast" style="top:64px;bottom:auto"><img src="${C.zl.img}" alt=""><div><b>资料伙伴需要你确认</b><p>要在飞书发送「本周项目周报」吗？</p></div><small>17:30</small></div>`,
+}) })
+
+const s15 = () => win({ main: sidechat({ dockHtml: dock({ status: working('正在整理下载目录', '<span class="faint">· 定时任务</span>') }) }) + `<div class="scrim"></div>
+  <div class="dialog">
+    <h3>归档资料伙伴？</h3>
+    <p class="desc">归档前先停下它手上的事。聊天记录、笔记和工作目录都会保留，随时可以恢复。</p>
+    <div class="dlist">
+      <div>${I('loader-circle')}<span>正在运行：整理下载目录</span><small>会停止</small></div>
+      <div>${I('circle-alert')}<span>等你确认：每周项目周报</span><small>会取消，不会发送</small></div>
+      <div>${I('pause')}<span>3 个定时任务</span><small>会暂停</small></div>
+    </div>
+    <p class="desc" style="margin-top:12px;font-size:12px">恢复以后，定时任务需要你自己重新开启，错过的不会补跑。</p>
+    <div class="dfoot"><div class="grow"></div><span class="btn">取消</span><span class="btn danger">停止并归档</span></div>
+  </div>` })
+
+const s16 = () => {
+  const one = (stage) => win({ narrow: true, main: chat({
+    top: topbar(C.zl, '', `<span class="ib">${I('search')}</span><span class="ib">${I('ellipsis')}</span>`, `<span class="ib">${I('arrow-left')}</span>`),
+    body: `<div class="day">昨天</div>`
+      + me(['下周要交采购比价，三家供应商的报价单我晚点发你。'])
+      + them(['好的。收到后我会先核对税率和运费，再整理成一张表。'])
+      + `<div class="day">今天</div>`
+      + me(['帮我把这三家供应商的报价整理成对比表，含税价单独列一列。'])
+      + `<div class="g them"><img class="gav" src="${C.zl.img}" alt=""><div class="gcol">
+          <div class="m"><div class="b">收到，我先看一下三份报价。</div></div>
+          <div class="m"><div class="b ${stage ? 'sel' : ''}">华东机电的报价单没写税率，我先按 13% 估算，表里做了标注。</div></div>
+          ${stage ? `<div class="mxb"><span class="ib">${I('smile')}</span><span class="ib">${I('reply')}</span><span class="ib">${I('ellipsis')}</span><time>14:32</time></div>` : ''}
+          <div class="m"><div class="b">整理好了。含税价最低的是华东机电，12,800 元。</div></div>
+        </div></div>`,
+    dockHtml: dock({ narrow: true }),
+  }) })
+  return `<div style="display:flex;gap:24px">${one(false)}${one(true)}</div>`
+}
+
+const screens = [
+  { id: 'chat', title: '私聊', desc: '一条消息一个气泡，鼠标移上去才出现操作。', ids: ['C00'], render: s01,
+    focus: ['顶部居中一个胶囊：圆形头像和名字；消息滚到顶部时渐隐，不硬切', '你的消息是实心深色气泡，联系人的是浅灰气泡；连续消息间隔 4px，换人时 16px', '输入框是一条长胶囊：左边加号放附件，右边发送', '正在做的事只在输入框上方一行显示：头像、「正在查网页 · 12 秒」、停止'],
+    tucked: ['表情、引用回复、更多和时间只在悬停或键盘聚焦时出现在气泡旁，不挤动正文', '「重置上下文」收进右上角 ⋯', '联系人生成的文件用一张小卡片挂在回复下面'],
+    removed: ['去掉每条消息下方常驻的复制按钮和完整日期', '工具名称、参数和推理过程不进私聊'] },
+  { id: 'actions', title: '消息菜单与表情', desc: '更多菜单只放三件事，表情只有六个。', ids: ['C00', 'C06', 'C07'], render: s02,
+    focus: ['更多菜单：复制、收藏、标为未读（截图为打开状态）', '表情面板六个表情，点同一个取消，点别的替换（截图把表情面板和更多菜单画在一起，实际一次只开一个）', '选中的表情贴在气泡右下角，重开后还在'],
+    tucked: ['「标为未读」只出现在联系人发来的消息上', '收藏后菜单里变成「取消收藏」，气泡上不加星标'],
+    removed: ['不显示多人表情计数', '不提供「删除消息」和「编辑重发」'] },
+  { id: 'reply', title: '引用回复', desc: '回复指定的一条，发出去后还能点回原文。', ids: ['C07'], render: s03,
+    focus: ['输入框顶部显示「回复资料伙伴」和原文摘要，可以取消', '发出的消息上方带一行引用，点它跳回原气泡', '模型收到的请求里也带着这条原文'],
+    tucked: ['长消息和代码在引用里只显示一行', '附件消息的摘要用文件名'],
+    removed: ['原消息找不到时只写「原消息不可用」，不跳到别的消息'] },
+  { id: 'search', title: '搜索私聊', desc: '只搜和这个联系人的聊天，结果长得像消息。', ids: ['C01'], render: s04,
+    focus: ['顶部搜索框，结果在下方弹层，关键词高亮', '每条结果：谁说的、两行片段、日期', '时间筛选放在弹层顶部，四个选项'],
+    tucked: ['键盘操作提示放在弹层底部', '搜索范围用一句话说明，不做范围切换'],
+    removed: ['不搜笔记，不搜工具过程', '不混进普通对话的搜索结果'] },
+  { id: 'locate', title: '跳到搜索结果', desc: '跳到很早的消息也能准确定位。', ids: ['C01', 'K1'], render: s05,
+    focus: ['目标气泡加一圈描边，关键词加深高亮', '顶部收成一个小条：「报价 3 / 4」和上下切换', '底部浮出「回到最新消息」'],
+    tucked: ['搜索框收起成小条，点它重新展开'],
+    removed: ['不在时间线上画额外的标记'] },
+  { id: 'background', title: '定时任务的结果与确认', desc: '后台做完的事回到私聊，要你决定的停在这里等你。', ids: ['C03', 'C02', 'K2'], render: s06,
+    focus: ['气泡上方一行小字说明来自哪个定时任务', '确认卡沿用现在的竖排选项：A 允许这一次、B 不发送', '输入框上方显示「等你确认」，侧栏联系人后面出现「待确认」'],
+    tucked: ['完整的操作参数收进「查看操作详情」', '确认后卡片变成一行回执，例如「已允许这一次 · 17:32」'],
+    removed: ['不另开一个任务窗口', '等确认期间你仍可以继续和它聊别的'] },
+  { id: 'schedule', title: '在聊天里建定时任务', desc: '用一句话说清要做什么，回一张任务卡。', ids: ['C03'], render: s07,
+    focus: ['任务卡：做什么、什么时候、下次时间、结果发到哪', '「现在运行一次」是卡片上唯一的按钮，暂停是文字按钮', '错过的时间用一行灰字说明，并给出「现在运行一次」'],
+    tucked: ['修改和删除放进卡片的铅笔和 ⋯'],
+    removed: ['不显示 cron 表达式和时区代码，时间写成「每个工作日 09:00」', '错过的不会自动补跑，也不显示成「已完成」'] },
+  { id: 'profile', title: '联系人资料', desc: '右侧栏：居中头像，下面是分组的设置卡片。', ids: ['C04', 'C06'], render: s08,
+    focus: ['居中的圆形头像、名字和一句职责，下面三个小分页：资料、笔记、文件', '设置分成「对话 / 定时任务 / 这个联系人」三组，每组一张圆角卡片', '定时任务直接用开关启停，要处理的写在名字下面'],
+    tucked: ['编辑名字和人设放进铅笔，置顶、归档、删除放进 ⋯', '全部任务、可用能力、项目笔记授权、收藏都进入二级页', '共享记忆入口放进笔记页'],
+    removed: ['去掉「保存资料」大按钮，改为单项修改即时生效', '去掉「导出文件」按钮列表，改由文件页处理', '不再把任务、收藏做成单独的分页'] },
+  { id: 'capabilities', title: '可用能力', desc: '它能查网页、能用哪些连接器的哪些工具，一页说清。', ids: ['C02', 'K4'], render: s09,
+    focus: ['网页搜索和读取网页各一个开关', '连接器展开后按工具勾选，标出「发送前问我」', '状态只用圆点：已连接、未启用、还没连接'],
+    tucked: ['本机运行的连接器展开后才显示边界说明', '没连接的只给一个「去连接」链接'],
+    removed: ['不显示服务器 ID 和工具的英文名', '不把「已安装」写成「可以用」'] },
+  { id: 'model', title: '独立模型', desc: '默认跟随全局，需要时给它单独选一个。', ids: ['C04', 'K5'], render: s10,
+    focus: ['第一项「跟随全局」，并写出现在跟随的是哪个', '按服务分组列出已配置的模型，标出能不能看图', '用不了的模型灰掉，并写原因（截图为打开状态）'],
+    tucked: ['生效范围写在菜单底部一行小字'],
+    removed: ['不显示接口地址、上下文长度等参数', '不提供在聊天里用一句话换模型'] },
+  { id: 'tasks', title: '全部定时任务', desc: '从资料页进入的二级页，任务和最近几次运行放在一起。', ids: ['C03', 'K3'], render: s11,
+    focus: ['唯一主按钮「新建任务」', '每个任务一行：名字、时间、开关；要处理的直接给链接', '最近运行按时间排，每条写清结果和下一步'],
+    tucked: ['立即运行只在悬停时出现，修改和删除在 ⋯', '本机运行的限制放在底部一行'],
+    removed: ['不显示「重叠跳过」「interrupted」这类状态码', '中断不自动重跑，只给「重新运行」'] },
+  { id: 'files', title: '文件与成果', desc: '它做的和你给的分开，每个都能回到来源。', ids: ['C05'], render: s12,
+    focus: ['两个分段：它做的、我给的', '每行写来源：哪天的消息或哪个定时任务', '文件丢了直接写「文件已不在工作目录」'],
+    tucked: ['回到消息、另存为、打开只在悬停时出现', '打开工作目录收成右上角图标'],
+    removed: ['去掉原来一长串「路径 · 另存为」按钮'] },
+  { id: 'favorites', title: '收藏', desc: '从资料页「收藏」进入，点一下回到原文。', ids: ['C07'], render: s13,
+    focus: ['每条显示谁说的、两行内容和日期', '顶部一句话说明收藏不会写进笔记'],
+    tucked: ['回到消息和取消收藏只在悬停时出现'],
+    removed: ['不做收藏夹分组和标签'] },
+  { id: 'notify', title: '提醒与侧栏状态', desc: '侧栏一眼看出谁有新消息、谁在忙、谁在等你。', ids: ['C06', 'K6'], render: s14,
+    focus: ['新消息：深色数字；正在工作：转圈图标；等你确认：黄色「待确认」', '静音的联系人名字变灰，带铃铛划线，数字改成描边', '打开聊天时，没读过的位置上方有一条「新消息」分隔线'],
+    tucked: ['提醒方式在资料页设置：全部提醒、仅需要处理、静音', '系统通知由 Windows 弹出，点击直接打开对应私聊（截图里画在窗口内示意）'],
+    removed: ['窗口有焦点不等于已读，要真的滚到那条消息才算', '读了消息也不会清掉「待确认」'] },
+  { id: 'archive', title: '归档时它还在忙', desc: '先说清会停下哪些事，再归档。', ids: ['K2'], render: s15,
+    focus: ['列出正在运行、等你确认和定时任务三类，各写会发生什么', '危险按钮直接写「停止并归档」'],
+    tucked: ['停止需要时间时按钮变成「正在停止…」，完成后自动归档'],
+    removed: ['不再因为「正在运行」直接把归档按钮灰掉、又不告诉原因'] },
+  { id: 'narrow', title: '窄窗口', desc: '没有鼠标悬停时，点一下气泡再显示操作。', ids: ['C00'], render: s16,
+    focus: ['左：默认状态，只有气泡', '右：点了一条消息，操作条出现在气泡下方，按钮加大到 40 × 36', '气泡最大宽度放到 86%'],
+    tucked: ['工作目录和联系人入口收进右上角 ⋯'],
+    removed: ['窄窗口不显示侧栏'] },
+]
+
+/* ---------------- Theme switcher ---------------- */
+const THEMES = [['graphite', '石墨'], ['paper', '暖纸'], ['mist', '雾蓝']]
+function setTheme(theme, mode) {
+  const root = document.documentElement
+  if (theme) { root.dataset.colorTheme = theme; localStorage.setItem('fox-mock-theme', theme) }
+  if (mode) { root.classList.toggle('dark', mode === 'dark'); localStorage.setItem('fox-mock-mode', mode) }
+  render()
+}
+function renderSwitcher() {
+  const root = document.documentElement
+  const theme = root.dataset.colorTheme
+  const mode = root.classList.contains('dark') ? 'dark' : 'light'
+  document.getElementById('switcher').innerHTML = `${I('palette')}
+    <div class="seg">${THEMES.map(([k, l]) => `<button class="${theme === k ? 'on' : ''}" onclick="setTheme('${k}')">${l}</button>`).join('')}</div>
+    <div class="seg"><button class="${mode === 'light' ? 'on' : ''}" onclick="setTheme(null,'light')">${I('sun')}浅色</button><button class="${mode === 'dark' ? 'on' : ''}" onclick="setTheme(null,'dark')">${I('moon')}深色</button></div>`
+}
+
+/* ---------------- Doc ---------------- */
+function render() {
+  renderSwitcher()
+  const only = new URLSearchParams(location.search).get('frame')
+  const doc = document.getElementById('doc')
+  if (only) {
+    document.body.classList.add('single')
+    doc.innerHTML = screens.find((s) => s.id === only).render()
+    return
+  }
+  const scroll = window.scrollY
+  const arrow = I('arrow-right')
+  const gloss = [['审批 / approval', '等你确认'], ['Run', '这次任务'], ['工具级授权', '可用能力'], ['MCP 服务器', '连接器'], ['stdio MCP', '在这台电脑上运行的连接器'], ['有效模型解析', '模型 · 跟随全局'], ['产物 / artifact', '它做的文件'], ['附件副本', '我给的文件'], ['手动未读覆盖', '标为未读'], ['overlap_skipped', '上次还没结束，这次跳过'], ['interrupted', '中断：Fox 被关闭'], ['错过的周期', '没有运行：Fox 没有打开']]
+  doc.innerHTML = `
+  <header class="doc-hero"><h1>联系人 P0 至 P2 · 界面样稿</h1><p>对应《联系人功能补全方案》C00 至 C07。外框、侧栏、颜色和圆角直接引用 <code>apps/desktop/src/styles/themes.css</code>，右上角可切换石墨 / 暖纸 / 雾蓝和浅色 / 深色；暖纸主色沿用知识库样稿的暖墨色。气泡和悬停操作按已选的 Rakazo 组件画，确认卡沿用现在的竖排选项。所有数据都是示例。</p></header>
+  <section class="doc-block"><h2>设计原则（沿用知识库样稿，加上聊天特有的两条）</h2><div class="principles">
+    <div><b>气泡就是消息</b><span>一条已送达的消息一个气泡。操作、时间、来源都不常驻，悬停或点一下才出现，出现时不推动正文。</span></div>
+    <div><b>正在做的事只说一处</b><span>进行中只在输入框上方一行；等你决定的在聊天里出一张卡，侧栏同步显示「待确认」。</span></div>
+    <div><b>用日常用语</b><span>「等你确认」代替「审批」，「可用能力」代替「工具授权」，时间写成「每个工作日 09:00」。</span></div>
+    <div><b>一页一件事</b><span>每页最多一个实心主按钮；资料页用一列设置行，列表用分隔线，不套卡片。</span></div>
+  </div></section>
+  <section class="doc-block"><h2>页面结构</h2>
+    <table class="map"><thead><tr><th>页面</th><th>现在</th><th>这次之后</th><th>方案</th></tr></thead><tbody>
+      <tr><td>私聊消息</td><td>大圆角灰块，每条下方常驻复制按钮和完整日期</td><td>Rakazo 气泡，双方分色；表情、引用、更多和时间悬停才出现</td><td>C00</td></tr>
+      <tr><td>私聊顶栏</td><td>名字 + 「重置上下文」文字按钮 + 资料图标</td><td>居中胶囊（圆形头像 + 名字），顶部渐隐；右边搜索、⋯、资料；「重置上下文」进 ⋯</td><td>C00 C01</td></tr>
+      <tr><td>聊天搜索</td><td>没有，全局搜索还会排除私聊</td><td>顶部搜索框 + 结果弹层 + 跳到原气泡</td><td>C01</td></tr>
+      <tr><td>引用、收藏、表情</td><td>没有</td><td>悬停操作接通；引用进输入框，收藏进资料页</td><td>C07</td></tr>
+      <tr><td>联系人资料</td><td>资料 / 笔记两个按钮 + 一长串表单和按钮</td><td>居中头像 + <b>三个分页</b>：资料、笔记、文件；资料页是分组卡片，任务、收藏、可用能力是二级页</td><td>C02 至 C07</td></tr>
+      <tr><td>定时任务</td><td>只有数字同事页面，和联系人无关</td><td>聊天里一句话建任务，回一张任务卡；资料页「任务」看全部和最近运行</td><td>C03</td></tr>
+      <tr><td>侧栏联系人</td><td>小字「运行中」和数字</td><td>数字、转圈、「待确认」三种状态；静音变灰</td><td>C06</td></tr>
+      <tr><td>归档</td><td>运行中时按钮直接灰掉</td><td>弹窗说明会停下哪些事，确认后停止并归档</td><td>K2</td></tr>
+    </tbody></table>
+  </section>
+  <section class="doc-block"><h2>用词替换</h2><div class="glossary">${gloss.map(([a, b]) => `<div><s>${a}</s>${arrow}<span>${b}</span></div>`).join('')}</div>
+    <p class="doc-note">这几处是样稿里新提的改动，方案里没有写死，需要你确认：「重置上下文」收进 ⋯；右侧栏改成居中头像、三个分页加二级页，单项即时生效；归档从「灰掉按钮」改为「说明后停止并归档」。</p>
+  </section>
+  <nav class="toc">${screens.map((s, i) => `<a href="#${s.id}">${String(i + 1).padStart(2, '0')} ${s.title}</a>`).join('')}</nav>
+  ${screens.map((s, i) => `<section class="frame" id="${s.id}">
+    <div class="frame-head"><span class="no">${String(i + 1).padStart(2, '0')}</span><h2>${s.title}</h2><p>${s.desc}</p><div class="ids">${s.ids.map((x) => `<span>${x}</span>`).join('')}</div></div>
+    ${s.id === 'narrow' ? `<div class="frame-row">${s.render()}${notes(s)}</div>` : s.render() + notes(s)}
+  </section>`).join('')}`
+  window.scrollTo(0, scroll)
+}
+const notes = (s) => `<div class="notes">
+  <div><h4>${I('star')}突出</h4><ul>${s.focus.map((x) => `<li>${x}</li>`).join('')}</ul></div>
+  <div><h4>${I('ellipsis')}收进图标 / 菜单</h4><ul>${s.tucked.map((x) => `<li>${x}</li>`).join('')}</ul></div>
+  <div><h4>${I('x')}去掉 / 不做</h4><ul>${s.removed.map((x) => `<li>${x}</li>`).join('')}</ul></div>
+</div>`
+render()
+</script>
+</body>
+</html>

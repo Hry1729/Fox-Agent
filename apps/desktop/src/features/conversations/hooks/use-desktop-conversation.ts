@@ -568,6 +568,7 @@ export function useDesktopConversation(): DesktopConversationState {
           approvals: merge(page.approvals, value.approvals, (item) => item.id),
           attachments: merge(page.attachments, value.attachments, (item) => item.id),
           artifacts: merge(page.artifacts, value.artifacts, (item) => item.id),
+          bubbles: merge(page.bubbles ?? [], value.bubbles ?? [], (item) => item.id).sort((a, b) => a.deliveryOrder - b.deliveryOrder),
           hasEarlierMessages: page.hasEarlierMessages,
         }
       })

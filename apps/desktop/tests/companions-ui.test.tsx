@@ -12,7 +12,7 @@ import type { AgentRecord, ConversationDetail, ToolCallRecord } from '../src/fea
 const contact: Companion = {
   id: 'cmp_one', conversationId: 'chat', templateAgentId: 'expert', displayName: '当前联系人',
   avatarRef: '', duty: '', personaOverride: null, workspaceDir: 'C:/fox/workspace', workspaceState: 'ready',
-  workspaceError: null, isDefault: false, pinnedAt: 1, lastReadOrdinal: 0, unreadCount: 2, activeRunStatus: null,
+  workspaceError: null, isDefault: false, pinnedAt: 1, lastReadOrdinal: 0, modelProviderId: null, modelRef: null, unreadCount: 2, activeRunStatus: null,
   archivedAt: null, deletingAt: null,
 }
 const archived = { ...contact, id: 'cmp_archived', conversationId: 'old', displayName: '已归档角色', archivedAt: 2 }

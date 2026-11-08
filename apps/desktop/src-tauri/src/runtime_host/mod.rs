@@ -1527,8 +1527,9 @@ impl RuntimeHost {
         &self,
         conversation_id: &str,
         attachments: &[AttachmentRecord],
+        supports_image_input: bool,
     ) -> Result<(), String> {
-        self.runtime_images(conversation_id, attachments)
+        self.runtime_images(conversation_id, attachments, supports_image_input)
             .map(|_| ())
     }
 
@@ -1906,12 +1907,23 @@ impl RuntimeHost {
         self.database
             .freeze_run_execution_profile(&started.run.id, execution_profile.id())
             .map_err(|error| error.to_string())?;
-        let images = self.runtime_images(&started.run.conversation_id, attachments)?;
-
-        let model_service = self
-            .database
-            .get_model_service()?
-            .ok_or_else(|| format!("[model.connection_required] {}", crate::commands::FOX_MODEL_SERVICE_MISSING))?;
+        // K5: one resolved model for the whole run. A snapshot frozen at send
+        // time wins; runs without one (pre-v109, child or colleague runs)
+        // resolve once here and freeze, so retry and restart never re-read the
+        // global model. Image capability, budget and the request all read this
+        // same value.
+        let model_service = match self.database.run_model_snapshot(&started.run.id)? {
+            Some(service) => service,
+            None => {
+                let resolved = self
+                    .database
+                    .resolve_effective_model(&started.run.conversation_id)?
+                    .ok_or_else(|| format!("[model.connection_required] {}", crate::commands::FOX_MODEL_SERVICE_MISSING))?;
+                self.database.freeze_run_model_snapshot(&started.run.id, &resolved)?;
+                resolved
+            }
+        };
+        let images = self.runtime_images(&started.run.conversation_id, attachments, model_service.supports_image_input)?;
         let count_budget_override = self
             .run_budget_override
             .as_ref()
@@ -2011,10 +2023,34 @@ impl RuntimeHost {
 
         let mut companion_context = self.database.companion_runtime_notes(&started.run.conversation_id, text)?;
         if let Some(context) = companion_context.as_mut().filter(|ctx| ctx["role"] == "owner") {
-            let allowed: Vec<_> = fox_engine_protocol::TOOL_CONTRACTS.iter()
+            // K4: freeze this run's capability snapshot (write-once) and show
+            // the model exactly that set. A grant added mid-run only appears
+            // in the next run; a revocation still stops execution via the
+            // claim-time re-check.
+            let snapshot = match self.database.run_companion_tools_snapshot(&started.run.id)? {
+                Some(ids) => ids,
+                None => {
+                    let ids = match self.database.conversation_companion_id(&started.run.conversation_id)? {
+                        Some(companion) => self.database.companion_capability_ids(&companion)?,
+                        None => Vec::new(),
+                    };
+                    self.database.freeze_run_companion_tools(&started.run.id, &ids)?;
+                    ids
+                }
+            };
+            let mut allowed: Vec<&str> = fox_engine_protocol::TOOL_CONTRACTS.iter()
                 .map(|contract| contract.0)
                 .filter(|name| crate::companion_workspace::allows_tool(name))
                 .collect();
+            for tool in crate::database::WEB_TOOLS {
+                if snapshot.iter().any(|id| id == tool) {
+                    allowed.push(tool);
+                }
+            }
+            if snapshot.iter().any(|id| id.starts_with("mcp:")) {
+                allowed.push("list_mcp_tools");
+                allowed.push("call_mcp_tool");
+            }
             context["allowedTools"] = json!(allowed);
         }
 
@@ -2112,6 +2148,7 @@ impl RuntimeHost {
         &self,
         conversation_id: &str,
         attachments: &[AttachmentRecord],
+        supports_image_input: bool,
     ) -> Result<Vec<Value>, String> {
         if attachments.iter().any(|attachment| {
             attachment_looks_like_image(attachment)
@@ -2129,11 +2166,7 @@ impl RuntimeHost {
         if image_attachments.len() > MAX_IMAGES_PER_MESSAGE {
             return Err(format!("单条消息最多支持 {MAX_IMAGES_PER_MESSAGE} 张图片"));
         }
-        let supports_images = self
-            .database
-            .get_model_service()?
-            .is_some_and(|service| service.supports_image_input);
-        if !supports_images {
+        if !supports_image_input {
             return Err(
                 "当前模型未启用图片理解，请在模型服务设置中确认模型支持视觉输入后开启".to_owned(),
             );
@@ -2620,7 +2653,7 @@ impl RuntimeHost {
         let conversation_id = prepared.started.run.conversation_id.clone();
         let model_max_output = self
             .database
-            .get_model_service()?
+            .resolve_effective_model(&conversation_id)?
             .ok_or_else(|| "digital_colleague.model_service_unavailable".to_owned())?
             .max_output_tokens;
         let effective_max_output = effective_digital_colleague_output_limit(
@@ -3603,9 +3636,14 @@ impl RuntimeHost {
         self.spawn_stdout_reader(stdout, stdin.clone(), pending);
         self.spawn_stderr_reader(stderr);
 
+        // The shared worker initializes with the effective model of the
+        // conversation that starts it (K5): a companion with an independent
+        // model must not require the global model to be configured. Every run
+        // still sends its own frozen modelService with each prompt, so other
+        // conversations on this worker keep their own model.
         let model_service = self
             .database
-            .get_model_service()?
+            .resolve_effective_model(conversation_id)?
             .ok_or_else(|| "model service is not configured".to_owned())?;
         let api_key = crate::model_service::get_api_key(&model_service.base_url);
         let execution_profile_fields = execution_profile.initialize_fields();
@@ -5618,7 +5656,7 @@ fn execute_child_run_tool_request(
                 let task = required_bounded_text(&input, "task", 8_000)?;
                 let member_context = optional_bounded_text(&input, "context", 12_000)?;
                 let model_max_output = database
-                    .get_model_service()?
+                    .resolve_effective_model(conversation_id)?
                     .ok_or_else(|| "model service is not configured".to_owned())?
                     .max_output_tokens;
                 if member.budget.max_output_tokens > model_max_output {
@@ -5993,7 +6031,7 @@ fn start_isolated_child_run(
     rejection_code: &str,
 ) -> Result<Value, String> {
     let model_max_output = database
-        .get_model_service()?
+        .resolve_effective_model(parent_conversation_id)?
         .ok_or_else(|| "model service is not configured".to_owned())?
         .max_output_tokens;
     let budget = normalized_child_budget(budget_input, model_max_output)?;
@@ -8041,6 +8079,29 @@ fn execute_mcp_tool_request(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_ascii_lowercase();
+            // K4: a companion's catalog is exactly its granted tools on the
+            // enabled servers, bounded by the run's frozen snapshot. Other
+            // conversations keep the full installed catalog.
+            let companion_catalog: Option<HashMap<String, HashSet<String>>> = match database
+                .conversation_companion_id(conversation_id)?
+            {
+                Some(companion) => {
+                    let ids = match database.run_companion_tools_snapshot(run_id)? {
+                        Some(ids) => ids,
+                        None => database.companion_capability_ids(&companion)?,
+                    };
+                    let mut map: HashMap<String, HashSet<String>> = HashMap::new();
+                    for id in ids {
+                        if let Some(rest) = id.strip_prefix("mcp:") {
+                            if let Some((server, tool)) = rest.split_once(':') {
+                                map.entry(server.to_owned()).or_default().insert(tool.to_owned());
+                            }
+                        }
+                    }
+                    Some(map)
+                }
+                None => None,
+            };
             let mut items = Vec::new();
             let binding=database.run_control_binding(run_id)?.ok_or("MCP catalog requires a frozen Run")?;
             let manifest_hash=runtime_shadow_hash(&format!("manifest|pi|v2|{}",state.lock().map_err(|_|"runtime lock poisoned")?.capabilities));
@@ -8053,6 +8114,11 @@ fn execute_mcp_tool_request(
                     allowed_mcp_servers
                         .as_ref()
                         .is_none_or(|allowed| allowed.contains(&item.id))
+                })
+                .filter(|item| {
+                    companion_catalog
+                        .as_ref()
+                        .is_none_or(|map| map.contains_key(&item.id))
                 })
             {
                 let health_started = Instant::now();
@@ -8068,6 +8134,13 @@ fn execute_mcp_tool_request(
                         ); }
                         let tools = tools
                             .into_iter()
+                            .filter(|item| {
+                                companion_catalog.as_ref().is_none_or(|map| {
+                                    item.get("name").and_then(Value::as_str).is_some_and(|name| {
+                                        map.get(&server.id).is_some_and(|granted| granted.contains(name))
+                                    })
+                                })
+                            })
                             .filter(|item| {
                                 query.is_empty()
                                     || item.canonical_string().to_ascii_lowercase().contains(&query)

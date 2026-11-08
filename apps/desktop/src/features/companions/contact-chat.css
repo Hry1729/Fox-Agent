@@ -12,31 +12,96 @@
 }
 @keyframes fox-contact-working { 50% { opacity: 0.55; } }
 
-.is-contact-chat .fox-thread-viewport { gap: var(--fox-space-m); }
-.fox-contact-run { gap: var(--fox-space-xs); align-items: flex-start; }
-.fox-contact-message { max-width: 90%; min-width: 0; }
+.is-contact-chat .fox-thread-viewport { gap: 16px; }
+/* Content dissolving under the floating topbar instead of shearing off at a hard edge. */
+.is-contact-chat .fox-thread-viewport.is-scrolled-under-topbar {
+  mask-image: linear-gradient(to bottom, transparent 0, #000 20px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 20px);
+}
+
+/* --- Rakazo-style contact bubbles (plan C00) -----------------------------
+   One committed reply is one bubble. The avatar marks the speaker; the action
+   row and time appear beside the bubble on hover/focus and never shift the
+   text. */
+.fox-contact-run {
+  flex-direction: row;
+  gap: 10px;
+  align-items: flex-start;
+}
+.fox-contact-run > .fox-contact-avatar {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  margin-top: 2px;
+  border-radius: 50%;
+  object-fit: cover;
+  font-size: 12px;
+}
+.fox-contact-run-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  max-width: 80%;
+}
+.fox-contact-message { position: relative; max-width: 100%; min-width: 0; }
 .fox-contact-bubble {
-  padding: var(--fox-space-l) var(--fox-space-xl);
-  border-radius: var(--fox-radius-large);
+  padding: 10px 16px;
+  border-radius: 18px;
   background: var(--muted);
   color: var(--foreground);
+  font-size: 14px;
+  line-height: 22px;
   overflow-wrap: anywhere;
   min-width: 0;
 }
 .fox-contact-bubble .fox-answer-response { min-width: 0; }
 .fox-contact-bubble pre { max-width: 100%; overflow-x: auto; }
 .fox-contact-message-meta {
+  position: absolute;
+  left: 100%;
+  bottom: 4px;
   display: flex;
   align-items: center;
-  gap: var(--fox-space-xs);
-  min-height: 26px;
+  gap: 0;
+  padding-left: 6px;
   opacity: 0;
+  white-space: nowrap;
   color: var(--muted-foreground);
-  font-size: var(--fox-type-caption);
+  font-size: 12px;
   transition: opacity var(--fox-duration-fast) var(--fox-ease-out);
 }
+.fox-contact-message-meta time { padding: 0 6px; font-variant-numeric: tabular-nums; }
 .fox-contact-message:is(:hover, :focus-within) .fox-contact-message-meta { opacity: 1; }
-.is-contact-chat .fox-user-bubble { max-width: 85%; }
+
+/* The user bubble is the strong one in a private chat. */
+.is-contact-chat .fox-thread-msg.is-user { align-items: flex-end; }
+/* The row hugs the bubble, so the action gap sits beside it rather than at the
+   far edge of the chat column. */
+.fox-contact-user-row { position: relative; display: flex; justify-content: flex-end; max-width: 76%; margin-left: auto; }
+.fox-contact-user-row .fox-user-bubble {
+  max-width: 100%;
+  padding: 10px 16px !important;
+  border-radius: 18px !important;
+  background: var(--primary) !important;
+  color: var(--primary-foreground);
+  font-size: 14px !important;
+  line-height: 22px;
+}
+.is-contact-chat .fox-contact-user-row .fox-user-meta {
+  position: absolute;
+  right: 100%;
+  bottom: 4px;
+  margin: 0;
+  padding-right: 6px;
+  justify-content: flex-end;
+  opacity: 0;
+  white-space: nowrap;
+  transition: opacity var(--fox-duration-fast) var(--fox-ease-out);
+}
+.is-contact-chat .fox-contact-user-row .fox-user-meta .fox-message-time { order: -1; }
+.is-contact-chat .fox-contact-user-row:is(:hover, :focus-within) .fox-user-meta { opacity: 1; }
 .fox-contact-ended { color: var(--muted-foreground); font-size: var(--fox-type-caption); }
 
 .fox-contact-decision-entry { width: min(100%, 480px); }
@@ -109,12 +174,24 @@
 .fox-contact-decision > button { align-self: flex-end; }
 .fox-contact-decision .fox-approval-disclosure { font-size: var(--fox-type-caption); }
 
-@media (max-width: 600px) {
-  .fox-contact-message { max-width: 96%; }
-  .is-contact-chat .fox-user-bubble { max-width: 94%; }
+.is-search-hit .fox-contact-bubble,
+.is-search-hit.fox-user-bubble,
+.is-search-hit .fox-user-bubble {
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--ring) 55%, transparent);
+  border-radius: var(--fox-radius-bubble, 14px);
 }
-@media (hover: none) { .fox-contact-message-meta { opacity: 1; } }
+::highlight(fox-contact-search) { background: color-mix(in oklch, var(--brand) 26%, transparent); }
+
+@media (max-width: 600px) {
+  .fox-contact-run-body { max-width: 86%; }
+  .fox-contact-user-row { max-width: 84%; }
+}
+@media (hover: none) {
+  .fox-contact-message-meta,
+  .is-contact-chat .fox-contact-user-row .fox-user-meta { opacity: 1; }
+}
 @media (prefers-reduced-motion: reduce) {
   .fox-contact-work-status[data-working="true"] .fox-contact-avatar { animation: none; }
-  .fox-contact-message-meta { transition: none; }
+  .fox-contact-message-meta,
+  .fox-contact-user-row .fox-user-meta { transition: none; }
 }

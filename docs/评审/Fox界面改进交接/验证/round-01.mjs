@@ -1,0 +1,10 @@
+const task = await taskSpace("Fox 1339 comparison artifact verification");
+const page = task.page("p1");
+console.log({spaceId:task.spaceId});
+await page.cdp("Emulation.setDeviceMetricsOverride",{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
+await page.cdp("egoAutomated.disable");
+await page.cdp("Runtime.enable");
+await page.goto("file:///D:/python/projects/Fox/Fox/docs/评审/Fox界面改进交接/对比.html");
+console.log(await page.snapshot());
+console.log(await page.screenshot({path:"D:/python/projects/Fox/Fox/docs/评审/Fox界面改进交接/验证/desktop.png",fullPage:true}));
+console.log(await page.evaluate(()=>({errors:window.__prototypeErrors,images:[...document.images].filter(x=>!x.closest("dialog")).map(x=>({loaded:x.complete&&x.naturalWidth>0,w:x.naturalWidth})),overflow:document.documentElement.scrollWidth>innerWidth})));

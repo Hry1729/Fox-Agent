@@ -10,6 +10,7 @@ import type { ApprovalModeLists, NativePermissionRequest, NativePermissionView }
 import type {
   AgentRecord,
   ApiResponse,
+  ContactBubbleSearchPage,
   ConversationDetail,
   ConversationExpertBinding,
   ConversationSummary,
@@ -718,6 +719,8 @@ export const desktopClient = {
     normalizeExpertBinding(await command<ConversationExpertBinding>('conversation_expert_remove', { conversationId })),
   loadConversationHistory: (conversationId: string, beforeOrdinal: number, limit = 100) =>
     command<ConversationHistoryPage>('conversation_history', { conversationId, beforeOrdinal, limit }),
+  searchContactChat: (conversationId: string, query: string, options: { since?: number; until?: number; limit?: number; offset?: number } = {}) =>
+    command<ContactBubbleSearchPage>('companion_chat_search', { conversationId, query, ...options }),
   deleteConversation: (conversationId: string) =>
     command<boolean>('conversation_delete', { conversationId }),
   purgeConversation: (conversationId: string) =>

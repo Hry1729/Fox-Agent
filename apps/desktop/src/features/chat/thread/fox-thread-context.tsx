@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react'
-import type { ApprovalDecision, ArtifactRecord, AttachmentRecord, ConversationDetail, KnowledgeBindingRecord, RunEventRecord, ToolCallRecord } from '../../conversations/model/types'
+import type { ApprovalDecision, ArtifactRecord, AttachmentRecord, ContactBubbleRecord, ConversationDetail, KnowledgeBindingRecord, RunEventRecord, ToolCallRecord } from '../../conversations/model/types'
 import type { RuntimeSource } from '../timeline/fox-runtime-process-model'
 
 /**
@@ -19,6 +19,12 @@ export interface FoxThreadContextValue {
   events: RunEventRecord[]
   /** Events grouped by run id, memoized by the provider. */
   eventsByRun: Map<string, RunEventRecord[]>
+  /** Committed contact bubbles by run id (C00/K1). */
+  contactBubblesByRun?: Map<string, ContactBubbleRecord[]>
+  /** Live Kernel preview replies by run id, already carrying the durable
+   * `<runId>:kernel:<checkpoint>:response` identity (K1). The run's persisted
+   * assistant row renders them; the preview rows themselves stay empty. */
+  contactKernelPreviewsByRun?: Map<string, { id: string; text: string; createdAt: number }[]>
   toolCalls?: readonly ToolCallRecord[]
   /** Attachment display names by attachment id (tool rows resolve ids). */
   attachmentNames: ReadonlyMap<string, string>

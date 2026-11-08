@@ -1,0 +1,84 @@
+.design-file-card[data-slot='button'] {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: var(--fox-space-l);
+  box-sizing: border-box;
+  width: 340px;
+  max-width: 100%;
+  min-width: 0;
+  height: auto;
+  padding: var(--fox-space-l);
+  border: 1px solid var(--fox-border);
+  border-radius: var(--fox-radius-card);
+  background: var(--card);
+  color: var(--fox-text);
+  text-align: left;
+  box-shadow: none;
+  transition: border-color var(--fox-transition-fast), background-color var(--fox-transition-fast);
+}
+
+.design-file-card .design-file-card-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--fox-radius-control);
+  background: var(--muted);
+  color: var(--fox-muted);
+}
+
+.design-file-card-content {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.design-file-card .design-file-card-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+}
+
+.design-file-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fox-muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
+}
+
+.design-file-card-open {
+  color: var(--fox-muted);
+  opacity: .55;
+  transition: opacity var(--fox-transition-fast), color var(--fox-transition-fast);
+}
+
+.design-file-card[data-slot='button']:hover,
+.design-file-card[data-slot='button']:focus-visible {
+  border-color: var(--fox-border-strong);
+  background: var(--card);
+}
+
+.design-file-card:hover .design-file-card-open,
+.design-file-card:focus-visible .design-file-card-open {
+  color: var(--fox-text);
+  opacity: 1;
+}
+
+.design-file-card[data-slot='button']:focus-visible {
+  outline: var(--fox-focus-outline);
+  outline-offset: var(--fox-focus-offset);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .design-file-card[data-slot='button'],
+  .design-file-card-open {
+    transition: none;
+  }
+}

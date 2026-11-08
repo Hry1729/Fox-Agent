@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { ThreadPrimitive, useAuiState } from '@assistant-ui/react'
 import { type GoalProgressData } from '../hooks/use-goal-progress'
 import type { ArtifactRecord, ConversationMessage } from '../../conversations/model/types'
@@ -79,12 +80,17 @@ function FoxBottomDock({ plan }: { plan?: GoalProgressData['planRevisions'][numb
  * instead of mixing message streams.
  */
 export default function FoxThread({ statusBar, approvalSlot, fox, suggestions, onStart, planRevision, turnRailMessages, turnRailArtifacts }: FoxThreadProps) {
+  const [scrolledUnderTopbar, setScrolledUnderTopbar] = useState(false)
   return (
     <FoxThreadContext.Provider value={fox}>
       <div className={`fox-thread${fox.contactChat ? ' is-contact-chat' : ''}`}>
         {!fox.contactChat && <ConversationTurnRail messages={turnRailMessages ?? []} artifacts={turnRailArtifacts ?? []} />}
         <ThreadPrimitive.Root className="fox-thread-root">
-          <ThreadPrimitive.Viewport className="fox-thread-viewport" autoScroll>
+          <ThreadPrimitive.Viewport
+            className={`fox-thread-viewport${scrolledUnderTopbar ? ' is-scrolled-under-topbar' : ''}`}
+            autoScroll
+            onScroll={event => setScrolledUnderTopbar(event.currentTarget.scrollTop > 4)}
+          >
             {/* Hybrid rollback: the empty conversation keeps the classic
                 mascot + suggestions screen from the legacy timeline. */}
             <ThreadPrimitive.Empty>

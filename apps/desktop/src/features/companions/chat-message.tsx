@@ -8,22 +8,34 @@ import { StreamingText } from '@/features/chat/components/StreamingText'
 import { RuntimeArtifacts } from '@/features/chat/runtime-artifacts'
 import { resolveFinalArtifactReference } from '@/features/chat/final-artifact-references'
 import { ErrorPrompt } from '@/features/chat/demo/fox-demo-prompts'
-import { formatDateTime } from '@/lib/time-format'
+import { formatClockTime } from '@/lib/time-format'
 import { notify as toast } from '@/features/notifications'
 import { ContactWriteCards } from './chat-cards'
 import { ContactDecisionCards } from './chat-decisions'
 import { contactReplies } from './chat-message-model'
+import { ContactAvatar } from './chat-controls'
+import { useContacts } from './context'
 import './contact-chat.css'
 
 export function ContactAssistantMessage() {
   const fox = useFoxThread()
+  const contact = useContacts()?.current
   const message = useAuiState(state => state.message.metadata?.custom?.fox as FoxThreadMessage | undefined)
   const lastInRun = useAuiState(state => {
     const current = state.message.metadata?.custom?.fox as FoxThreadMessage | undefined
     return state.thread.messages.findLast(item => item.role === 'assistant'
       && (item.metadata?.custom?.fox as FoxThreadMessage | undefined)?.runId === current?.runId)?.id === state.message.id
   })
-  const replies = useMemo(() => message ? contactReplies(message, message.runId ? fox.eventsByRun.get(message.runId) ?? [] : []) : [], [message, fox.eventsByRun])
+  // Committed bubbles own the identity once the run settles. A live run keeps
+  // its event-derived previews: they are display-only until delivery.
+  const committed = !message?.isActiveRun && message?.runId ? fox.contactBubblesByRun?.get(message.runId) : undefined
+  const replies = useMemo(() => {
+    if (!message) return []
+    if (committed?.length) return committed.map(bubble => ({ id: bubble.id, text: bubble.content, createdAt: bubble.deliveredAt }))
+    const delivered = contactReplies(message, message.runId ? fox.eventsByRun.get(message.runId) ?? [] : [])
+    const previews = message.isActiveRun && message.runId ? fox.contactKernelPreviewsByRun?.get(message.runId) ?? [] : []
+    return [...delivered, ...previews]
+  }, [message, fox.eventsByRun, fox.contactKernelPreviewsByRun, committed])
   if (!message || !fox.contactChat) return null
   const artifacts = message.content.flatMap(part => part.type === 'data-fox-artifacts' ? part.data : [])
   return <div id={`fox-turn-${message.id}`} data-turn-message-id={message.id} className="fox-turn-anchor">
@@ -37,13 +49,15 @@ export function ContactAssistantMessage() {
       if (artifact) fox.onOpenArtifact?.(artifact)
       else toast.error('文件记录尚未找到')
     }}>
-      {replies.map(reply => <section className="fox-contact-message" key={reply.id} data-contact-message-id={reply.id}>
-        <div className="fox-contact-bubble"><StreamingText text={reply.text} streaming={false} className="fox-answer-response" /></div>
-        <div className="fox-contact-message-meta">
-          <FoxCopyMessageButton onCopy={() => copyMessageResponse(reply.text)} />
-          <time dateTime={new Date(reply.createdAt).toISOString()}>{formatDateTime(reply.createdAt)}</time>
-        </div>
-      </section>)}
+      {contact && <ContactAvatar contact={contact} />}
+      <div className="fox-contact-run-body">
+        {replies.map(reply => <section className="fox-contact-message" key={reply.id} data-contact-message-id={reply.id}>
+          <div className="fox-contact-bubble"><StreamingText text={reply.text} streaming={false} className="fox-answer-response" /></div>
+          <div className="fox-contact-message-meta">
+            <FoxCopyMessageButton onCopy={() => copyMessageResponse(reply.text)} />
+            <time dateTime={new Date(reply.createdAt).toISOString()}>{formatClockTime(reply.createdAt)}</time>
+          </div>
+        </section>)}
       {lastInRun && <>
         <RuntimeArtifacts artifacts={artifacts.filter(artifact => artifact.declaredAt != null)} onOpenArtifact={fox.onOpenArtifact} />
         {message.runId && <ContactDecisionCards runId={message.runId} />}
@@ -51,6 +65,7 @@ export function ContactAssistantMessage() {
         {message.failure && <ErrorPrompt failure={message.failure} />}
         {message.cancelled && <p className="fox-contact-ended" role="status">已停止，发出的消息已保留</p>}
       </>}
+      </div>
     </MessagePrimitive.Root>
   </div>
 }

@@ -1,0 +1,1287 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-color-theme="graphite">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="od-motion-output" content="interactive">
+  <title>Fox 设计体系 · Design System</title>
+  <meta name="description" content="基于 Fox 桌面端当前实现整理的设计体系：原则、令牌、组件、页面模式与问题清单。">
+  <script>
+    (function () {
+      try {
+        var theme = localStorage.getItem('foxds.theme');
+        var mode = localStorage.getItem('foxds.mode');
+        if (theme === 'paper' || theme === 'mist' || theme === 'graphite') {
+          document.documentElement.setAttribute('data-color-theme', theme);
+        }
+        if (mode === 'dark') document.documentElement.classList.add('dark');
+      } catch (error) { /* no stored preference */ }
+    })();
+  </script>
+  <link rel="stylesheet" href="styles.css">
+  <script src="main.js" defer></script>
+</head>
+<body>
+<div class="shell">
+
+  <aside class="rail" aria-label="设计体系导航">
+    <a class="rail-brand" href="#top">
+      <img src="assets/fox-calm.png" alt="Fox 助手头像" width="34" height="34">
+      <div>
+        <strong>Fox</strong>
+        <span>设计体系</span>
+      </div>
+    </a>
+
+    <nav class="rail-nav" aria-label="章节">
+      <a href="#principles"><b>01</b><span>原则</span></a>
+      <a href="#color"><b>02</b><span>色彩</span></a>
+      <a href="#type"><b>03</b><span>字体</span></a>
+      <a href="#space"><b>04</b><span>间距</span></a>
+      <a href="#radius"><b>05</b><span>圆角</span></a>
+      <a href="#elevation"><b>06</b><span>层级</span></a>
+      <a href="#motion"><b>07</b><span>动效</span></a>
+      <a href="#icons"><b>08</b><span>图标</span></a>
+      <a href="#components"><b>09</b><span>组件</span></a>
+      <a href="#patterns"><b>10</b><span>页面模式</span></a>
+      <a href="#a11y"><b>11</b><span>无障碍</span></a>
+      <a href="#audit"><b>12</b><span>问题清单</span></a>
+    </nav>
+
+    <div class="rail-controls">
+      <div class="rail-label">主题 <span id="theme-name">石墨</span></div>
+      <div class="theme-picker" role="group" aria-label="配色主题">
+        <button type="button" data-set-theme="graphite" aria-pressed="true">
+          <i style="color: oklch(0.205 0 0)"></i>石墨
+        </button>
+        <button type="button" data-set-theme="paper" aria-pressed="false">
+          <i style="color: oklch(0.52 0.105 78)"></i>暖纸
+        </button>
+        <button type="button" data-set-theme="mist" aria-pressed="false">
+          <i style="color: oklch(0.56 0.13 255)"></i>雾蓝
+        </button>
+      </div>
+      <button type="button" class="mode-toggle" id="mode-toggle" aria-pressed="false">
+        <span id="mode-label">切换深色</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="inner">
+
+      <!-- ============================ COVER ============================ -->
+      <header class="masthead" id="top">
+        <p class="eyebrow">Fox / Design System / Specimen 01</p>
+        <div class="masthead-grid">
+          <div>
+            <h1>
+              Fox 设计体系
+              <span>为桌面端智能体工作台建立的一套可执行视觉规范</span>
+            </h1>
+            <p class="lede">
+              这套体系不是另起一套视觉，而是把 Fox 当前代码里已经成立的选择收拢成规则：
+              三套配色主题、两级明暗、一套字号阶梯、4px 间距、随主题变化的圆角，
+              以及“内容优先、界面退后”的克制界面。页面本身使用同一组令牌渲染，
+              右上角的主题切换会同时改变文档与示例。
+            </p>
+          </div>
+          <div class="masthead-mark" aria-hidden="true">
+            <img src="assets/fox-calm.png" alt="" width="86" height="86">
+          </div>
+        </div>
+        <dl class="masthead-meta">
+          <div>
+            <dt>来源</dt>
+            <dd>Fox 0.1.x 当前代码</dd>
+          </div>
+          <div>
+            <dt>主题</dt>
+            <dd>石墨 / 暖纸 / 雾蓝 × 明暗</dd>
+          </div>
+          <div>
+            <dt>基准</dt>
+            <dd>14px 正文 · 4px 间距 · 32px 控件</dd>
+          </div>
+          <div>
+            <dt>更新</dt>
+            <dd>2026-11-06 · v1.0</dd>
+          </div>
+        </dl>
+      </header>
+
+      <!-- ============================ 01 PRINCIPLES ============================ -->
+      <section class="section" id="principles" aria-labelledby="principles-title">
+        <div class="section-head">
+          <span class="section-index">01</span>
+          <h2 id="principles-title">原则</h2>
+        </div>
+        <p class="section-intro">
+          当细节没有明确答案时，用下面五条判断。它们来自现有页面反复做出的选择，
+          也解释了为什么 Fox 看起来比同类工具更安静。
+        </p>
+
+        <div class="block">
+          <article class="principle">
+            <span class="principle-index">01</span>
+            <div>
+              <h3>内容优先，界面退后</h3>
+              <p>文档、对话、任务和数据是主角。导航、工具栏和状态只提供方向，不与内容争夺注意力。能用留白分开的，不再加一层容器。</p>
+            </div>
+          </article>
+          <article class="principle">
+            <span class="principle-index">02</span>
+            <div>
+              <h3>每套主题只有一个强调色</h3>
+              <p>品牌色只出现在选中、焦点、进度和链接上。红、绿、黄只表示状态，并且必须同时有文字或图标说明，不能只靠颜色传达信息。</p>
+            </div>
+          </article>
+          <article class="principle">
+            <span class="principle-index">03</span>
+            <div>
+              <h3>用留白和细线分层</h3>
+              <p>层级首先来自间距、字号和背景差，而不是边框与阴影。普通卡片默认无阴影；只有浮层、菜单和对话框可以浮起来。</p>
+            </div>
+          </article>
+          <article class="principle">
+            <span class="principle-index">04</span>
+            <div>
+              <h3>少而确定的档位</h3>
+              <p>字号、字重、圆角、间距、控件高度都从固定档位取值。新代码只引用令牌，不再写 9px、10.5px、7px 圆角这类一次性数值。</p>
+            </div>
+          </article>
+          <article class="principle">
+            <span class="principle-index">05</span>
+            <div>
+              <h3>状态必须可读</h3>
+              <p>状态使用“6px 圆点 + 文字”，危险和警告只出现在真正出问题的那一项上。所有可交互元素都有可见的键盘焦点，文字缩放后布局不崩。</p>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <!-- ============================ 02 COLOR ============================ -->
+      <section class="section" id="color" aria-labelledby="color-title">
+        <div class="section-head">
+          <span class="section-index">02</span>
+          <h2 id="color-title">色彩</h2>
+        </div>
+        <p class="section-intro">
+          颜色只有一个来源：<code class="inline">themes.css</code>。三套主题各自给出一组完整的语义令牌，
+          组件只消费语义名，不直接写色值。石墨是默认主题，也是先做好的黑白基准。
+        </p>
+
+        <div class="block">
+          <div class="block-head">
+            <h3>三套配色主题</h3>
+            <p class="mono">graphite / paper / mist</p>
+          </div>
+
+          <div class="theme-cards">
+            <article class="theme-card" data-color-theme="graphite">
+              <div class="theme-card-head">
+                <strong>石墨</strong>
+                <span>Graphite · 默认</span>
+              </div>
+              <div class="swatch-grid">
+                <div class="swatch"><span class="swatch-chip" style="background: var(--background)"></span><code>--background</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--card)"></span><code>--card</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--foreground)"></span><code>--foreground</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--muted)"></span><code>--muted</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--brand)"></span><code>--brand</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--border)"></span><code>--border</code></div>
+              </div>
+              <div class="theme-dark dark" data-color-theme="graphite">
+                <div class="theme-dark-label">深色</div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--background)"></span><code>background</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--card)"></span><code>card</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--foreground)"></span><code>foreground</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--brand)"></span><code>brand</code></div>
+              </div>
+            </article>
+
+            <article class="theme-card" data-color-theme="paper">
+              <div class="theme-card-head">
+                <strong>暖纸</strong>
+                <span>Paper</span>
+              </div>
+              <div class="swatch-grid">
+                <div class="swatch"><span class="swatch-chip" style="background: var(--background)"></span><code>--background</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--card)"></span><code>--card</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--foreground)"></span><code>--foreground</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--muted)"></span><code>--muted</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--brand)"></span><code>--brand</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--border)"></span><code>--border</code></div>
+              </div>
+              <div class="theme-dark dark" data-color-theme="paper">
+                <div class="theme-dark-label">深色</div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--background)"></span><code>background</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--card)"></span><code>card</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--foreground)"></span><code>foreground</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--brand)"></span><code>brand</code></div>
+              </div>
+            </article>
+
+            <article class="theme-card" data-color-theme="mist">
+              <div class="theme-card-head">
+                <strong>雾蓝</strong>
+                <span>Mist</span>
+              </div>
+              <div class="swatch-grid">
+                <div class="swatch"><span class="swatch-chip" style="background: var(--background)"></span><code>--background</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--card)"></span><code>--card</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--foreground)"></span><code>--foreground</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--muted)"></span><code>--muted</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--brand)"></span><code>--brand</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--border)"></span><code>--border</code></div>
+              </div>
+              <div class="theme-dark dark" data-color-theme="mist">
+                <div class="theme-dark-label">深色</div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--background)"></span><code>background</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--card)"></span><code>card</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--foreground)"></span><code>foreground</code></div>
+                <div class="swatch"><span class="swatch-chip" style="background: var(--brand)"></span><code>brand</code></div>
+              </div>
+            </article>
+          </div>
+          <p class="note">
+            主题写在 <code class="inline">&lt;html data-color-theme&gt;</code> 上，可保存、可局部预览。
+            石墨是纯中性灰阶，暖纸带暖金强调色，雾蓝延续 Fox 经典的冷蓝。
+            完整数值见 <a href="./tokens.json">tokens.json</a>。
+          </p>
+        </div>
+
+        <div class="block">
+          <div class="block-head">
+            <h3>语义令牌（石墨）</h3>
+            <p class="mono">light / dark</p>
+          </div>
+          <table class="token-table">
+            <thead>
+              <tr>
+                <th scope="col">令牌</th>
+                <th scope="col">浅色</th>
+                <th scope="col">深色</th>
+                <th scope="col">用途</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>--background</code></td><td class="val">oklch(1 0 0)</td><td class="val">oklch(0.145 0 0)</td><td class="use">页面与内容底色</td></tr>
+              <tr><td><code>--foreground</code></td><td class="val">oklch(0.145 0 0)</td><td class="val">oklch(0.985 0 0)</td><td class="use">正文、标题与图标</td></tr>
+              <tr><td><code>--card</code></td><td class="val">oklch(1 0 0)</td><td class="val">oklch(0.18 0 0)</td><td class="use">卡片与内容块</td></tr>
+              <tr><td><code>--muted</code></td><td class="val">oklch(0.97 0 0)</td><td class="val">oklch(0.24 0 0)</td><td class="use">次级面板、分段控件底</td></tr>
+              <tr><td><code>--muted-foreground</code></td><td class="val">oklch(0.54 0 0)</td><td class="val">oklch(0.708 0 0)</td><td class="use">次要文字与说明</td></tr>
+              <tr><td><code>--brand</code></td><td class="val">oklch(0.205 0 0)</td><td class="val">oklch(0.922 0 0)</td><td class="use">唯一强调色</td></tr>
+              <tr><td><code>--brand-soft</code></td><td class="val">oklch(0.955 0 0)</td><td class="val">oklch(0.269 0 0)</td><td class="use">选中态与品牌浅底</td></tr>
+              <tr><td><code>--border</code></td><td class="val">oklch(0.922 0 0)</td><td class="val">oklch(1 0 0 / 9%)</td><td class="use">细线、分隔与输入描边</td></tr>
+              <tr><td><code>--destructive</code></td><td class="val">oklch(0.577 0.245 27.325)</td><td class="val">oklch(0.704 0.191 22.216)</td><td class="use">错误与危险操作</td></tr>
+              <tr><td><code>--success</code></td><td class="val">oklch(0.56 0.12 160)</td><td class="val">oklch(0.74 0.13 160)</td><td class="use">完成、可用</td></tr>
+              <tr><td><code>--warning</code></td><td class="val">oklch(0.55 0.13 70)</td><td class="val">oklch(0.8 0.13 75)</td><td class="use">需注意，不阻断</td></tr>
+              <tr><td><code>--sidebar</code></td><td class="val">oklch(0.975 0 0)</td><td class="val">oklch(0.175 0 0)</td><td class="use">侧栏底色</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="block">
+          <div class="block-head">
+            <h3>状态色</h3>
+            <p class="mono">圆点 + 文字</p>
+          </div>
+          <div class="demo-surface">
+            <div class="chip-row">
+              <span class="status-chip"><i></i>已就绪</span>
+              <span class="status-chip is-warning"><i></i>需要配置</span>
+              <span class="status-chip is-error"><i></i>连接失败</span>
+              <span class="status-chip is-idle"><i></i>未启用</span>
+            </div>
+            <p class="note">
+              实心圆点表示可用，空心圆点表示缺失；红、橙只标出有问题的项，不用于汇总或标题。
+              状态色始终与文字同时出现。
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================ 03 TYPE ============================ -->
+      <section class="section" id="type" aria-labelledby="type-title">
+        <div class="section-head">
+          <span class="section-index">03</span>
+          <h2 id="type-title">字体</h2>
+        </div>
+        <p class="section-intro">
+          全站使用 HarmonyOS Sans SC，字重止于 600。字号是一套固定阶梯，
+          从 11px 的元数据到 32px 的展示标题；对话正文 15px，控件与侧栏 13px，辅助信息 12px。
+        </p>
+
+        <div class="block">
+          <div class="specimen">
+            <div class="specimen-display">
+              <strong>Fox</strong>
+              <span>智能体工作台，安静地把事情做完。</span>
+            </div>
+            <div class="specimen-body">
+              <p>
+                HarmonyOS Sans SC 的中文骨架紧凑、横竖比例稳定，适合长时间阅读的对话与文档。
+                正文使用 400，标题与关键动作使用 500 或 600；不使用 700，也不加载未使用的字重。
+              </p>
+              <div>
+                <p style="font-size: var(--fox-type-caption); color: var(--fox-muted)">
+                  ABCDEFGHIJKLMNOPQRSTUVWXYZ<br>
+                  abcdefghijklmnopqrstuvwxyz<br>
+                  0123456789 · 今天 17:03 · 1120 px
+                </p>
+                <small>回退顺序：Segoe UI Variable → Segoe UI → Microsoft YaHei → system-ui</small>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="block">
+          <div class="block-head">
+            <h3>字号阶梯</h3>
+            <p class="mono">11 / 12 / 13 / 14 / 15 / 16 / 24 / 32</p>
+          </div>
+          <div class="type-scale">
+            <div class="type-row">
+              <code>--fox-type-display</code><span class="px">32px</span>
+              <span class="type-sample" style="font-size: var(--fox-type-display); font-weight: 600; letter-spacing: -0.03em">首页式大标题</span>
+            </div>
+            <div class="type-row">
+              <code>--fox-type-page</code><span class="px">24px</span>
+              <span class="type-sample" style="font-size: var(--fox-type-page); font-weight: 600; letter-spacing: -0.02em">页面标题 / 设置</span>
+            </div>
+            <div class="type-row">
+              <code>--fox-type-title</code><span class="px">16px</span>
+              <span class="type-sample" style="font-size: var(--fox-type-title); font-weight: 600">对话框标题、区块标题</span>
+            </div>
+            <div class="type-row">
+              <code>--fox-type-workbench</code><span class="px">15px</span>
+              <span class="type-sample" style="font-size: var(--fox-type-workbench)">对话正文是唯一使用 15px 的场景</span>
+            </div>
+            <div class="type-row">
+              <code>--fox-type-body</code><span class="px">14px</span>
+              <span class="type-sample" style="font-size: var(--fox-type-body)">正文、卡片内容与表单值</span>
+            </div>
+            <div class="type-row">
+              <code>--fox-type-chrome</code><span class="px">13px</span>
+              <span class="type-sample" style="font-size: var(--fox-type-chrome)">侧栏、菜单、控件与页面说明</span>
+            </div>
+            <div class="type-row">
+              <code>--fox-type-caption</code><span class="px">12px</span>
+              <span class="type-sample" style="font-size: var(--fox-type-caption)">辅助说明、时间、快捷键、徽标</span>
+            </div>
+            <div class="type-row">
+              <code>--fox-type-micro</code><span class="px">11px</span>
+              <span class="type-sample" style="font-size: var(--fox-type-micro); color: var(--fox-muted)">最小字号：仅元数据与角标，不再更低</span>
+            </div>
+          </div>
+          <p class="note">
+            字重：400 正文 / 500 强调 / 600 标题。行高：正文 1.6–1.75，控件 1.4，标题 1.2–1.3。
+            正文长度的目标区间为 65–75 个字符，移动端 35–60。
+          </p>
+        </div>
+
+        <div class="block">
+          <div class="block-head">
+            <h3>文字缩放</h3>
+            <p class="mono">70% – 140%</p>
+          </div>
+          <div class="scale-demo" id="scale-demo" style="--fox-text-scale: 1">
+            <div class="scale-demo-head">
+              <strong>拖动查看令牌缩放效果</strong>
+              <output id="scale-output">100%</output>
+            </div>
+            <input type="range" id="scale-range" min="70" max="140" step="10" value="100" aria-label="文字缩放比例">
+            <div class="scale-demo-text">
+              <p id="scale-sample">对话正文：把复杂的事做完，再解释它是怎么完成的。</p>
+              <small>只有引用 <code class="inline">--fox-type-*</code> 的文字会跟随缩放；直接写死 px 或 Tailwind 字号的地方不会。</small>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================ 04 SPACE ============================ -->
+      <section class="section" id="space" aria-labelledby="space-title">
+        <div class="section-head">
+          <span class="section-index">04</span>
+          <h2 id="space-title">间距</h2>
+        </div>
+        <p class="section-intro">
+          间距建立在 4px 网格上：2px 只用于紧贴的图标与文字，常用档位是 4 / 8 / 12 / 16 / 24 / 32。
+          页面留白比控件内距大两级，让内容之间自然分开，而不是靠更多边框。
+        </p>
+
+        <div class="block">
+          <div class="block-head">
+            <h3>4px 网格</h3>
+            <p class="mono">1 unit = 4px</p>
+          </div>
+          <div class="grid-strip" aria-hidden="true">
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          </div>
+
+          <div class="space-ladder">
+            <div class="space-row"><code>--fox-space-micro</code><span class="px">2</span><span class="space-bar" style="width: calc(var(--fox-space-micro) * 4)"></span></div>
+            <div class="space-row"><code>--fox-space-xs</code><span class="px">4</span><span class="space-bar" style="width: calc(var(--fox-space-xs) * 4)"></span></div>
+            <div class="space-row"><code>--fox-space-s</code><span class="px">6</span><span class="space-bar" style="width: calc(var(--fox-space-s) * 4)"></span></div>
+            <div class="space-row"><code>--fox-space-m</code><span class="px">8</span><span class="space-bar" style="width: calc(var(--fox-space-m) * 4)"></span></div>
+            <div class="space-row"><code>--fox-space-l</code><span class="px">12</span><span class="space-bar" style="width: calc(var(--fox-space-l) * 4)"></span></div>
+            <div class="space-row"><code>--fox-space-xl</code><span class="px">16</span><span class="space-bar" style="width: calc(var(--fox-space-xl) * 4)"></span></div>
+            <div class="space-row"><code>--fox-space-2xl</code><span class="px">20</span><span class="space-bar" style="width: calc(var(--fox-space-2xl) * 4)"></span></div>
+            <div class="space-row"><code>--fox-space-3xl</code><span class="px">24</span><span class="space-bar" style="width: calc(var(--fox-space-3xl) * 4)"></span></div>
+            <div class="space-row"><code>--fox-space-4xl</code><span class="px">32</span><span class="space-bar" style="width: calc(var(--fox-space-4xl) * 4)"></span></div>
+            <div class="space-row"><code>--fox-space-5xl</code><span class="px">40</span><span class="space-bar" style="width: calc(var(--fox-space-5xl) * 4)"></span></div>
+            <div class="space-row"><code>--fox-space-6xl</code><span class="px">48</span><span class="space-bar" style="width: calc(var(--fox-space-6xl) * 4)"></span></div>
+            <div class="space-row"><code>--fox-space-8xl</code><span class="px">64</span><span class="space-bar" style="width: calc(var(--fox-space-8xl) * 4)"></span></div>
+          </div>
+        </div>
+
+        <div class="block">
+          <div class="block-head">
+            <h3>页面骨架</h3>
+            <p class="mono">content / padding / gap</p>
+          </div>
+          <div class="metric-grid">
+            <div class="metric"><strong>1120</strong><span>内容最大宽度（px）</span></div>
+            <div class="metric"><strong>32 / 24 / 48</strong><span>一级页面 上 / 左右 / 下</span></div>
+            <div class="metric"><strong>24</strong><span>分区之间的间距</span></div>
+            <div class="metric"><strong>16</strong><span>卡片内边距</span></div>
+          </div>
+
+          <div class="callout is-warning" style="margin-top: 14px">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/>
+              <path d="M12 9v4"/><path d="M12 17h.01"/>
+            </svg>
+            <div>
+              <strong>当前实现有一个系统性偏差</strong>
+              <p>
+                根字号被设为 14px，而 Tailwind 的间距与字号单位仍按 rem 计算：
+                <code class="inline">gap-2</code> 实际是 7px，<code class="inline">text-xs</code> 实际是 10.5px。
+                这与本页使用的 4px 网格和 11px 下限冲突。修复建议见问题清单 P0-1。
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================ 05 RADIUS ============================ -->
+      <section class="section" id="radius" aria-labelledby="radius-title">
+        <div class="section-head">
+          <span class="section-index">05</span>
+          <h2 id="radius-title">圆角</h2>
+        </div>
+        <p class="section-intro">
+          圆角不是全局固定值，而是主题性格的一部分：石墨紧凑、暖纸柔和、雾蓝居中。
+          同一组件在三套主题下几何会变化，因此嵌套圆角必须按“外框减内距”计算。
+        </p>
+
+        <div class="block">
+          <div class="radius-panel" data-color-theme="graphite">
+            <div class="radius-panel-head"><strong>石墨</strong><span>4 / 6 / 8 / 12 / 12</span></div>
+            <div class="radius-row">
+              <div class="radius-item"><div class="radius-box" style="border-radius: var(--fox-radius-small)"></div><small>small · 4<br>徽标、小按钮</small></div>
+              <div class="radius-item"><div class="radius-box" style="border-radius: var(--fox-radius-control)"></div><small>control · 6<br>按钮、输入框</small></div>
+              <div class="radius-item"><div class="radius-box" style="border-radius: var(--fox-radius-card)"></div><small>card · 8<br>卡片</small></div>
+              <div class="radius-item"><div class="radius-box" style="border-radius: var(--fox-radius-large)"></div><small>large · 12<br>面板、输入区</small></div>
+              <div class="radius-item"><div class="radius-box" style="border-radius: var(--fox-radius-overlay)"></div><small>overlay · 12<br>对话框</small></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="block">
+          <div class="radius-panel" data-color-theme="paper">
+            <div class="radius-panel-head"><strong>暖纸</strong><span>7 / 10 / 16 / 20 / 20</span></div>
+            <div class="radius-row">
+              <div class="radius-item"><div class="radius-box" style="border-radius: var(--fox-radius-small)"></div><small>small · 7<br>徽标、小按钮</small></div>
+              <div class="radius-item"><div class="radius-box" style="border-radius: var(--fox-radius-control)"></div><small>control · 10<br>按钮、输入框</small></div>
+              <div class="radius-item"><div class="radius-box" style="border-radius: var(--fox-radius-card)"></div><small>card · 16<br>卡片</small></div>
+              <div class="radius-item"><div class="radius-box" style="border-radius: var(--fox-radius-large)"></div><small>large · 20<br>面板、输入区</small></div>
+              <div class="radius-item"><div class="radius-box" style="border-radius: var(--fox-radius-overlay)"></div><small>overlay · 20<br>对话框</small></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="block">
+          <div class="radius-panel" data-color-theme="mist">
+            <div class="radius-panel-head"><strong>雾蓝</strong><span>6 / 8 / 12 / 14 / 16</span></div>
+            <div class="radius-row">
+              <div class="radius-item"><div class="radius-box" style="border-radius: var(--fox-radius-small)"></div><small>small · 6<br>徽标、小按钮</small></div>
+              <div class="radius-item"><div class="radius-box" style="border-radius: var(--fox-radius-control)"></div><small>control · 8<br>按钮、输入框</small></div>
+              <div class="radius-item"><div class="radius-box" style="border-radius: var(--fox-radius-card)"></div><small>card · 12<br>卡片</small></div>
+              <div class="radius-item"><div class="radius-box" style="border-radius: var(--fox-radius-large)"></div><small>large · 14<br>面板、输入区</small></div>
+              <div class="radius-item"><div class="radius-box" style="border-radius: var(--fox-radius-overlay)"></div><small>overlay · 16<br>对话框</small></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="block">
+          <div class="radius-nested">
+            <div class="radius-nested-box" aria-hidden="true"><span></span></div>
+            <p>
+              嵌套规则：内层圆角 = 外层圆角 − 内边距。外框 16px、内距 8px 时，内层用 8px 才是同心的；
+              直接复制外层数值会让内层看起来更方。胶囊圆角只用于头像、开关和状态圆点。
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================ 06 ELEVATION ============================ -->
+      <section class="section" id="elevation" aria-labelledby="elevation-title">
+        <div class="section-head">
+          <span class="section-index">06</span>
+          <h2 id="elevation-title">层级</h2>
+        </div>
+        <p class="section-intro">
+          界面靠背景差和留白分层，阴影只用来表达“浮在上面”。
+          普通卡片默认无阴影；凸起控件一档、菜单一档、对话框一档，不使用内高光。
+        </p>
+
+        <div class="block">
+          <div class="elevation-row">
+            <div class="elevation-card sm">
+              <strong>sm · 凸起控件</strong>
+              <span>输入区、被拖起的卡片、分段控件的选中项。</span>
+            </div>
+            <div class="elevation-card md">
+              <strong>md · 菜单与浮层</strong>
+              <span>Select、Dropdown、Popover、Tooltip。</span>
+            </div>
+            <div class="elevation-card lg">
+              <strong>lg · 对话框</strong>
+              <span>Dialog、AlertDialog、Sheet，以及临时浮起的输入区。</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="block">
+          <div class="block-head">
+            <h3>表面层级</h3>
+            <p class="mono">shell → background → card → popover</p>
+          </div>
+          <div class="surface-stack">
+            <div class="surface-layer" style="background: var(--shell)"><span>窗口外壳</span><code>--shell</code></div>
+            <div class="surface-layer" style="background: var(--background)"><span>内容底色</span><code>--background</code></div>
+            <div class="surface-layer" style="background: var(--card)"><span>卡片与内容块</span><code>--card</code></div>
+            <div class="surface-layer" style="background: var(--popover); box-shadow: var(--fox-shadow-md)"><span>浮层与对话框</span><code>--popover</code></div>
+          </div>
+          <p class="note">
+            深色模式不能套用浅色阴影：阴影色 <code class="inline">--fox-shadow-color</code> 随主题和明暗变化，
+            深色下提高不透明度，避免出现发白的边缘。
+          </p>
+        </div>
+      </section>
+
+      <!-- ============================ 07 MOTION ============================ -->
+      <section class="section" id="motion" aria-labelledby="motion-title">
+        <div class="section-head">
+          <span class="section-index">07</span>
+          <h2 id="motion-title">动效</h2>
+        </div>
+        <p class="section-intro">
+          动效只表达状态变化、层级或因果，不做无意义的装饰。
+          常规切换 120–160ms，浮层出现 240ms；离开比进入更快，进入用 ease-out。
+        </p>
+
+        <div class="block">
+          <div class="duration-row">
+            <div class="duration-card"><strong>120ms</strong><span>悬停、按下、颜色与描边变化</span></div>
+            <div class="duration-card"><strong>160ms</strong><span>默认状态切换、展开与收起</span></div>
+            <div class="duration-card"><strong>240ms</strong><span>浮层出现、较大的空间移动</span></div>
+          </div>
+        </div>
+
+        <div class="block">
+          <div class="block-head">
+            <h3>缓动曲线</h3>
+            <p class="mono">ease-out / standard</p>
+          </div>
+          <div class="easing-grid">
+            <div class="easing-card">
+              <svg viewBox="0 0 100 100" role="img" aria-label="ease-out 曲线">
+                <line class="grid" x1="0" y1="25" x2="100" y2="25"/>
+                <line class="grid" x1="0" y1="50" x2="100" y2="50"/>
+                <line class="grid" x1="0" y1="75" x2="100" y2="75"/>
+                <line class="grid" x1="25" y1="0" x2="25" y2="100"/>
+                <line class="grid" x1="50" y1="0" x2="50" y2="100"/>
+                <line class="grid" x1="75" y1="0" x2="75" y2="100"/>
+                <path d="M0 100 C 16 0, 30 0, 100 0"/>
+              </svg>
+              <code>--fox-ease-out: cubic-bezier(.16, 1, .3, 1)</code>
+            </div>
+            <div class="easing-card">
+              <svg viewBox="0 0 100 100" role="img" aria-label="standard 曲线">
+                <line class="grid" x1="0" y1="25" x2="100" y2="25"/>
+                <line class="grid" x1="0" y1="50" x2="100" y2="50"/>
+                <line class="grid" x1="0" y1="75" x2="100" y2="75"/>
+                <line class="grid" x1="25" y1="0" x2="25" y2="100"/>
+                <line class="grid" x1="50" y1="0" x2="50" y2="100"/>
+                <line class="grid" x1="75" y1="0" x2="75" y2="100"/>
+                <path d="M0 100 C 20 100, 0 0, 100 0"/>
+              </svg>
+              <code>--fox-ease-standard: cubic-bezier(.2, 0, 0, 1)</code>
+            </div>
+          </div>
+        </div>
+
+        <div class="block">
+          <div class="block-head">
+            <h3>入场与位移</h3>
+            <p class="mono">hover to preview</p>
+          </div>
+          <div class="motion-stage" id="motion-stage">
+            <div class="motion-tile"></div>
+            <div class="motion-tile"></div>
+            <div class="motion-tile"></div>
+          </div>
+          <div class="motion-controls">
+            <button type="button" class="btn btn-outline btn-sm" id="replay-motion">重播入场</button>
+            <span class="note" style="margin: 0">列表项错开 30–50ms；移动应保持方向连续，不突然跳变。</span>
+          </div>
+          <p class="note">
+            当系统开启 <code class="inline">prefers-reduced-motion</code> 时，本页与产品都应把动画降到接近 0ms，
+            并保留静态可读的最终状态。
+          </p>
+        </div>
+      </section>
+
+      <!-- ============================ 08 ICONS ============================ -->
+      <section class="section" id="icons" aria-labelledby="icons-title">
+        <div class="section-head">
+          <span class="section-index">08</span>
+          <h2 id="icons-title">图标</h2>
+        </div>
+        <p class="section-intro">
+          统一使用 Lucide 线条图标，24 网格、2px 描边、圆角端点。默认 16px，紧凑处 14px，最小 12px；
+          大图标用 20 或 24px。不要混用实心与描边，也不要用 emoji 代替功能图标。
+        </p>
+
+        <div class="block">
+          <div class="icon-grid">
+            <div class="icon-cell">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
+              <span>搜索</span>
+            </div>
+            <div class="icon-cell">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+              <span>新建</span>
+            </div>
+            <div class="icon-cell">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+              <span>展开</span>
+            </div>
+            <div class="icon-cell">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="7" cy="17" r="2"/></svg>
+              <span>设置</span>
+            </div>
+            <div class="icon-cell">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+              <span>完成</span>
+            </div>
+            <div class="icon-cell">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+              <span>关闭</span>
+            </div>
+            <div class="icon-cell">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+              <span>警告</span>
+            </div>
+            <div class="icon-cell">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+              <span>文件夹</span>
+            </div>
+          </div>
+
+          <div class="icon-sizes">
+            <div class="icon-size">
+              <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
+              <span>12</span>
+            </div>
+            <div class="icon-size">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
+              <span>14</span>
+            </div>
+            <div class="icon-size">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
+              <span>16</span>
+            </div>
+            <div class="icon-size">
+              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
+              <span>20</span>
+            </div>
+            <div class="icon-size">
+              <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
+              <span>24</span>
+            </div>
+          </div>
+          <p class="note">
+            图标只放在帮助扫读的位置：文件类型、导航、状态和工具动作。
+            “标签：值”行和区块标题不加装饰图标。
+          </p>
+        </div>
+      </section>
+
+      <!-- ============================ 09 COMPONENTS ============================ -->
+      <section class="section" id="components" aria-labelledby="components-title">
+        <div class="section-head">
+          <span class="section-index">09</span>
+          <h2 id="components-title">组件</h2>
+        </div>
+        <p class="section-intro">
+          基础组件来自 <code class="inline">components/ui</code>（shadcn 风格，基于 radix-ui）。
+          这里展示的是当前实现的实际尺寸、变体和状态；新页面优先复用，不再另写 fox-* 按钮和卡片。
+        </p>
+
+        <div class="block">
+          <div class="block-head"><h3>按钮 Button</h3><p class="mono">variant / size / state</p></div>
+          <div class="demo-surface">
+            <div class="demo-row">
+              <p class="demo-label">变体</p>
+              <button type="button" class="btn btn-default">新建对话</button>
+              <button type="button" class="btn btn-outline">导入</button>
+              <button type="button" class="btn btn-secondary">次级动作</button>
+              <button type="button" class="btn btn-ghost">更多</button>
+              <button type="button" class="btn btn-destructive">删除</button>
+              <button type="button" class="btn btn-link">查看详情</button>
+            </div>
+            <div class="demo-row">
+              <p class="demo-label">尺寸</p>
+              <button type="button" class="btn btn-default btn-xs">xs · 24</button>
+              <button type="button" class="btn btn-default btn-sm">sm · 28</button>
+              <button type="button" class="btn btn-default">default · 32</button>
+              <button type="button" class="btn btn-default btn-lg">lg · 40</button>
+              <button type="button" class="btn btn-outline btn-icon" aria-label="新建">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+              </button>
+            </div>
+            <div class="demo-row">
+              <p class="demo-label">状态</p>
+              <button type="button" class="btn btn-default">默认</button>
+              <button type="button" class="btn btn-default is-focus">键盘焦点</button>
+              <button type="button" class="btn btn-outline" disabled>禁用</button>
+              <button type="button" class="btn btn-destructive"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>删除</button>
+            </div>
+          </div>
+          <p class="note">每个视图最多一个实心主按钮；同一动作不要在同一屏出现两个入口。禁用态降低对比，但仍保持 4.5:1 的可读性边界。</p>
+        </div>
+
+        <div class="block">
+          <div class="block-head"><h3>徽标 Badge</h3><p class="mono">20px height</p></div>
+          <div class="demo-surface">
+            <div class="demo-row">
+              <span class="badge badge-default">默认</span>
+              <span class="badge badge-secondary">次级</span>
+              <span class="badge badge-outline">描边</span>
+              <span class="badge badge-destructive">异常</span>
+              <span class="badge badge-outline"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>已完成</span>
+            </div>
+          </div>
+          <p class="note">徽标用于短状态，不承载句子。不要用彩色胶囊重复页面已经说明的信息。</p>
+        </div>
+
+        <div class="block">
+          <div class="block-head"><h3>表单 Controls</h3><p class="mono">32px control</p></div>
+          <div class="demo-surface">
+            <div class="demo-row" style="align-items: flex-start">
+              <div class="field-wrap">
+                <label for="demo-name">名称</label>
+                <input class="field" id="demo-name" type="text" value="产品资料库">
+                <span class="field-help">用于侧栏和搜索结果。</span>
+              </div>
+              <div class="field-wrap">
+                <label for="demo-model">向量模型</label>
+                <div class="select-wrap">
+                  <select id="demo-model">
+                    <option>未配置</option>
+                    <option>本地 bge-m3</option>
+                    <option>远程 embedding-v3</option>
+                  </select>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+                </div>
+                <span class="field-help">未配置时仍可关键词检索。</span>
+              </div>
+            </div>
+            <div class="demo-row" style="align-items: flex-start">
+              <div class="field-wrap">
+                <label for="demo-note">说明</label>
+                <textarea class="field" id="demo-note" rows="3">把常用的产品资料放在这里，导入后可直接引用。</textarea>
+              </div>
+              <div class="field-wrap" style="max-width: 220px">
+                <span class="field-help">开关</span>
+                <div class="switch-row">
+                  <button type="button" class="switch" role="switch" aria-checked="true" aria-label="启用向量索引"></button>
+                  <span>启用向量索引</span>
+                </div>
+                <div class="switch-row">
+                  <button type="button" class="switch" role="switch" aria-checked="false" aria-label="自动同步"></button>
+                  <span>自动同步</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <p class="note">输入框、选择器与文本域统一 32px 高、control 圆角；焦点使用同一圈 2px 描边。开关是按钮角色，不是装饰。</p>
+        </div>
+
+        <div class="block">
+          <div class="block-head"><h3>卡片 Card</h3><p class="mono">no shadow</p></div>
+          <div class="demo-surface">
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <h4 class="card-title">本地知识库</h4>
+                  <p class="card-desc">把文档导入 Fox，建立可检索的知识空间。</p>
+                </div>
+                <span class="badge badge-outline">126 文档</span>
+              </div>
+              <div class="card-body">
+                卡片最多一层容器。卡片内部用细分隔线，不再嵌套带边框的卡片。
+              </div>
+              <div class="card-foot">
+                <button type="button" class="btn btn-ghost btn-sm">取消</button>
+                <button type="button" class="btn btn-default btn-sm">打开</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="block">
+          <div class="block-head"><h3>分段控件与对话框</h3><p class="mono">tabs · dialog</p></div>
+          <div class="demo-surface">
+            <div class="segmented" role="tablist" aria-label="示例标签">
+              <button type="button" role="tab" aria-selected="true">文档</button>
+              <button type="button" role="tab" aria-selected="false">检索测试</button>
+              <button type="button" role="tab" aria-selected="false">任务</button>
+            </div>
+
+            <div class="dialog-demo" style="margin-top: 18px">
+              <h4>删除这个知识库？</h4>
+              <p>文档索引会一并删除，此操作不可撤销。原始文件仍保留在磁盘上。</p>
+              <div class="card-foot">
+                <button type="button" class="btn btn-ghost btn-sm">取消</button>
+                <button type="button" class="btn btn-destructive btn-sm">删除</button>
+              </div>
+            </div>
+          </div>
+          <p class="note">对话框底部按钮靠右，危险动作使用描边式 destructive，不使用整块红色。层级：浮层 50、Dialog 100、Select 110。</p>
+        </div>
+
+        <div class="block">
+          <div class="block-head"><h3>状态与空状态</h3><p class="mono">dot · empty</p></div>
+          <div class="pattern-grid">
+            <div class="demo-surface">
+              <div class="status-line">
+                <span><i class="status-dot ok"></i>已就绪</span>
+                <span><i class="status-dot warn"></i>待配置</span>
+                <span><i class="status-dot error"></i>失败</span>
+                <span><i class="status-dot empty"></i>未启用</span>
+              </div>
+              <div class="data-row" style="margin-top: 16px">
+                <span>文档</span><span class="num">126</span><span class="muted">今天 17:03</span>
+              </div>
+              <div class="data-row">
+                <span>分块</span><span class="num">1,204</span><span class="muted">今天 17:04</span>
+              </div>
+              <div class="data-row">
+                <span>向量索引</span><span class="num">未配置</span><span class="muted">关键词可用</span>
+              </div>
+            </div>
+            <div class="demo-surface">
+              <div class="empty-state">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+                <strong>这个知识库还没有文档</strong>
+                <p>导入文档，或把文件拖到这里。</p>
+                <button type="button" class="btn btn-outline btn-sm">导入文档</button>
+              </div>
+            </div>
+          </div>
+          <p class="note">空状态只有一句话和一个动作，居中、不加框、不放大图标块。没有数据时隐藏筛选与排序。</p>
+        </div>
+
+        <div class="block">
+          <div class="block-head"><h3>列表行与设置行</h3><p class="mono">sidebar · settings</p></div>
+          <div class="pattern-grid">
+            <div class="demo-surface">
+              <div class="sidebar-demo">
+                <div class="sidebar-row">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/></svg>
+                  <span class="name">把 Fox 的发布说明整理成周报</span>
+                  <time>17:03</time>
+                </div>
+                <div class="sidebar-row is-active">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/></svg>
+                  <span class="name">设计体系评审</span>
+                  <time>昨天</time>
+                </div>
+                <div class="sidebar-row">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+                  <span class="name">产品资料库</span>
+                  <span class="badge badge-outline">3</span>
+                </div>
+              </div>
+              <p class="note">行高 32px；图标 16px；右侧动作只在悬停或聚焦时出现，并保留占位避免标题跳动。</p>
+            </div>
+            <div class="demo-surface">
+              <div class="settings-demo">
+                <div class="settings-row">
+                  <div>
+                    <strong>默认模型</strong>
+                    <small>新对话优先使用的模型。</small>
+                  </div>
+                  <div class="select-wrap" style="max-width: 180px">
+                    <select aria-label="默认模型">
+                      <option>Fox 默认</option>
+                      <option>本地模型</option>
+                    </select>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+                  </div>
+                </div>
+                <div class="settings-row">
+                  <div>
+                    <strong>发送快捷键</strong>
+                    <small>对话输入区使用的发送方式。</small>
+                  </div>
+                  <div class="demo-row" style="gap: 6px">
+                    <kbd>Enter</kbd><span class="muted" style="font-size: 12px">发送</span>
+                    <kbd>Shift</kbd><kbd>Enter</kbd><span class="muted" style="font-size: 12px">换行</span>
+                  </div>
+                </div>
+                <div class="settings-row">
+                  <div>
+                    <strong>自动同步</strong>
+                    <small>在本机后台保持索引更新。</small>
+                  </div>
+                  <button type="button" class="switch" role="switch" aria-checked="true" aria-label="自动同步"></button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================ 10 PATTERNS ============================ -->
+      <section class="section" id="patterns" aria-labelledby="patterns-title">
+        <div class="section-head">
+          <span class="section-index">10</span>
+          <h2 id="patterns-title">页面模式</h2>
+        </div>
+        <p class="section-intro">
+          页面不是卡片的集合。先确定信息主次，再用外壳、页头、分组和输入区四种模式组织内容；
+          容器最多一层，主按钮最多一个。
+        </p>
+
+        <div class="block">
+          <div class="block-head"><h3>应用外壳</h3><p class="mono">30px titlebar · 264px rail</p></div>
+          <div class="pattern-grid">
+            <div class="shell-demo">
+              <div class="shell-titlebar"><span>Fox</span><span>— □ ×</span></div>
+              <div class="shell-body">
+                <div class="shell-sidebar">
+                  <span class="is-active">新对话</span>
+                  <span>对话</span>
+                  <span>知识库</span>
+                  <span>任务</span>
+                  <span>设置</span>
+                </div>
+                <div class="shell-content">
+                  <div class="line w60"></div>
+                  <div class="line w80"></div>
+                  <div class="line"></div>
+                  <div class="box"></div>
+                </div>
+              </div>
+            </div>
+            <div class="pattern-note">
+              <strong>尺寸约定</strong>
+              标题栏 30px；侧栏默认 264px，可折叠；内容区最大 1120px 居中；
+              一级页面内边距上 32、左右 24、下 48。深色模式下侧栏比内容区暗一档，
+              用背景差分层，而不是加边框。
+            </div>
+          </div>
+        </div>
+
+        <div class="block">
+          <div class="block-head"><h3>页面头</h3><p class="mono">24 / 600 · 13 muted</p></div>
+          <div class="page-head-demo">
+            <div class="page-head-top">
+              <div>
+                <h4>本地知识库</h4>
+                <p>18 个知识库 · 1,204 个分块 · 2 个待构建索引</p>
+              </div>
+              <button type="button" class="btn btn-default">导入文档</button>
+            </div>
+            <div class="page-head-tabs">
+              <div class="segmented" role="tablist" aria-label="知识库标签">
+                <button type="button" role="tab" aria-selected="true">全部</button>
+                <button type="button" role="tab" aria-selected="false">最近</button>
+                <button type="button" role="tab" aria-selected="false">待处理</button>
+              </div>
+            </div>
+          </div>
+          <p class="note">页面标题 24/600，说明 13px muted；标题行与右侧 32px 按钮同一基线。工具栏最多一个分段控件加一个筛选浮层。</p>
+        </div>
+
+        <div class="block">
+          <div class="block-head"><h3>对话输入区</h3><p class="mono">composer</p></div>
+          <div class="composer-demo">
+            <div class="prompt">告诉 Fox 你想完成什么，或拖入文件作为上下文。</div>
+            <div class="composer-bar">
+              <div class="left">
+                <span class="composer-chip">
+                  <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" style="fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+                  附件
+                </span>
+                <span class="composer-chip">产品资料库</span>
+              </div>
+              <div class="right">
+                <span class="mono">Enter 发送</span>
+                <button type="button" class="send-btn" aria-label="发送">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+          <p class="note">输入区是唯一允许有轻微浮起感的常驻元素，但只用一层弱阴影，不使用多层发光或大面积模糊。</p>
+        </div>
+      </section>
+
+      <!-- ============================ 11 ACCESSIBILITY ============================ -->
+      <section class="section" id="a11y" aria-labelledby="a11y-title">
+        <div class="section-head">
+          <span class="section-index">11</span>
+          <h2 id="a11y-title">无障碍</h2>
+        </div>
+        <p class="section-intro">
+          可读性优先于风格。正文文字与背景至少 4.5:1，大字号、图标和焦点描边至少 3:1；
+          三套主题和明暗模式必须分别检查，不能从浅色推断深色。
+        </p>
+
+        <div class="block">
+          <div class="block-head">
+            <h3>当前主题对比度实测</h3>
+            <p class="mono" id="contrast-theme">石墨 · 浅色</p>
+          </div>
+          <table class="contrast-table">
+            <thead>
+              <tr>
+                <th scope="col">组合</th>
+                <th scope="col">前景</th>
+                <th scope="col">背景</th>
+                <th scope="col">对比度</th>
+                <th scope="col">判定</th>
+              </tr>
+            </thead>
+            <tbody id="contrast-body">
+              <tr data-fg="--foreground" data-bg="--background" data-min="4.5">
+                <td>正文</td><td><code>--foreground</code></td><td><code>--background</code></td>
+                <td class="ratio">—</td><td><span class="verdict">—</span></td>
+              </tr>
+              <tr data-fg="--muted-foreground" data-bg="--background" data-min="4.5">
+                <td>次要文字</td><td><code>--muted-foreground</code></td><td><code>--background</code></td>
+                <td class="ratio">—</td><td><span class="verdict">—</span></td>
+              </tr>
+              <tr data-fg="--fox-faint" data-bg="--sidebar" data-min="4.5">
+                <td>第三级文字</td><td><code>--fox-faint</code></td><td><code>--sidebar</code></td>
+                <td class="ratio">—</td><td><span class="verdict">—</span></td>
+              </tr>
+              <tr data-fg="--primary-foreground" data-bg="--primary" data-min="4.5">
+                <td>主按钮文字</td><td><code>--primary-foreground</code></td><td><code>--primary</code></td>
+                <td class="ratio">—</td><td><span class="verdict">—</span></td>
+              </tr>
+              <tr data-fg="--destructive" data-bg="--card" data-min="4.5">
+                <td>危险文字</td><td><code>--destructive</code></td><td><code>--card</code></td>
+                <td class="ratio">—</td><td><span class="verdict">—</span></td>
+              </tr>
+              <tr data-fg="--success" data-bg="--card" data-min="4.5">
+                <td>成功文字</td><td><code>--success</code></td><td><code>--card</code></td>
+                <td class="ratio">—</td><td><span class="verdict">—</span></td>
+              </tr>
+              <tr data-fg="--fox-warning-text" data-bg="--card" data-min="4.5">
+                <td>警示文字</td><td><code>--fox-warning-text</code></td><td><code>--card</code></td>
+                <td class="ratio">—</td><td><span class="verdict">—</span></td>
+              </tr>
+              <tr data-fg="--ring" data-bg="--background" data-min="3">
+                <td>焦点描边（非文字）</td><td><code>--ring</code></td><td><code>--background</code></td>
+                <td class="ratio">—</td><td><span class="verdict">—</span></td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="note">
+            数值由浏览器在当前主题下实时计算，仅代表本页的令牌组合。
+            产品内还有大量半透明混合色，需要逐页复核；发现失败项时优先调整文字色，而不是放大字号。
+          </p>
+        </div>
+
+        <div class="block">
+          <div class="block-head"><h3>焦点</h3><p class="mono">2px ring + 3px halo</p></div>
+          <div class="demo-surface">
+            <div class="focus-demo">
+              <button type="button" class="btn btn-default is-focus">键盘焦点</button>
+              <button type="button" class="btn btn-outline is-focus">描边按钮</button>
+              <a href="#a11y">可聚焦链接</a>
+            </div>
+          </div>
+          <p class="note">所有可交互元素使用同一圈焦点：2px 实线加 3px 半透明光晕，偏移 2px。不要用颜色变化代替焦点。</p>
+        </div>
+
+        <div class="block">
+          <div class="block-head"><h3>检查清单</h3><p class="mono">before shipping</p></div>
+          <ul class="checklist">
+            <li>正文对比度 ≥ 4.5:1；大字号、图标、描边 ≥ 3:1。</li>
+            <li>状态不只靠颜色，必须有文字或图标。</li>
+            <li>所有操作可用键盘完成，焦点顺序与视觉顺序一致。</li>
+            <li>文字缩放到 70% 与 140% 时无溢出、无截断。</li>
+            <li>图片有替代文本；装饰图使用空 alt。</li>
+            <li>尊重 prefers-reduced-motion，保留最终静态状态。</li>
+          </ul>
+          <div class="callout" style="margin-top: 14px">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+            <div>
+              <strong>关于 14 / 15px 正文</strong>
+              <p>
+                网页正文的通用下限是 16px，但 Fox 是桌面高密度工具，正文使用 14px、对话 15px。
+                这是有意的产品取舍：保留更大的信息密度，同时用 1.6–1.75 行高和克制的行长保证可读性。
+                若面向弱视力或投屏场景，使用产品内的文字缩放，而不是单独放大某一页。
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================ 12 AUDIT ============================ -->
+      <section class="section" id="audit" aria-labelledby="audit-title">
+        <div class="section-head">
+          <span class="section-index">12</span>
+          <h2 id="audit-title">问题清单</h2>
+        </div>
+        <p class="section-intro">
+          下面是从当前代码静态检索出的主要问题：不是审美偏好，而是会造成主题失效、
+          字号失控或维护成本上升的结构性偏差。完整证据与修复顺序见
+          <a href="./AUDIT.md">AUDIT.md</a>。
+        </p>
+
+        <div class="block">
+          <div class="audit-summary">
+            <div class="audit-count"><strong>4</strong><span>P0 · 系统级，优先修</span></div>
+            <div class="audit-count"><strong>6</strong><span>P1 · 一致性与可访问性</span></div>
+            <div class="audit-count"><strong>3</strong><span>P2 · 维护与文档同步</span></div>
+          </div>
+        </div>
+
+        <div class="block">
+          <article class="audit-item">
+            <span class="severity p0">P0</span>
+            <div>
+              <h4>根字号 14px 让 Tailwind 的 rem 刻度整体偏小</h4>
+              <p><code>globals.css:63</code> 设置根字号 14px；Tailwind 的 <code>--spacing</code> 与 <code>--text-xs</code> 仍按 rem 计算，于是 <code>gap-2</code> 变成 7px、<code>text-xs</code> 变成 10.5px。全项目有 150 处 <code>text-xs</code>、107 处 <code>text-sm</code>，与 4px 网格和 11px 下限同时冲突。</p>
+            </div>
+          </article>
+          <article class="audit-item">
+            <span class="severity p0">P0</span>
+            <div>
+              <h4>637 处硬编码 font-size，仍有 90 余处低于 11px</h4>
+              <p>CSS 中仍存在 8 / 8.5 / 9 / 9.5 / 10 / 10.5px 的字号，例如 <code>workbench.css:4549</code> 的 8.5px。令牌注释声称最小 11px，但代码没有 enforcement。</p>
+            </div>
+          </article>
+          <article class="audit-item">
+            <span class="severity p0">P0</span>
+            <div>
+              <h4>硬编码颜色绕过主题</h4>
+              <p><code>themes.css</code> 之外约 79 处十六进制颜色，TS/TSX 中约 82 处。典型如 <code>file-tree.tsx:176</code> 的 <code>#e8f4ff</code>、<code>TaskItem.tsx:29</code> 的 <code>text-blue-600</code>、<code>workspace-pages.css:25</code> 的 <code>#7656d8</code>，切到暖纸或雾蓝时不会跟随。</p>
+            </div>
+          </article>
+          <article class="audit-item">
+            <span class="severity p0">P0</span>
+            <div>
+              <h4>CSS 单体与 !important 覆盖</h4>
+              <p><code>workbench.css</code> 约 304KB、<code>workspace-pages.css</code> 约 217KB，后者大量规则压成单行；23 个样式文件使用 <code>!important</code>，仅 workspace-pages.css 就有 263 处。样式靠权重竞争，而不是分层。</p>
+            </div>
+          </article>
+
+          <article class="audit-item">
+            <span class="severity p1">P1</span>
+            <div>
+              <h4>圆角随主题变化，但缺少嵌套与几何约束</h4>
+              <p>卡片圆角在石墨 / 暖纸 / 雾蓝分别是 8 / 16 / 12px，同一组件在三套主题下的几何差异明显。需要把“内层圆角 = 外层 − 内距”写成组件规则并逐一验证。</p>
+            </div>
+          </article>
+          <article class="audit-item">
+            <span class="severity p1">P1</span>
+            <div>
+              <h4>字体令牌自相矛盾</h4>
+              <p><code>globals.css:181</code> 把卡片标题与区块标题都定为 16px，<code>card.tsx:40</code> 实际用 13px 的 <code>--fox-type-ui</code>，<code>workbench.css:5952</code> 又在局部把 section 改成 18px；<code>local-knowledge.css:1053</code> 引用了从未定义的 <code>--fox-type-section-title</code>。</p>
+            </div>
+          </article>
+          <article class="audit-item">
+            <span class="severity p1">P1</span>
+            <div>
+              <h4>Button lg 与控件高度令牌不一致</h4>
+              <p><code>button.tsx:31</code> 的 <code>lg</code> 固定 <code>h-10</code>（40px），而 <code>globals.css:130</code> 定义 <code>--fox-control-lg: 36px</code>；同一套尺寸体系里出现两个 lg。</p>
+            </div>
+          </article>
+          <article class="audit-item">
+            <span class="severity p1">P1</span>
+            <div>
+              <h4>文字缩放只覆盖令牌</h4>
+              <p><code>text-scale.ts</code> 只写入 <code>--fox-text-scale</code>；Tailwind 字号类与硬编码 px 不缩放。用户把文字调到 140% 时，页面会出现部分文字变大、部分不变的分裂。</p>
+            </div>
+          </article>
+          <article class="audit-item">
+            <span class="severity p1">P1</span>
+            <div>
+              <h4>AlertDialog 层级低于 Dialog</h4>
+              <p><code>alert-dialog.tsx:39,61</code> 使用 <code>z-50</code>，<code>dialog.tsx:41,67</code> 使用 <code>z-[100]</code>。从对话框内触发“放弃修改”确认框时，存在被遮挡的结构性风险，需要在真实运行中验证。</p>
+            </div>
+          </article>
+          <article class="audit-item">
+            <span class="severity p1">P1</span>
+            <div>
+              <h4>警示色小字对比度不足</h4>
+              <p><code>--warning</code> 在浅色主题下用于 12px 文字时对比度偏低，需要统一使用 <code>--fox-warning-text</code>（混合前景色后的可读版本），而不是直接使用 <code>--warning</code>。</p>
+            </div>
+          </article>
+
+          <article class="audit-item">
+            <span class="severity p2">P2</span>
+            <div>
+              <h4>加载了未使用的 Bold 字重</h4>
+              <p><code>globals.css:9</code> 引入 Bold，但字重令牌最高 600，没有 700 的用法；同时两处字体栈不一致（<code>globals.css:15</code> 与 <code>:312</code>）。</p>
+            </div>
+          </article>
+          <article class="audit-item">
+            <span class="severity p2">P2</span>
+            <div>
+              <h4>圆角裸值仍有 361 处</h4>
+              <p>其中 5 / 7 / 9 / 11 / 13 / 14px 等被规范排除的档位仍有约 87 处。需要把圆角收敛到主题令牌，或为插画类组件单独定义例外。</p>
+            </div>
+          </article>
+          <article class="audit-item">
+            <span class="severity p2">P2</span>
+            <div>
+              <h4>现有设计文档与代码不同步</h4>
+              <p><code>docs/03-产品与前端/设计系统.md:68</code> 记录 <code>--muted-foreground</code> 为 0.556，代码实际是 0.54；部分“已知限制”已经修复或结构已变化。新体系应以代码为准，并定期由令牌重新生成文档。</p>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <div>
+          <strong class="mono" style="color: var(--fox-text)">Fox Design System · v1.0</strong><br>
+          依据 2026-11-06 的源码静态检索与令牌比对生成；未修改产品源码。
+        </div>
+        <div style="text-align: right">
+          <code>themes.css</code> · <code>globals.css</code> · <code>components/ui</code><br>
+          <a href="./DESIGN-SYSTEM.md">DESIGN-SYSTEM.md</a> · <a href="./AUDIT.md">AUDIT.md</a> · <a href="./tokens.json">tokens.json</a>
+        </div>
+      </footer>
+
+    </div>
+  </main>
+</div>
+</body>
+</html>

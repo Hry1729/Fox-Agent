@@ -1,0 +1,109 @@
+html[data-review='after'] .fox-composer-project-menu {
+  padding: var(--fox-space-m);
+  gap: 0;
+}
+html[data-review='after'] .fox-composer-project-menu > [data-slot='command'] {
+  padding: 0;
+  background: transparent;
+}
+html[data-review='after'] .fox-composer-project-menu [data-slot='command-input-wrapper'] {
+  padding: 0;
+  margin: 0 0 var(--fox-space-xs);
+}
+html[data-review='after'] .fox-composer-project-menu [data-slot='command-group'] {
+  padding: 0;
+}
+html[data-review='after'] .fox-composer-project-menu [cmdk-group-heading] {
+  padding: var(--fox-space-m) var(--fox-space-m) var(--fox-space-s);
+  font-size: var(--fox-type-meta);
+  line-height: 16px;
+}
+html[data-review='after'] .fox-composer-project-menu [data-slot='command-item'] {
+  min-height: 52px;
+  padding: var(--fox-space-m);
+  gap: var(--fox-space-m);
+}
+html[data-review='after'] .fox-composer-project-menu .fox-composer-project-option {
+  gap: var(--fox-space-micro);
+}
+html[data-review='after'] .fox-composer-project-menu .fox-composer-project-option > span {
+  font-size: var(--fox-type-body);
+  line-height: 20px;
+}
+html[data-review='after'] .fox-composer-project-menu .fox-composer-project-option > small {
+  font-size: var(--fox-type-meta);
+  line-height: 16px;
+}
+html[data-review='after'] .fox-composer-project-menu [cmdk-separator] {
+  margin: var(--fox-space-m) 0;
+}
+html[data-review='after'] .fox-composer-project-menu .fox-composer-project-add {
+  width: 100%;
+  min-height: var(--fox-control-lg);
+  margin: 0;
+  padding: 0 var(--fox-space-m);
+  gap: var(--fox-space-m);
+  border-radius: var(--fox-radius-control);
+  font-size: var(--fox-type-control);
+  line-height: 20px;
+}
+html[data-review='after'] .fox-composer-project-menu [data-slot='command-item'] > svg,
+html[data-review='after'] .fox-composer-project-menu .fox-composer-project-add > svg {
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
+  flex: none;
+}
+html[data-review='after'] .design-project-scene .fox-composer-project-bar {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+html[data-review='after'] .design-stage[data-surface='messages'] {
+  padding: var(--fox-space-3xl);
+}
+html[data-review='after'] .design-stage[data-surface='messages'] .design-stage-label {
+  margin-bottom: 0;
+}
+html[data-review='after'] .design-message-scene {
+  width: min(100%, 720px);
+  margin: var(--fox-space-3xl) auto 0;
+}
+html[data-review='after'] .design-stopped {
+  display: grid;
+  gap: var(--fox-space-m);
+  margin-top: var(--fox-space-3xl);
+}
+html[data-review='after'] .design-stopped > .design-process {
+  display: grid;
+  grid-template-columns: var(--fox-icon-size) minmax(0, 1fr);
+  align-items: center;
+  column-gap: var(--fox-space-m);
+  margin: 0;
+  font-size: var(--fox-type-control);
+  line-height: 24px;
+}
+html[data-review='after'] .design-process > svg {
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
+}
+html[data-review='after'] .design-stopped > .aui-stopped-run {
+  margin: 0;
+}
+html[data-review='after'] .design-stopped > .aui-stopped-run > div > span {
+  display: grid;
+  grid-template-columns: var(--fox-icon-size) minmax(0, 1fr);
+  align-items: center;
+  column-gap: var(--fox-space-m);
+  margin: 0;
+  font-size: var(--fox-type-control);
+  line-height: 24px;
+}
+html[data-review='after'] .design-stopped > .aui-stopped-run > div > span > svg {
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
+  justify-self: center;
+}
+html[data-review='after'] .design-file-scene {
+  margin-block: var(--fox-space-3xl) var(--fox-space-5xl);
+}

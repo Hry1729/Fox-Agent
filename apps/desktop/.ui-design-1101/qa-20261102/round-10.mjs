@@ -1,0 +1,14 @@
+const task = await taskSpace(1);
+const page = task.page('p1');
+await page.hover('loc=css:.review-message-thread .is-assistant');
+await page.waitForFunction(()=>getComputedStyle(document.querySelector('.review-message-thread .fox-thread-actionbar')).opacity==='1');
+console.log(await page.evaluate(()=>[...document.querySelectorAll('.review-message-thread .fox-thread-actionbar,.review-message-thread .fox-user-actions')].map(e=>({kind:e.className,opacity:getComputedStyle(e).opacity}))));
+await page.hover('loc=css:.review-message-thread .is-user');
+await page.waitForFunction(()=>getComputedStyle(document.querySelector('.review-message-thread .fox-user-actions')).opacity==='1');
+console.log(await page.evaluate(()=>[...document.querySelectorAll('.review-message-thread .fox-thread-actionbar,.review-message-thread .fox-user-actions')].map(e=>({kind:e.className,opacity:getComputedStyle(e).opacity}))));
+await page.click('loc=role:button[name="05 交付文件卡片"]');
+await page.cdp('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:false});
+console.log(await page.evaluate(()=>{const e=document.querySelector('.design-file-card');return {viewport:innerWidth,scrollWidth:document.documentElement.scrollWidth,cardWidth:e.getBoundingClientRect().width,cardRight:e.getBoundingClientRect().right}}));
+console.log({screenshot:await page.screenshot({path:'D:/python/projects/Fox/Fox/apps/desktop/.ui-design-1101/qa-20261102/05-after-narrow.png'})});
+await page.cdp('Emulation.clearDeviceMetricsOverride',{});
+console.log(await page.snapshot());

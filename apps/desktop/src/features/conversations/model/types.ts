@@ -596,6 +596,8 @@ export interface ConversationDetail {
   approvals: ApprovalRecord[]
   attachments: AttachmentRecord[]
   artifacts: ArtifactRecord[]
+  /** Committed contact bubbles in the loaded window (C00/K1). */
+  bubbles?: ContactBubbleRecord[]
   /** Host read projection of this conversation's current last Run. Missing is not a verdict. */
   deliveryChecklist?: DeliveryChecklistRecord[]
   deliveryChecklistTruncated?: boolean
@@ -691,7 +693,45 @@ export interface ConversationHistoryPage {
   approvals: ApprovalRecord[]
   attachments: AttachmentRecord[]
   artifacts: ArtifactRecord[]
+  bubbles?: ContactBubbleRecord[]
   hasEarlierMessages: boolean
+}
+
+/** A committed contact bubble (plan C00/K1). Identity and delivery order are
+ * durable; text and fingerprint may be recomputed from the source message. */
+export interface ContactBubbleRecord {
+  id: string
+  conversationId: string
+  runId: string | null
+  messageId: string
+  sourceOrdinal: number
+  author: 'user' | 'companion'
+  projection: 'message' | 'segmented' | 'kernel'
+  segmentStart: number | null
+  segmentEnd: number | null
+  deliveryOrder: number
+  deliveredAt: number
+  content: string
+  fingerprint: string
+}
+
+/** One C01 search hit: a committed bubble with a snippet around the first
+ * match. `matchStart`/`matchEnd` are char offsets inside `snippet`. */
+export interface ContactBubbleSearchHit {
+  id: string
+  author: 'user' | 'companion'
+  snippet: string
+  matchStart: number
+  matchEnd: number
+  deliveredAt: number
+  sourceOrdinal: number
+  runId: string | null
+  messageId: string
+}
+
+export interface ContactBubbleSearchPage {
+  total: number
+  results: ContactBubbleSearchHit[]
 }
 
 export interface AttachmentRecord {

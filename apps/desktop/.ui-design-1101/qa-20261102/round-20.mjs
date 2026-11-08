@@ -1,0 +1,11 @@
+const task = await taskSpace(1);
+const page = task.page('p1');
+await page.click('loc=role:button[name="01 输入框底部留白"]');
+await page.cdp('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:false});
+await page.hover('loc=css:.fox-composer-draft-footer .fox-composer-agent-trigger');
+console.log(await page.evaluate(()=>({viewport:innerWidth,scrollWidth:document.documentElement.scrollWidth,footerHeight:document.querySelector('.fox-composer-draft-footer').getBoundingClientRect().height,buttons:[...document.querySelectorAll('.fox-composer-draft-footer button')].map(e=>({height:e.getBoundingClientRect().height,visible:e.getBoundingClientRect().width>0}))})));
+console.log({screenshot:await page.screenshot({path:'D:/python/projects/Fox/Fox/apps/desktop/.ui-design-1101/qa-20261102/01-compact-footer-narrow.png'})});
+await page.cdp('Emulation.clearDeviceMetricsOverride',{});
+await page.hover('loc=css:.fox-composer-draft-footer .fox-composer-agent-trigger');
+console.log(await page.snapshot());
+console.log(await task.finish({keep:['p1']}));

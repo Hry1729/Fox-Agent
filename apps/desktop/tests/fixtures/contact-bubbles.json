@@ -1,0 +1,102 @@
+{
+  "comment": "Shared TS/Rust contact-bubble projection fixture (K1). Both sides project each case and compare bubble ids and visible text one by one. Rust additionally pins deliveredAt in its own unit tests. event.payload carries no type field; each harness adds eventType as type, matching stored run_events.",
+  "cases": [
+    {
+      "name": "leading-newline-never-decides-identity",
+      "mode": "runtime",
+      "runId": "run",
+      "content": "\n你好，世界",
+      "events": [
+        { "seq": 1, "eventType": "message.delta", "payload": { "delta": "\n" }, "createdAt": 100 },
+        { "seq": 2, "eventType": "message.delta", "payload": { "delta": "你好，" }, "createdAt": 200 },
+        { "seq": 3, "eventType": "message.delta", "payload": { "delta": "世界" }, "createdAt": 300 }
+      ],
+      "expected": [
+        { "id": "run:response:2", "text": "你好，世界" }
+      ]
+    },
+    {
+      "name": "separator-only-between-tool-rounds-joins-next-reply",
+      "mode": "runtime",
+      "runId": "run",
+      "content": "第一段\n第二段",
+      "events": [
+        { "seq": 1, "eventType": "message.delta", "payload": { "delta": "第一段" }, "createdAt": 100 },
+        { "seq": 2, "eventType": "tool.started", "payload": { "toolCallId": "t1", "tool": "read" }, "createdAt": 200 },
+        { "seq": 3, "eventType": "tool.completed", "payload": { "toolCallId": "t1" }, "createdAt": 300 },
+        { "seq": 4, "eventType": "message.delta", "payload": { "delta": "\n" }, "createdAt": 400 },
+        { "seq": 5, "eventType": "tool.started", "payload": { "toolCallId": "t2", "tool": "read" }, "createdAt": 500 },
+        { "seq": 6, "eventType": "tool.completed", "payload": { "toolCallId": "t2" }, "createdAt": 600 },
+        { "seq": 7, "eventType": "message.delta", "payload": { "delta": "第二段" }, "createdAt": 700 }
+      ],
+      "expected": [
+        { "id": "run:response:1", "text": "第一段" },
+        { "id": "run:response:7", "text": "第二段" }
+      ]
+    },
+    {
+      "name": "trailing-whitespace-only-joins-the-last-reply",
+      "mode": "runtime",
+      "runId": "run",
+      "content": "正文\n",
+      "events": [
+        { "seq": 1, "eventType": "message.delta", "payload": { "delta": "正文" }, "createdAt": 100 },
+        { "seq": 2, "eventType": "tool.started", "payload": { "toolCallId": "t1", "tool": "read" }, "createdAt": 200 },
+        { "seq": 3, "eventType": "message.delta", "payload": { "delta": "\n" }, "createdAt": 300 }
+      ],
+      "expected": [
+        { "id": "run:response:1", "text": "正文" }
+      ]
+    },
+    {
+      "name": "retry-splits-the-abandoned-attempt",
+      "mode": "runtime",
+      "runId": "run",
+      "content": "废弃的回答正确的回答",
+      "events": [
+        { "seq": 1, "eventType": "message.delta", "payload": { "delta": "废弃的回答" }, "createdAt": 100 },
+        { "seq": 2, "eventType": "run.retrying", "payload": { "attempt": 1 }, "createdAt": 200 },
+        { "seq": 3, "eventType": "run.phase", "payload": { "phase": "request_sent" }, "createdAt": 300 },
+        { "seq": 4, "eventType": "message.delta", "payload": { "delta": "正确的回答" }, "createdAt": 400 }
+      ],
+      "expected": [
+        { "id": "run:response:1", "text": "废弃的回答" },
+        { "id": "run:response:4", "text": "正确的回答" }
+      ]
+    },
+    {
+      "name": "kernel-checkpoint-responses",
+      "mode": "kernel",
+      "runId": "run",
+      "content": "第一轮第二轮",
+      "events": [
+        { "seq": 1, "eventType": "tool.started", "payload": { "toolCallId": "t1", "tool": "read", "kernelCheckpointSeq": "2" }, "createdAt": 100 },
+        { "seq": 2, "eventType": "tool.completed", "payload": { "toolCallId": "t1", "kernelCheckpointSeq": "2" }, "createdAt": 300 }
+      ],
+      "kernelCheckpoints": [
+        { "checkpointSeq": 2, "content": "第一轮", "createdAt": 200 },
+        { "checkpointSeq": 4, "content": "第二轮", "createdAt": 400 }
+      ],
+      "expected": [
+        { "id": "run:kernel:2:response", "text": "第一轮" },
+        { "id": "run:kernel:4:response", "text": "第二轮" }
+      ]
+    },
+    {
+      "name": "kernel-verification-failure-falls-back-to-delta-segments",
+      "mode": "kernelFallback",
+      "runId": "run",
+      "content": "增量正文",
+      "events": [
+        { "seq": 1, "eventType": "message.delta", "payload": { "delta": "增量" }, "createdAt": 100 },
+        { "seq": 2, "eventType": "message.delta", "payload": { "delta": "正文" }, "createdAt": 200 }
+      ],
+      "kernelCheckpoints": [
+        { "checkpointSeq": 2, "content": "对不上的内容", "createdAt": 100 }
+      ],
+      "expected": [
+        { "id": "run:response:1", "text": "增量正文" }
+      ]
+    }
+  ]
+}

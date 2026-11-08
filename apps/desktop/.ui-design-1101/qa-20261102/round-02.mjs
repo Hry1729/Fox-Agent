@@ -1,0 +1,10 @@
+const task = await taskSpace(1);
+const page = task.page('p1');
+await page.click('@16', {label:'inspect project menu spacing'});
+console.log(await page.evaluate(() => [...document.querySelectorAll('.fox-composer-project-menu,[data-slot="command-input-wrapper"],.fox-composer-project-menu [cmdk-item],.fox-composer-project-add')].map(e=>({class:e.className,slot:e.getAttribute('data-slot'),x:e.getBoundingClientRect().x,y:e.getBoundingClientRect().y,width:e.getBoundingClientRect().width,height:e.getBoundingClientRect().height,padding:getComputedStyle(e).padding,margin:getComputedStyle(e).margin}))));
+console.log({screenshot:await page.screenshot({path:'D:/python/projects/Fox/Fox/apps/desktop/.ui-design-1101/qa-20261102/03-before.png'})});
+await page.keyboard.press('Escape');
+await page.click('text="取消状态与消息操作"');
+await page.waitForSelector('.aui-stopped-run');
+console.log({screenshot:await page.screenshot({path:'D:/python/projects/Fox/Fox/apps/desktop/.ui-design-1101/qa-20261102/04-before.png'})});
+console.log(await page.snapshot());

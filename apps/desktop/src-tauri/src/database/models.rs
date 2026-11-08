@@ -18,6 +18,11 @@ pub struct CompanionProfile {
     pub pinned_at: Option<i64>,
     pub last_read_ordinal: i64,
     pub template_notice_dismissed_hash: Option<String>,
+    /// C04: independent model override. Both set = use this provider model;
+    /// both NULL = follow the global model. A dangling reference is an explicit
+    /// error at send time, never a silent fallback.
+    pub model_provider_id: Option<String>,
+    pub model_ref: Option<String>,
     pub archived_at: Option<i64>,
     pub deleting_at: Option<i64>,
     pub created_at: i64,
@@ -1073,6 +1078,8 @@ pub struct ConversationDetail {
     pub approvals: Vec<ApprovalRecord>,
     pub attachments: Vec<AttachmentRecord>,
     pub artifacts: Vec<ArtifactRecord>,
+    /// Committed contact bubbles for the loaded window (plan C00/K1).
+    pub bubbles: Vec<ContactBubbleRecord>,
     /// Latest Run only. Empty/missing/truncated never means business acceptance.
     pub delivery_checklist: Vec<DeliveryChecklistView>,
     pub delivery_checklist_truncated: bool,
@@ -1184,6 +1191,60 @@ impl std::fmt::Display for ConversationExpertBindingError {
 
 impl std::error::Error for ConversationExpertBindingError {}
 
+/// One committed, user-visible chat bubble (plan K1). Identity, projection
+/// mode, segment range and delivery order are durable; content and fingerprint
+/// can be recomputed from the source message and run events.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContactBubbleRecord {
+    pub id: String,
+    pub conversation_id: String,
+    pub run_id: Option<String>,
+    pub message_id: String,
+    pub source_ordinal: i64,
+    pub author: String,
+    pub projection: String,
+    pub segment_start: Option<i64>,
+    pub segment_end: Option<i64>,
+    pub delivery_order: i64,
+    pub delivered_at: i64,
+    pub content: String,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContactBubbleSearchHit {
+    pub id: String,
+    pub author: String,
+    pub snippet: String,
+    /// Char offsets of the first match inside `snippet`, for highlighting.
+    pub match_start: usize,
+    pub match_end: usize,
+    pub delivered_at: i64,
+    pub source_ordinal: i64,
+    pub run_id: Option<String>,
+    pub message_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContactBubbleSearchPage {
+    pub total: usize,
+    pub results: Vec<ContactBubbleSearchHit>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionChatSearchRequest {
+    pub conversation_id: String,
+    pub query: String,
+    pub since: Option<i64>,
+    pub until: Option<i64>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationHistoryPage {
@@ -1193,6 +1254,7 @@ pub struct ConversationHistoryPage {
     pub approvals: Vec<ApprovalRecord>,
     pub attachments: Vec<AttachmentRecord>,
     pub artifacts: Vec<ArtifactRecord>,
+    pub bubbles: Vec<ContactBubbleRecord>,
     pub has_earlier_messages: bool,
 }
 
@@ -2824,7 +2886,7 @@ pub struct YuxiConnectionTest {
     pub latency_ms: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelServiceRecord {
     pub name: String,

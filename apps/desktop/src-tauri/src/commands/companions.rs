@@ -35,6 +35,56 @@ pub(crate) struct EditProfile {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct SetCompanionModel {
+    companion_id: String,
+    provider_id: Option<String>,
+    model_ref: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WebCapability {
+    tool: String,
+    granted: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConnectorTool {
+    name: String,
+    granted: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConnectorCapability {
+    server_id: String,
+    name: String,
+    transport: String,
+    enabled: bool,
+    status: String,
+    last_error: Option<String>,
+    tools: Vec<ConnectorTool>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CompanionCapabilities {
+    web: Vec<WebCapability>,
+    connectors: Vec<ConnectorCapability>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetCompanionCapability {
+    companion_id: String,
+    server_id: String,
+    tool: String,
+    granted: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct PinCompanion {
     companion_id: String,
     pinned: bool,
@@ -145,6 +195,74 @@ pub(crate) fn companion_update_profile(
             .database
             .edit_companion(&request.companion_id, &request.edit),
     )
+}
+
+#[tauri::command]
+pub(crate) fn companion_set_model(
+    state: State<'_, AppState>,
+    request: SetCompanionModel,
+) -> ApiResponse<CompanionView> {
+    response(
+        state
+            .database
+            .set_companion_model(&request.companion_id, request.provider_id.as_deref(), request.model_ref.as_deref()),
+    )
+}
+
+/// C02: the profile's capability list. Grants are the user's choice; the tool
+/// list is the connector's live reality. A disabled or unreachable connector
+/// shows its reason instead of pretending its tools are callable.
+#[tauri::command]
+pub(crate) fn companion_capabilities_get(
+    state: State<'_, AppState>,
+    request: CompanionId,
+) -> ApiResponse<CompanionCapabilities> {
+    let grants = match state.database.companion_tool_grants(&request.companion_id) {
+        Ok(grants) => grants,
+        Err(error) => return ApiResponse::failure("storage.error", error, true),
+    };
+    let granted = |server: &str, tool: &str| grants.iter().any(|(s, t)| s == server && t == tool);
+    let web = crate::database::WEB_TOOLS.iter()
+        .map(|tool| WebCapability { tool: (*tool).to_owned(), granted: granted(crate::database::WEB_SERVER_ID, tool) })
+        .collect();
+    let servers = match state.database.list_mcp_servers() {
+        Ok(servers) => servers,
+        Err(error) => return ApiResponse::failure("storage.error", error, true),
+    };
+    let connectors = servers.into_iter().map(|server| {
+        let (tools, last_error) = if server.enabled {
+            match crate::mcp::list_tools(&server) {
+                Ok(list) => (list.into_iter()
+                    .filter_map(|item| item.get("name").and_then(|value| value.as_str()).map(str::to_owned))
+                    .map(|name| ConnectorTool { granted: granted(&server.id, &name), name })
+                    .collect::<Vec<_>>(), None),
+                Err(error) => (Vec::new(), Some(error)),
+            }
+        } else {
+            (Vec::new(), server.last_error.clone())
+        };
+        ConnectorCapability {
+            server_id: server.id,
+            name: server.name,
+            transport: server.transport,
+            enabled: server.enabled,
+            status: server.status,
+            last_error,
+            tools,
+        }
+    }).collect();
+    ApiResponse::success(CompanionCapabilities { web, connectors })
+}
+
+#[tauri::command]
+pub(crate) fn companion_capability_set(
+    state: State<'_, AppState>,
+    request: SetCompanionCapability,
+) -> ApiResponse<()> {
+    match state.database.set_companion_tool_grant(&request.companion_id, &request.server_id, &request.tool, request.granted) {
+        Ok(()) => ApiResponse::success(()),
+        Err(error) => ApiResponse::failure("companion.capability_invalid", error, false),
+    }
 }
 
 #[tauri::command]

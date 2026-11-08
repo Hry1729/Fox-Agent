@@ -36,9 +36,22 @@ export function FoxUserMessage() {
   const isEditing = useAuiState((state) => state.message.composer.isEditing)
   const running = useAuiState(state => state.thread.isRunning)
   const isLatestUser = useAuiState(state => state.thread.messages.findLast(message => message.role === 'user')?.id === state.message.id)
+  const contactChat = Boolean(companion?.privateChat)
+  const meta = !isEditing && <div className="fox-user-meta">
+    <time className="fox-message-time" dateTime={createdAt.toISOString()}>{formatDateTime(createdAt)}</time>
+    <ActionBarPrimitive.Root autohide="never" className="fox-user-actions">
+      <FoxCopyMessageButton onCopy={() => copyMessageResponse(aui.message.getState().content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n\n'))} />
+      {!companion?.privateChat && <button type="button" className="fox-thread-action-button" disabled={running} aria-label="从此消息创建分支" title="从此消息创建分支" onClick={() => requestConversationFork(aui.message.getState().id)}>
+        <GitFork size={13} />
+      </button>}
+      {!companion?.privateChat && isLatestUser && <ActionBarPrimitive.Edit asChild disabled={running}>
+          <button type="button" className="fox-thread-action-button" aria-label="编辑并重新发送" title="编辑并重新发送"><FileEdit size={13} /></button>
+        </ActionBarPrimitive.Edit>}
+    </ActionBarPrimitive.Root>
+  </div>
   return (
     <div id={`fox-turn-${messageId}`} data-turn-message-id={messageId} className="fox-turn-anchor">
-      <MessagePrimitive.Root className="fox-thread-msg is-user">
+      <MessagePrimitive.Root className={`fox-thread-msg is-user${companion?.privateChat ? ' is-contact-user' : ''}`}>
         <MessagePrimitive.If hasAttachments>
           <div className="fox-thread-attachments">
             <MessagePrimitive.Attachments>
@@ -46,20 +59,10 @@ export function FoxUserMessage() {
             </MessagePrimitive.Attachments>
           </div>
         </MessagePrimitive.If>
-        <MessagePrimitive.Parts components={{ Text: FoxUserText }} />
         <FoxEditComposer />
-        {!isEditing && <div className="fox-user-meta">
-            <time className="fox-message-time" dateTime={createdAt.toISOString()}>{formatDateTime(createdAt)}</time>
-            <ActionBarPrimitive.Root autohide="never" className="fox-user-actions">
-              <FoxCopyMessageButton onCopy={() => copyMessageResponse(aui.message.getState().content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n\n'))} />
-              {!companion?.privateChat && <button type="button" className="fox-thread-action-button" disabled={running} aria-label="从此消息创建分支" title="从此消息创建分支" onClick={() => requestConversationFork(aui.message.getState().id)}>
-                <GitFork size={13} />
-              </button>}
-              {!companion?.privateChat && isLatestUser && <ActionBarPrimitive.Edit asChild disabled={running}>
-                  <button type="button" className="fox-thread-action-button" aria-label="编辑并重新发送" title="编辑并重新发送"><FileEdit size={13} /></button>
-                </ActionBarPrimitive.Edit>}
-            </ActionBarPrimitive.Root>
-          </div>}
+        {contactChat
+          ? <div className="fox-contact-user-row"><MessagePrimitive.Parts components={{ Text: FoxUserText }} />{meta}</div>
+          : <><MessagePrimitive.Parts components={{ Text: FoxUserText }} />{meta}</>}
       </MessagePrimitive.Root>
     </div>
   )

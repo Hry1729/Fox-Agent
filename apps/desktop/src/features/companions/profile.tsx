@@ -7,6 +7,7 @@ import type { ProjectFileEntry } from '@/features/conversations/model/types'
 import { contacts, direct, type Companion, type CompanionGrant, type RetainedWorkspace, type TemplateStatus } from './api'
 import { showContactError, useContacts } from './context'
 import { ContactDelete } from './delete'
+import { ContactModelSelect } from './model-select'
 import { ContactNotes } from './notes'
 
 function TemplateChanges({ template }: { template: TemplateStatus }) {
@@ -70,7 +71,7 @@ export function ContactProfile({ contact }: { contact: Companion }) {
           <TemplateChanges template={template} />
           <div className="fox-contact-actions"><Button size="sm" disabled={busy || Boolean(contact.activeRunStatus)} onClick={() => void run(() => decide(true))}>采用新版</Button><Button size="sm" variant="ghost" disabled={busy || template.dismissed} onClick={() => void run(() => decide(false))}>暂不更新</Button></div></details>}
       </section>
-      <SettingsGroup title="对话设置"><SettingsRow title="使用全局模型" description={ctx?.model} />
+      <SettingsGroup title="对话设置"><SettingsRow title="模型"><ContactModelSelect contact={contact} /></SettingsRow>
         <SettingsRow title="权限"><select aria-label="私聊权限" value={ctx?.permission ?? 'ask'} onChange={e => ctx?.setPermission(e.target.value as 'read_only' | 'ask' | 'allow')}><option value="read_only">只读</option><option value="ask">询问</option><option value="allow">自动</option></select></SettingsRow>
         <SettingsRow title="共享记忆"><Button size="sm" variant="ghost" onClick={ctx?.openSharedMemory}>查看共享记忆</Button></SettingsRow></SettingsGroup>
       <section className="fox-contact-section"><h3>工作目录</h3><code>{contact.workspaceDir}</code>

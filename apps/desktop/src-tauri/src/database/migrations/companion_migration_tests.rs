@@ -414,3 +414,52 @@ fn shared_preference_requests_allow_no_match_and_only_replace_a_displayed_choice
     db.execute_batch("UPDATE companion_shared_requests SET status='replaced',replaced_memory_id='old',resolved_at=2 WHERE id='second'").unwrap();
     check_foreign_keys_after_migration(&db).unwrap();
 }
+
+#[test]
+fn v109_model_columns_default_to_follow_global_and_migration_never_rewrites_a_choice() {
+    let mut db = Connection::open_in_memory().unwrap();
+    run(&mut db, 1).unwrap();
+    db.execute_batch(AGENTS).unwrap();
+    db.execute_batch(PROFILES).unwrap();
+    assert_eq!(
+        number(&db, "SELECT count(*) FROM companion_profiles WHERE model_provider_id IS NULL AND model_ref IS NULL"),
+        2,
+        "旧联系人升级后默认跟随全局"
+    );
+    assert_eq!(
+        number(&db, "SELECT count(*) FROM pragma_table_info('runs') WHERE name='model_snapshot'"),
+        1
+    );
+    db.execute_batch("UPDATE companion_profiles SET model_provider_id='prov', model_ref='prov-model' WHERE id='cmp_a'").unwrap();
+    run(&mut db, 2).unwrap();
+    assert_eq!(
+        number(&db, "SELECT count(*) FROM companion_profiles WHERE id='cmp_a' AND model_provider_id='prov' AND model_ref='prov-model'"),
+        1,
+        "重复执行迁移不改写已保存的选择"
+    );
+    check_foreign_keys_after_migration(&db).unwrap();
+}
+
+#[test]
+fn v110_grants_start_empty_and_the_snapshot_column_defaults_to_null() {
+    let mut db = Connection::open_in_memory().unwrap();
+    run(&mut db, 1).unwrap();
+    db.execute_batch(AGENTS).unwrap();
+    db.execute_batch(PROFILES).unwrap();
+    assert_eq!(number(&db, "SELECT count(*) FROM companion_tool_grants"), 0, "旧联系人不自动获得新能力");
+    assert_eq!(
+        number(&db, "SELECT count(*) FROM pragma_table_info('runs') WHERE name='companion_tools_snapshot'"),
+        1
+    );
+    db.execute_batch(
+        "INSERT INTO companion_tool_grants(companion_id,server_id,tool,created_at) VALUES ('cmp_a','@web','web_search',1)",
+    ).unwrap();
+    run(&mut db, 2).unwrap();
+    assert_eq!(
+        number(&db, "SELECT count(*) FROM companion_tool_grants WHERE companion_id='cmp_a' AND server_id='@web' AND tool='web_search'"),
+        1,
+        "重复执行迁移保留已保存的授权"
+    );
+    denied(&db, "INSERT INTO companion_tool_grants(companion_id,server_id,tool,created_at) VALUES ('cmp_gone','@web','web_search',1)", "FOREIGN KEY");
+    check_foreign_keys_after_migration(&db).unwrap();
+}

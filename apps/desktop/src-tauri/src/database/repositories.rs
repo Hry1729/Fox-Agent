@@ -35,6 +35,7 @@ mod artifact_delivery_view;
 mod app_management;
 mod bundled_capabilities;
 pub(crate) mod companions;
+pub(crate) mod companion_capabilities;
 mod computed_artifacts;
 mod delivery_acceptance;
 mod child_runs;
@@ -140,6 +141,7 @@ mod kernel_projection;
 mod kernel_display;
 pub(crate) use kernel_host::KernelHostScope;
 mod companion_notes;
+pub(crate) mod contact_bubbles;
 mod memory;
 mod observability;
 mod work_events;
@@ -1474,6 +1476,7 @@ impl Database {
                    )",
                 [now],
             )?;
+            contact_bubbles::project_interrupted_in_transaction(&transaction)?;
             transaction.execute(
                 "UPDATE tool_calls SET status = 'interrupted', completed_at = ?1, updated_at = ?1
                  WHERE status IN ('pending', 'running')
@@ -1534,6 +1537,53 @@ impl Database {
             interrupt_tasks_owned_by_terminal_runs(&transaction, &now.to_string())?;
             transaction.commit()?;
             Ok(())
+        })
+    }
+
+    /// Projects the bubbles of up to `limit` private chats that have no
+    /// completion marker yet, then marks each one complete. Returns how many
+    /// chats were completed; `0` means every private chat is fully projected.
+    /// Re-entrant and resumable: `ensure_window` never rewrites an existing
+    /// row, so a chat interrupted mid-backfill is simply retried next batch.
+    pub fn backfill_contact_bubbles_batch(&self, limit: usize) -> Result<usize, String> {
+        self.with_connection(|connection| {
+            let ids: Vec<String> = {
+                let mut statement = connection.prepare(
+                    "SELECT c.id FROM conversations c
+                     WHERE c.companion_id IS NOT NULL
+                       AND NOT EXISTS (
+                         SELECT 1 FROM contact_bubble_backfills b WHERE b.conversation_id = c.id
+                       )
+                     ORDER BY c.id ASC LIMIT ?1",
+                )?;
+                let rows = statement.query_map([limit as i64], |row| row.get::<_, String>(0))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let mut completed = 0;
+            for id in ids {
+                contact_bubbles::ensure_window(connection, &id, 0, None)?;
+                connection.execute(
+                    "INSERT OR IGNORE INTO contact_bubble_backfills(conversation_id, completed_at)
+                     VALUES (?1, ?2)",
+                    params![id, now_ms()],
+                )?;
+                completed += 1;
+            }
+            Ok(completed)
+        })
+    }
+
+    pub fn search_contact_bubbles(
+        &self,
+        conversation_id: &str,
+        query: &str,
+        since: Option<i64>,
+        until: Option<i64>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<super::ContactBubbleSearchPage, String> {
+        self.with_connection(|connection| {
+            contact_bubbles::search_bubbles(connection, conversation_id, query, since, until, limit, offset)
         })
     }
 
@@ -2746,6 +2796,8 @@ impl Database {
             let conversation = query_conversation(connection, id)?;
             let messages = query_message_page(connection, id, None, INITIAL_HISTORY_MESSAGES)?;
             let oldest_ordinal = messages.first().map(|message| message.ordinal).unwrap_or(0);
+            contact_bubbles::ensure_window(connection, id, oldest_ordinal, None)?;
+            let bubbles = contact_bubbles::query_window(connection, id, oldest_ordinal, None)?;
             let runtime_events = query_runtime_events_window(connection, id, oldest_ordinal, None)?;
             let tool_calls = query_tool_calls_window(connection, id, oldest_ordinal, None)?;
             let approvals = query_approvals_window(connection, id, oldest_ordinal, None)?;
@@ -2775,6 +2827,7 @@ impl Database {
                 approvals,
                 attachments,
                 artifacts,
+                bubbles,
                 delivery_checklist,
                 delivery_checklist_truncated,
                 knowledge_bindings,
@@ -3109,6 +3162,8 @@ impl Database {
                 .first()
                 .map(|message| message.ordinal)
                 .unwrap_or(before_ordinal);
+            contact_bubbles::ensure_window(connection, id, oldest_ordinal, Some(before_ordinal))?;
+            let bubbles = contact_bubbles::query_window(connection, id, oldest_ordinal, Some(before_ordinal))?;
             let runtime_events =
                 query_runtime_events_window(connection, id, oldest_ordinal, Some(before_ordinal))?;
             let tool_calls =
@@ -3131,6 +3186,7 @@ impl Database {
                 approvals,
                 attachments,
                 artifacts,
+                bubbles,
                 has_earlier_messages,
             })
         })?;
@@ -5380,6 +5436,49 @@ impl Database {
             let Some(approval_id) = approval_id else {
                 return Ok(false);
             };
+            // K4: an approval given before a revocation must not execute. Every
+            // approved execution — live approval or restart recovery — claims
+            // through here, so the companion's current grants and the run's
+            // frozen snapshot are re-checked at this exact point. A revoked
+            // call fails with its reason on the card instead of running.
+            let call: Option<(String, String)> = transaction
+                .query_row(
+                    "SELECT tool_name, input_json FROM tool_calls
+                     WHERE run_id = ?1 AND runtime_tool_call_id = ?2",
+                    params![run_id, runtime_tool_call_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if let Some((tool, input_json)) = call {
+                let input: serde_json::Value = serde_json::from_str(&input_json).unwrap_or_default();
+                if let Err(error) = super::ensure_granted_on(&transaction, run_id, &tool, Some(&input)) {
+                    let tool_failed = transaction.execute(
+                        "UPDATE tool_calls
+                         SET status = 'failed', error_message = ?3,
+                             completed_at = ?4, updated_at = ?4
+                         WHERE run_id = ?1 AND runtime_tool_call_id = ?2
+                           AND execution_location = 'host' AND status = 'pending'",
+                        params![run_id, runtime_tool_call_id, error, now],
+                    )?;
+                    let approval_claimed = transaction.execute(
+                        "UPDATE approvals
+                         SET claimed_at = ?2, claimed_by_run_id = ?3
+                         WHERE id = ?1 AND status = 'approved' AND claimed_at IS NULL
+                           AND category = 'tool_execution'",
+                        params![approval_id, now, run_id],
+                    )?;
+                    if tool_failed != 1 || approval_claimed != 1 {
+                        return Err(projection_violation(
+                            "revoked companion grant lost its terminal CAS".to_owned(),
+                        ));
+                    }
+                    transaction.commit()?;
+                    return Err(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                        Some(error),
+                    ));
+                }
+            }
             if let Err(error) = validate_managed_tool_acquisition(&transaction, run_id, now, false)
             {
                 let error_message = error.to_string();
@@ -5617,6 +5716,12 @@ impl Database {
                 create_run_in_transaction(&transaction, conversation_id, clean_prompt, None)?;
             transaction.execute(
                 "UPDATE messages SET role = 'system', kind = 'internal' WHERE id = ?1",
+                [started.user_message.id.as_str()],
+            )?;
+            // The prompt is internal, not something the user said: drop the
+            // bubble create_run_in_transaction projected before the role change.
+            transaction.execute(
+                "DELETE FROM contact_bubbles WHERE source_message_id = ?1",
                 [started.user_message.id.as_str()],
             )?;
             started.user_message.role = "system".to_owned();
@@ -6869,6 +6974,7 @@ impl Database {
                 "failed",
                 message,
             )?;
+            contact_bubbles::project_run_in_transaction(&transaction, run_id)?;
             transaction.commit()?;
             Ok(())
         })
@@ -6960,6 +7066,7 @@ impl Database {
                 "failed",
                 message,
             )?;
+            contact_bubbles::project_run_in_transaction(&transaction, run_id)?;
             transaction.commit()?;
             Ok(())
         })
@@ -7133,6 +7240,94 @@ impl Database {
                     },
                 )
                 .optional()
+        })
+    }
+
+    /// K5: resolve the effective model once per send/run. A companion's
+    /// explicit override wins over the global singleton; a dangling or disabled
+    /// override is an explicit error, never a silent fallback to another model.
+    /// `Ok(None)` means nothing is configured (the global model is missing).
+    pub fn resolve_effective_model(&self, conversation_id: &str) -> Result<Option<ModelServiceRecord>, String> {
+        let override_ids: Option<(String, String)> = self.with_connection(|connection| {
+            connection.query_row(
+                "SELECT cp.model_provider_id, cp.model_ref FROM conversations c
+                 JOIN companion_profiles cp ON cp.id = c.companion_id
+                 WHERE c.id = ?1 AND cp.model_provider_id IS NOT NULL AND cp.model_ref IS NOT NULL",
+                [conversation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional()
+        })?;
+        let Some((provider_id, model_ref)) = override_ids else {
+            return self.get_model_service();
+        };
+        let provider: Option<(String, i64, String, String, String, Option<i64>, Option<i64>)> = self.with_connection(|connection| {
+            connection.query_row(
+                "SELECT name, enabled, base_url, api_type, last_status, last_latency_ms, last_checked_at
+                 FROM model_providers WHERE id = ?1",
+                [&provider_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+            ).optional()
+        })?;
+        let Some((name, enabled, base_url, api_type, last_status, last_latency_ms, last_checked_at)) = provider else {
+            return Err("联系人的独立模型服务已被删除，请在资料页重新选择模型".to_owned());
+        };
+        if enabled == 0 {
+            return Err(format!("联系人的独立模型服务「{name}」已停用，请在模型服务设置中启用，或在资料页改选其他模型"));
+        }
+        let model: Option<(String, i64, i64, i64)> = self.with_connection(|connection| {
+            connection.query_row(
+                "SELECT model_id, context_window, max_output_tokens, supports_image_input
+                 FROM provider_models WHERE id = ?1 AND provider_id = ?2",
+                params![model_ref, provider_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            ).optional()
+        })?;
+        let Some((model_id, context_window, max_output_tokens, supports_image_input)) = model else {
+            return Err(format!("联系人的独立模型已从「{name}」中移除，请在资料页重新选择模型"));
+        };
+        Ok(Some(ModelServiceRecord {
+            name,
+            connection_type: connection_type(&base_url),
+            base_url,
+            model_id,
+            api_type,
+            context_window,
+            max_output_tokens,
+            supports_image_input: supports_image_input != 0,
+            enabled: true,
+            credential_configured: false,
+            last_status,
+            last_latency_ms,
+            last_checked_at,
+            created_at: 0,
+            updated_at: 0,
+        }))
+    }
+
+    /// The model snapshot frozen for this run, if one was written yet. Runs
+    /// created before v109 have none and resolve once at their next start.
+    pub fn run_model_snapshot(&self, run_id: &str) -> Result<Option<ModelServiceRecord>, String> {
+        let raw: Option<Option<String>> = self.with_connection(|connection| {
+            connection.query_row("SELECT model_snapshot FROM runs WHERE id = ?1", [run_id], |row| row.get(0)).optional()
+        })?;
+        match raw.flatten() {
+            Some(json) => serde_json::from_str(&json)
+                .map(Some)
+                .map_err(|error| format!("运行的模型快照无法读取: {error}")),
+            None => Ok(None),
+        }
+    }
+
+    /// Freeze the resolved model for the run's whole lifetime. Write-once:
+    /// queueing, retry and restart never replace it with the current global.
+    pub fn freeze_run_model_snapshot(&self, run_id: &str, service: &ModelServiceRecord) -> Result<(), String> {
+        let json = serde_json::to_string(service).map_err(|error| error.to_string())?;
+        self.with_connection(|connection| {
+            connection.execute(
+                "UPDATE runs SET model_snapshot = ?2 WHERE id = ?1 AND model_snapshot IS NULL",
+                params![run_id, json],
+            )?;
+            Ok(())
         })
     }
 
@@ -7588,6 +7783,7 @@ impl Database {
                             "Assistant Message for Run '{run_id}' changed concurrently before completion"
                         )));
                     }
+                    contact_bubbles::project_run_in_transaction(&transaction, run_id)?;
                     update_last_seq(&transaction, run_id, seq)?;
                 }
                 "tool.started" => {
@@ -7672,6 +7868,7 @@ impl Database {
                         "failed",
                         "Run completed before its running Attempt reached a terminal state",
                     )?;
+                    contact_bubbles::project_run_in_transaction(&transaction, run_id)?;
                 }
                 "run.cancelled" => {
                     if !authorize_runtime_terminal_transition(
@@ -7721,6 +7918,7 @@ impl Database {
                         "cancelled",
                         "Run was cancelled before its Attempt finished",
                     )?;
+                    contact_bubbles::project_run_in_transaction(&transaction, run_id)?;
                 }
                 "run.interrupted" => {
                     let code = payload.get("code").and_then(Value::as_str);
@@ -7767,6 +7965,7 @@ impl Database {
                         "failed",
                         message.unwrap_or("Run was interrupted before its Attempt finished"),
                     )?;
+                    contact_bubbles::project_run_in_transaction(&transaction, run_id)?;
                 }
                 "run.failed" => {
                     let code = payload.get("code").and_then(Value::as_str);
@@ -7819,6 +8018,7 @@ impl Database {
                         "failed",
                         message.unwrap_or("Run failed before its Attempt finished"),
                     )?;
+                    contact_bubbles::project_run_in_transaction(&transaction, run_id)?;
                 }
                 _ => update_last_seq(&transaction, run_id, seq)?,
             }
@@ -7922,6 +8122,9 @@ fn create_run_in_transaction(
         "SELECT CASE WHEN a.runtime_type = 'yuxi'
                     THEN COALESCE(?2, '')
                     ELSE COALESCE(?2,
+                                  (SELECT m.model_id FROM companion_profiles cp
+                                   JOIN provider_models m ON m.id = cp.model_ref AND m.provider_id = cp.model_provider_id
+                                   WHERE cp.id = c.companion_id),
                                   (SELECT model_id FROM model_service WHERE singleton_id = 1 AND enabled = 1),
                                   a.default_model)
                 END,
@@ -7971,6 +8174,7 @@ fn create_run_in_transaction(
          ) VALUES (?1, ?2, ?3, 'user', 'text', ?4, 'completed', ?5, ?6, ?6)",
         params![message_id, conversation_id, run_id, clean_text, ordinal, now],
     )?;
+    contact_bubbles::project_message_in_transaction(transaction, conversation_id, &message_id)?;
     let next_title = if current_title == "新对话" {
         truncate_title(clean_text)
     } else {

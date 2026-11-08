@@ -1,0 +1,816 @@
+<!doctype html>
+<html lang="zh-CN" data-color-theme="graphite">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Fox 界面改进 · 真实代码预览</title>
+<script>
+window.__pvErrors = []
+window.addEventListener('error', e => window.__pvErrors.push(String(e.message)))
+window.addEventListener('unhandledrejection', e => window.__pvErrors.push(String(e.reason)))
+</script>
+<script>
+/* 与 apps/desktop/dist/theme-init.js 同一套键，保证预览和产品使用同样的主题真值 */
+(() => {
+  const q = new URLSearchParams(location.search)
+  const theme = q.get('theme') || localStorage.getItem('fox.preferences.colorTheme') || 'graphite'
+  const dark = q.get('mode') ? q.get('mode') === 'dark' : localStorage.getItem('fox.theme') === 'dark'
+  document.documentElement.dataset.colorTheme = ['graphite', 'paper', 'mist'].includes(theme) ? theme : 'graphite'
+  document.documentElement.classList.toggle('dark', dark)
+})()
+</script>
+<!-- ↓ apps/desktop/dist/assets 的真实构建 CSS，逐字内联；仅把 /assets/ 绝对路径改写为相对 dist 路径。 -->
+<style>
+/*__INLINE_CSS__*/
+</style>
+<style>
+/* ============================================================================
+   预览页外壳：不属于产品改进。命名空间 .pv-*，避免与产品 CSS 互相污染。
+   ============================================================================ */
+/* 桌面 App 的真实构建 CSS 含 `html,body,#root { width:100%;height:100%;overflow:hidden }`
+   （Tauri 固定视口）。整份内联进普通文档后，它会把预览页锁死在一屏、完全无法滚动。
+   这里在外壳层解除该约束：只影响预览页 html/body，不改动任何产品组件样式。 */
+html {
+  width: auto !important;
+  height: auto !important;
+  min-height: 100% !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+}
+body.pv-body {
+  width: auto !important;
+  height: auto !important;
+  min-height: 100% !important;
+  overflow: visible !important;
+}
+html, body { margin: 0; padding: 0; }
+body.pv-body {
+  font-family: "HarmonyOS Sans SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  font-size: 14px; line-height: 1.6; color: var(--foreground);
+  background: color-mix(in oklch, var(--shell) 70%, var(--muted));
+  -webkit-font-smoothing: antialiased;
+}
+.pv-doc { max-width: 1400px; margin: 0 auto; padding: 40px 32px 100px; }
+.pv-doc h1 { margin: 0 0 8px; font-size: 30px; line-height: 1.3; font-weight: 650; letter-spacing: -.02em; color: var(--foreground); }
+.pv-doc h2 { margin: 0; font-size: 21px; line-height: 1.35; font-weight: 620; letter-spacing: -.01em; color: var(--foreground); }
+.pv-doc h3 { margin: 0 0 8px; font-size: 13px; line-height: 1.5; font-weight: 620; color: var(--foreground); }
+.pv-doc p { margin: 6px 0; line-height: 1.7; }
+.pv-doc a { color: var(--foreground); text-underline-offset: 3px; }
+.pv-sub { color: var(--muted-foreground); font-size: 14px; line-height: 1.75; max-width: 92ch; }
+.pv-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+.pv-head-links { display: flex; gap: 8px; flex-wrap: wrap; }
+.pv-link { display: inline-flex; align-items: center; min-height: 34px; padding: 0 12px; border: 1px solid var(--border); border-radius: var(--fox-radius-control, 8px); background: var(--card); color: var(--foreground); font-size: 13px; font-weight: 550; text-decoration: none; }
+.pv-link:hover { background: var(--accent); }
+.pv-card { margin-top: 20px; padding: 20px 24px; border: 1px solid var(--border); border-radius: var(--fox-radius-large, 12px); background: var(--card); }
+.pv-truth { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; margin-top: 18px; }
+.pv-truth > div { padding: 0 22px; border-left: 1px solid var(--border); }
+.pv-truth > div:first-child { padding-left: 0; border-left: 0; }
+.pv-truth > div:last-child { padding-right: 0; }
+.pv-tag { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; border-radius: 99px; font-size: 11px; font-weight: 650; letter-spacing: .02em; }
+.pv-tag.real { background: color-mix(in oklch, var(--success) 16%, transparent); color: var(--foreground); }
+.pv-tag.patch { background: color-mix(in oklch, var(--warning) 20%, transparent); color: var(--foreground); }
+.pv-tag.demo { background: var(--muted); color: var(--muted-foreground); }
+.pv-truth ul { margin: 10px 0 0; padding-left: 18px; color: var(--muted-foreground); font-size: 13px; line-height: 1.85; }
+.pv-truth li b { color: var(--foreground); font-weight: 550; }
+.pv-alert { margin-top: 16px; padding: 14px 18px; border: 1px solid color-mix(in oklch, var(--warning) 42%, var(--border)); border-radius: var(--fox-radius-control, 8px); background: color-mix(in oklch, var(--warning) 8%, var(--card)); font-size: 13px; line-height: 1.8; }
+.pv-alert b { font-weight: 650; }
+.pv-alert code, .pv-doc code { padding: 1px 5px; border-radius: 4px; background: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+
+/* ---- 控制条 ---- */
+.pv-controls { position: sticky; top: 0; z-index: 60; margin: 24px 0 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--fox-radius-large, 12px); background: color-mix(in oklch, var(--card) 92%, transparent); backdrop-filter: blur(10px); box-shadow: var(--shadow-md, 0 4px 16px rgba(0,0,0,.06)); }
+.pv-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pv-row + .pv-row { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.pv-row > label.pv-rowlabel { min-width: 60px; color: var(--muted-foreground); font-size: 12px; font-weight: 600; }
+.pv-btn { min-height: 30px; padding: 5px 12px; border: 1px solid var(--border); border-radius: var(--fox-radius-control, 8px); background: var(--background); color: var(--muted-foreground); font: inherit; font-size: 12.5px; font-weight: 550; cursor: pointer; }
+.pv-btn:hover { background: var(--accent); color: var(--foreground); }
+.pv-btn[aria-pressed="true"] { background: var(--primary); border-color: transparent; color: var(--primary-foreground); }
+.pv-select { min-height: 30px; padding: 4px 8px; border: 1px solid var(--border); border-radius: var(--fox-radius-control, 8px); background: var(--background); color: var(--foreground); font: inherit; font-size: 12.5px; }
+.pv-switch { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted-foreground); cursor: pointer; }
+.pv-switch input { accent-color: var(--primary); width: 15px; height: 15px; }
+.pv-feedback { min-height: 0; margin: 0; color: var(--muted-foreground); font-size: 12.5px; }
+.pv-feedback.has { margin-top: 8px; padding: 7px 10px; border-radius: 6px; background: var(--muted); color: var(--foreground); }
+
+/* ---- 舞台 ---- */
+.pv-stage-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; flex-wrap: wrap; margin: 30px 0 14px; }
+.pv-stage-head p { margin: 4px 0 0; color: var(--muted-foreground); font-size: 13.5px; }
+.pv-task { padding: 4px 10px; border-radius: 99px; background: var(--muted); color: var(--muted-foreground); font-size: 12px; font-weight: 600; }
+#stage { display: grid; gap: 16px; align-items: start; }
+.pv-slot { min-width: 0; }
+.pv-slot-label { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 8px; font-size: 12.5px; color: var(--muted-foreground); }
+.pv-slot-label b { color: var(--foreground); font-size: 13px; font-weight: 620; }
+.pv-surface { border: 1px solid var(--border); border-radius: 10px; background: var(--card); overflow: hidden; }
+.pv-window-holder { position: relative; overflow: hidden; background: var(--shell); }
+.pv-window { position: absolute; top: 0; left: 0; transform-origin: top left; }
+.pv-evidence { display: block; width: 100%; height: auto; background: var(--muted); }
+.pv-evidence-note { padding: 16px 18px; color: var(--muted-foreground); font-size: 13px; line-height: 1.8; }
+.pv-evidence-note blockquote { margin: 10px 0; padding-left: 12px; border-left: 2px solid var(--border); color: var(--foreground); }
+.pv-caption { padding: 9px 12px; border-top: 1px solid var(--border); color: var(--muted-foreground); font-size: 12px; line-height: 1.6; }
+.pv-statebar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 14px 0 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--fox-radius-control, 8px); background: var(--card); font-size: 12.5px; color: var(--muted-foreground); }
+
+/* ---- 应用窗口的预览容器（只负责摆放，不改变产品组件本身） ---- */
+.pv-app.fox-shell { width: 100%; height: 100%; }
+.pv-workbench { display: flex; min-height: 0; min-width: 0; flex: 1; }
+.pv-workbench > .fox-sidebar { flex: none; }
+.pv-chat-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--content, var(--background)); border-top: 1px solid var(--border); border-left: 1px solid var(--border); }
+.pv-thread { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.pv-main { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
+.pv-main > .fox-conversation { flex: 1; min-height: 0; }
+/* composer 与产品一样：作为 .fox-chat-pane 的直接子元素，由它自己的 absolute 规则停靠底部。
+   不要给它再套 position:relative 的容器，否则真实定位规则会错位。 */
+.pv-composer-center .fox-composer-wrap { position: relative; left: auto; right: auto; top: auto; bottom: auto; transform: none; width: 100%; }
+/* 只作为组织用途，不生成盒子：composer 仍是 .fox-chat-pane 的绝对定位子元素 */
+.pv-dock { display: contents; }
+/* 静态渲染适配（两栏一致，不属于提案补丁）：组件在浏览器里靠 JS 测量宽度并跑入场动画，
+   静态片段没有这段测量，这里把被测量前的 0 宽 / 透明副本还原成可读文本。 */
+.pv-app [data-slot="collapsible-trigger"] [style*="width: 0px"] { width: auto !important; }
+.pv-app [data-slot="collapsible-trigger"] .opacity-0 { opacity: 1 !important; }
+.pv-app [data-slot="collapsible-trigger"] .blur-\[2px\] { filter: none !important; }
+/* Radix Collapsible 在真实运行时由 JS 量高度；静态片段保留量到的固定值会裁掉尾部输出。
+   这里是静态渲染适配（两栏一致），让取消前的完整输出可见。 */
+.pv-app [data-slot="collapsible-content"] { height: auto !important; max-height: none !important; overflow: visible !important; }
+.pv-settings-page { padding: 26px 30px 40px; overflow: auto; }
+.pv-settings-head { max-width: 720px; margin: 0 0 18px; }
+.pv-settings-head h2 { font-size: 22px; }
+.pv-settings-head p { color: var(--muted-foreground); font-size: 13px; }
+.pv-approval-slot { padding: 0 0 0 76px; }
+.pv-main > .pv-recovery { position: absolute; left: 50%; bottom: 184px; z-index: 25; width: min(720px, calc(100% - 40px)); margin: 0; transform: translateX(-50%); box-shadow: var(--shadow-md, 0 4px 16px rgba(0,0,0,.08)); }
+.pv-welcome { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding-bottom: 8px; }
+.pv-welcome img { width: 72px; height: 72px; object-fit: contain; }
+.pv-welcome h2 { font-size: 22px; font-weight: 620; }
+.pv-welcome p { color: var(--muted-foreground); font-size: 13px; }
+.pv-composer-center { width: min(760px, calc(100% - 64px)); margin: 0 auto 24px; position: relative; min-height: 210px; }
+
+/* ============================================================================
+   提案增量补丁：仅在 data-patch="on" 的窗口内生效，尚未写入产品代码。
+   全部使用产品既有语义 token，不改主题定义、侧栏与吉祥物。
+   ============================================================================ */
+/* T04 回合信息减重：去掉同义的停止说明与底部头像状态，保留一个回合级摘要 */
+.pv-app[data-patch="on"] [data-slot="stopped-run"],
+.pv-app[data-patch="on"] .fox-message-cancelled-meta { display: none; }
+.pv-app[data-patch="on"] .fox-process-turn-header .fox-process-turn-label { font-size: 13px; font-weight: 620; color: var(--foreground); }
+.pv-app[data-patch="on"] .fox-process-turn-header .fox-process-turn-toggle { padding-inline: 2px; }
+/* T02/T07 输出可读：取消后展开的工具结果用正文密度呈现 */
+.pv-app[data-patch="on"] [data-slot="tool-call"][data-state="open"] { border: 1px solid var(--border); border-radius: var(--fox-radius-card, 10px); background: var(--card); }
+.pv-app[data-patch="on"] [data-slot="tool-call"] pre,
+.pv-app[data-patch="on"] [data-slot="tool-output"] { font-size: 13px; line-height: 1.65; color: var(--foreground); }
+/* T05 输入框：外壳统一后，长内容自然长高，不切回单行胶囊 */
+.pv-app[data-patch="on"] .fox-composer-wrap .fox-prompt-textarea { min-height: 44px; max-height: 180px; height: auto; }
+.pv-app[data-patch="on"] .fox-composer-wrap [data-beam] { animation: none !important; }
+.pv-app[data-patch="on"] .fox-composer-wrap [data-beam]::before,
+.pv-app[data-patch="on"] .fox-composer-wrap [data-beam]::after { display: none !important; }
+.pv-app[data-patch="on"] .fox-composer-wrap .fox-prompt-shell { box-shadow: none; }
+/* T06 审批：拒绝与仅允许本次相邻、同等可见；长期授权不再做推荐主动作 */
+.pv-app[data-patch="on"] .fox-confirmation-actions { justify-content: flex-start; gap: 8px; }
+.pv-app[data-patch="on"] [data-slot="approval-card-deny"],
+.pv-app[data-patch="on"] [data-slot="approval-card-allow-once"] { min-height: 32px; border: 1px solid var(--border); background: var(--background); color: var(--foreground); font-size: 13px; }
+.pv-app[data-patch="on"] [data-slot="approval-card-deny"] { order: 1; }
+.pv-app[data-patch="on"] [data-slot="approval-card-allow-once"] { order: 2; }
+.pv-app[data-patch="on"] [data-slot="approval-card-always-allow"] { order: 3; margin-left: auto; opacity: .72; font-size: 12px; }
+.pv-app[data-patch="on"] [data-slot="approval-card"] [data-slot="approval-card-title"],
+.pv-app[data-patch="on"] [data-slot="approval-card"] p.text-\[13\.5px\] { font-size: 14px; font-weight: 620; }
+/* T06 设置：紧凑分组、主表单上限、失败说明紧邻动作 */
+.pv-app[data-patch="on"] .fox-settings-sheet-body { max-width: 720px; margin: 0; }
+.pv-app[data-patch="on"] .fox-settings-sheet-section { padding-inline: 0; }
+.pv-app[data-patch="on"] .fox-settings-test-row { flex-wrap: wrap; gap: 8px 12px; }
+/* T07 短反馈、无状态变化不循环播放；尊重 reduced-motion */
+.pv-app[data-patch="on"] .fox-runtime-step-row *,
+.pv-app[data-patch="on"] .fox-composer-wrap * { animation-duration: .14s !important; }
+@media (prefers-reduced-motion: reduce) {
+  .pv-app *, .pv-app *::before, .pv-app *::after { animation: none !important; transition: none !important; }
+}
+/* 提案增量 DOM 的样式：用产品 token，不用另造品牌色 */
+.pv-added { border: 1px solid var(--border); border-radius: var(--fox-radius-card, 10px); background: var(--card); color: var(--foreground); font-size: 13px; line-height: 1.65; }
+.pv-added strong { font-weight: 620; }
+.pv-added .pv-added-sub { color: var(--muted-foreground); font-size: 12.5px; }
+.pv-recovery { display: flex; align-items: flex-start; gap: 12px; margin: 0 16px 10px; padding: 12px 14px; }
+.pv-recovery .pv-recovery-body { flex: 1; min-width: 0; }
+.pv-recovery .pv-recovery-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.pv-empty-output { margin: 8px 0 0; padding: 8px 10px; border-radius: 6px; background: var(--muted); color: var(--muted-foreground); font-size: 12.5px; }
+.pv-key-hint { margin: 6px 0 0; padding: 8px 10px; }
+.pv-approval-actions { display: flex; gap: 8px; margin: 10px 0 0; }
+.pv-turn-cancel { display: inline-flex; align-items: center; min-height: 32px; padding: 0 12px; border: 1px solid var(--border); border-radius: var(--fox-radius-control, 8px); background: var(--background); color: var(--foreground); font: inherit; font-size: 12.5px; cursor: pointer; }
+.pv-mini-btn { display: inline-flex; align-items: center; min-height: 30px; padding: 0 11px; border: 1px solid var(--border); border-radius: var(--fox-radius-control, 8px); background: var(--background); color: var(--foreground); font: inherit; font-size: 12.5px; font-weight: 550; cursor: pointer; }
+.pv-mini-btn.primary { background: var(--primary); border-color: transparent; color: var(--primary-foreground); }
+.pv-mini-btn:hover { filter: brightness(.97); }
+/* 标出哪些节点是提案增量（仅预览辅助，不属于产品） */
+[data-mark="on"] .pv-added { outline: 2px dashed color-mix(in oklch, var(--warning) 70%, var(--foreground)); outline-offset: 2px; }
+[data-mark="on"] .pv-added::after { content: "提案增量"; display: inline-block; margin-left: 8px; padding: 0 6px; border-radius: 4px; background: color-mix(in oklch, var(--warning) 24%, transparent); color: var(--foreground); font-size: 10px; font-weight: 650; vertical-align: middle; }
+
+/* ---- 说明区 / 清单 ---- */
+.pv-notes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 16px; }
+.pv-notes > div { padding: 16px 18px; border: 1px solid var(--border); border-radius: var(--fox-radius-large, 12px); background: var(--card); }
+.pv-notes ul { margin: 0; padding-left: 18px; color: var(--muted-foreground); font-size: 12.5px; line-height: 1.85; }
+.pv-notes li b { color: var(--foreground); font-weight: 550; }
+.pv-section { margin-top: 44px; }
+.pv-section > p { color: var(--muted-foreground); font-size: 13px; }
+table.pv-table { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 12.5px; }
+table.pv-table th { padding: 10px 12px 10px 0; color: var(--muted-foreground); font-size: 12px; font-weight: 550; text-align: left; border-bottom: 1px solid var(--border); }
+table.pv-table td { padding: 10px 12px 10px 0; border-bottom: 1px solid var(--border); color: var(--muted-foreground); vertical-align: top; line-height: 1.65; }
+table.pv-table td:first-child { color: var(--foreground); font-weight: 550; white-space: nowrap; }
+table.pv-table td code { white-space: normal; }
+.pv-foot { margin-top: 44px; padding-top: 18px; border-top: 1px solid var(--border); color: var(--muted-foreground); font-size: 12.5px; line-height: 1.85; }
+@media (max-width: 1050px) {
+  .pv-truth, .pv-notes { grid-template-columns: 1fr; }
+  .pv-truth > div { padding: 14px 0; border-left: 0; border-top: 1px solid var(--border); }
+  .pv-truth > div:first-child { border-top: 0; }
+}
+/* 专注模式：只留舞台，便于按场景截图 / 投屏评审 */
+body.pv-focus .pv-head, body.pv-focus .pv-card, body.pv-focus .pv-controls,
+body.pv-focus .pv-section, body.pv-focus .pv-foot, body.pv-focus .pv-notes,
+body.pv-focus .pv-statebar { display: none; }
+body.pv-focus .pv-doc { max-width: 1600px; padding: 12px 16px 24px; }
+body.pv-focus .pv-stage-head { margin: 8px 0 10px; }
+.pv-slot-label .pv-mini-btn { min-height: 24px; padding: 0 8px; font-size: 11.5px; }
+</style>
+</head>
+<body class="pv-body">
+<div class="pv-doc">
+
+  <header class="pv-head">
+    <div>
+      <h1>Fox 界面改进 · 真实代码预览</h1>
+      <p class="pv-sub">不再用截图上叠手绘元素冒充「改后」。这个页面的每个 Fox 界面都由 <code>apps/desktop/src</code> 的真实 React 组件渲染，套用 <code>dist/assets</code> 的真实构建 CSS、字体、图标与主题；方案中的改动是一层可开关的补丁。</p>
+    </div>
+    <div class="pv-head-links">
+      <a class="pv-link" href="实施方案.md">实施方案 T01–T08</a>
+      <a class="pv-link" href="对比.html">原对比页</a>
+      <a class="pv-link" href="验证/render-real.tsx">渲染脚本</a>
+    </div>
+  </header>
+
+  <section class="pv-card">
+    <h2>这一页里，什么是真的，什么是提案</h2>
+    <div class="pv-truth">
+      <div>
+        <span class="pv-tag real">真实 · 可逐项核对</span>
+        <ul>
+          <li><b>组件 DOM：</b>时间线、工具卡、输入框、审批卡、模型服务表单、侧栏、标题栏，均由产品 TSX 直接渲染</li>
+          <li><b>样式：</b>桌面端 dist 构建 CSS 逐字内联（含 themes、tailwind、字体）</li>
+          <li><b>状态与文案：</b>取消事件来自 <code>runtime-tool-settled.test.ts</code> 夹具，恢复文案来自 <code>send-failure-notice.ts</code></li>
+          <li><b>资源：</b>真实字体、lucide 图标 SVG、吉祥物与头像图片</li>
+        </ul>
+      </div>
+      <div>
+        <span class="pv-tag patch">提案 · 尚未落地</span>
+        <ul>
+          <li>标注 <code>data-patch="on"</code> 的增量 CSS，只作用于本轮组件</li>
+          <li>少量新增 DOM：恢复提示、输出空态、常驻凭据说明、取消回合入口</li>
+          <li>输入框外壳统一：把历史对话切到产品已有的 <code>is-new-conversation</code> 真实类名</li>
+          <li>不改主题 token、侧栏、吉祥物；不打产品补丁、不提交</li>
+        </ul>
+      </div>
+      <div>
+        <span class="pv-tag demo">演示 · 不证明后端</span>
+        <ul>
+          <li>状态切换只替换已渲染片段，不跑 Runtime、不发消息</li>
+          <li>连接测试、审批结果、再次发送均为页内反馈</li>
+          <li>不访问模型、不读写凭据、不执行任何命令</li>
+          <li>进程清扫、凭据迁移、跨适配器一致性仍需实机证据</li>
+        </ul>
+      </div>
+    </div>
+    <div class="pv-alert">
+      <b>先说清楚一条会影响决策的事实：</b>本页渲染的是<b>当前工作区源码</b>，不是 1339 的打包产物。当前源码在收到 <code>run.cancelled</code> 终态时，已经会显示「1 项已取消 · 过程已取消」、工具标题「已取消」，展开后能看到取消前的真实输出与附注。1339 截图里的「正在执行」更可能出在 Pi / Codex / dsh 适配器的事件送达、终态或历史重载链路上 —— 这属于 T01 / T02 要用事件序列证明的部分，静态预览不能替它背书。
+    </div>
+  </section>
+
+  <div class="pv-controls" aria-label="预览控制">
+    <div class="pv-row" id="scene-row"><label class="pv-rowlabel">场景</label></div>
+    <div class="pv-row">
+      <label class="pv-rowlabel">查看</label>
+      <div class="pv-row" id="view-row" style="gap:6px"></div>
+      <label class="pv-rowlabel" style="margin-left:auto">窗口</label>
+      <select class="pv-select" id="size-select">
+        <option value="1024x702">1024 × 702（1339 证据尺寸）</option>
+        <option value="1280x800" selected>1280 × 800</option>
+        <option value="1440x900">1440 × 900</option>
+      </select>
+      <label class="pv-rowlabel">主题</label>
+      <select class="pv-select" id="theme-select">
+        <option value="graphite">Graphite</option><option value="paper">Paper</option><option value="mist">Mist</option>
+      </select>
+      <button class="pv-btn" id="mode-btn" type="button">切换深/浅</button>
+    </div>
+    <div class="pv-row">
+      <label class="pv-switch"><input type="checkbox" id="patch-toggle" checked /> 应用提案补丁</label>
+      <label class="pv-switch"><input type="checkbox" id="mark-toggle" /> 标出提案增量 DOM</label>
+      <label class="pv-switch"><input type="checkbox" id="focus-toggle" /> 专注模式</label>
+      <span class="pv-feedback" id="feedback" role="status" aria-live="polite"></span>
+    </div>
+  </div>
+
+  <section aria-labelledby="stage-title">
+    <div class="pv-stage-head">
+      <div><h2 id="stage-title"></h2><p id="stage-desc"></p></div>
+      <span class="pv-task" id="stage-task"></span>
+    </div>
+    <div id="stage"></div>
+    <div class="pv-statebar" id="statebar"></div>
+    <div class="pv-notes" id="notes"></div>
+  </section>
+
+  <section class="pv-section">
+    <h2>真实性清单</h2>
+    <p>下表的每一行都能在仓库里直接找到来源。片段由 <code>验证/render-real.tsx</code> 用 bun + React 渲染为静态 HTML，再由 <code>验证/build-preview.py</code> 内联进本页。构建时间：<span id="build-time">__BUILD_TIME__</span>。</p>
+    <table class="pv-table"><thead><tr><th>片段 / 资源</th><th>来源</th><th>内容与用途</th><th>大小</th></tr></thead><tbody id="inventory"></tbody></table>
+  </section>
+
+  <footer class="pv-foot">
+    <b>边界：</b>本页只回答「按方案改，Fox 会长什么样」，不回答「取消后子进程是否真的退出」「改 URL 后凭据是否真的保住」「Pi/Codex/dsh 是否都送达终态」。这些必须看 T01/T02/T03 的事件序列、Windows 进程审计与凭据库实机证据。<br />
+    <b>未授权项：</b>产品代码、主题 token、侧栏与吉祥物均未修改；没有提交、推送或发布。若决定推进，按实施方案 T01 → T08 分阶段实施，每阶段单独给 diff、测试结果与实机证据。<br />
+    <b>打开方式：</b>改前证据、头像与吉祥物已内联，双击本地文件或在预览面板里打开都完整。字体分片仍相对引用 <code>../../../apps/desktop/dist/assets/</code> 的真实资源：在线预览面板会回退系统字体，双击本地文件可加载真实 HarmonyOS Sans SC。
+  </footer>
+</div>
+
+<script id="real-data" type="application/json">__INLINE_DATA__</script>
+<script>
+"use strict";
+const DATA = JSON.parse(document.getElementById('real-data').textContent)
+const F = DATA.fragments
+const C = DATA.copies
+const $ = id => document.getElementById(id)
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
+const SHOT = '../../windows-test/run-1339/shots-1339/'
+const IMG = DATA.inlineImages || {}
+const shotSrc = name => IMG[name] || (SHOT + name)
+const MASCOT = IMG['fox_sit_nicely.png'] || '../../../apps/desktop/dist/mascot/fox/idle/fox_sit_nicely.png'
+
+const SCENES = {
+  cancel: {
+    title: '取消之后：状态说清楚，输出还在', task: 'T01 / T02 / T04',
+    desc: '改前是 1339 的 R1-6 实测截图；改后是真实时间线组件吃同一条取消事件序列后的 DOM，补丁只做减重与可读性。',
+    shot: 'R1-6-card.png', shotLabel: '1339 实测截图 · R1-6',
+    caption: 'R1-6-card.png，1024 × 702。回合已取消，工具标题仍写「正在执行」，只看到请求 JSON。',
+    states: [['running','运行中'],['cancelling','正在取消…'],['cancelled','已取消 · 有输出'],['empty','已取消 · 无输出']],
+    stateLabel: '回合状态',
+    changes: [
+      '<b>一个回合级摘要</b>：隐藏同义的 StoppedRun 说明与底部头像状态，保留真实组件已有的「1 项已取消 · 过程已取消」',
+      '<b>工具事实与回合事实分层</b>：工具标题仍是「已取消」，不把已完成工具一并改掉',
+      '<b>输出可见</b>：使用真实组件展开态，取消前收到的输出与「以上是取消前已经产生的输出」附注都来自组件自身',
+      '<b>真实空态</b>：没有输出时补一句「取消前未收到输出」（提案增量 DOM）',
+    ],
+    selectors: ['[data-slot="stopped-run"]', '.fox-message-cancelled-meta', '.fox-process-turn-label', '[data-slot="tool-call"]'],
+    acceptance: [
+      '取消后工具标题不再活动，正文与输出保留',
+      '刷新 / 重开会话后与终态一致（需 T01 事件链证据）',
+      '「已取消」不等于「所有子进程已退出」',
+    ],
+  },
+  error: {
+    title: '发送失败：草稿在，下一步也在', task: 'T03',
+    desc: '改前是 1339 的 B4-5 截图；改后把产品模块里已经写好的失败文案放到输入框旁，作为持久恢复入口。',
+    shot: 'B4-5-toast.png', shotLabel: '1339 实测截图 · B4-5',
+    caption: 'B4-5-toast.png，1024 × 702。草稿还在，但没有预期的恢复提示，也没有可达的修复入口。',
+    states: [['unreachable','地址连不上'],['unverified','改过地址，需重新测试']],
+    stateLabel: '失败原因',
+    changes: [
+      '<b>文案不是我编的</b>：标题与正文取自 send-failure-notice.ts 的 sendNotStartedNotice()，含 workspaceView: model-service',
+      '<b>恢复入口紧邻问题</b>：输入框上方常驻一条提示，toast 只做即时反馈',
+      '<b>不创建 Run</b>：草稿、附件与失败原因都留在输入区；由用户主动重试',
+      '<b>「去设置模型服务」</b>切到本页的模型服务场景（演示导航，未执行产品路由）',
+    ],
+    selectors: ['MODEL_UNREACHABLE_TITLE / BODY', 'sendNotStartedNotice()', '.fox-composer-wrap', '.pv-added'],
+    acceptance: [
+      '无新增 Run、草稿与附件完整',
+      '设置失败 / 取消后能回到原会话与原草稿',
+      '测试连接成功不自动发送',
+    ],
+  },
+  composer: {
+    title: '输入框：新对话与历史对话共用外壳', task: 'T05',
+    desc: '两个窗口都是真实 composer 组件渲染。补丁把历史对话从 is-history 切到产品已有的 is-new-conversation 外壳，并移走 border-beam。',
+    shot: 'R2-4-menu.png', shotLabel: '1339 实测截图 · 历史对话',
+    caption: 'R2-4-menu.png，1024 × 702。历史回合底部是单行胶囊；_tmp-compose.png 的新对话却是大输入框托盘。',
+    states: [['history','历史对话'],['new','新对话']],
+    stateLabel: '对话形态',
+    changes: [
+      '<b>不造新皮肤</b>：把 is-history 换成产品自身的 is-new-conversation 类名，视觉完全由真实 CSS 决定',
+      '<b>上下文常驻</b>：把新对话片段里真实的 .fox-composer-draft-footer（项目 / Agent / 模型）挂回历史输入框',
+      '<b>移除 border-beam</b>：关掉真实 [data-beam] 装饰与循环动画，焦点沿用既有 ring',
+      '<b>内容长高</b>：textarea 不再锁 40px，达到上限后内部滚动',
+    ],
+    selectors: ['.fox-composer-wrap.is-history → .is-new-conversation', '.fox-composer-draft-footer', '[data-beam]', '.fox-prompt-textarea'],
+    acceptance: [
+      '新对话与历史对话外壳一致，操作入口位置稳定',
+      '快捷键、中文输入法、附件、引用、审批语义不回退',
+      '1024×702 / 1280×800 / 1440×900 与 125% / 150% 缩放逐项看',
+    ],
+  },
+  approval: {
+    title: '审批：先看影响，再决定是否允许', task: 'T02 / T06',
+    desc: '1339 没有对应截图，改前列源码依据；改后是真实 ApprovalCard 组件，补丁只调整授权选项的层级与顺序。',
+    shot: null, shotLabel: '源码依据 · 无 1339 截图',
+    caption: '依据 components/assistant-ui/upstream/elements/approval-card.tsx 与实施方案 T06，不伪造改前视觉。',
+    states: [['pending','等待批准'],['denied','已拒绝（演示）'],['allowed','仅允许本次（演示）'],['cancelled','回合已取消（演示）']],
+    stateLabel: '审批状态',
+    changes: [
+      '<b>同等可见</b>：拒绝与「只允许这一次」相邻、同为描边按钮；长期授权退到末尾且更弱，但没有被删除',
+      '<b>先说影响</b>：标题字号提升，命令 / 作用目录 / 权限范围 / 拒绝后果仍来自真实 details 数据',
+      '<b>取消整个回合</b>：补一个明确入口；取消后待审批项必须失效（该行为需 T02 实现）',
+      '<b>键盘焦点</b>：不默认落在危险动作；Escape 契约留给实现层验证',
+    ],
+    selectors: ['[data-slot="approval-card-deny"]', '[data-slot="approval-card-allow-once"]', '[data-slot="approval-card-always-allow"]', '.fox-confirmation-actions'],
+    acceptance: [
+      '不默认选中允许，长期授权不是推荐主动作',
+      '等待审批时仍可取消回合；迟到批准不得执行',
+      '拒绝单项不等于取消整个回合',
+    ],
+  },
+  settings: {
+    title: '模型服务：改地址，不等于重填一遍 Key', task: 'T03 / T06',
+    desc: '1339 只有文字记录没有设置截图；改后是真实 ProviderEditor 组件，补丁收紧表单宽度并让凭据规则常驻可见。',
+    shot: null, shotLabel: '1339 实测文字 · 无设置截图',
+    caption: 'B4-5 记录：改地址保存后该供应商的 API Key 不再可用，恢复需重新输入。源码按 URL 标识默认 Key。',
+    states: [['error','连接失败'],['testing','检测中'],['ok','连接正常（演示）']],
+    stateLabel: '检测状态',
+    changes: [
+      '<b>紧凑分组</b>：主表单 ≤720px、左对齐，连接配置 / 凭据 / 验证结果仍是产品原有分区',
+      '<b>凭据规则常驻</b>：把「留空保持已存 Key」从 placeholder 提升为可见说明（提案增量 DOM）',
+      '<b>清除与编辑分离</b>：显式清除仍是独立动作，不误写成留空保持',
+      '<b>检测状态就近</b>：失败原因紧邻「测试连接」；成功只说本次受测配置',
+    ],
+    selectors: ['.fox-settings-sheet-body', '.fox-settings-field', '.fox-settings-test-row', '.fox-settings-test-result'],
+    acceptance: [
+      '同 URL 留空 Key 保持原凭据；改 URL 仍需重新测试',
+      '保存失败回滚、冲突 URL 拒绝且不动另一供应商',
+      '凭据库行为需实机证据，静态页不证明',
+    ],
+  },
+}
+
+const VIEWS = [['split','证据 / 改后并排'],['after','只看改后'],['patch','补丁前 / 后']]
+const state = {
+  scene: 'cancel', view: 'split', size: '1280x800', patch: true, mark: false, focus: false,
+  cancel: 'cancelled', error: 'unreachable', composer: 'history', approval: 'pending', settings: 'error',
+}
+/* URL 参数便于直接打开某个场景 / 视图，也方便截图核对 */
+{
+  const q = new URLSearchParams(location.search)
+  if (q.has('scene') && SCENES[q.get('scene')]) state.scene = q.get('scene')
+  if (['split', 'after', 'patch'].includes(q.get('view'))) state.view = q.get('view')
+  if (['1024x702', '1280x800', '1440x900'].includes(q.get('size'))) state.size = q.get('size')
+  if (q.has('patch')) state.patch = q.get('patch') !== '0'
+  if (q.has('mark')) state.mark = q.get('mark') === '1'
+  if (q.has('focus')) state.focus = q.get('focus') === '1'
+  const st = q.get('state')
+  if (st && SCENES[state.scene].states.some(([v]) => v === st)) state[state.scene] = st
+}
+
+function noticeFor(key) {
+  return key === 'unverified' ? C.unverified : C.unreachable
+}
+
+function timelineFragment() {
+  if (state.scene === 'error') return F['timeline-draft'].html
+  if (state.scene === 'approval') return F['timeline-cancelling'].html
+  if (state.scene === 'composer') return F['timeline-draft'].html
+  if (state.scene !== 'cancel') return ''
+  return {
+    running: 'timeline-running', cancelling: 'timeline-cancelling',
+    cancelled: 'timeline-cancelled-open', empty: 'timeline-empty-cancelled-open',
+  }[state.cancel] ? F[{running:'timeline-running',cancelling:'timeline-cancelling',cancelled:'timeline-cancelled-open',empty:'timeline-empty-cancelled-open'}[state.cancel]].html : ''
+}
+
+function mainHTML() {
+  const s = state.scene
+  if (s === 'settings') {
+    return `<div class="pv-settings-page"><div class="pv-settings-head"><h2>模型服务</h2><p>连接配置、凭据与验证结果。字段来自真实 ProviderEditor；下方连接状态为演示。</p></div>${F['provider-editor'].html}</div>`
+  }
+  if (s === 'composer' && state.composer === 'new') {
+    return `<div class="pv-welcome"><img src="${MASCOT}" alt="" /><h2>今天想做点什么？</h2><p>原吉祥物资源与相对位置不变，仅把输入框放回同一主区轴线。</p></div>
+      <div class="pv-composer-center">${F['composer-new'].html}</div>`
+  }
+  let html = timelineFragment()
+  if (s === 'approval') {
+    html += `<div class="pv-approval-slot">${F['approval-request'].html}</div>`
+  }
+  return html
+}
+
+function dockHTML() {
+  if (state.scene === 'settings' || (state.scene === 'composer' && state.composer === 'new')) return ''
+  return `<div class="pv-dock">${F['composer-history'].html}</div>`
+}
+
+function windowHTML(patched, label) {
+  return `<div class="pv-surface"><div class="pv-window-holder"><div class="pv-window">
+    <div class="fox-shell pv-app" data-patch="${patched ? 'on' : 'off'}" data-mark="${state.mark ? 'on' : 'off'}">
+      ${F['window-titlebar'].html}
+      <div class="fox-workbench pv-workbench">
+        ${F['sidebar'].html}
+        <div class="fox-chat-pane pv-chat-pane">
+          <div class="fox-chat-stage">
+            <div class="fox-thread-shell pv-thread"><div class="pv-main">${mainHTML()}</div></div>
+            ${dockHTML()}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div></div><div class="pv-caption">${esc(label)}</div></div>`
+}
+
+function beforeHTML() {
+  const s = SCENES[state.scene]
+  if (!s.shot) {
+    return `<div class="pv-surface"><div class="pv-evidence-note">
+      <h3>没有对应的 1339 截图</h3>
+      <p>${esc(s.caption)}</p>
+      <blockquote>这一栏不伪造「改前视觉」。现状请看上方真实性说明与实施方案第 6 节的场景映射。</blockquote>
+    </div><div class="pv-caption">${esc(s.shotLabel)}</div></div>`
+  }
+  let src = s.shot
+  let label = s.shotLabel
+  let caption = s.caption
+  if (state.scene === 'composer' && state.composer === 'new') {
+    src = '_tmp-compose.png'
+    label = '1339 实测截图 · 新对话'
+    caption = '_tmp-compose.png：新对话是大输入框托盘，与历史对话的单行胶囊不是同一种形态。'
+  }
+  return `<div class="pv-surface"><img class="pv-evidence" src="${shotSrc(src)}" alt="${esc(label)}" />
+    <div class="pv-caption"><b>${esc(label)}</b> · ${esc(caption)}</div></div>`
+}
+
+/* ---- 提案增量 DOM：只加在打了补丁的窗口里，全部用 .pv-added 标记 ---- */
+function applyPatchDOM(root) {
+  const scene = state.scene
+  // T02：取消前没有输出时，给真实工具卡补一个明确的空态
+  if (scene === 'cancel' && state.cancel === 'empty') {
+    const card = root.querySelector('[data-slot="tool-call"] [data-slot="collapsible-content"]')
+    if (card && !card.querySelector('.pv-empty-output')) {
+      const p = document.createElement('p')
+      p.className = 'pv-empty-output pv-added'
+      p.textContent = '取消前未收到输出。'
+      card.appendChild(p)
+    }
+  }
+  // T03：发送失败恢复提示，文案来自产品模块
+  if (scene === 'error') {
+    const main = root.querySelector('.pv-main')
+    if (main && !main.querySelector('.pv-recovery')) {
+      const n = noticeFor(state.error)
+      const box = document.createElement('div')
+      box.className = 'pv-recovery pv-added'
+      box.innerHTML = `<div class="pv-recovery-body"><strong>${esc(n.title)}</strong><div class="pv-added-sub">${esc(n.description)}</div>
+        <div class="pv-recovery-actions"><button type="button" class="pv-mini-btn primary" data-action="open-settings">去设置模型服务</button>
+        <button type="button" class="pv-mini-btn" data-action="resend">再次发送</button></div></div>`
+      main.appendChild(box)
+    }
+    const ta = root.querySelector('.fox-prompt-textarea')
+    if (ta) { ta.textContent = '帮我把这份目录整理成一份清单'; ta.setAttribute('data-demo-draft', '1') }
+  }
+  // T05：历史输入框切到产品已有的新对话外壳，并挂回真实上下文行
+  if (scene === 'composer' || scene === 'error' || scene === 'cancel' || scene === 'approval') {
+    root.querySelectorAll('.fox-composer-wrap.is-history').forEach(wrap => {
+      wrap.classList.remove('is-history')
+      wrap.classList.add('is-new-conversation')
+      const holder = document.createElement('div')
+      holder.innerHTML = F['composer-new'].html
+      const footer = holder.querySelector('.fox-composer-draft-footer')
+      if (footer && !wrap.querySelector('.fox-composer-draft-footer')) {
+        const shell = wrap.querySelector('.fox-prompt-shell')
+        if (shell) shell.appendChild(footer.cloneNode(true))
+      }
+      wrap.querySelectorAll('[data-beam]').forEach(beam => beam.removeAttribute('data-active'))
+    })
+  }
+  // T06 审批：回合级取消入口
+  if (scene === 'approval') {
+    const card = root.querySelector('[data-slot="approval-card"]')
+    // 放在卡片标题行右侧：不增加卡片高度，授权按钮区保持完整可见。
+    if (state.approval === 'pending' && card && !card.querySelector('.pv-turn-cancel')) {
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.className = 'pv-turn-cancel pv-added'
+      btn.dataset.action = 'cancel-turn'
+      btn.textContent = '取消整个回合'
+      btn.title = '与授权选项分开；取消后本卡片失效（行为需 T02 实现）'
+      btn.style.cssText = 'margin-left:auto;flex:none;min-height:28px;padding:0 8px;font-size:12px'
+      const header = card.firstElementChild
+      if (header) header.appendChild(btn)
+    }
+    if (card && state.approval !== 'pending' && !card.querySelector('.pv-demo-state')) {
+      const labels = { denied: '已拒绝本次请求（演示）', allowed: '已允许本次请求（演示）', cancelled: '回合已取消（演示）' }
+      const tag = document.createElement('div')
+      tag.className = 'pv-demo-state pv-added'
+      tag.style.padding = '8px 10px'
+      tag.textContent = labels[state.approval] || ''
+      card.appendChild(tag)
+      card.querySelectorAll('.fox-confirmation-actions button').forEach(b => { b.disabled = true; b.style.opacity = '.5' })
+    }
+  }
+  if (scene === 'settings') {
+    const keyField = root.querySelector('.fox-settings-secret')?.closest('.fox-settings-field')
+    if (keyField && !keyField.querySelector('.pv-key-hint')) {
+      const hint = document.createElement('div')
+      hint.className = 'pv-key-hint pv-added'
+      hint.innerHTML = `<strong>已安全保存 · 留空保持不变</strong><div class="pv-added-sub">改地址不等于重填 Key；显式清除是另一个独立动作。</div>`
+      keyField.appendChild(hint)
+    }
+    // 检测状态为演示：只替换真实组件已有的结果节点，不改字段或凭据
+    const result = root.querySelector('.fox-settings-test-result')
+    if (result) {
+      result.classList.toggle('is-error', state.settings === 'error')
+      if (state.settings === 'testing') result.innerHTML = '<span>正在验证…（演示）</span>'
+      else if (state.settings === 'ok') result.innerHTML = '<i class="fox-settings-dot is-ok" aria-hidden="true"></i><b>连接正常</b><span>演示：本次受测配置 · 128 ms · 发现 3 个模型</span>'
+    }
+  }
+}
+
+function statusControls() {
+  const s = SCENES[state.scene]
+  const key = state.scene
+  return `<label for="state-select">${esc(s.stateLabel)}</label>
+    <select class="pv-select" id="state-select">${s.states.map(([v, l]) => `<option value="${v}"${state[key] === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>
+    <span>· 状态切换只替换已渲染的真实片段，不运行 Runtime</span>`
+}
+
+function render() {
+  const s = SCENES[state.scene]
+  $('stage-title').textContent = s.title
+  $('stage-desc').textContent = s.desc
+  $('stage-task').textContent = s.task
+  document.documentElement.dataset.colorTheme = $('theme-select').value
+  document.body.classList.toggle('pv-focus', state.focus)
+  document.body.dataset.mark = state.mark ? 'on' : 'off'
+  document.body.dataset.errors = String(window.__pvErrors.length)
+
+  const cols = state.view === 'after' ? 1 : 2
+  $('stage').style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`
+  let html = ''
+  if (state.view === 'split') {
+    const beforeLabel = (state.scene === 'composer' && state.composer === 'new') ? '1339 实测截图 · 新对话' : s.shotLabel
+    html += `<div class="pv-slot"><div class="pv-slot-label"><b>改前 · 真实证据</b><span>${esc(beforeLabel)}</span></div>${beforeHTML()}</div>`
+    html += `<div class="pv-slot"><div class="pv-slot-label"><b>改后 · 真实组件${state.patch ? ' + 提案补丁' : '（补丁关闭）'}</b><span><button class="pv-mini-btn" type="button" data-action="zoom">放大窗口</button> apps/desktop/src + dist CSS</span></div>${windowHTML(state.patch, '真实组件 DOM，非截图叠层；点「补丁前 / 后」可看增量效果。')}</div>`
+  } else if (state.view === 'after') {
+    html += `<div class="pv-slot"><div class="pv-slot-label"><b>改后 · 真实组件${state.patch ? ' + 提案补丁' : '（补丁关闭）'}</b><span>单窗口放大 · <button class="pv-mini-btn" type="button" data-action="split">回到并排</button></span></div>${windowHTML(state.patch, '真实组件 DOM，非截图叠层。')}</div>`
+  } else {
+    html += `<div class="pv-slot"><div class="pv-slot-label"><b>补丁前 · 当前源码原样</b><span>data-patch="off"</span></div>${windowHTML(false, '没有任何提案样式与增量 DOM，就是当前工作区源码渲染的样子。')}</div>`
+    html += `<div class="pv-slot"><div class="pv-slot-label"><b>补丁后 · 方案增量</b><span><button class="pv-mini-btn" type="button" data-action="zoom">放大窗口</button> data-patch="on"</span></div>${windowHTML(true, '同一批真实组件 DOM，叠加 T03–T07 的提案增量。')}</div>`
+  }
+  $('stage').innerHTML = html
+  $('statebar').innerHTML = statusControls()
+  $('notes').innerHTML = `
+    <div><h3>具体改了什么</h3><ul>${s.changes.map(x => `<li>${x}</li>`).join('')}</ul></div>
+    <div><h3>补丁作用在哪些真实节点</h3><ul>${s.selectors.map(x => `<li><code>${esc(x)}</code></li>`).join('')}</ul></div>
+    <div><h3>验收目标（不在本页证明）</h3><ul>${s.acceptance.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>`
+
+  document.querySelectorAll('#stage .pv-app').forEach(root => {
+    // 审批卡属于消息流：放进真实的会话内容容器，避免和消息层叠在一起（两个窗口一致）。
+    const slot = root.querySelector('.pv-approval-slot')
+    const content = root.querySelector('.fox-conversation-content')
+    if (slot && content) content.appendChild(slot)
+    if (root.dataset.patch === 'on') applyPatchDOM(root)
+  })
+  layoutWindows()
+  debugInfo()
+  const sel = $('state-select')
+  if (sel) sel.onchange = e => { state[state.scene] = e.target.value; feedback(''); render() }
+}
+
+function debugInfo() {
+  if (!new URLSearchParams(location.search).has('debug')) return
+  const sels = ['.pv-window', '.fox-shell', '.fox-chat-pane', '.fox-thread-shell', '.pv-main',
+    '.fox-composer-wrap', '.fox-prompt-shell', '.fox-prompt-input', '.fox-composer-draft-footer']
+  const els = sels.map(sel => {
+    const el = document.querySelector(sel)
+    if (!el) return { sel, missing: true }
+    const r = el.getBoundingClientRect(), c = getComputedStyle(el)
+    return { sel, rect: [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)],
+      pos: c.position, display: c.display, w: c.width, h: c.height, bottom: c.bottom, left: c.left, minH: c.minHeight }
+  })
+  const se = document.scrollingElement
+  const savedTop = se ? se.scrollTop : 0
+  if (se) se.scrollTop = 600
+  const probeTop = se ? se.scrollTop : 0
+  if (se) se.scrollTop = savedTop
+  const scroll = {
+    element: se === document.documentElement ? 'html' : 'body',
+    htmlOverflow: getComputedStyle(document.documentElement).overflow,
+    bodyOverflow: getComputedStyle(document.body).overflow,
+    docHeight: se ? se.scrollHeight : 0,
+    viewport: innerHeight,
+    canScroll: !!se && se.scrollHeight > innerHeight + 4,
+    probeTop,
+  }
+  let pre = $('pv-debug')
+  if (!pre) { pre = document.createElement('pre'); pre.id = 'pv-debug'; pre.style.display = 'none'; document.body.appendChild(pre) }
+  pre.textContent = JSON.stringify({
+    errors: window.__pvErrors,
+    ready: document.readyState,
+    scroll,
+    stageText: ($('stage').textContent || '').replace(/\s+/g, ' ').slice(0, 260),
+    images: [...document.images].map(i => ({ src: i.getAttribute('src'), ok: i.complete && i.naturalWidth > 0, nw: i.naturalWidth })),
+    patchOn: document.querySelectorAll('[data-patch="on"]').length,
+    added: document.querySelectorAll('.pv-added').length,
+    els,
+  }, null, 1)
+}
+
+function layoutWindows() {
+  const [w, h] = state.size.split('x').map(Number)
+  const stage = $('stage')
+  const cols = state.view === 'after' ? 1 : 2
+  const gap = 16
+  const avail = Math.max(320, (stage.clientWidth - gap * (cols - 1)) / cols) - 2
+  const scale = Math.min(1, avail / w)
+  document.querySelectorAll('.pv-window').forEach(win => {
+    win.style.width = w + 'px'
+    win.style.height = h + 'px'
+    win.style.transform = `scale(${scale})`
+    const holder = win.parentElement
+    holder.style.height = Math.round(h * scale) + 'px'
+    holder.style.width = '100%'
+  })
+}
+
+function feedback(text) {
+  const el = $('feedback')
+  el.textContent = text
+  el.classList.toggle('has', Boolean(text))
+}
+
+function initControls() {
+  $('scene-row').innerHTML = Object.entries(SCENES).map(([k, v]) =>
+    `<button type="button" class="pv-btn" data-scene="${k}" aria-pressed="${k === state.scene}">${esc(v.title.split('：')[0])}</button>`).join('')
+  $('view-row').innerHTML = VIEWS.map(([k, v]) =>
+    `<button type="button" class="pv-btn" data-view="${k}" aria-pressed="${k === state.view}">${esc(v)}</button>`).join('')
+  $('theme-select').value = document.documentElement.dataset.colorTheme || 'graphite'
+  $('size-select').value = state.size
+  $('patch-toggle').checked = state.patch
+  $('mark-toggle').checked = state.mark
+  $('focus-toggle').checked = state.focus
+
+  $('scene-row').onclick = e => {
+    const b = e.target.closest('[data-scene]'); if (!b) return
+    state.scene = b.dataset.scene; feedback(''); initControls(); render()
+  }
+  $('view-row').onclick = e => {
+    const b = e.target.closest('[data-view]'); if (!b) return
+    state.view = b.dataset.view; initControls(); render()
+  }
+  $('size-select').onchange = e => { state.size = e.target.value; render() }
+  $('theme-select').onchange = e => {
+    document.documentElement.dataset.colorTheme = e.target.value
+    localStorage.setItem('fox.preferences.colorTheme', e.target.value)
+  }
+  $('mode-btn').onclick = () => {
+    const dark = document.documentElement.classList.toggle('dark')
+    localStorage.setItem('fox.theme', dark ? 'dark' : 'light')
+  }
+  $('patch-toggle').onchange = e => { state.patch = e.target.checked; render() }
+  $('mark-toggle').onchange = e => { state.mark = e.target.checked; render() }
+  $('focus-toggle').onchange = e => { state.focus = e.target.checked; render(); layoutWindows() }
+  window.addEventListener('resize', layoutWindows)
+}
+
+/* 页内演示动作：一律明确标注「演示」，不假装调用产品能力 */
+$('stage').addEventListener('click', e => {
+  const btn = e.target.closest('[data-action]')
+  if (!btn) {
+    // 真实组件自身的按钮在静态 HTML 上没有 React 事件，提示一次即可。
+    if (e.target.closest('.pv-app button')) feedback('演示：这是真实组件渲染的静态 DOM，未连接产品事件；页内的提案动作已标注「演示」。')
+    return
+  }
+  const a = btn.dataset.action
+  if (a === 'zoom') { state.view = 'after'; initControls(); render() }
+  else if (a === 'split') { state.view = 'split'; initControls(); render() }
+  else if (a === 'open-settings') { state.scene = 'settings'; initControls(); render(); feedback('演示：切到设置场景。真实实现应打开 workspaceView: model-service，并保留原草稿。') }
+  else if (a === 'resend') feedback('演示：连接仍不可用，未开始发送、未创建 Run，草稿与附件保留。真实重试由用户主动触发。')
+  else if (a === 'cancel-turn') { state.approval = 'cancelled'; render(); feedback('演示：回合已取消，审批卡应失效。真实行为需 T02 的终态与迟到批准防护。') }
+})
+
+function buildInventory() {
+  const rows = Object.entries(F).map(([k, v]) =>
+    `<tr><td>${esc(k)}</td><td><code>${esc(v.from)}</code></td><td>${esc(v.note)}</td><td>${(v.html.length / 1024).toFixed(1)} KB</td></tr>`)
+  rows.push(...DATA.cssFiles.map(f =>
+    `<tr><td>构建 CSS</td><td><code>${esc(f.name)}</code></td><td>产品真实构建产物，逐字内联（仅重写字体绝对路径）</td><td>${(f.bytes / 1024).toFixed(0)} KB</td></tr>`))
+  rows.push(`<tr><td>改前证据</td><td><code>docs/windows-test/run-1339/shots-1339/</code></td><td>R1-6 / B4-5 / R2-4 / _tmp-compose 等 1339 原始截图</td><td>—</td></tr>`)
+  rows.push(`<tr><td>事件夹具</td><td><code>apps/desktop/tests/runtime-tool-settled.test.ts</code></td><td>ping 取消序列：run.started → tool.started → tool.updated → run.cancelled</td><td>—</td></tr>`)
+  rows.push(`<tr><td>失败文案</td><td><code>apps/desktop/src/features/chat/send-failure-notice.ts</code></td><td>sendNotStartedNotice() 的真实输出：${esc(C.unreachable.title)} / ${esc(C.unverified.title)}</td><td>—</td></tr>`)
+  $('inventory').innerHTML = rows.join('')
+}
+$('build-time').textContent = DATA.buildTime || '__BUILD_TIME__'
+buildInventory()
+initControls()
+render()
+/* 可选 ?scroll=N：评审截图 / 深链定位用；不传时行为不变 */
+const pvScrollY = Number(new URLSearchParams(location.search).get('scroll') || 0)
+if (pvScrollY) requestAnimationFrame(() => requestAnimationFrame(() => {
+  window.scrollTo(0, pvScrollY)
+  document.body.dataset.scrolly = String(Math.round(window.scrollY))
+  const pre = $('pv-debug')
+  if (pre) {
+    try {
+      const d = JSON.parse(pre.textContent)
+      d.scroll.scrollY = Math.round(window.scrollY)
+      const controls = document.querySelector('.pv-controls')
+      d.scroll.stickyTop = controls ? Math.round(controls.getBoundingClientRect().top) : null
+      const section = document.querySelector('.pv-section')
+      d.scroll.sectionTop = section ? Math.round(section.getBoundingClientRect().top) : null
+      pre.textContent = JSON.stringify(d, null, 1)
+    } catch (e) { /* 调试信息不是交付内容，忽略 */ }
+  }
+}))
+</script>
+</body>
+</html>

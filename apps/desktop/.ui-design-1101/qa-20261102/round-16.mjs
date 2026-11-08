@@ -1,0 +1,10 @@
+const task = await taskSpace(1);
+const page = task.page('p1');
+await page.reload();
+await page.waitForFunction(()=>document.querySelector('.design-heading')?.textContent.includes('悬停底色到外框两侧和底部均留 8px'));
+await page.hover('loc=css:.fox-composer-draft-footer .fox-composer-project-trigger');
+console.log({screenshot:await page.screenshot({path:'D:/python/projects/Fox/Fox/apps/desktop/.ui-design-1101/qa-20261102/01-project-hover.png'})});
+await page.hover('loc=css:.fox-composer-draft-footer .fox-composer-agent-trigger');
+console.log({screenshot:await page.screenshot({path:'D:/python/projects/Fox/Fox/apps/desktop/.ui-design-1101/qa-20261102/01-agent-hover.png'})});
+console.log(await page.snapshot());
+console.log(await task.finish({keep:['p1']}));

@@ -1,0 +1,10 @@
+const task = await taskSpace(1);
+const page = task.page('p1');
+console.log(await page.snapshot());
+await page.click('loc=css:button[aria-label="打开 p0.txt，TXT，5 B"]');
+console.log(await page.evaluate(()=>({preview:document.querySelector('.design-file-scene')?.textContent})));
+await page.press('loc=css:button[aria-label="打开 p0.txt，TXT，5 B"]','Enter');
+console.log(await page.evaluate(()=>({previewAfterEnter:document.querySelector('.design-file-scene')?.textContent})));
+await page.click('loc=css:button[aria-label="切换深色"]');
+console.log({screenshot:await page.screenshot({path:'D:/python/projects/Fox/Fox/apps/desktop/.ui-design-1101/qa-20261102/05-after-dark.png'})});
+console.log(await page.snapshot());

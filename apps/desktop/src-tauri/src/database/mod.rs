@@ -6,11 +6,16 @@ mod repositories;
 mod migration_copy_tests;
 
 /// v100 remains unused. v106 adds contacts and their private conversations.
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 106;
+/// v107 adds the persisted contact bubble projection (C00/K1).
+/// v108 adds the per-chat bubble backfill completion ledger (K1).
+/// v109 adds the companion model override and the per-run model snapshot (C04/K5).
+/// v110 adds companion tool grants and the per-run capability snapshot (C02/K4).
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 110;
 pub(crate) use repositories::{AcceptanceBinding, AcceptanceRow, AcceptanceWrite};
 pub(crate) use repositories::kernel_execution_admission;
 pub(crate) use repositories::permission_rules::{ConversationAccess, PermissionAuditRecord, PermissionRuleRecord};
 pub(crate) use repositories::companions;
+pub(crate) use repositories::companion_capabilities::{capability_id, ensure_granted_on, WEB_SERVER_ID, WEB_TOOLS};
 pub(crate) use repositories::RunBackendIdentity;
 pub(crate) use repositories::{EXECUTOR_ROUTE_RETIRED, EXECUTOR_ROUTE_RETIRED_MESSAGE, EXECUTOR_ROUTE_UNKNOWN};
 pub(crate) use repositories::kernel_reconciliation::*;

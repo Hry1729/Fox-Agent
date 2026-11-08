@@ -1,6 +1,7 @@
 import { AssistantRuntimeProvider } from '@assistant-ui/react'
 import type { ApprovalDecision, ArtifactRecord, ConversationMessage } from '../../conversations/model/types'
 import { useContacts } from '@/features/companions/context'
+import { splitAssistantContent } from '../timeline/fox-assistant-content'
 import { useDesktopConversation } from '../../conversations/hooks/use-desktop-conversation'
 import { type RuntimeSource } from '../timeline/fox-runtime-process-model'
 import type { GoalProgressData } from '../hooks/use-goal-progress'
@@ -62,6 +63,33 @@ export default function AssistantUiChat({ statusBar, approvalSlot, conversation,
     }
     return grouped
   }, [events])
+  // Committed contact bubbles are the authority for this window. Live preview
+  // bubbles keep rendering from run events until the run settles.
+  const contactBubblesByRun = useMemo(() => {
+    const grouped = new Map<string, NonNullable<typeof detail>['bubbles']>()
+    for (const bubble of detail?.bubbles ?? []) {
+      if (!bubble.runId || bubble.author !== 'companion') continue
+      const bucket = grouped.get(bubble.runId)
+      if (bucket) bucket.push(bubble)
+      else grouped.set(bubble.runId, [bubble])
+    }
+    return grouped as Map<string, import('../../conversations/model/types').ContactBubbleRecord[]>
+  }, [detail])
+  // Live Kernel previews already carry the durable bubble identity, so the
+  // settled row (and later the committed Rust bubble) never remounts them.
+  const contactKernelPreviewsByRun = useMemo(() => {
+    const grouped = new Map<string, { id: string; text: string; createdAt: number }[]>()
+    for (const message of detail?.messages ?? []) {
+      if (!message.kernelPreview || !message.runId || message.role !== 'assistant') continue
+      const text = splitAssistantContent(message.content).answer
+      if (!text.trim()) continue
+      const entry = { id: `${message.runId}:kernel:${message.kernelPreview.checkpointSeq}:response`, text, createdAt: message.createdAt }
+      const bucket = grouped.get(message.runId)
+      if (bucket) bucket.push(entry)
+      else grouped.set(message.runId, [entry])
+    }
+    return grouped
+  }, [detail])
   const attachments = useMemo(() => detail?.attachments ?? [], [detail])
   const attachmentNames = useMemo(() => new Map(attachments.map((attachment) => [attachment.id, attachment.displayName])), [attachments])
   const attachmentsByMessage = useMemo(() => {
@@ -89,6 +117,8 @@ export default function AssistantUiChat({ statusBar, approvalSlot, conversation,
       ? { detail, onResolveApproval, onSubmitQuestion } : undefined,
     events,
     eventsByRun,
+    contactBubblesByRun,
+    contactKernelPreviewsByRun,
     toolCalls,
     attachmentNames,
     attachmentsByMessage,
@@ -98,7 +128,7 @@ export default function AssistantUiChat({ statusBar, approvalSlot, conversation,
     onOpenArtifact,
     onOpenFileInSidebar,
     onRevealFileInExplorer,
-  }), [companion?.privateChat, companion?.current?.conversationId, detail, onResolveApproval, onSubmitQuestion, events, eventsByRun, toolCalls, attachmentNames, attachmentsByMessage, timelineContext.knowledgeBindings, timelineContext.onOpenSource, groupHelpers, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer])
+  }), [companion?.privateChat, companion?.current?.conversationId, detail, onResolveApproval, onSubmitQuestion, events, eventsByRun, contactBubblesByRun, contactKernelPreviewsByRun, toolCalls, attachmentNames, attachmentsByMessage, timelineContext.knowledgeBindings, timelineContext.onOpenSource, groupHelpers, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer])
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <FoxThread statusBar={statusBar} approvalSlot={approvalSlot} fox={fox} suggestions={suggestions} onStart={onStart} planRevision={planRevision} turnRailMessages={detail?.messages} turnRailArtifacts={detail?.artifacts} />

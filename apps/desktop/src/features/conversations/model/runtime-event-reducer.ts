@@ -172,6 +172,8 @@ export function mergeConversationDetail(persisted: ConversationDetail, current: 
     approvals: mergeApprovals(persisted.approvals, current.approvals),
     attachments: mergeRecords(persisted.attachments, current.attachments, (attachment) => attachment.id),
     artifacts: mergeRecords(persisted.artifacts, current.artifacts, (artifact) => artifact.id),
+    bubbles: mergeRecords(persisted.bubbles ?? [], current.bubbles ?? [], (bubble) => bubble.id)
+      .sort((left, right) => left.deliveryOrder - right.deliveryOrder),
     knowledgeBindings: mergeRecords(
       persisted.knowledgeBindings,
       current.knowledgeBindings,

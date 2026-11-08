@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { FolderLock, FolderOpen, MoreHorizontal, PanelRight, Pin, Plus, UserRound } from 'lucide-react'
+import { FolderLock, FolderOpen, MoreHorizontal, PanelRight, Pin, Plus, Search, UserRound } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { notify as toast } from '@/features/notifications'
@@ -7,6 +7,7 @@ import type { AgentRecord, ConversationDetail } from '@/features/conversations/m
 import { contacts, type Companion } from './api'
 import { useContacts, showContactError } from './context'
 import { ContactDelete } from './delete'
+import { ContactSearchBar, ContactSearchChip, ContactSearchPanel, useContactChatSearch } from './chat-search'
 import './contacts.css'
 
 export function ContactAvatar({ contact }: { contact: Companion }) {
@@ -69,19 +70,46 @@ export function ContactComposerFooter() {
   </div>
 }
 
-export function ContactTopbar({ detail, onReset }: {
+export function ContactTopbar({ detail, onReset, loadEarlierMessages }: {
   detail: ConversationDetail | null
   onReset: () => void
+  loadEarlierMessages?: () => Promise<void>
 }) {
   const ctx = useContacts()
-  return <header className="fox-chat-topbar fox-contact-topbar"><button type="button" className="fox-contact-heading" onClick={ctx?.showProfile}>
-    {ctx?.current ? <ContactAvatar contact={ctx.current} /> : <UserRound size={17} />}<strong>{ctx?.current?.displayName ?? '联系人'}</strong>
-    </button>
-    {detail?.contextReset?.supported && <Button
-      variant="ghost" size="sm" disabled={Boolean(detail.contextResetBlockedReason || ctx?.current?.activeRunStatus)}
-      title={detail.contextResetBlockedReason ?? undefined} onClick={onReset}
-    >重置上下文</Button>}
-    <button type="button" className="fox-icon-button" title="联系人资料" aria-label="联系人资料" onClick={ctx?.showProfile}><PanelRight size={16} /></button></header>
+  const search = useContactChatSearch({
+    conversationId: detail?.conversation?.id,
+    detail,
+    loadEarlierMessages: loadEarlierMessages ?? (async () => {}),
+  })
+  const searching = search.mode !== 'closed'
+  const contactName = ctx?.current?.displayName ?? '联系人'
+  return <header className="fox-chat-topbar fox-contact-topbar"><span className="fox-contact-topbar-side" />
+    {search.mode === 'panel'
+      ? <ContactSearchBar search={search} />
+      : search.mode === 'locating' || search.mode === 'chip'
+        ? <ContactSearchChip search={search} />
+        : <button type="button" className="fox-contact-heading" onClick={ctx?.showProfile}>
+            {ctx?.current ? <ContactAvatar contact={ctx.current} /> : <UserRound size={17} />}<strong>{contactName}</strong>
+          </button>}
+    <div className="fox-contact-topbar-side is-end">
+      {!searching && <button type="button" className="fox-icon-button" title="搜索私聊" aria-label="搜索私聊" onClick={search.open}><Search size={16} /></button>}
+      {!searching && <details className="fox-contact-more">
+        <summary className="fox-icon-button" aria-label="更多联系人操作" title="更多"><MoreHorizontal size={16} /></summary>
+        <div className="fox-contact-more-menu" role="menu">
+          {detail?.contextReset?.supported
+            ? <button type="button" role="menuitem" disabled={Boolean(detail.contextResetBlockedReason || ctx?.current?.activeRunStatus)}
+                title={detail.contextResetBlockedReason ?? undefined}
+                onClick={event => {
+                  onReset()
+                  event.currentTarget.closest('details')?.removeAttribute('open')
+                }}>重置上下文</button>
+            : <span className="fox-contact-more-empty">暂无更多操作</span>}
+        </div>
+      </details>}
+      <button type="button" className="fox-icon-button" title="联系人资料" aria-label="联系人资料" onClick={ctx?.showProfile}><PanelRight size={16} /></button>
+    </div>
+    {search.mode === 'panel' && <ContactSearchPanel search={search} contact={ctx?.current} contactName={contactName} />}
+  </header>
 }
 
 export function ContactRepairBanner({ detail }: { detail: ConversationDetail | null }) {

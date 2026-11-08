@@ -1,0 +1,10 @@
+const task = await taskSpace(1);
+const page = task.page('p1');
+await page.keyboard.press('Escape');
+await page.click('loc=role:button[name="04 取消状态与消息操作"]');
+await page.waitForFunction(()=>getComputedStyle(document.querySelector('.design-message-scene')).marginLeft!=='0px');
+console.log(await page.evaluate(()=>{const stage=document.querySelector('.design-stage').getBoundingClientRect();const scene=document.querySelector('.design-message-scene').getBoundingClientRect();const process=document.querySelector('.design-process').getBoundingClientRect();const stopped=document.querySelector('.aui-stopped-run').getBoundingClientRect();return {sceneWidth:scene.width,centerOffset:(scene.x+scene.width/2)-(stage.x+stage.width/2),processX:process.x,stoppedX:stopped.x}}));
+console.log({screenshot:await page.screenshot({path:'D:/python/projects/Fox/Fox/apps/desktop/.ui-design-1101/qa-20261102/04-centered.png'})});
+await page.click('loc=role:button[name="01 输入框底部留白"]');
+console.log(await page.evaluate(()=>[...document.querySelectorAll('.fox-composer-wrap,.fox-composer-draft-footer,.fox-composer-project-bar,.fox-composer-project-trigger,.fox-composer-agent-trigger')].map(e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return {class:e.className,x:r.x,y:r.y,w:r.width,h:r.height,padding:s.padding,margin:s.margin,radius:s.borderRadius,border:s.borderWidth}})));
+console.log(await page.snapshot());

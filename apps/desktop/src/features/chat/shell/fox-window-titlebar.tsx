@@ -1,4 +1,3 @@
-import { FOX_ASSISTANT_AVATAR } from '../components/FoxAssistantAvatar'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuPortal, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent, DropdownMenuSeparator, DropdownMenuShortcut, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { ClipboardPaste, Copy, FolderOpen, Minus, Redo2, Sparkles, Undo2, X, ZoomIn, ZoomOut } from 'lucide-react'
@@ -78,7 +77,7 @@ function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSett
   return (
     <header className="fox-window-titlebar" data-tauri-drag-region {...{ [WINDOW_CHROME_ATTR]: '' }}>
       <div className="fox-window-product" data-tauri-drag-region>
-        <img src={FOX_ASSISTANT_AVATAR} alt="" />
+        <img src="/app-logo.png" alt="" />
         <div className="fox-titlebar-sidebar-controls" aria-label="标题栏控制">
           <AppMenu onNewChat={onNewChat} onOpenProject={onOpenProject} onSettings={onSettings} onAbout={onAbout} leftSidebarCollapsed={leftSidebarCollapsed} onToggleSidebar={onToggleSidebar} onZoom={onZoom} onClose={() => void windowAction('close')} shortcutHint={shortcutHint} />
           <AnimatedIconTrigger><button type="button" aria-label={leftSidebarCollapsed ? '展开左侧边栏' : '收起左侧边栏'} title={leftSidebarCollapsed ? '展开左侧边栏' : '收起左侧边栏'} aria-pressed={!leftSidebarCollapsed} onClick={onToggleSidebar}><PanelLeft /></button></AnimatedIconTrigger>
