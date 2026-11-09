@@ -1330,7 +1330,7 @@ fn prepare_verified_preimage(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, not(windows)))]
 /// The in-place replace on platforms without `ReplaceFileW`: the Host builds
 /// and verifies the pre-image itself, then performs the single atomic rename.
 /// The verified backup is what makes `Committed` reachable, so a successful
@@ -3918,7 +3918,10 @@ mod tests {
         // elsewhere it says which code page it applied rather than hiding it.
         let gbk: Vec<u8> = vec![0xB1, 0xE0, 0xD2, 0xEB, 0xCA, 0xA7, 0xB0, 0xDC];
         let (text, encoding) = decode_child_bytes(&gbk);
-        if cfg!(windows) {
+        // `child_output_codepage` only exists on Windows, so the branch has to
+        // be compiled out rather than skipped at run time.
+        #[cfg(windows)]
+        {
             let codepage = child_output_codepage();
             if codepage == 65001 {
                 // Invalid UTF-8 cannot round-trip when the system OEM code page
@@ -3935,7 +3938,10 @@ mod tests {
             if codepage == 936 && encoding == "cp936" {
                 assert_eq!(text, "编译失败", "CP936 bytes must round-trip");
             }
-        } else {
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = text;
             assert_eq!(encoding, "non-utf8-lossy");
         }
     }

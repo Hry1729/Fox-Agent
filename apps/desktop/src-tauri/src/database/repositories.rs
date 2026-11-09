@@ -1425,6 +1425,9 @@ impl Database {
     /// Pi-native Runs keep their tool facts. Waiting Host approvals and explicit
     /// unclaimed decisions remain available to Host recovery; other active Runs stop.
     ///
+    /// K3: digital colleague triggers are projected onto the terminal state of
+    /// their Run in this same transaction. An interrupted Run is never re-run.
+    ///
     /// A0: an unfinished historical Kernel Run (Authoritative, no frozen route)
     /// is interrupted with `executor_route_retired` / 「执行路径已退役」 and is
     /// never resumed; the user continues in a new Run.
@@ -1520,6 +1523,14 @@ impl Database {
                          AND r.status IN ('queued', 'running', 'cancelling', 'interrupted')
                    )",
                 [now],
+            )?;
+            // K3: a Run that just ended must not leave its digital colleague
+            // trigger active, or every later claim overlap-skips forever.
+            digital_colleagues::reconcile_terminal_triggers_in_transaction(
+                &transaction,
+                None,
+                "startup",
+                now,
             )?;
             child_runs::reconcile_terminal_graph_children_in_transaction(&transaction, now)?;
             interrupt_tasks_owned_by_terminal_runs(&transaction, &now.to_string())?;

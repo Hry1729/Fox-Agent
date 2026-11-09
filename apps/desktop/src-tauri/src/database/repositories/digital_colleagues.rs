@@ -6,7 +6,7 @@ use crate::database::{
     DigitalColleagueRecord, DigitalColleagueScheduleRecord, DigitalColleagueTriggerAcceptance,
     DigitalColleagueTriggerRecord, PreparedDigitalColleagueTrigger,
 };
-use rusqlite::{params, OptionalExtension, Transaction};
+use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -515,7 +515,7 @@ impl Database {
     ) -> Result<DigitalColleagueTriggerAcceptance, String> {
         let now = now_ms();
         let payload_json = crate::canonical_json::to_string(payload).map_err(|error| error.to_string())?;
-        let outcome = self.with_connection(|connection| {
+        self.with_connection(|connection| {
             let transaction = connection.transaction()?;
             if let Some(existing) =
                 query_trigger_by_key(&transaction, colleague_id, idempotency_key)?
@@ -526,254 +526,346 @@ impl Database {
                     prepared: None,
                 }));
             }
-            let colleague = transaction.query_row(
-                &format!("{} WHERE id = ?1", colleague_select()),
-                [colleague_id],
-                map_colleague,
-            )?;
-            if colleague.status != "active" {
-                append_audit(
-                    &transaction,
-                    Some(colleague_id),
-                    source_id.filter(|_| source_type == "channel"),
-                    None,
-                    "trigger.received",
-                    "rejected",
-                    actor,
-                    &json!({ "code": "digital_colleague.not_active" }),
-                    now,
-                )?;
-                transaction.commit()?;
-                return Ok(Err("digital_colleague.not_active".to_owned()));
-            }
-            let day_start = now - now.rem_euclid(86_400_000);
-            let (runs_today, tokens_today): (i64, i64) = transaction.query_row(
-                "SELECT COUNT(*), COALESCE(SUM(total_tokens), 0)
-                 FROM digital_colleague_triggers
-                 WHERE colleague_id = ?1 AND created_at >= ?2
-                   AND status NOT IN ('rejected', 'skipped')",
-                params![colleague_id, day_start],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
-            let overlap: bool = transaction.query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM digital_colleague_triggers
-                    WHERE colleague_id = ?1 AND status IN ('accepted', 'queued', 'running')
-                 )",
-                [colleague_id],
-                |row| row.get(0),
-            )?;
-            if runs_today >= colleague.max_runs_per_day
-                || tokens_today >= colleague.max_tokens_per_day
-                || overlap
-            {
-                let code = if overlap {
-                    "digital_colleague.overlap_skipped"
-                } else {
-                    "digital_colleague.daily_quota_exceeded"
+            let admission =
+                match admit_trigger_in_transaction(&transaction, colleague_id, actor, now, None)? {
+                    Ok(admission) => admission,
+                    Err(conclusion) => {
+                        append_audit(
+                            &transaction,
+                            Some(colleague_id),
+                            source_id.filter(|_| source_type == "channel"),
+                            None,
+                            "trigger.received",
+                            conclusion.status,
+                            actor,
+                            &conclusion.details,
+                            now,
+                        )?;
+                        transaction.commit()?;
+                        return Ok(Err(conclusion.code));
+                    }
                 };
-                append_audit(
-                    &transaction,
-                    Some(colleague_id),
-                    source_id.filter(|_| source_type == "channel"),
-                    None,
-                    "trigger.received",
-                    "skipped",
-                    actor,
-                    &json!({ "code": code, "runsToday": runs_today, "tokensToday": tokens_today }),
-                    now,
-                )?;
-                transaction.commit()?;
-                return Ok(Err(code.to_owned()));
-            }
-            let remaining_tokens = colleague
-                .max_tokens_per_day
-                .saturating_sub(tokens_today)
-                .max(0)
-                .min(200_000);
-            let model_max_output = transaction
-                .query_row(
-                    "SELECT max_output_tokens FROM model_service
-                     WHERE singleton_id = 1 AND enabled = 1",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?
-                .unwrap_or(colleague.max_output_tokens);
-            let effective_max_output = colleague
-                .max_output_tokens
-                .min(remaining_tokens)
-                .min(model_max_output);
-            if effective_max_output < MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS {
-                let code = "digital_colleague.remaining_output_budget_exhausted";
-                append_audit(
-                    &transaction,
-                    Some(colleague_id),
-                    source_id.filter(|_| source_type == "channel"),
-                    None,
-                    "trigger.received",
-                    "skipped",
-                    actor,
-                    &json!({
-                        "code": code,
-                        "remainingTokens": remaining_tokens,
-                        "minimumOutputTokens": MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS,
-                    }),
-                    now,
-                )?;
-                transaction.commit()?;
-                return Ok(Err(code.to_owned()));
-            }
-            let prompt = digital_colleague_prompt(&colleague, source_type, payload)?;
-            let started =
-                create_run_in_transaction(&transaction, &colleague.conversation_id, &prompt, None)?;
-            let frozen_run_budget = json!({
-                "contract": "digital_colleague_run_budget_v1",
-                "maxDurationMs": colleague.max_duration_ms,
-                "maxTotalTokens": remaining_tokens,
-                "maxOutputTokens": effective_max_output,
-                "maxToolCalls": colleague.max_tool_calls,
-                "maxDailyTokens": colleague.max_tokens_per_day,
-                "dailyWindowStartMs": day_start,
-            })
-            .canonical_string();
-            let frozen = transaction.execute(
-                "UPDATE runs SET budget_json = ?2 WHERE id = ?1 AND status = 'queued'",
-                params![started.run.id, frozen_run_budget],
-            )?;
-            if frozen != 1 {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-            let trigger_id = Uuid::new_v4().to_string();
-            transaction.execute(
-                "INSERT INTO digital_colleague_triggers(
-                    id, colleague_id, source_type, source_id, idempotency_key, status,
-                    payload_json, scheduled_for, run_id, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9, ?9)",
-                params![
-                    trigger_id,
-                    colleague_id,
-                    source_type,
-                    source_id,
-                    idempotency_key,
-                    payload_json,
-                    scheduled_for,
-                    started.run.id,
-                    now,
-                ],
-            )?;
-            append_audit(
+            let trigger_id = insert_trigger_record(
                 &transaction,
-                Some(colleague_id),
-                source_id.filter(|_| source_type == "channel"),
-                Some(&trigger_id),
-                "trigger.accepted",
+                colleague_id,
+                source_type,
+                source_id,
+                idempotency_key,
                 "accepted",
+                &payload_json,
+                scheduled_for,
+                None,
+                None,
+                now,
+            )?;
+            let prepared = dispatch_or_skip_in_transaction(
+                &transaction,
+                &admission,
+                &trigger_id,
+                source_type,
+                source_id,
+                payload,
+                scheduled_for,
                 actor,
-                &json!({ "sourceType": source_type, "scheduledFor": scheduled_for }),
                 now,
             )?;
             let trigger = query_trigger(&transaction, &trigger_id)?;
-            let mut prepared_colleague = colleague;
-            prepared_colleague.max_output_tokens = effective_max_output;
             transaction.commit()?;
-            Ok(Ok(DigitalColleagueTriggerAcceptance {
-                trigger: trigger.clone(),
-                prepared: Some(PreparedDigitalColleagueTrigger {
-                    remaining_tokens,
-                    colleague: prepared_colleague,
+            match prepared {
+                Some(prepared) => Ok(Ok(DigitalColleagueTriggerAcceptance {
                     trigger,
-                    started,
-                }),
-            }))
-        })?;
-        outcome
+                    prepared: Some(prepared),
+                })),
+                None => Ok(Err(TRIGGER_DISPATCH_UNAVAILABLE.to_owned())),
+            }
+        })?
     }
 
+    /// K3: one transaction per occurrence moves the schedule cursor, writes the
+    /// claim record (executed or skipped) and creates its Run. A crash before
+    /// commit leaves the cursor where it was, so the occurrence is claimed
+    /// again; a crash after commit leaves a complete record to reconcile.
     pub(crate) fn claim_due_digital_colleague_triggers(
         &self,
         now: i64,
     ) -> Result<Vec<PreparedDigitalColleagueTrigger>, String> {
-        let due = self.with_connection(|connection| {
-            let mut statement = connection.prepare(
-                "SELECT id, colleague_id, catchup_window_seconds, next_due_at, interval_seconds
-                 FROM digital_colleague_schedules
-                 WHERE enabled = 1 AND next_due_at <= ?1
-                 ORDER BY next_due_at, id LIMIT 16",
-            )?;
-            let rows = statement
-                .query_map([now], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, i64>(4)?,
-                    ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows)
-        })?;
-        let mut prepared = Vec::new();
-        for (schedule_id, colleague_id, catchup_seconds, due_at, interval_seconds) in due {
-            let interval_ms = interval_seconds.saturating_mul(1_000);
-            let mut next_due = due_at.saturating_add(interval_ms);
-            while next_due <= now {
-                next_due = next_due.saturating_add(interval_ms);
-            }
+        let mut prepared = self.recover_pending_digital_colleague_dispatches(now)?;
+        for _ in 0..16 {
             let claimed = self.with_connection(|connection| {
-                let changed = connection.execute(
+                let transaction =
+                    connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let due = transaction
+                    .query_row(
+                        "SELECT id, colleague_id, catchup_window_seconds, next_due_at, interval_seconds
+                         FROM digital_colleague_schedules
+                         WHERE enabled = 1 AND next_due_at <= ?1
+                         ORDER BY next_due_at, id LIMIT 1",
+                        [now],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, i64>(2)?,
+                                row.get::<_, i64>(3)?,
+                                row.get::<_, i64>(4)?,
+                            ))
+                        },
+                    )
+                    .optional()?;
+                let Some((schedule_id, colleague_id, catchup_seconds, due_at, interval_seconds)) =
+                    due
+                else {
+                    transaction.commit()?;
+                    return Ok(None);
+                };
+                let interval_ms = interval_seconds.saturating_mul(1_000);
+                let mut next_due = due_at.saturating_add(interval_ms);
+                while next_due <= now {
+                    next_due = next_due.saturating_add(interval_ms);
+                }
+                let claimed_cursor = transaction.execute(
                     "UPDATE digital_colleague_schedules
                      SET next_due_at = ?2, last_scheduled_at = ?3, updated_at = ?4
                      WHERE id = ?1 AND enabled = 1 AND next_due_at = ?3",
                     params![schedule_id, next_due, due_at, now],
                 )?;
-                Ok(changed == 1)
-            })?;
-            if !claimed {
-                continue;
-            }
-            if now.saturating_sub(due_at) > catchup_seconds.saturating_mul(1_000) {
-                self.record_digital_colleague_audit(
-                    Some(&colleague_id),
-                    None,
-                    None,
-                    "schedule.misfire",
-                    "skipped",
-                    "scheduler",
-                    json!({ "scheduleId": schedule_id, "scheduledFor": due_at }),
-                )?;
-                continue;
-            }
-            let key = format!("schedule:{schedule_id}:{due_at}");
-            match self.accept_digital_colleague_trigger(
-                &colleague_id,
-                "schedule",
-                Some(&schedule_id),
-                &key,
-                &json!({ "scheduleId": schedule_id, "scheduledFor": due_at }),
-                Some(due_at),
-                "scheduler",
-            ) {
-                Ok(acceptance) => {
-                    if let Some(trigger) = acceptance.prepared {
-                        prepared.push(trigger);
+                if claimed_cursor != 1 {
+                    transaction.rollback()?;
+                    return Ok(Some(Vec::new()));
+                }
+                let key = format!("schedule:{schedule_id}:{due_at}");
+                let payload = json!({ "scheduleId": schedule_id, "scheduledFor": due_at });
+                let payload_json = crate::canonical_json::to_string(&payload)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                if query_trigger_by_key(&transaction, &colleague_id, &key)?.is_some() {
+                    transaction.commit()?;
+                    return Ok(Some(Vec::new()));
+                }
+                let mut dispatchable = Vec::new();
+                if now.saturating_sub(due_at) > catchup_seconds.saturating_mul(1_000) {
+                    let code = "digital_colleague.schedule_misfire";
+                    let trigger_id = insert_trigger_record(
+                        &transaction,
+                        &colleague_id,
+                        "schedule",
+                        Some(&schedule_id),
+                        &key,
+                        "skipped",
+                        &payload_json,
+                        Some(due_at),
+                        Some(code),
+                        Some("错过的执行周期已跳过，可用“立即执行”补跑一次。"),
+                        now,
+                    )?;
+                    append_audit(
+                        &transaction,
+                        Some(&colleague_id),
+                        None,
+                        Some(&trigger_id),
+                        "schedule.misfire",
+                        "skipped",
+                        "scheduler",
+                        &json!({ "scheduleId": schedule_id, "scheduledFor": due_at, "code": code }),
+                        now,
+                    )?;
+                } else {
+                    match admit_trigger_in_transaction(
+                        &transaction,
+                        &colleague_id,
+                        "scheduler",
+                        now,
+                        None,
+                    )? {
+                        Err(conclusion) => {
+                            let trigger_id = insert_trigger_record(
+                                &transaction,
+                                &colleague_id,
+                                "schedule",
+                                Some(&schedule_id),
+                                &key,
+                                conclusion.status,
+                                &payload_json,
+                                Some(due_at),
+                                Some(&conclusion.code),
+                                Some(&conclusion.message),
+                                now,
+                            )?;
+                            append_audit(
+                                &transaction,
+                                Some(&colleague_id),
+                                None,
+                                Some(&trigger_id),
+                                "trigger.received",
+                                conclusion.status,
+                                "scheduler",
+                                &conclusion.details,
+                                now,
+                            )?;
+                        }
+                        Ok(admission) => {
+                            let trigger_id = insert_trigger_record(
+                                &transaction,
+                                &colleague_id,
+                                "schedule",
+                                Some(&schedule_id),
+                                &key,
+                                "accepted",
+                                &payload_json,
+                                Some(due_at),
+                                None,
+                                None,
+                                now,
+                            )?;
+                            if let Some(trigger) = dispatch_or_skip_in_transaction(
+                                &transaction,
+                                &admission,
+                                &trigger_id,
+                                "schedule",
+                                Some(&schedule_id),
+                                &payload,
+                                Some(due_at),
+                                "scheduler",
+                                now,
+                            )? {
+                                dispatchable.push(trigger);
+                            }
+                        }
                     }
                 }
+                transaction.commit()?;
+                Ok(Some(dispatchable))
+            });
+            match claimed {
+                Ok(None) => break,
+                Ok(Some(dispatchable)) => prepared.extend(dispatchable),
                 Err(error) => {
+                    // The claim rolled back, cursor included: the occurrence is
+                    // still due and is retried on the next poll.
                     let _ = self.record_digital_colleague_audit(
-                        Some(&colleague_id),
+                        None,
                         None,
                         None,
                         "schedule.dispatch",
-                        "skipped",
+                        "failed",
                         "scheduler",
-                        json!({ "scheduleId": schedule_id, "error": error }),
+                        json!({ "error": error }),
                     );
+                    break;
                 }
             }
         }
         Ok(prepared)
+    }
+
+    /// K3 recovery of a claim that persisted its trigger but never got a Run.
+    /// The original trigger row and idempotency key are reused, so the
+    /// occurrence gains exactly one Run. A trigger whose Run disappeared is
+    /// closed instead: it may already have produced external side effects.
+    pub(crate) fn recover_pending_digital_colleague_dispatches(
+        &self,
+        now: i64,
+    ) -> Result<Vec<PreparedDigitalColleagueTrigger>, String> {
+        self.with_connection(|connection| {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let pending = {
+                let mut statement = transaction.prepare(
+                    "SELECT id, colleague_id, source_type, source_id, payload_json, scheduled_for, status
+                     FROM digital_colleague_triggers
+                     WHERE status IN ('accepted', 'queued', 'running')
+                       AND (run_id IS NULL
+                            OR NOT EXISTS (SELECT 1 FROM runs r WHERE r.id = digital_colleague_triggers.run_id))
+                     ORDER BY created_at, id LIMIT 16",
+                )?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, Option<i64>>(5)?,
+                            row.get::<_, String>(6)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            let mut prepared = Vec::new();
+            for (trigger_id, colleague_id, source_type, source_id, payload_json, scheduled_for, status) in pending {
+                if status != "accepted" {
+                    let code = "digital_colleague.run_missing";
+                    finalize_trigger_conclusion(
+                        &transaction,
+                        &trigger_id,
+                        "skipped",
+                        code,
+                        "原运行记录已不存在，本次触发不再重跑。",
+                        now,
+                    )?;
+                    append_audit(
+                        &transaction,
+                        Some(&colleague_id),
+                        None,
+                        Some(&trigger_id),
+                        "trigger.reconciled",
+                        "skipped",
+                        "startup",
+                        &json!({ "code": code, "previousStatus": status }),
+                        now,
+                    )?;
+                    continue;
+                }
+                let payload: Value = parse_json_column(payload_json)?;
+                match admit_trigger_in_transaction(
+                    &transaction,
+                    &colleague_id,
+                    "startup",
+                    now,
+                    Some(&trigger_id),
+                )? {
+                    Err(conclusion) => {
+                        finalize_trigger_conclusion(
+                            &transaction,
+                            &trigger_id,
+                            conclusion.status,
+                            &conclusion.code,
+                            &conclusion.message,
+                            now,
+                        )?;
+                        append_audit(
+                            &transaction,
+                            Some(&colleague_id),
+                            source_id.as_deref().filter(|_| source_type == "channel"),
+                            Some(&trigger_id),
+                            "trigger.received",
+                            conclusion.status,
+                            "startup",
+                            &conclusion.details,
+                            now,
+                        )?;
+                    }
+                    Ok(admission) => {
+                        if let Some(trigger) = dispatch_or_skip_in_transaction(
+                            &transaction,
+                            &admission,
+                            &trigger_id,
+                            &source_type,
+                            source_id.as_deref(),
+                            &payload,
+                            scheduled_for,
+                            "startup",
+                            now,
+                        )? {
+                            prepared.push(trigger);
+                        }
+                    }
+                }
+            }
+            transaction.commit()?;
+            Ok(prepared)
+        })
     }
 
     pub fn list_digital_colleague_triggers(
@@ -931,6 +1023,347 @@ impl Database {
                 .optional()
         })
     }
+}
+
+const TRIGGER_DISPATCH_UNAVAILABLE: &str = "digital_colleague.dispatch_unavailable";
+
+/// Budget inputs decided once inside the claim transaction and reused for both
+/// the frozen Run budget and the Host dispatch.
+struct TriggerAdmission {
+    colleague: DigitalColleagueRecord,
+    day_start: i64,
+    remaining_tokens: i64,
+    effective_max_output: i64,
+}
+
+/// Why a claim does not run. `status` doubles as the audit outcome so a skipped
+/// occurrence stays queryable next to the executed ones.
+struct TriggerConclusion {
+    status: &'static str,
+    code: String,
+    message: String,
+    details: Value,
+}
+
+fn admit_trigger_in_transaction(
+    transaction: &Transaction<'_>,
+    colleague_id: &str,
+    actor: &str,
+    now: i64,
+    // A recovered claim already owns a trigger row: it must not count itself
+    // towards the daily quota or block itself as an overlap.
+    pending_trigger_id: Option<&str>,
+) -> rusqlite::Result<Result<TriggerAdmission, TriggerConclusion>> {
+    // A Run that ended without its terminal event being projected must not keep
+    // occupying the colleague, or every later claim overlap-skips forever.
+    reconcile_terminal_triggers_in_transaction(transaction, Some(colleague_id), actor, now)?;
+    let colleague = transaction.query_row(
+        &format!("{} WHERE id = ?1", colleague_select()),
+        [colleague_id],
+        map_colleague,
+    )?;
+    if colleague.status != "active" {
+        return Ok(Err(TriggerConclusion {
+            status: "rejected",
+            code: "digital_colleague.not_active".to_owned(),
+            message: "数字同事已暂停或撤销，本次触发未执行。".to_owned(),
+            details: json!({ "code": "digital_colleague.not_active" }),
+        }));
+    }
+    let day_start = now - now.rem_euclid(86_400_000);
+    let (runs_today, tokens_today): (i64, i64) = transaction.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(total_tokens), 0)
+         FROM digital_colleague_triggers
+         WHERE colleague_id = ?1 AND created_at >= ?2
+           AND status NOT IN ('rejected', 'skipped')
+           AND (?3 IS NULL OR id != ?3)",
+        params![colleague_id, day_start, pending_trigger_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let overlap: bool = transaction.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM digital_colleague_triggers
+            WHERE colleague_id = ?1 AND status IN ('accepted', 'queued', 'running')
+              AND (?2 IS NULL OR id != ?2)
+         )",
+        params![colleague_id, pending_trigger_id],
+        |row| row.get(0),
+    )?;
+    if runs_today >= colleague.max_runs_per_day
+        || tokens_today >= colleague.max_tokens_per_day
+        || overlap
+    {
+        let code = if overlap {
+            "digital_colleague.overlap_skipped"
+        } else {
+            "digital_colleague.daily_quota_exceeded"
+        };
+        return Ok(Err(TriggerConclusion {
+            status: "skipped",
+            code: code.to_owned(),
+            message: if overlap {
+                "上一次运行尚未结束，本次触发已跳过。"
+            } else {
+                "今天的运行次数或用量已达上限，本次触发已跳过。"
+            }
+            .to_owned(),
+            details: json!({ "code": code, "runsToday": runs_today, "tokensToday": tokens_today }),
+        }));
+    }
+    let remaining_tokens = colleague
+        .max_tokens_per_day
+        .saturating_sub(tokens_today)
+        .max(0)
+        .min(200_000);
+    let model_max_output = transaction
+        .query_row(
+            "SELECT max_output_tokens FROM model_service
+             WHERE singleton_id = 1 AND enabled = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or(colleague.max_output_tokens);
+    let effective_max_output = colleague
+        .max_output_tokens
+        .min(remaining_tokens)
+        .min(model_max_output);
+    if effective_max_output < MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS {
+        let code = "digital_colleague.remaining_output_budget_exhausted";
+        return Ok(Err(TriggerConclusion {
+            status: "skipped",
+            code: code.to_owned(),
+            message: "今天剩余的用量不足以完成一次回复，本次触发已跳过。".to_owned(),
+            details: json!({
+                "code": code,
+                "remainingTokens": remaining_tokens,
+                "minimumOutputTokens": MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS,
+            }),
+        }));
+    }
+    Ok(Ok(TriggerAdmission {
+        colleague,
+        day_start,
+        remaining_tokens,
+        effective_max_output,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_trigger_record(
+    transaction: &Transaction<'_>,
+    colleague_id: &str,
+    source_type: &str,
+    source_id: Option<&str>,
+    idempotency_key: &str,
+    status: &str,
+    payload_json: &str,
+    scheduled_for: Option<i64>,
+    error_code: Option<&str>,
+    error_message: Option<&str>,
+    now: i64,
+) -> rusqlite::Result<String> {
+    let trigger_id = Uuid::new_v4().to_string();
+    let completed_at = matches!(status, "skipped" | "rejected").then_some(now);
+    transaction.execute(
+        "INSERT INTO digital_colleague_triggers(
+            id, colleague_id, source_type, source_id, idempotency_key, status,
+            payload_json, scheduled_for, run_id, error_code, error_message,
+            created_at, updated_at, completed_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?10, ?11, ?11, ?12)",
+        params![
+            trigger_id,
+            colleague_id,
+            source_type,
+            source_id,
+            idempotency_key,
+            status,
+            payload_json,
+            scheduled_for,
+            error_code,
+            error_message,
+            now,
+            completed_at,
+        ],
+    )?;
+    Ok(trigger_id)
+}
+
+fn finalize_trigger_conclusion(
+    transaction: &Transaction<'_>,
+    trigger_id: &str,
+    status: &str,
+    code: &str,
+    message: &str,
+    now: i64,
+) -> rusqlite::Result<()> {
+    transaction.execute(
+        "UPDATE digital_colleague_triggers
+         SET status = ?2, error_code = ?3, error_message = ?4, updated_at = ?5, completed_at = ?5
+         WHERE id = ?1 AND status IN ('accepted', 'queued', 'running')",
+        params![trigger_id, status, code, message, now],
+    )?;
+    Ok(())
+}
+
+/// Creates the Run of an admitted claim and attaches it to the already
+/// persisted trigger row, or closes that row with a readable reason when the
+/// execution conversation cannot take a Run right now.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_or_skip_in_transaction(
+    transaction: &Transaction<'_>,
+    admission: &TriggerAdmission,
+    trigger_id: &str,
+    source_type: &str,
+    source_id: Option<&str>,
+    payload: &Value,
+    scheduled_for: Option<i64>,
+    actor: &str,
+    now: i64,
+) -> rusqlite::Result<Option<PreparedDigitalColleagueTrigger>> {
+    let colleague = &admission.colleague;
+    let channel_id = source_id.filter(|_| source_type == "channel");
+    let prompt = digital_colleague_prompt(colleague, source_type, payload)?;
+    let started = match create_run_in_transaction(
+        transaction,
+        &colleague.conversation_id,
+        &prompt,
+        None,
+    ) {
+        Ok(started) => started,
+        // QueryReturnedNoRows means the execution conversation is archived,
+        // trashed or otherwise gone: a persistable skip, not a transaction
+        // failure. Rolling back would leave the cursor on the same due
+        // occurrence and block every later schedule on each poll.
+        Err(error @ (rusqlite::Error::InvalidQuery | rusqlite::Error::QueryReturnedNoRows)) => {
+            let message = match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    "本次触发无法派发：执行会话已归档或不再存在。"
+                }
+                _ => "本次触发无法派发：执行会话不可用，或已有正在进行的运行。",
+            };
+            finalize_trigger_conclusion(
+                transaction,
+                trigger_id,
+                "skipped",
+                TRIGGER_DISPATCH_UNAVAILABLE,
+                message,
+                now,
+            )?;
+            append_audit(
+                transaction,
+                Some(&colleague.id),
+                channel_id,
+                Some(trigger_id),
+                "trigger.received",
+                "skipped",
+                actor,
+                &json!({ "code": TRIGGER_DISPATCH_UNAVAILABLE }),
+                now,
+            )?;
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let frozen_run_budget = json!({
+        "contract": "digital_colleague_run_budget_v1",
+        "maxDurationMs": colleague.max_duration_ms,
+        "maxTotalTokens": admission.remaining_tokens,
+        "maxOutputTokens": admission.effective_max_output,
+        "maxToolCalls": colleague.max_tool_calls,
+        "maxDailyTokens": colleague.max_tokens_per_day,
+        "dailyWindowStartMs": admission.day_start,
+    })
+    .canonical_string();
+    let frozen = transaction.execute(
+        "UPDATE runs SET budget_json = ?2 WHERE id = ?1 AND status = 'queued'",
+        params![started.run.id, frozen_run_budget],
+    )?;
+    if frozen != 1 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let attached = transaction.execute(
+        "UPDATE digital_colleague_triggers SET run_id = ?2, status = 'queued', updated_at = ?3
+         WHERE id = ?1 AND status = 'accepted'",
+        params![trigger_id, started.run.id, now],
+    )?;
+    if attached != 1 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    append_audit(
+        transaction,
+        Some(&colleague.id),
+        channel_id,
+        Some(trigger_id),
+        "trigger.accepted",
+        "accepted",
+        actor,
+        &json!({ "sourceType": source_type, "scheduledFor": scheduled_for }),
+        now,
+    )?;
+    let trigger = query_trigger(transaction, trigger_id)?;
+    let mut prepared_colleague = colleague.clone();
+    prepared_colleague.max_output_tokens = admission.effective_max_output;
+    Ok(Some(PreparedDigitalColleagueTrigger {
+        remaining_tokens: admission.remaining_tokens,
+        colleague: prepared_colleague,
+        trigger,
+        started,
+    }))
+}
+
+/// K3 startup reconciliation: a Run that reached a terminal state while its
+/// trigger stayed active is projected with the same mapping the live event path
+/// uses (`run.interrupted` → `failed`). Nothing is re-run here.
+pub(super) fn reconcile_terminal_triggers_in_transaction(
+    transaction: &Transaction<'_>,
+    colleague_id: Option<&str>,
+    actor: &str,
+    now: i64,
+) -> rusqlite::Result<usize> {
+    let stale = {
+        let mut statement = transaction.prepare(
+            "SELECT t.id, t.colleague_id, t.run_id, t.status, r.status
+             FROM digital_colleague_triggers t JOIN runs r ON r.id = t.run_id
+             WHERE t.status IN ('accepted', 'queued', 'running')
+               AND r.status IN ('completed', 'failed', 'cancelled', 'interrupted')
+               AND (?1 IS NULL OR t.colleague_id = ?1)
+             ORDER BY t.created_at, t.id",
+        )?;
+        let rows = statement
+            .query_map([colleague_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for (trigger_id, owner, run_id, previous_status, run_status) in &stale {
+        let event = match run_status.as_str() {
+            "completed" => "run.completed",
+            "cancelled" => "run.cancelled",
+            "interrupted" => "run.interrupted",
+            _ => "run.failed",
+        };
+        project_digital_colleague_event(transaction, run_id, event, &json!({}), now)?;
+        append_audit(
+            transaction,
+            Some(owner),
+            None,
+            Some(trigger_id),
+            "trigger.reconciled",
+            "applied",
+            actor,
+            &json!({ "runStatus": run_status, "previousStatus": previous_status }),
+            now,
+        )?;
+    }
+    Ok(stale.len())
 }
 
 pub(super) fn project_digital_colleague_event(
@@ -2263,6 +2696,588 @@ mod tests {
                 )
                 .expect_err("reject revoked colleague"),
             "digital_colleague.not_active"
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn make_schedule_due(database: &Database, schedule_id: &str, due_at: i64) {
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE digital_colleague_schedules SET next_due_at = ?2 WHERE id = ?1",
+                    params![schedule_id, due_at],
+                )?;
+                Ok(())
+            })
+            .expect("make schedule due");
+    }
+
+    fn schedule_cursor(database: &Database, schedule_id: &str) -> (i64, Option<i64>) {
+        database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT next_due_at, last_scheduled_at
+                     FROM digital_colleague_schedules WHERE id = ?1",
+                    [schedule_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .expect("read schedule cursor")
+    }
+
+    fn conversation_run_count(database: &Database, conversation_id: &str) -> i64 {
+        database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT COUNT(*) FROM runs WHERE conversation_id = ?1",
+                    [conversation_id],
+                    |row| row.get(0),
+                )
+            })
+            .expect("count conversation runs")
+    }
+
+    fn persisted_run_status(database: &Database, run_id: &str) -> String {
+        database
+            .with_connection(|connection| {
+                connection.query_row("SELECT status FROM runs WHERE id = ?1", [run_id], |row| {
+                    row.get(0)
+                })
+            })
+            .expect("read persisted run status")
+    }
+
+    fn trigger_with_key(
+        database: &Database,
+        colleague_id: &str,
+        key: &str,
+    ) -> DigitalColleagueTriggerRecord {
+        database
+            .list_digital_colleague_triggers(colleague_id, 100)
+            .expect("list triggers")
+            .into_iter()
+            .find(|trigger| trigger.idempotency_key == key)
+            .expect("persisted claim record")
+    }
+
+    fn audit_codes(database: &Database, colleague_id: &str) -> Vec<String> {
+        database
+            .list_digital_colleague_audit(colleague_id, 200)
+            .expect("list audit")
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .details
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
+    /// K3 crash point 1: the claim transaction never commits. The cursor must
+    /// roll back with the trigger and the Run, and the occurrence stays
+    /// claimable without ever being written twice.
+    #[test]
+    fn claim_rolls_back_the_cursor_when_its_transaction_cannot_commit() {
+        let (database, path) = test_database();
+        let colleague = create_colleague(&database);
+        let schedule = database
+            .save_digital_colleague_schedule(None, &colleague.id, "release review", 60, 120, true)
+            .expect("save interval schedule");
+        let now = now_ms();
+        let due_at = now - 10_000;
+        make_schedule_due(&database, &schedule.id, due_at);
+
+        database
+            .execute_raw_sql(
+                "CREATE TRIGGER reject_claim_write BEFORE INSERT ON digital_colleague_triggers
+                 BEGIN SELECT RAISE(ABORT, 'claim write failed'); END;",
+            )
+            .expect("install a failing claim write");
+        assert!(database
+            .claim_due_digital_colleague_triggers(now)
+            .expect("a rolled back occurrence does not fail the poll")
+            .is_empty());
+        assert_eq!(schedule_cursor(&database, &schedule.id), (due_at, None));
+        assert!(database
+            .list_digital_colleague_triggers(&colleague.id, 10)
+            .expect("list triggers")
+            .is_empty());
+        assert_eq!(
+            conversation_run_count(&database, &colleague.conversation_id),
+            0,
+            "a rolled back claim leaves no Run behind"
+        );
+
+        database
+            .execute_raw_sql("DROP TRIGGER reject_claim_write")
+            .expect("remove the failing claim write");
+        let claimed = database
+            .claim_due_digital_colleague_triggers(now)
+            .expect("claim the rolled back occurrence");
+        assert_eq!(claimed.len(), 1);
+        let key = format!("schedule:{}:{due_at}", schedule.id);
+        assert_eq!(claimed[0].trigger.idempotency_key, key);
+        assert_eq!(claimed[0].trigger.status, "queued");
+        let (next_due, last_scheduled) = schedule_cursor(&database, &schedule.id);
+        assert!(next_due > now);
+        assert_eq!(last_scheduled, Some(due_at));
+
+        assert!(database
+            .claim_due_digital_colleague_triggers(now)
+            .expect("coalesce repeated poll")
+            .is_empty());
+        assert_eq!(
+            database
+                .list_digital_colleague_triggers(&colleague.id, 10)
+                .expect("list triggers")
+                .len(),
+            1
+        );
+        assert_eq!(
+            conversation_run_count(&database, &colleague.conversation_id),
+            1
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// K3 crash point 2: a claim persisted its trigger without a Run, then the
+    /// process restarted after the Run was created but before dispatch. The
+    /// occurrence keeps its trigger identity and gains exactly one Run.
+    #[test]
+    fn restart_reuses_a_persisted_claim_and_never_creates_a_second_run() {
+        let (database, path) = test_database();
+        let colleague = create_colleague(&database);
+        let schedule = database
+            .save_digital_colleague_schedule(None, &colleague.id, "release review", 60, 120, true)
+            .expect("save interval schedule");
+        let now = now_ms();
+        let due_at = now - 10_000;
+        let key = format!("schedule:{}:{due_at}", schedule.id);
+        let trigger_id = Uuid::new_v4().to_string();
+        let payload_json = serde_json::to_string(&json!({
+            "scheduleId": schedule.id, "scheduledFor": due_at
+        }))
+        .expect("serialize claim payload");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO digital_colleague_triggers(
+                        id, colleague_id, source_type, source_id, idempotency_key, status,
+                        payload_json, scheduled_for, created_at, updated_at
+                     ) VALUES (?1, ?2, 'schedule', ?3, ?4, 'accepted', ?5, ?6, ?7, ?7)",
+                    params![
+                        trigger_id,
+                        colleague.id,
+                        schedule.id,
+                        key,
+                        payload_json,
+                        due_at,
+                        now
+                    ],
+                )?;
+                connection.execute(
+                    "UPDATE digital_colleague_schedules
+                     SET next_due_at = ?2, last_scheduled_at = ?3 WHERE id = ?1",
+                    params![schedule.id, due_at + 60_000, due_at],
+                )?;
+                Ok(())
+            })
+            .expect("persist a claim that has no Run yet");
+
+        let recovered = database
+            .recover_pending_digital_colleague_dispatches(now)
+            .expect("recover the pending claim");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].trigger.id, trigger_id);
+        assert_eq!(recovered[0].trigger.status, "queued");
+        let run_id = recovered[0].trigger.run_id.clone().expect("recovered Run");
+        assert_eq!(recovered[0].started.run.id, run_id);
+        assert!(database
+            .recover_pending_digital_colleague_dispatches(now)
+            .expect("recovery is idempotent")
+            .is_empty());
+
+        drop(database);
+        let reopened = Database::open(path.clone()).expect("reopen database");
+        reopened.repair_interrupted_runs().expect("repair startup");
+        assert_eq!(persisted_run_status(&reopened, &run_id), "interrupted");
+        let trigger = trigger_with_key(&reopened, &colleague.id, &key);
+        assert_eq!(trigger.id, trigger_id);
+        assert_eq!(trigger.run_id.as_deref(), Some(run_id.as_str()));
+        assert_eq!(trigger.status, "failed");
+        assert_eq!(
+            conversation_run_count(&reopened, &colleague.conversation_id),
+            1,
+            "the same occurrence never gains a second Run"
+        );
+        assert!(reopened
+            .recover_pending_digital_colleague_dispatches(now)
+            .expect("interrupted work is not re-run")
+            .is_empty());
+        assert!(reopened
+            .claim_due_digital_colleague_triggers(now)
+            .expect("nothing else is due")
+            .is_empty());
+
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// K3 crash point 3: the Run was interrupted and its terminal state never
+    /// reached the trigger. Startup reconciles both, and the next occurrence is
+    /// no longer blocked by the ghost trigger.
+    #[test]
+    fn startup_reconciles_an_interrupted_run_and_releases_the_overlap_slot() {
+        let (database, path) = test_database();
+        let colleague = create_colleague(&database);
+        let schedule = database
+            .save_digital_colleague_schedule(None, &colleague.id, "release review", 60, 120, true)
+            .expect("save interval schedule");
+        let now = now_ms();
+        make_schedule_due(&database, &schedule.id, now - 10_000);
+        let claimed = database
+            .claim_due_digital_colleague_triggers(now)
+            .expect("claim first occurrence");
+        assert_eq!(claimed.len(), 1);
+        let first_key = claimed[0].trigger.idempotency_key.clone();
+        let run_id = claimed[0].trigger.run_id.clone().expect("first Run");
+        database
+            .apply_runtime_event(&run_id, 1, &json!({ "type": "run.started" }))
+            .expect("start the first Run");
+        assert_eq!(
+            trigger_with_key(&database, &colleague.id, &first_key).status,
+            "running"
+        );
+
+        drop(database);
+        let reopened = Database::open(path.clone()).expect("reopen database");
+        reopened.repair_interrupted_runs().expect("repair startup");
+        let reconciled = trigger_with_key(&reopened, &colleague.id, &first_key);
+        assert_eq!(
+            reconciled.status, "failed",
+            "run.interrupted projects to the same terminal state as the live event path"
+        );
+        assert_eq!(
+            reconciled.error_code.as_deref(),
+            Some("runtime.application_restarted")
+        );
+        assert!(reconciled.completed_at.is_some());
+        assert_eq!(persisted_run_status(&reopened, &run_id), "interrupted");
+        assert!(reopened
+            .list_digital_colleague_audit(&colleague.id, 100)
+            .expect("list audit")
+            .iter()
+            .any(|entry| entry.event == "trigger.reconciled"));
+
+        let later = now + 60_000;
+        make_schedule_due(&reopened, &schedule.id, later - 10_000);
+        let next = reopened
+            .claim_due_digital_colleague_triggers(later)
+            .expect("claim after reconciliation");
+        assert_eq!(next.len(), 1, "the ghost trigger no longer overlap-skips");
+        assert_ne!(next[0].trigger.run_id.clone().expect("second Run"), run_id);
+        assert_eq!(
+            conversation_run_count(&reopened, &colleague.conversation_id),
+            2
+        );
+        assert!(!audit_codes(&reopened, &colleague.id)
+            .contains(&"digital_colleague.overlap_skipped".to_owned()));
+
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The same ghost is healed by the next claim even without a restart, so a
+    /// missed terminal projection cannot block the schedule permanently.
+    #[test]
+    fn claim_projects_a_terminal_run_whose_trigger_was_never_updated() {
+        let (database, path) = test_database();
+        let colleague = create_colleague(&database);
+        let schedule = database
+            .save_digital_colleague_schedule(None, &colleague.id, "release review", 60, 120, true)
+            .expect("save interval schedule");
+        let now = now_ms();
+        make_schedule_due(&database, &schedule.id, now - 10_000);
+        let claimed = database
+            .claim_due_digital_colleague_triggers(now)
+            .expect("claim first occurrence");
+        let first_key = claimed[0].trigger.idempotency_key.clone();
+        let run_id = claimed[0].trigger.run_id.clone().expect("first Run");
+        database
+            .apply_runtime_event(&run_id, 1, &json!({ "type": "run.started" }))
+            .expect("start the first Run");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE runs SET status = 'interrupted', finished_at = ?2,
+                        error_code = 'runtime.application_restarted'
+                     WHERE id = ?1",
+                    params![run_id, now],
+                )?;
+                Ok(())
+            })
+            .expect("terminate the Run without projecting its trigger");
+
+        let later = now + 60_000;
+        make_schedule_due(&database, &schedule.id, later - 10_000);
+        let next = database
+            .claim_due_digital_colleague_triggers(later)
+            .expect("claim over an unprojected terminal Run");
+        assert_eq!(next.len(), 1);
+        assert_eq!(
+            trigger_with_key(&database, &colleague.id, &first_key).status,
+            "failed"
+        );
+        assert!(!audit_codes(&database, &colleague.id)
+            .contains(&"digital_colleague.overlap_skipped".to_owned()));
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Every occurrence that does not run still leaves a queryable record with
+    /// its reason, and none of them creates a Run.
+    #[test]
+    fn skipped_claims_persist_their_conclusion_next_to_the_moved_cursor() {
+        let (database, path) = test_database();
+        let colleague = create_colleague(&database);
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE digital_colleagues SET max_runs_per_day = 1 WHERE id = ?1",
+                    [&colleague.id],
+                )?;
+                Ok(())
+            })
+            .expect("limit the day to one Run");
+        let schedule = database
+            .save_digital_colleague_schedule(None, &colleague.id, "release review", 60, 120, true)
+            .expect("save interval schedule");
+        let now = now_ms();
+        let first_due = now - 10_000;
+        make_schedule_due(&database, &schedule.id, first_due);
+        let claimed = database
+            .claim_due_digital_colleague_triggers(now)
+            .expect("claim first occurrence");
+        assert_eq!(claimed.len(), 1);
+
+        let second_due = first_due + 60_000;
+        let second_poll = second_due + 1_000;
+        make_schedule_due(&database, &schedule.id, second_due);
+        assert!(database
+            .claim_due_digital_colleague_triggers(second_poll)
+            .expect("poll while the first Run is active")
+            .is_empty());
+        let overlap = trigger_with_key(
+            &database,
+            &colleague.id,
+            &format!("schedule:{}:{second_due}", schedule.id),
+        );
+        assert_eq!(overlap.status, "skipped");
+        assert_eq!(
+            overlap.error_code.as_deref(),
+            Some("digital_colleague.overlap_skipped")
+        );
+        assert!(overlap.run_id.is_none());
+        assert!(overlap.completed_at.is_some());
+        assert!(schedule_cursor(&database, &schedule.id).0 > second_poll);
+
+        complete_trigger(&database, &claimed[0].trigger);
+        let third_due = second_due + 60_000;
+        let third_poll = third_due + 1_000;
+        make_schedule_due(&database, &schedule.id, third_due);
+        assert!(database
+            .claim_due_digital_colleague_triggers(third_poll)
+            .expect("poll after the daily slot was used")
+            .is_empty());
+        let quota = trigger_with_key(
+            &database,
+            &colleague.id,
+            &format!("schedule:{}:{third_due}", schedule.id),
+        );
+        assert_eq!(quota.status, "skipped");
+        assert_eq!(
+            quota.error_code.as_deref(),
+            Some("digital_colleague.daily_quota_exceeded")
+        );
+
+        let stale_due = third_poll - 300_000;
+        make_schedule_due(&database, &schedule.id, stale_due);
+        assert!(database
+            .claim_due_digital_colleague_triggers(third_poll)
+            .expect("poll a missed cycle")
+            .is_empty());
+        let misfire = trigger_with_key(
+            &database,
+            &colleague.id,
+            &format!("schedule:{}:{stale_due}", schedule.id),
+        );
+        assert_eq!(misfire.status, "skipped");
+        assert_eq!(
+            misfire.error_code.as_deref(),
+            Some("digital_colleague.schedule_misfire")
+        );
+        assert!(database
+            .list_digital_colleague_audit(&colleague.id, 100)
+            .expect("list audit")
+            .iter()
+            .any(|entry| entry.event == "schedule.misfire" && entry.trigger_id.is_some()));
+
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE digital_colleagues SET status = 'paused' WHERE id = ?1",
+                    [&colleague.id],
+                )?;
+                Ok(())
+            })
+            .expect("pause the colleague without disabling its schedule");
+        let paused_poll = third_poll + 1_000;
+        make_schedule_due(&database, &schedule.id, third_poll);
+        assert!(database
+            .claim_due_digital_colleague_triggers(paused_poll)
+            .expect("poll a paused colleague")
+            .is_empty());
+        let rejected = trigger_with_key(
+            &database,
+            &colleague.id,
+            &format!("schedule:{}:{third_poll}", schedule.id),
+        );
+        assert_eq!(rejected.status, "rejected");
+        assert_eq!(
+            rejected.error_code.as_deref(),
+            Some("digital_colleague.not_active")
+        );
+        assert_eq!(
+            conversation_run_count(&database, &colleague.conversation_id),
+            1,
+            "no skipped or rejected claim creates a Run"
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A user Run occupying the execution conversation is not a colleague
+    /// trigger, so the overlap check cannot see it. The claim still leaves its
+    /// conclusion next to the moved cursor and never touches the user's Run.
+    #[test]
+    fn claim_persists_a_skip_when_the_execution_conversation_is_busy() {
+        let (database, path) = test_database();
+        let colleague = create_colleague(&database);
+        let schedule = database
+            .save_digital_colleague_schedule(None, &colleague.id, "release review", 60, 120, true)
+            .expect("save interval schedule");
+        let user_run = database
+            .create_run(&colleague.conversation_id, "继续聊天", None)
+            .expect("occupy the execution conversation");
+        let now = now_ms();
+        let due_at = now - 10_000;
+        make_schedule_due(&database, &schedule.id, due_at);
+        assert!(database
+            .claim_due_digital_colleague_triggers(now)
+            .expect("a busy conversation does not fail the poll")
+            .is_empty());
+        let skipped = trigger_with_key(
+            &database,
+            &colleague.id,
+            &format!("schedule:{}:{due_at}", schedule.id),
+        );
+        assert_eq!(skipped.status, "skipped");
+        assert_eq!(
+            skipped.error_code.as_deref(),
+            Some(TRIGGER_DISPATCH_UNAVAILABLE)
+        );
+        assert!(skipped.run_id.is_none());
+        assert!(skipped.completed_at.is_some());
+        assert!(schedule_cursor(&database, &schedule.id).0 > now);
+        assert_eq!(
+            conversation_run_count(&database, &colleague.conversation_id),
+            1,
+            "the claim adds no Run of its own"
+        );
+        assert_eq!(persisted_run_status(&database, &user_run.run.id), "queued");
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// An archived execution conversation makes create_run return
+    /// QueryReturnedNoRows. The claim must persist that skip and move the
+    /// cursor, not roll back and block every later due schedule on each poll.
+    #[test]
+    fn claim_skips_an_archived_conversation_without_blocking_other_schedules() {
+        let (database, path) = test_database();
+        let archived = create_colleague(&database);
+        let healthy = create_colleague(&database);
+        let archived_schedule = database
+            .save_digital_colleague_schedule(None, &archived.id, "stale review", 60, 120, true)
+            .expect("save archived colleague schedule");
+        let healthy_schedule = database
+            .save_digital_colleague_schedule(None, &healthy.id, "live review", 60, 120, true)
+            .expect("save healthy colleague schedule");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE conversations SET archived = 1 WHERE id = ?1",
+                    [&archived.conversation_id],
+                )?;
+                Ok(())
+            })
+            .expect("archive the execution conversation");
+        let now = now_ms();
+        let archived_due = now - 20_000;
+        let healthy_due = now - 10_000;
+        make_schedule_due(&database, &archived_schedule.id, archived_due);
+        make_schedule_due(&database, &healthy_schedule.id, healthy_due);
+
+        let prepared = database
+            .claim_due_digital_colleague_triggers(now)
+            .expect("an archived conversation does not fail the poll");
+        assert_eq!(prepared.len(), 1, "the other due colleague is still claimed");
+        assert_eq!(prepared[0].colleague.id, healthy.id);
+        assert_eq!(prepared[0].trigger.status, "queued");
+        assert!(prepared[0].trigger.run_id.is_some());
+
+        let skipped = trigger_with_key(
+            &database,
+            &archived.id,
+            &format!("schedule:{}:{archived_due}", archived_schedule.id),
+        );
+        assert_eq!(skipped.status, "skipped");
+        assert_eq!(
+            skipped.error_code.as_deref(),
+            Some(TRIGGER_DISPATCH_UNAVAILABLE)
+        );
+        assert!(skipped.error_message.is_some());
+        assert!(skipped.run_id.is_none());
+        assert!(skipped.completed_at.is_some());
+        assert!(schedule_cursor(&database, &archived_schedule.id).0 > now);
+        assert!(schedule_cursor(&database, &healthy_schedule.id).0 > now);
+        assert_eq!(
+            conversation_run_count(&database, &archived.conversation_id),
+            0,
+            "the skipped claim creates no Run"
+        );
+        assert_eq!(conversation_run_count(&database, &healthy.conversation_id), 1);
+
+        assert!(database
+            .claim_due_digital_colleague_triggers(now)
+            .expect("repoll after the skip")
+            .is_empty());
+        assert_eq!(
+            database
+                .list_digital_colleague_triggers(&archived.id, 100)
+                .expect("list archived colleague triggers")
+                .len(),
+            1,
+            "the same occurrence is not retried"
         );
 
         drop(database);
