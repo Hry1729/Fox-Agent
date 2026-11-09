@@ -36,6 +36,8 @@ mod app_management;
 mod bundled_capabilities;
 pub(crate) mod companions;
 pub(crate) mod companion_capabilities;
+pub(crate) mod companion_ownership;
+use self::companion_ownership::ORDINARY_CHAT_FILTER;
 mod computed_artifacts;
 mod delivery_acceptance;
 mod child_runs;
@@ -2115,10 +2117,13 @@ impl Database {
         })
     }
 
+    /// K2: the effective companion identity of a conversation. The fixed
+    /// private chat reads its own binding; a contact background task reads the
+    /// persisted ownership chain of its execution conversation. A task marked
+    /// as a contact task whose chain is broken errors instead of resolving to
+    /// None, so no caller silently falls back to the unrestricted path.
     pub(crate) fn conversation_companion_id(&self, chat: &str) -> Result<Option<String>, String> {
-        self.with_connection(|connection| connection.query_row(
-            "SELECT companion_id FROM conversations WHERE id = ?1", [chat], |row| row.get(0),
-        ))
+        Ok(self.conversation_companion_scope(chat)?.map(|scope| scope.companion_id))
     }
 
     pub(crate) fn companion_chat_state(&self, chat: &str) -> Result<Option<CompanionChatState>, String> {
@@ -2150,7 +2155,7 @@ impl Database {
 
     pub fn list_conversations(&self) -> Result<Vec<ConversationSummary>, String> {
         self.with_connection(|connection| {
-            let mut statement = connection.prepare(
+            let mut statement = connection.prepare(&format!(
                 "SELECT c.id, c.agent_id, a.name, c.title, c.project_id,
                         COALESCE(p.root_path, c.project_root), c.status,
                         c.pinned, c.archived, c.archived_at, c.trashed_at,
@@ -2163,8 +2168,9 @@ impl Database {
                  LEFT JOIN projects p ON p.id = c.project_id
                  LEFT JOIN kernel_execution_policies kep ON kep.conversation_id = c.id
                  WHERE c.companion_id IS NULL AND c.conversation_kind = 'primary' AND c.archived = 0 AND c.trashed_at IS NULL
+                       {ORDINARY_CHAT_FILTER}
                  ORDER BY c.pinned DESC, COALESCE(c.last_message_at, c.created_at) DESC",
-            )?;
+            ))?;
             let mut records: Vec<ConversationSummary> = statement
                 .query_map([], map_conversation)?
                 .collect::<rusqlite::Result<_>>()?;
@@ -2175,7 +2181,7 @@ impl Database {
 
     pub fn list_archived_conversations(&self) -> Result<Vec<ConversationSummary>, String> {
         self.with_connection(|connection| {
-            let mut statement = connection.prepare(
+            let mut statement = connection.prepare(&format!(
                 "SELECT c.id, c.agent_id, a.name, c.title, c.project_id,
                         COALESCE(p.root_path, c.project_root), c.status,
                         c.pinned, c.archived, c.archived_at, c.trashed_at,
@@ -2188,8 +2194,9 @@ impl Database {
                  LEFT JOIN projects p ON p.id = c.project_id
                  LEFT JOIN kernel_execution_policies kep ON kep.conversation_id = c.id
                  WHERE c.companion_id IS NULL AND c.conversation_kind = 'primary' AND c.archived = 1 AND c.trashed_at IS NULL
+                       {ORDINARY_CHAT_FILTER}
                  ORDER BY COALESCE(c.archived_at, c.updated_at) DESC",
-            )?;
+            ))?;
             let mut records: Vec<ConversationSummary> = statement
                 .query_map([], map_conversation)?
                 .collect::<rusqlite::Result<_>>()?;
@@ -2200,7 +2207,7 @@ impl Database {
 
     pub fn list_trashed_conversations(&self) -> Result<Vec<ConversationSummary>, String> {
         self.with_connection(|connection| {
-            let mut statement = connection.prepare(
+            let mut statement = connection.prepare(&format!(
                 "SELECT c.id, c.agent_id, a.name, c.title, c.project_id,
                         COALESCE(p.root_path, c.project_root), c.status,
                         c.pinned, c.archived, c.archived_at, c.trashed_at,
@@ -2213,8 +2220,9 @@ impl Database {
                  LEFT JOIN projects p ON p.id = c.project_id
                  LEFT JOIN kernel_execution_policies kep ON kep.conversation_id = c.id
                  WHERE c.companion_id IS NULL AND c.conversation_kind = 'primary' AND c.trashed_at IS NOT NULL
+                       {ORDINARY_CHAT_FILTER}
                  ORDER BY c.trashed_at DESC",
-            )?;
+            ))?;
             let mut records: Vec<ConversationSummary> = statement
                 .query_map([], map_conversation)?
                 .collect::<rusqlite::Result<_>>()?;
@@ -2444,7 +2452,7 @@ impl Database {
             if fts_query.is_empty() {
                 return Ok(Vec::new());
             }
-            let mut statement = connection.prepare(
+            let mut statement = connection.prepare(&format!(
                 "SELECT DISTINCT c.id, c.agent_id, a.name, c.title, c.project_id,
                         COALESCE(p.root_path, c.project_root), c.status,
                         c.pinned, c.archived, c.archived_at, c.trashed_at,
@@ -2456,7 +2464,8 @@ impl Database {
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
                  LEFT JOIN kernel_execution_policies kep ON kep.conversation_id = c.id
-                 WHERE c.companion_id IS NULL AND c.conversation_kind = 'primary' AND c.archived = 0 AND c.trashed_at IS NULL AND (
+                 WHERE c.companion_id IS NULL AND c.conversation_kind = 'primary' AND c.archived = 0 AND c.trashed_at IS NULL
+                       {ORDINARY_CHAT_FILTER} AND (
                        c.title LIKE ?1 ESCAPE '\\'
                     OR COALESCE(p.root_path, c.project_root, '') LIKE ?1 ESCAPE '\\'
                     OR a.name LIKE ?1 ESCAPE '\\'
@@ -2469,7 +2478,7 @@ impl Database {
                  )
                  ORDER BY c.pinned DESC, COALESCE(c.last_message_at, c.created_at) DESC
                  LIMIT ?3",
-            )?;
+            ))?;
             let mut records: Vec<ConversationSummary> = statement
                 .query_map(params![like, fts_query, limit as i64], map_conversation)?
                 .collect::<rusqlite::Result<_>>()?;
@@ -2872,8 +2881,40 @@ impl Database {
         detail
             .approvals
             .extend(self.child_run_approvals_for_conversation(id)?);
+        detail
+            .approvals
+            .extend(self.background_pending_approvals_for_report_chat(id)?);
         self.enrich_kernel_approval_preview(&mut detail.approvals);
         Ok(detail)
+    }
+
+    /// K2: a contact task executes in a conversation hidden from the ordinary
+    /// lists, so its pending approval card loads in the contact's fixed report
+    /// chat instead. The card keeps the original Run, tool_call and approval
+    /// identities; answering it settles the original call.
+    pub(crate) fn background_pending_approvals_for_report_chat(
+        &self,
+        report_conversation_id: &str,
+    ) -> Result<Vec<super::ApprovalRecord>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT a.id, a.tool_call_id, t.run_id, t.conversation_id, t.tool_name,
+                        a.status, a.requested_action, a.request_json, a.decision_json,
+                        a.requested_at, a.resolved_at, a.category, a.claimed_at,
+                        a.claimed_by_run_id
+                 FROM approvals a
+                 JOIN tool_calls t ON t.id = a.tool_call_id
+                 WHERE a.status = 'pending'
+                   AND t.conversation_id IN (
+                       SELECT dc.conversation_id FROM digital_colleagues dc
+                       WHERE dc.report_conversation_id = ?1 AND dc.companion_bound = 1)
+                 ORDER BY a.requested_at ASC, a.id ASC",
+            )?;
+            let records = statement
+                .query_map([report_conversation_id], map_approval)?
+                .collect();
+            records
+        })
     }
 
     /// Show the user the same Office boundary that the Host will hash into a
@@ -7259,15 +7300,22 @@ impl Database {
     /// override is an explicit error, never a silent fallback to another model.
     /// `Ok(None)` means nothing is configured (the global model is missing).
     pub fn resolve_effective_model(&self, conversation_id: &str) -> Result<Option<ModelServiceRecord>, String> {
-        let override_ids: Option<(String, String)> = self.with_connection(|connection| {
-            connection.query_row(
-                "SELECT cp.model_provider_id, cp.model_ref FROM conversations c
-                 JOIN companion_profiles cp ON cp.id = c.companion_id
-                 WHERE c.id = ?1 AND cp.model_provider_id IS NOT NULL AND cp.model_ref IS NOT NULL",
-                [conversation_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            ).optional()
-        })?;
+        // K2/K5: background tasks resolve through the same ownership chain as
+        // the private chat, so one contact has one effective model.
+        let companion = self
+            .conversation_companion_scope(conversation_id)?
+            .map(|scope| scope.companion_id);
+        let override_ids: Option<(String, String)> = match companion {
+            None => None,
+            Some(companion) => self.with_connection(|connection| {
+                connection.query_row(
+                    "SELECT model_provider_id, model_ref FROM companion_profiles
+                     WHERE id = ?1 AND model_provider_id IS NOT NULL AND model_ref IS NOT NULL",
+                    [&companion],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                ).optional()
+            })?,
+        };
         let Some((provider_id, model_ref)) = override_ids else {
             return self.get_model_service();
         };
@@ -8135,15 +8183,20 @@ fn create_run_in_transaction(
                     ELSE COALESCE(?2,
                                   (SELECT m.model_id FROM companion_profiles cp
                                    JOIN provider_models m ON m.id = cp.model_ref AND m.provider_id = cp.model_provider_id
-                                   WHERE cp.id = c.companion_id),
+                                   WHERE cp.id = COALESCE(c.companion_id,
+                                       (SELECT dc.companion_id FROM digital_colleagues dc
+                                        WHERE dc.conversation_id = c.id AND dc.companion_bound = 1))),
                                   (SELECT model_id FROM model_service WHERE singleton_id = 1 AND enabled = 1),
                                   a.default_model)
                 END,
                 c.title
          FROM conversations c JOIN agents a ON a.id = c.agent_id
          WHERE c.id = ?1 AND c.archived = 0 AND c.trashed_at IS NULL
-           AND NOT EXISTS (SELECT 1 FROM companion_profiles cp WHERE cp.id = c.companion_id
-                           AND (cp.archived_at IS NOT NULL OR cp.deleting_at IS NOT NULL))",
+           AND NOT EXISTS (SELECT 1 FROM companion_profiles cp
+                           WHERE cp.id = COALESCE(c.companion_id,
+                               (SELECT dc.companion_id FROM digital_colleagues dc
+                                WHERE dc.conversation_id = c.id AND dc.companion_bound = 1))
+                             AND (cp.archived_at IS NOT NULL OR cp.deleting_at IS NOT NULL))",
         params![conversation_id, requested_model],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;

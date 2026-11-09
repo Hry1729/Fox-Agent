@@ -218,6 +218,14 @@ pub struct DigitalColleagueRecord {
     pub created_at: i64,
     pub updated_at: i64,
     pub revoked_at: Option<i64>,
+    /// K2 ownership chain. `companion_bound` is written once at creation and
+    /// never cleared, so a contact task can never degrade into an unbound one.
+    #[serde(default)]
+    pub companion_id: Option<String>,
+    #[serde(default)]
+    pub report_conversation_id: Option<String>,
+    #[serde(default)]
+    pub companion_bound: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -316,6 +324,9 @@ pub struct CreateDigitalColleagueInput {
     pub max_duration_ms: i64,
     pub max_output_tokens: i64,
     pub max_tool_calls: i64,
+    /// Some binds the task to a contact: its own execution conversation, the
+    /// contact's workspace and its fixed private chat as the report target.
+    pub companion_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]

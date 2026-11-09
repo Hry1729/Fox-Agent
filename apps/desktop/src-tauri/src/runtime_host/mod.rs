@@ -810,6 +810,17 @@ struct QueuedRun {
     started: StartRunResult,
     text: String,
     attachments: Vec<AttachmentRecord>,
+    /// K2: (companion, background) resolved from the persisted ownership chain
+    /// before the Run may take an execution position.
+    companion: Option<(String, bool)>,
+}
+
+/// A dispatch reservation holds the conversation and the contact position so
+/// two starts cannot take either while the first is still submitting.
+#[derive(Clone)]
+struct DispatchReservation {
+    conversation_id: String,
+    companion_id: Option<String>,
 }
 
 struct RuntimeCommand {
@@ -850,8 +861,11 @@ struct RuntimeHostState {
     queue_dispatcher: bool,
     queue_changed: Arc<(Mutex<()>, Condvar)>,
     native_run_leases: HashMap<String, kernel_run_lock::KernelRunLock>,
-    dispatching_runs: HashMap<String, String>,
+    dispatching_runs: HashMap<String, DispatchReservation>,
     cancelled_dispatches: HashSet<String>,
+    /// K2: contacts whose archive/delete stop sweep is in flight. No Run of
+    /// such a contact may be dispatched or submitted until the sweep finishes.
+    stopping_companions: HashSet<String>,
     recovery_attempts: u8,
     last_recovery_at: Option<i64>,
 }
@@ -1283,6 +1297,7 @@ impl RuntimeHost {
                 native_run_leases: HashMap::new(),
                 dispatching_runs: HashMap::new(),
                 cancelled_dispatches: HashSet::new(),
+                stopping_companions: HashSet::new(),
                 recovery_attempts: 0,
                 last_recovery_at: None,
             })),
@@ -1600,12 +1615,20 @@ impl RuntimeHost {
             Ok(_) => {}
             Err(error) => { self.record_start_failure(&started, error); return; }
         }
+        // K2: resolve the contact position from the persisted ownership chain
+        // before queueing. A contact task whose chain is broken stops here; it
+        // is never queued as an unrestricted ordinary Run.
+        let companion = match self.database.run_companion_slot(&run_id) {
+            Ok(slot) => slot,
+            Err(error) => { self.record_start_failure(&started, error); return; }
+        };
         let mut queued_at = None;
         if let Ok(mut state) = self.state.lock() {
             state.queued_runs.push_back(QueuedRun {
                 started,
                 text,
                 attachments,
+                companion,
             });
             queued_at = Some(crate::database::now_ms());
         }
@@ -1652,14 +1675,21 @@ impl RuntimeHost {
             let occupied = state.worker.as_ref().map(|w| w.sessions.occupied()).unwrap_or(0);
             let Some(index) = state.queued_runs.iter().position(|item| {
                 let conversation = &item.started.run.conversation_id;
+                let companion = item.companion.as_ref().map(|(id, _)| id.as_str());
                 occupied + starting < sidecar_sessions::ACTIVE_RUN_LIMIT
-                    && !state.dispatching_runs.values().any(|id| id == conversation)
-                    && state.worker.as_ref().is_none_or(|w| w.sessions.can_admit(conversation))
+                    && !state.dispatching_runs.values().any(|reservation| reservation.conversation_id == *conversation)
+                    && companion.is_none_or(|id| {
+                        !state.dispatching_runs.values().any(|reservation| reservation.companion_id.as_deref() == Some(id))
+                            && !state.stopping_companions.contains(id)
+                    })
+                    && state.worker.as_ref().is_none_or(|w| w.sessions.can_admit(conversation, companion))
                     && !matches!(state.state.as_str(), "starting" | "stopping")
             }) else { return; };
             let Some(queued) = state.queued_runs.remove(index) else { return; };
-            state.dispatching_runs.insert(queued.started.run.id.clone(),
-                queued.started.run.conversation_id.clone());
+            state.dispatching_runs.insert(queued.started.run.id.clone(), DispatchReservation {
+                conversation_id: queued.started.run.conversation_id.clone(),
+                companion_id: queued.companion.as_ref().map(|(id, _)| id.clone()),
+            });
             (queued, crate::database::now_ms())
         };
         let (queued, granted_at) = queued;
@@ -1693,6 +1723,7 @@ impl RuntimeHost {
             }
             if let Ok(mut state) = runtime_host.state.lock() {
                 state.dispatching_runs.remove(&run_id);
+                state.queue_changed.1.notify_all();
             }
             runtime_host.dispatch_next_queued_run();
         }));
@@ -1713,7 +1744,7 @@ impl RuntimeHost {
                     .is_none_or(|worker| worker.sessions.by_run(run_id).is_none())
             {
                 state.cancelled_dispatches.insert(run_id.to_owned());
-                state.dispatching_runs.get(run_id).cloned()
+                state.dispatching_runs.get(run_id).map(|reservation| reservation.conversation_id.clone())
             } else {
                 let Some(index) = state
                     .queued_runs
@@ -1869,6 +1900,10 @@ impl RuntimeHost {
         } else {
             "primary"
         };
+        // K2: the effective contact identity comes from the persisted ownership
+        // chain. A contact background task with a broken chain refuses to start
+        // instead of running without contact restrictions.
+        let companion_slot = self.database.run_companion_slot(&started.run.id)?;
         let frozen_binding = self.database.run_control_binding(&started.run.id)?;
         if matches!(kernel_authority::resolve_run_route(frozen_binding.as_ref()), kernel_authority::RunRoute::Reject) {
             return Err(format!("{}: unsupported frozen executor", crate::database::EXECUTOR_ROUTE_UNKNOWN));
@@ -2078,11 +2113,26 @@ impl RuntimeHost {
             if state.cancelled_dispatches.remove(&started.run.id) {
                 return Err(CANCELLED_BEFORE_SUBMISSION.to_owned());
             }
+            // K2: the stop sweep and the archived/deleting contact both refuse
+            // submission here, under the same transition lock the archive takes,
+            // so a Run queued before the sweep cannot start after it.
+            if let Some((companion, _)) = companion_slot.as_ref() {
+                if state.stopping_companions.contains(companion) {
+                    return Err("companion.stopping: 正在停止这个联系人的执行".to_owned());
+                }
+                self.database.ensure_companion_executable(companion)?;
+            }
             state.cancellation.register_run(&started.run.id)?;
             if let Some(worker) = state.worker.as_mut() {
                 let generation = self.database.get_runtime_session(&started.run.conversation_id)?
                     .ok_or("runtime session mapping is missing")?.context_generation;
-                worker.sessions.start(&started.run.conversation_id, &runtime_session_id, generation, &started.run.id)?;
+                worker.sessions.start(
+                    &started.run.conversation_id,
+                    &runtime_session_id,
+                    generation,
+                    &started.run.id,
+                    companion_slot.as_ref().map(|(id, background)| (id.as_str(), *background)),
+                )?;
             }
             if let Some(lease) = native_ownership { state.native_run_leases.insert(started.run.id.clone(), lease); }
             state.state = "busy".to_owned();
@@ -2287,19 +2337,108 @@ impl RuntimeHost {
         Ok(())
     }
 
+    /// K2: archiving a contact stops its whole serial range first — new dispatch
+    /// is refused, queued Runs are cancelled, running and awaiting-approval Runs
+    /// are stopped — and only once every Run is terminal are the sessions closed
+    /// and the contact archived.
     pub(crate) fn archive_companion(
         &self,
         companion_id: &str,
     ) -> Result<crate::database::companions::CompanionView, crate::database::companions::CompanionError> {
         use crate::database::companions::CompanionError;
-        let _transition = self.run_transition.lock()
-            .map_err(|_| CompanionError::Storage("运行时状态锁已损坏".into()))?;
-        let record = self.database.companion_profile(companion_id)?;
-        if record.active_run_status.is_some() {
-            return Err(CompanionError::RunActive);
+        self.begin_companion_stop(companion_id).map_err(CompanionError::Storage)?;
+        let outcome = self
+            .drain_companion_runs(companion_id)
+            .map_err(CompanionError::Storage)
+            .and_then(|()| {
+                let _transition = self.run_transition.lock()
+                    .map_err(|_| CompanionError::Storage("运行时状态锁已损坏".into()))?;
+                let record = self.database.companion_profile(companion_id)?;
+                if record.active_run_status.is_some() {
+                    return Err(CompanionError::RunActive);
+                }
+                self.close_conversation_session(&record.conversation_id).map_err(CompanionError::Storage)?;
+                for conversation in self.database.companion_background_conversations(companion_id)
+                    .map_err(CompanionError::Storage)?
+                {
+                    self.close_conversation_session(&conversation).map_err(CompanionError::Storage)?;
+                }
+                self.database.archive_companion(companion_id)
+            });
+        self.end_companion_stop(companion_id);
+        outcome
+    }
+
+    /// K2: refuse new dispatch for a contact while its stop sweep is in flight.
+    /// Always paired with [`Self::end_companion_stop`]. Cancelling a Run takes the
+    /// transition lock, so the caller must not hold it across the sweep.
+    pub(crate) fn begin_companion_stop(&self, companion_id: &str) -> Result<(), String> {
+        let mut state = self.state.lock().map_err(|_| "runtime state lock is poisoned")?;
+        state.stopping_companions.insert(companion_id.to_owned());
+        state.queue_changed.1.notify_all();
+        Ok(())
+    }
+
+    pub(crate) fn end_companion_stop(&self, companion_id: &str) {
+        if let Ok(mut state) = self.state.lock() {
+            state.stopping_companions.remove(companion_id);
+            state.queue_changed.1.notify_all();
         }
-        self.close_conversation_session(&record.conversation_id).map_err(CompanionError::Storage)?;
-        self.database.archive_companion(companion_id)
+    }
+
+    /// Cancel every non-terminal Run of the contact — private chat and background
+    /// tasks alike — and confirm the terminal state. A Run created during the
+    /// sweep is cancelled on the next pass; the dispatch gate keeps it from
+    /// starting, and the archived/deleting contact refuses it afterwards.
+    pub(crate) fn drain_companion_runs(&self, companion_id: &str) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let active = self.database.companion_active_run_ids(companion_id)?;
+            if active.is_empty() {
+                return Ok(());
+            }
+            for run_id in &active {
+                // Ok(false) means no live owner in this process. A previous
+                // process leaves such a Run non-terminal on purpose: restart
+                // protection keeps a waiting approval recoverable and a
+                // work-mode confirmation stays parked, so there is nothing to
+                // signal and the sweep settles the Run itself.
+                if !self.cancel_managed_run(run_id).unwrap_or(false) {
+                    self.settle_unowned_companion_run(run_id)?;
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err("companion.stopping: 联系人的执行没有按时停止，请稍后重试".into());
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn settle_unowned_companion_run(&self, run_id: &str) -> Result<(), String> {
+        use rusqlite::OptionalExtension;
+        let goal: Option<String> = self.database.with_connection(|connection| {
+            connection.query_row(
+                "SELECT goal_id FROM pending_work_mode_dispatches WHERE run_id = ?1",
+                [run_id],
+                |row| row.get::<_, Option<String>>(0),
+            ).optional()
+        })?.flatten();
+        if let Some(goal) = goal {
+            self.database.reject_pending_work_mode_dispatch(&goal)?;
+            return Ok(());
+        }
+        if let Err(error) = self.database.mark_run_interrupted(
+            run_id,
+            "companion.stopping",
+            "联系人已归档或删除，执行随之停止",
+        ) {
+            // A Run that reached its own terminal state between the sweep's read
+            // and this settle is no longer listed on the next pass. Any other
+            // refusal still fails the sweep on its deadline rather than letting
+            // the contact be archived with a live Run.
+            eprintln!("fox.companion_stop run={run_id} settle_refused: {error}");
+        }
+        Ok(())
     }
 
     fn live_runtime_session_id(&self, conversation_id: &str) -> Option<String> {
@@ -3374,7 +3513,7 @@ impl RuntimeHost {
                 .worker.as_ref().ok_or("runtime worker is not running")?.stdin.clone();
             native_tool_batch::recover_native_approval(self, &stdin, approval_id)?;
         }
-        let _ = self.app.emit("fox://approval-resolved", approval);
+        let _ = emit_approval_event(&self.app, &self.database, "fox://approval-resolved", &approval);
         Ok(true)
     }
 
@@ -6898,17 +7037,55 @@ impl SidecarExecutionWait {
     fn resume(self) -> Result<(), String> {
         loop {
             let signal = {
-                let mut state = self.state.lock().map_err(|_| "runtime state lock is poisoned")?;
+                let mut guard = self.state.lock().map_err(|_| "runtime state lock is poisoned")?;
+                let state = &mut *guard;
                 if state.shutting_down { return Err("runtime is shutting down".into()); }
                 if let Ok(token) = state.cancellation.run_token(&self.run_id) { token.check()?; }
+                // P2: the resume admission shares the dispatcher's reservation
+                // view under the same state lock, so an answered approval can
+                // never take a slot already granted to a starting Run.
+                let dispatching: Vec<(&str, Option<&str>)> = state
+                    .dispatching_runs
+                    .iter()
+                    .map(|(id, reservation)| (id.as_str(), reservation.companion_id.as_deref()))
+                    .collect();
                 let Some(worker) = state.worker.as_mut() else { return Ok(()); };
-                if worker.sessions.set_waiting(&self.run_id, false).is_ok() { return Ok(()); }
+                if worker.sessions.set_waiting_with_dispatch(&self.run_id, false, &dispatching).is_ok() { return Ok(()); }
                 state.queue_changed.clone()
             };
             let guard = signal.0.lock().map_err(|_| "runtime capacity lock is poisoned")?;
             drop(signal.1.wait_timeout(guard, Duration::from_millis(50)).map_err(|_| "runtime capacity wait is poisoned")?);
         }
     }
+}
+
+/// K2: the execution conversation of a contact task is hidden from the
+/// ordinary lists, so its approval card is also delivered to the contact's
+/// fixed report chat. The mirror keeps the original Run, tool_call and
+/// approval ids — only the routing conversation changes — so an answer given
+/// in the private chat settles the original call.
+pub(crate) fn emit_approval_event(
+    app: &AppHandle,
+    database: &Database,
+    event: &str,
+    approval: &ApprovalRecord,
+) -> Result<(), String> {
+    app.emit(event, approval).map_err(|error| error.to_string())?;
+    if let Some(mirrored) = report_chat_approval_mirror(database, approval) {
+        let _ = app.emit(event, &mirrored);
+    }
+    Ok(())
+}
+
+fn report_chat_approval_mirror(database: &Database, approval: &ApprovalRecord) -> Option<ApprovalRecord> {
+    let scope = database.run_companion_scope(&approval.run_id).ok()??;
+    let report = scope.report_conversation_id?;
+    if report == approval.conversation_id {
+        return None;
+    }
+    let mut mirrored = approval.clone();
+    mirrored.conversation_id = report;
+    Some(mirrored)
 }
 
 fn receive_sidecar_run_approval(database: &Database, state: &Arc<Mutex<RuntimeHostState>>,
@@ -7346,7 +7523,7 @@ fn request_declarative_hook_approval(
     );
     drop(pending);
     let approval_id = approval.id.clone();
-    let _ = app.emit("fox://approval-requested", approval);
+    let _ = emit_approval_event(app, database, "fox://approval-requested", &approval);
     let approval_result = receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
     if let Ok(runtime_state) = state.lock() {
         if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
@@ -7359,7 +7536,7 @@ fn request_declarative_hook_approval(
             if let Ok(Some(resolved)) =
                 database.resolve_approval(&approval_id, ApprovalDecision::Deny)
             {
-                let _ = app.emit("fox://approval-resolved", resolved);
+                let _ = emit_approval_event(app, database, "fox://approval-resolved", &resolved);
             }
             return Err(error);
         }
@@ -7432,7 +7609,7 @@ fn request_task_repair_override_approval(
     );
     drop(pending);
     let approval_id = approval.id.clone();
-    let _ = app.emit("fox://approval-requested", approval.clone());
+    let _ = emit_approval_event(app, database, "fox://approval-requested", &approval);
     let approval_result = receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
     if let Ok(runtime_state) = state.lock() {
         if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
@@ -7445,7 +7622,7 @@ fn request_task_repair_override_approval(
             if let Ok(Some(resolved)) =
                 database.resolve_approval(&approval_id, ApprovalDecision::Deny)
             {
-                let _ = app.emit("fox://approval-resolved", resolved);
+                let _ = emit_approval_event(app, database, "fox://approval-resolved", &resolved);
             }
             return Err(error);
         }
@@ -8215,7 +8392,7 @@ fn execute_mcp_tool_request(
                         },
                     );
                 let approval_id = approval.id.clone();
-                let _ = app.emit("fox://approval-requested", approval);
+                let _ = emit_approval_event(app, database, "fox://approval-requested", &approval);
                 let approval_result = receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
                 if let Ok(runtime_state) = state.lock() {
                     if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
@@ -8228,7 +8405,7 @@ fn execute_mcp_tool_request(
                         if let Ok(Some(resolved)) =
                             database.resolve_approval(&approval_id, ApprovalDecision::Deny)
                         {
-                            let _ = app.emit("fox://approval-resolved", resolved);
+                            let _ = emit_approval_event(app, database, "fox://approval-resolved", &resolved);
                         }
                         return Err(error);
                     }
@@ -10200,7 +10377,7 @@ fn execute_host_tool_request(
                     },
                 );
             let approval_id = approval.id.clone();
-            let _ = app.emit("fox://approval-requested", approval);
+            let _ = emit_approval_event(app, database, "fox://approval-requested", &approval);
             let approval_result = receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
             if let Ok(runtime_state) = state.lock() {
                 if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
@@ -10213,7 +10390,7 @@ fn execute_host_tool_request(
                     if let Ok(Some(resolved)) =
                         database.resolve_approval(&approval_id, ApprovalDecision::Deny)
                     {
-                        let _ = app.emit("fox://approval-resolved", resolved);
+                        let _ = emit_approval_event(app, database, "fox://approval-resolved", &resolved);
                     }
                     return Err(error);
                 }
@@ -10516,7 +10693,7 @@ fn execute_capability_call(
                 runtime.sink().emit(run_id, conversation_id, json!({
                     "type": "run.waiting_approval", "approvalId": approval.id, "toolCallId": tool_call_id
                 }))?;
-                app.emit("fox://approval-requested", &approval).map_err(|e| e.to_string())?;
+                emit_approval_event(app, database, "fox://approval-requested", &approval)?;
                 loop {
                     if runtime.active_run_of(conversation_id).as_deref() != Some(run_id) {
                         let _ = database.resolve_approval(&approval.id, ApprovalDecision::Deny);
@@ -10544,7 +10721,7 @@ fn execute_capability_call(
                         },
                     );
                 let approval_id = approval.id.clone();
-                let _ = app.emit("fox://approval-requested", approval);
+                let _ = emit_approval_event(app, database, "fox://approval-requested", &approval);
                 let approval_result = receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
                 if let Ok(runtime_state) = state.lock() {
                     if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
@@ -10557,7 +10734,7 @@ fn execute_capability_call(
                         if let Ok(Some(resolved)) =
                             database.resolve_approval(&approval_id, ApprovalDecision::Deny)
                         {
-                            let _ = app.emit("fox://approval-resolved", resolved);
+                            let _ = emit_approval_event(app, database, "fox://approval-resolved", &resolved);
                         }
                         return Err(error);
                     }

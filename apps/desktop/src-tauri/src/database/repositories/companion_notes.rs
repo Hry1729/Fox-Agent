@@ -52,6 +52,13 @@ fn over_budget(db: &Connection, owner: &str, delta: i64) -> DbResult<Option<Valu
 }
 
 fn access(db: &Connection, conversation: &str) -> DbResult<Option<(String, bool)>> {
+    // K2: a contact background task owns its contact's notes through the
+    // persisted ownership chain, not through conversations.companion_id.
+    let scope = super::companion_ownership::resolve_conversation_on(db, conversation)
+        .map_err(|error| denied(&error))?;
+    if let Some(scope) = scope.filter(|scope| scope.background) {
+        return Ok(Some((scope.companion_id, true)));
+    }
     db.query_row("SELECT p.id,c.companion_id IS NOT NULL FROM conversations c
         JOIN companion_profiles p ON p.archived_at IS NULL AND p.deleting_at IS NULL AND (
             p.id=c.companion_id OR (c.companion_id IS NULL

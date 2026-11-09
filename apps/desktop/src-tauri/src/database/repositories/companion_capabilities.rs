@@ -58,13 +58,10 @@ pub(crate) fn ensure_granted_on(
     tool: &str,
     input: Option<&Value>,
 ) -> Result<(), String> {
-    let companion: Option<String> = connection.query_row(
-        "SELECT c.companion_id FROM runs r JOIN conversations c ON c.id = r.conversation_id
-         WHERE r.id = ?1 AND c.companion_id IS NOT NULL",
-        [run_id],
-        |row| row.get(0),
-    ).optional().map_err(|error| error.to_string())?;
-    let Some(companion) = companion else { return Ok(()) };
+    let Some(scope) = super::companion_ownership::resolve_run_on(connection, run_id)? else {
+        return Ok(());
+    };
+    let companion = scope.companion_id;
     let Some(required) = required_capability(tool, input)? else { return Ok(()) };
     let current = current_capability_ids_on(connection, &companion)?;
     let snapshot = run_snapshot_on(connection, run_id)?.unwrap_or_else(|| current.clone());

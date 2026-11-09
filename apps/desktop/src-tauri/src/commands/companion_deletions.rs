@@ -27,6 +27,19 @@ struct FileEntry {
     bytes: u64,
 }
 
+/// K2: one entry per contact background task. Deleting the contact removes the
+/// task's execution conversation, so the manifest has to list what goes with it
+/// instead of only counting the private chat.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskEntry {
+    colleague_id: String,
+    name: String,
+    conversation_id: String,
+    runs: i64,
+    messages: i64,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Plan {
@@ -34,6 +47,9 @@ struct Plan {
     template_agent_id: String,
     display_name: String,
     conversation_id: String,
+    /// Stored plans from before contact tasks existed deserialize with no tasks.
+    #[serde(default)]
+    tasks: Vec<TaskEntry>,
     workspace_path: PathBuf,
     workspace_files: u64,
     workspace_bytes: u64,
@@ -219,8 +235,40 @@ fn plan(conn: &Connection, data: &Path, id: &str) -> DeletionResult<Plan> {
         return Err("companion.default_not_deletable".into());
     }
     let count = |sql: &str, key: &str| conn.query_row(sql, [key], |r| r.get::<_, i64>(0));
-    if count("SELECT count(*) FROM runs WHERE conversation_id=?1 AND status IN ('queued','running','cancelling','awaiting_confirmation')", &conversation)? > 0 {
+    // K2: a contact task executes in its own conversation, so the stop check and
+    // the purge have to cover the whole serial range, not just the private chat.
+    let mut task_query = conn.prepare(
+        "SELECT dc.id, dc.name, dc.conversation_id,
+                (SELECT count(*) FROM runs r WHERE r.conversation_id=dc.conversation_id),
+                (SELECT count(*) FROM messages m WHERE m.conversation_id=dc.conversation_id)
+         FROM digital_colleagues dc
+         WHERE dc.companion_id=?1 AND dc.companion_bound=1 ORDER BY dc.conversation_id",
+    )?;
+    let tasks = task_query
+        .query_map([id], |r| {
+            Ok(TaskEntry {
+                colleague_id: r.get(0)?,
+                name: r.get(1)?,
+                conversation_id: r.get(2)?,
+                runs: r.get(3)?,
+                messages: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(task_query);
+    let active = |conversation: &str| {
+        count(
+            "SELECT count(*) FROM runs WHERE conversation_id=?1 AND status IN ('queued','running','cancelling','awaiting_confirmation')",
+            conversation,
+        )
+    };
+    if active(&conversation)? > 0 {
         return Err("companion.run_active".into());
+    }
+    for task in &tasks {
+        if active(&task.conversation_id)? > 0 {
+            return Err("companion.run_active".into());
+        }
     }
     if count("SELECT EXISTS(SELECT 1 FROM digital_colleagues WHERE conversation_id=?1
         UNION ALL SELECT 1 FROM work_graph_node_review_decisions WHERE reviewer_conversation_id=?1
@@ -274,6 +322,7 @@ fn plan(conn: &Connection, data: &Path, id: &str) -> DeletionResult<Plan> {
             &conversation,
         )?,
         conversation_id: conversation,
+        tasks,
         workspace_path: workspace,
         workspace_files,
         workspace_bytes,
@@ -330,6 +379,16 @@ fn purge_rows(db: &Database, plan: &Plan) -> Result<(), String> {
             "DELETE FROM conversations WHERE id=?1 AND companion_id=?2",
             params![plan.conversation_id, plan.companion_id],
         )?;
+        // K2: a contact task owns its execution conversation and references the
+        // profile with ON DELETE RESTRICT. Both go before the profile; runs,
+        // messages, triggers and report ledger rows cascade from them.
+        for task in &plan.tasks {
+            tx.execute("DELETE FROM conversations WHERE id=?1", [&task.conversation_id])?;
+        }
+        tx.execute(
+            "DELETE FROM digital_colleagues WHERE companion_id=?1 AND companion_bound=1",
+            [&plan.companion_id],
+        )?;
         tx.execute(
             "DELETE FROM companion_profiles WHERE id=?1",
             [&plan.companion_id],
@@ -377,7 +436,7 @@ fn finish(
     db: &Database,
     data: &Path,
     id: &str,
-    purge_sessions: impl FnOnce(&str) -> Result<(), String>,
+    mut purge_sessions: impl FnMut(&str) -> Result<(), String>,
 ) -> Result<Value, String> {
     on_db(db, |c| {
         let (text, signature, collected, purged, state): (String,String,bool,bool,String) = c.query_row(
@@ -389,6 +448,9 @@ fn finish(
         if !collected { collect(db,data,id,&signature)?; }
         if !purged {
             purge_sessions(&plan.conversation_id)?;
+            for task in &plan.tasks {
+                purge_sessions(&task.conversation_id)?;
+            }
             let notes = companion_notes_dir(&data.canonicalize().map_err(|e| e.to_string())?, id);
             if normalized(&notes).map_err(|e|e.to_string())? != notes { return Err("笔记目录已指向其他位置".into()); }
             match fs::remove_dir_all(&notes) {
@@ -450,10 +512,18 @@ pub(crate) fn resume_pending(state: &AppState) {
     match pending {
         Ok(ids) => {
             for id in ids {
-                let outcome = state
-                    .runtime_host
-                    .companion_transition()
-                    .and_then(|_guard| resume(state, &id));
+                // K2: the restart sweep leaves a parked work-mode confirmation
+                // non-terminal on purpose, so recovery has to stop the contact's
+                // runs the same way an explicit delete does before purging.
+                let host = &state.runtime_host;
+                let outcome = host
+                    .begin_companion_stop(&id)
+                    .and_then(|()| host.drain_companion_runs(&id))
+                    .and_then(|()| {
+                        host.companion_transition()
+                            .and_then(|_guard| resume(state, &id))
+                    });
+                host.end_companion_stop(&id);
                 if let Err(error) = outcome {
                     eprintln!("联系人删除续做失败 {id}：{error}");
                 }
@@ -496,11 +566,15 @@ pub(crate) fn companion_delete(
     companion_id: String,
     plan_hash: String,
 ) -> ApiResponse<Value> {
-    response(
-        state
-            .runtime_host
-            .companion_transition()
-            .and_then(|_guard| {
+    // K2: stop the contact's whole serial range before the deletion transition.
+    // Cancelling a Run takes the transition lock, so the sweep runs outside it
+    // and the dispatch gate stays closed until the profile is marked deleting.
+    let host = &state.runtime_host;
+    let result = host
+        .begin_companion_stop(&companion_id)
+        .and_then(|()| host.drain_companion_runs(&companion_id))
+        .and_then(|()| {
+            host.companion_transition().and_then(|_guard| {
                 let existing: Option<String> = state.database.with_connection(|c| {
                     c.query_row(
                         "SELECT plan_hash FROM companion_deletions WHERE companion_id=?1",
@@ -517,8 +591,10 @@ pub(crate) fn companion_delete(
                     None => collect(&state.database, &state.data_dir, &companion_id, &plan_hash)?,
                 }
                 resume(&state, &companion_id)
-            }),
-    )
+            })
+        });
+    host.end_companion_stop(&companion_id);
+    response(result)
 }
 
 #[tauri::command]
@@ -526,12 +602,16 @@ pub(crate) fn companion_delete_resume(
     state: State<'_, AppState>,
     companion_id: String,
 ) -> ApiResponse<Value> {
-    response(
-        state
-            .runtime_host
-            .companion_transition()
-            .and_then(|_guard| resume(&state, &companion_id)),
-    )
+    let host = &state.runtime_host;
+    let result = host
+        .begin_companion_stop(&companion_id)
+        .and_then(|()| host.drain_companion_runs(&companion_id))
+        .and_then(|()| {
+            host.companion_transition()
+                .and_then(|_guard| resume(&state, &companion_id))
+        });
+    host.end_companion_stop(&companion_id);
+    response(result)
 }
 
 #[tauri::command]
@@ -640,9 +720,36 @@ mod tests {
                     VALUES('req',?1,'unresolved',1,1)",[id])?;
                 Ok(())
             }).unwrap();
+            // K2: a bound task executes in its own conversation, so the manifest
+            // lists the task together with the runs and messages removed with it.
+            let colleague = db.create_digital_colleague(&crate::database::CreateDigitalColleagueInput {
+                name: "报价整理".into(),
+                expert_id: "fox-debugger".into(),
+                objective: "整理报价".into(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: Vec::new(),
+                max_runs_per_day: 2,
+                max_tokens_per_day: 10_000,
+                max_duration_ms: 60_000,
+                max_output_tokens: 1_024,
+                max_tool_calls: 8,
+                companion_id: Some(id.clone()),
+            }).unwrap();
+            db.with_connection(|c| {
+                c.execute("INSERT INTO runs(id,conversation_id,status,model,last_seq,created_at)
+                    VALUES('task-run',?1,'completed','model',1,1)", [&colleague.conversation_id])?;
+                c.execute("INSERT INTO messages(id,conversation_id,role,kind,content,status,ordinal,created_at,updated_at)
+                    VALUES('task-message',?1,'assistant','text','整理完成','completed',1,1,1)", [&colleague.conversation_id])?;
+                Ok(())
+            }).unwrap();
             let before = on_db(&db, |c| plan(c, &data, id)).unwrap();
             assert_eq!(before.shared_memories, 1);
             assert_eq!(before.workspace_files, 2);
+            assert_eq!(before.tasks.len(), 1);
+            assert_eq!(before.tasks[0].colleague_id, colleague.id);
+            assert_eq!(before.tasks[0].conversation_id, colleague.conversation_id);
+            assert_eq!((before.tasks[0].runs, before.tasks[0].messages), (1, 1));
             assert!(collect(&db, &data, id, "outdated")
                 .unwrap_err()
                 .contains("plan_changed"));
@@ -666,6 +773,13 @@ mod tests {
             let result = finish(&db, &data, id, |_| Ok(())).unwrap();
             assert_eq!(result["removedFiles"], 4);
             assert_eq!(result["keptFiles"], 2);
+            let purged: (i64, i64, i64) = db.with_connection(|c| c.query_row(
+                "SELECT (SELECT count(*) FROM conversations WHERE id=?1),
+                        (SELECT count(*) FROM runs WHERE id='task-run'),
+                        (SELECT count(*) FROM digital_colleagues WHERE id=?2)",
+                params![colleague.conversation_id, colleague.id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))).unwrap();
+            assert_eq!(purged, (0, 0, 0), "删除联系人一并移除后台任务的执行会话、运行与任务本身");
             let memories: (String,i64) = db.with_connection(|c| c.query_row(
                 "SELECT source_label,(SELECT count(*) FROM memory_entities WHERE id='unresolved') FROM memory_entities WHERE id='saved'",
                 [],|r| Ok((r.get(0)?,r.get(1)?)))).unwrap();

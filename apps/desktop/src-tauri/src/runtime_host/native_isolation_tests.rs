@@ -154,7 +154,7 @@ impl Fixture {
             Ok(())
         }).unwrap();
         let mut state = self.host.state.lock().unwrap();
-        state.worker.as_mut().unwrap().sessions.start(conversation, &session, generation, &started.run.id).unwrap();
+        state.worker.as_mut().unwrap().sessions.start(conversation, &session, generation, &started.run.id, None).unwrap();
         state.cancellation.register_run(&started.run.id).unwrap();
         Run { id:started.run.id, conversation:conversation.into(), session, generation, message:started.user_message.id }
     }

@@ -97,11 +97,17 @@ pub(crate) struct CompanionTemplateStatus {
     pub dismissed: bool,
 }
 
+/// K2: the active Run probe covers the contact's whole serial range — the fixed
+/// private chat and every bound background execution conversation — so archive,
+/// restore and delete cannot see an idle contact while a task is still running.
 const VIEW: &str = "SELECT p.*, c.id AS conversation_id,
     (SELECT count(*) FROM messages m WHERE m.conversation_id=c.id AND m.ordinal>p.last_read_ordinal
         AND m.role='assistant' AND m.status='completed') AS unread_count,
-    (SELECT r.status FROM runs r WHERE r.conversation_id=c.id
-        AND r.status IN ('queued','running','cancelling','awaiting_confirmation')
+    (SELECT r.status FROM runs r
+        WHERE r.status IN ('queued','running','cancelling','awaiting_confirmation')
+          AND (r.conversation_id=c.id OR r.conversation_id IN (
+              SELECT dc.conversation_id FROM digital_colleagues dc
+              WHERE dc.companion_id=p.id AND dc.companion_bound=1))
         ORDER BY r.created_at DESC LIMIT 1) AS active_run_status
     FROM companion_profiles p JOIN conversations c ON c.companion_id=p.id";
 
@@ -441,10 +447,19 @@ impl Database {
         self.companion_transaction(|tx| {
             let record = profile(tx, id)?;
             require_idle(&record)?;
+            let now = now_ms();
+            // K2: archiving stops the contact's plans from dispatching, and a
+            // restore leaves them off — enabling a plan again is the user's call.
+            tx.execute(
+                "UPDATE digital_colleague_schedules SET enabled=0, updated_at=?2
+                WHERE enabled=1 AND colleague_id IN (
+                    SELECT id FROM digital_colleagues WHERE companion_id=?1 AND companion_bound=1)",
+                params![id, now],
+            )?;
             tx.execute(
                 "UPDATE companion_profiles SET archived_at=coalesce(archived_at,?2),updated_at=?2
                 WHERE id=?1",
-                params![id, now_ms()],
+                params![id, now],
             )?;
             profile(tx, id)
         })
@@ -1016,6 +1031,44 @@ mod tests {
         assert_eq!(db.resolve_effective_model(&companion.conversation_id).unwrap().unwrap().model_id, "renamed");
         assert_eq!(db.run_model_snapshot(&run.run.id).unwrap().unwrap().model_id, "independent-model", "重开后快照仍在");
         drop(db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    /// K2: a contact background task resolves the same effective model as the
+    /// private chat, and the Run it dispatches carries that model before the
+    /// Host starts it.
+    #[test]
+    fn contact_background_task_shares_the_contact_model() {
+        let f = Fixture::new();
+        let companion = f.add("fox-debugger");
+        f.db.save_model_service(&global_service("global-model", false)).unwrap();
+        seed_provider(&f.db, true, true);
+        f.db.set_companion_model(&companion.profile.id, Some("prov"), Some("prov-model")).unwrap();
+        let colleague = f.db.create_digital_colleague(&crate::database::CreateDigitalColleagueInput {
+            name: "后台模型".into(),
+            expert_id: "fox-debugger".into(),
+            objective: "整理发布证据".into(),
+            project_id: None,
+            project_root: None,
+            knowledge_references: Vec::new(),
+            max_runs_per_day: 2,
+            max_tokens_per_day: 10_000,
+            max_duration_ms: 60_000,
+            max_output_tokens: 1_024,
+            max_tool_calls: 8,
+            companion_id: Some(companion.profile.id.clone()),
+        }).unwrap();
+        assert_eq!(
+            f.db.resolve_effective_model(&colleague.conversation_id).unwrap().unwrap().model_id,
+            "independent-model",
+            "后台执行会话与私聊共用联系人的有效模型"
+        );
+        let accepted = f.db.accept_digital_colleague_trigger(
+            &colleague.id, "manual", None, "manual:model", &serde_json::json!({}), None, "user",
+        ).unwrap();
+        let run = accepted.prepared.expect("a bound task is admitted").started.run;
+        assert_eq!(run.model, "independent-model", "派发前解析出的模型写进 Run");
+        drop(f.db);
         std::fs::remove_dir_all(f.root).unwrap();
     }
 

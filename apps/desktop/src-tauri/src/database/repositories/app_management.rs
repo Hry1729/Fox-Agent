@@ -1,6 +1,7 @@
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
 use super::{now_ms, Database};
+use super::companion_ownership::ORDINARY_CHAT_FILTER;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -533,14 +534,15 @@ impl Database {
         self.with_connection(|connection| {
             let mut results = Vec::new();
             {
-                let mut statement = connection.prepare(
+                let mut statement = connection.prepare(&format!(
                     "SELECT c.id, c.title, COALESCE(p.name, '普通对话'), c.updated_at
                      FROM conversations c LEFT JOIN projects p ON p.id = c.project_id
                      WHERE c.companion_id IS NULL AND c.archived = 0 AND c.trashed_at IS NULL AND c.conversation_kind = 'primary'
+                       {ORDINARY_CHAT_FILTER}
                        AND (c.title LIKE ?1 ESCAPE '\\' OR EXISTS(
                             SELECT 1 FROM messages m WHERE m.conversation_id = c.id
                               AND m.content LIKE ?1 ESCAPE '\\'))
-                     ORDER BY c.updated_at DESC LIMIT ?2")?;
+                     ORDER BY c.updated_at DESC LIMIT ?2"))?;
                 results.extend(statement.query_map(params![pattern, limit as i64], |row| Ok(GlobalSearchRecord {
                     id: row.get(0)?, kind: "conversation".to_owned(), title: row.get(1)?, subtitle: row.get(2)?,
                     workspace_view: "chat".to_owned(), entity_id: Some(row.get(0)?), document_id: None, updated_at: row.get(3)?,
@@ -578,12 +580,13 @@ impl Database {
                 }))?.collect::<Result<Vec<_>, _>>()?);
             }
             {
-                let mut statement = connection.prepare(
+                let mut statement = connection.prepare(&format!(
                     "SELECT a.id, a.display_name, COALESCE(c.title, '文件产物'), a.created_at, c.id
                      FROM artifacts a JOIN conversations c ON c.id = a.conversation_id
                      WHERE c.companion_id IS NULL AND c.archived = 0 AND c.trashed_at IS NULL
+                       {ORDINARY_CHAT_FILTER}
                        AND a.display_name LIKE ?1 ESCAPE '\\'
-                     ORDER BY a.created_at DESC LIMIT ?2")?;
+                     ORDER BY a.created_at DESC LIMIT ?2"))?;
                 results.extend(statement.query_map(params![pattern, limit as i64], |row| Ok(GlobalSearchRecord {
                     id: row.get(0)?, kind: "artifact".to_owned(), title: row.get(1)?, subtitle: row.get(2)?,
                      workspace_view: "chat".to_owned(), entity_id: Some(row.get(4)?), document_id: Some(row.get(0)?), updated_at: row.get(3)?,

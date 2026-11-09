@@ -25,6 +25,10 @@ pub struct DigitalColleagueCreateRequest {
     objective: String,
     project_id: Option<String>,
     project_root: Option<String>,
+    /// Binds the task to a contact (K2). The execution conversation, workspace
+    /// and report chat are then resolved from that contact, not from the caller.
+    #[serde(default)]
+    companion_id: Option<String>,
     #[serde(default)]
     knowledge_references: Vec<KnowledgeReference>,
     #[serde(default = "default_runs_per_day")]
@@ -169,7 +173,15 @@ fn response<T: Serialize>(result: Result<T, String>) -> ApiResponse<T> {
 
 fn validate_create(request: &DigitalColleagueCreateRequest) -> Result<(), String> {
     validate_text("name", &request.name, 1, 120)?;
-    validate_id("expertId", &request.expert_id, 160)?;
+    if let Some(companion) = &request.companion_id {
+        validate_id("companionId", companion, 160)?;
+        // A contact task inherits the contact's expert when none was named.
+        if !request.expert_id.trim().is_empty() {
+            validate_id("expertId", &request.expert_id, 160)?;
+        }
+    } else {
+        validate_id("expertId", &request.expert_id, 160)?;
+    }
     validate_text("objective", &request.objective, 1, 8_000)?;
     if let Some(root) = &request.project_root {
         validate_text("projectRoot", root, 1, 1_024)?;
@@ -279,6 +291,7 @@ pub fn digital_colleague_create(
                 max_duration_ms: request.max_duration_ms,
                 max_output_tokens: request.max_output_tokens,
                 max_tool_calls: request.max_tool_calls,
+                companion_id: request.companion_id.clone(),
             })
     })())
 }

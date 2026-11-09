@@ -207,7 +207,24 @@ pub(super) fn protect_restart_owners(transaction: &Transaction<'_>, now: i64, re
         // message, open tool calls and pending approvals settle with the
         // generic restart repair below.
         let retired_kernel = route == WriterRoute::Kernel && retired.contains(&run_id);
-        if (route == WriterRoute::Kernel && !retired_kernel) || (route == WriterRoute::PiNative && waiting_approval(transaction, &run_id)?) {
+        // K2: a contact being archived or deleted never resumes execution after
+        // a restart. Its waiting approval settles with the generic repair, so
+        // the deletion sweep finds a terminal Run instead of a live owner.
+        let companion_stopped: bool = transaction.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM runs r
+                 JOIN companion_profiles p ON p.id = COALESCE(
+                     (SELECT c.companion_id FROM conversations c WHERE c.id = r.conversation_id),
+                     (SELECT dc.companion_id FROM digital_colleagues dc
+                      WHERE dc.conversation_id = r.conversation_id AND dc.companion_bound = 1))
+                 WHERE r.id = ?1 AND (p.archived_at IS NOT NULL OR p.deleting_at IS NOT NULL))",
+            [&run_id],
+            |row| row.get(0),
+        )?;
+        if !companion_stopped
+            && ((route == WriterRoute::Kernel && !retired_kernel)
+                || (route == WriterRoute::PiNative && waiting_approval(transaction, &run_id)?))
+        {
             transaction.execute("INSERT INTO fox_restart_protected_runs(run_id) VALUES(?1)", [&run_id])?;
         }
     }

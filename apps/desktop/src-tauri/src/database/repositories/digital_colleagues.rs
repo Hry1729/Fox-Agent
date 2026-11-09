@@ -17,14 +17,41 @@ impl Database {
         &self,
         input: &CreateDigitalColleagueInput,
     ) -> Result<DigitalColleagueRecord, String> {
+        // K2: a contact task is bound before it can ever be dispatched. The
+        // execution conversation is its own (the fixed private chat keeps the
+        // unique companion binding) and runs inside the contact's workspace.
+        let target = match input.companion_id.as_deref() {
+            Some(companion) => Some(self.companion_background_target(companion)?),
+            None => None,
+        };
+        let (project_root, permission_mode, expert_id, project_id) = match &target {
+            Some(target) => (
+                Some(target.workspace_dir.clone()),
+                Some("ask".to_owned()),
+                if input.expert_id.trim().is_empty() {
+                    target.template_agent_id.clone().ok_or_else(|| {
+                        "digital_colleague.companion_unavailable".to_owned()
+                    })?
+                } else {
+                    input.expert_id.clone()
+                },
+                None,
+            ),
+            None => (
+                input.project_root.clone(),
+                input.project_id.clone(),
+                input.expert_id.clone(),
+                input.project_id.clone(),
+            ),
+        };
         let conversation = self.create_conversation(
             self.default_agent_id(),
             Some(&format!("数字同事 · {}", input.name)),
-            input.project_root.as_deref(),
-            input.project_id.as_deref(),
+            project_root.as_deref(),
+            permission_mode.as_deref(),
         )?;
         let binding = self
-            .bind_conversation_expert(&conversation.id, &input.expert_id, "digital_colleague")
+            .bind_conversation_expert(&conversation.id, &expert_id, "digital_colleague")
             .map_err(|error| error.to_string())?;
         if !input.knowledge_references.is_empty() {
             let references = input
@@ -50,20 +77,21 @@ impl Database {
                     id, name, expert_id, expert_binding_id, package_hash, package_snapshot_json,
                     conversation_id, objective, project_id, project_root,
                     knowledge_references_json, status, max_runs_per_day, max_tokens_per_day,
-                    max_duration_ms, max_output_tokens, max_tool_calls, created_at, updated_at
+                    max_duration_ms, max_output_tokens, max_tool_calls, created_at, updated_at,
+                    companion_id, report_conversation_id, companion_bound
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'active',
-                           ?12, ?13, ?14, ?15, ?16, ?17, ?17)",
+                           ?12, ?13, ?14, ?15, ?16, ?17, ?17, ?18, ?19, ?20)",
                 params![
                     id,
                     input.name,
-                    input.expert_id,
+                    expert_id,
                     binding.id,
                     binding.package_hash,
                     package_snapshot_json,
                     conversation.id,
                     input.objective,
-                    input.project_id,
-                    input.project_root,
+                    project_id,
+                    project_root,
                     knowledge_json,
                     input.max_runs_per_day,
                     input.max_tokens_per_day,
@@ -71,6 +99,9 @@ impl Database {
                     input.max_output_tokens,
                     input.max_tool_calls,
                     now,
+                    target.as_ref().map(|target| target.companion_id.clone()),
+                    target.as_ref().map(|target| target.report_conversation_id.clone()),
+                    target.is_some(),
                 ],
             )?;
             append_audit(
@@ -81,7 +112,12 @@ impl Database {
                 "colleague.created",
                 "applied",
                 "user",
-                &json!({ "expertId": input.expert_id, "packageHash": binding.package_hash }),
+                &json!({
+                    "expertId": expert_id,
+                    "packageHash": binding.package_hash,
+                    "companionId": target.as_ref().map(|target| target.companion_id.clone()),
+                    "reportConversationId": target.as_ref().map(|target| target.report_conversation_id.clone()),
+                }),
                 now,
             )?;
             Ok(())
@@ -1070,6 +1106,28 @@ fn admit_trigger_in_transaction(
             details: json!({ "code": "digital_colleague.not_active" }),
         }));
     }
+    // K2: the ownership chain must hold before dispatch. A contact task whose
+    // chain is broken stops with a persisted conclusion instead of falling back
+    // to the unrestricted ordinary conversation path.
+    let background_companion = if colleague.companion_bound {
+        match super::companion_ownership::resolve_conversation_on(
+            transaction,
+            &colleague.conversation_id,
+        ) {
+            Ok(scope) => scope.map(|scope| scope.companion_id),
+            Err(reason) => {
+                let code = super::companion_ownership::OWNERSHIP_MISSING;
+                return Ok(Err(TriggerConclusion {
+                    status: "rejected",
+                    code: code.to_owned(),
+                    message: reason.clone(),
+                    details: json!({ "code": code, "reason": reason }),
+                }));
+            }
+        }
+    } else {
+        None
+    };
     let day_start = now - now.rem_euclid(86_400_000);
     let (runs_today, tokens_today): (i64, i64) = transaction.query_row(
         "SELECT COUNT(*), COALESCE(SUM(total_tokens), 0)
@@ -1115,15 +1173,32 @@ fn admit_trigger_in_transaction(
         .saturating_sub(tokens_today)
         .max(0)
         .min(200_000);
-    let model_max_output = transaction
-        .query_row(
-            "SELECT max_output_tokens FROM model_service
-             WHERE singleton_id = 1 AND enabled = 1",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?
-        .unwrap_or(colleague.max_output_tokens);
+    // K5: the budget uses the same effective model as the request — the
+    // contact's override when it has one, the global singleton otherwise.
+    let companion_max_output = match background_companion.as_deref() {
+        Some(companion) => transaction
+            .query_row(
+                "SELECT m.max_output_tokens FROM companion_profiles cp
+                 JOIN provider_models m ON m.id = cp.model_ref AND m.provider_id = cp.model_provider_id
+                 WHERE cp.id = ?1",
+                [companion],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?,
+        None => None,
+    };
+    let model_max_output = match companion_max_output {
+        Some(value) => value,
+        None => transaction
+            .query_row(
+                "SELECT max_output_tokens FROM model_service
+                 WHERE singleton_id = 1 AND enabled = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(colleague.max_output_tokens),
+    };
     let effective_max_output = colleague
         .max_output_tokens
         .min(remaining_tokens)
@@ -1420,9 +1495,140 @@ pub(super) fn project_digital_colleague_event(
                  WHERE run_id = ?1",
                 params![run_id, status, now],
             )?;
+            report_companion_task_result_in_transaction(transaction, run_id, status, now)?;
         }
         _ => {}
     }
+    Ok(())
+}
+
+/// C03b/K2: a contact task reports its outcome into the contact's fixed private
+/// chat. Both the message id and the ledger row are keyed by the source Run, so
+/// a repeated terminal event or a startup reconciliation delivers it once.
+fn report_companion_task_result_in_transaction(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    outcome: &str,
+    now: i64,
+) -> rusqlite::Result<()> {
+    let delivered: Option<String> = transaction
+        .query_row(
+            "SELECT message_id FROM companion_task_reports WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if delivered.is_some() {
+        return Ok(());
+    }
+    // An unbound colleague, or a chain whose contact/chat is already gone, has
+    // no private chat to report to; execution was gated at admission instead.
+    let link: Option<(String, String, String, String)> = transaction
+        .query_row(
+            "SELECT dc.id, dc.name, dc.companion_id, dc.report_conversation_id
+             FROM digital_colleague_triggers t
+             JOIN digital_colleagues dc ON dc.id = t.colleague_id
+             WHERE t.run_id = ?1 AND dc.companion_bound = 1
+               AND dc.companion_id IS NOT NULL AND dc.report_conversation_id IS NOT NULL",
+            [run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let Some((colleague_id, name, companion_id, report_conversation_id)) = link else {
+        return Ok(());
+    };
+    let answer: Option<String> = transaction
+        .query_row(
+            "SELECT content FROM messages
+             WHERE run_id = ?1 AND role = 'assistant'
+               AND status NOT IN ('streaming', 'superseded')
+             ORDER BY ordinal DESC LIMIT 1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let failure: Option<(Option<String>, Option<String>)> = transaction
+        .query_row(
+            "SELECT error_code, error_message FROM runs WHERE id = ?1",
+            [run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let label = match outcome {
+        "completed" => "已完成",
+        "cancelled" => "已取消",
+        _ => "失败",
+    };
+    let mut body = answer.unwrap_or_default().trim().to_owned();
+    if body.is_empty() {
+        body = match failure {
+            Some((code, message)) => [message.unwrap_or_default(), code.unwrap_or_default()]
+                .into_iter()
+                .filter(|part| !part.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join(" "),
+            None => String::new(),
+        };
+    }
+    if body.chars().count() > 2000 {
+        body = format!("{}…", body.chars().take(2000).collect::<String>());
+    }
+    if body.is_empty() {
+        body = "（本次执行没有产生回复内容）".to_owned();
+    }
+    let content = format!("【后台任务回报】{name}\n状态：{label}\n\n{body}");
+    let message_id = format!("dc-report-{run_id}");
+    let metadata = json!({
+        "reportKind": "digital_colleague_result",
+        "sourceRunId": run_id,
+        "colleagueId": colleague_id,
+        "outcome": outcome,
+    });
+    let ordinal: i64 = transaction.query_row(
+        "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM messages WHERE conversation_id = ?1",
+        [&report_conversation_id],
+        |row| row.get(0),
+    )?;
+    let inserted = transaction.execute(
+        "INSERT OR IGNORE INTO messages(
+            id, conversation_id, role, kind, content, status, ordinal,
+            metadata_json, created_at, updated_at
+         ) VALUES (?1, ?2, 'assistant', 'text', ?3, 'completed', ?4, ?5, ?6, ?6)",
+        params![
+            message_id,
+            report_conversation_id,
+            content,
+            ordinal,
+            metadata.to_string(),
+            now
+        ],
+    )?;
+    if inserted > 0 {
+        super::contact_bubbles::project_message_in_transaction(
+            transaction,
+            &report_conversation_id,
+            &message_id,
+        )?;
+        transaction.execute(
+            "UPDATE conversations SET updated_at = ?2, last_message_at = ?2 WHERE id = ?1",
+            params![report_conversation_id, now],
+        )?;
+    }
+    transaction.execute(
+        "INSERT OR IGNORE INTO companion_task_reports(
+            run_id, colleague_id, companion_id, report_conversation_id,
+            message_id, outcome, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            run_id,
+            colleague_id,
+            companion_id,
+            report_conversation_id,
+            message_id,
+            outcome,
+            now
+        ],
+    )?;
     Ok(())
 }
 
@@ -1443,7 +1649,8 @@ fn colleague_select() -> &'static str {
     "SELECT id, name, expert_id, expert_binding_id, package_hash, package_snapshot_json,
             conversation_id, objective, project_id, project_root, knowledge_references_json,
             status, max_runs_per_day, max_tokens_per_day, max_duration_ms,
-            max_output_tokens, max_tool_calls, created_at, updated_at, revoked_at
+            max_output_tokens, max_tool_calls, created_at, updated_at, revoked_at,
+            companion_id, report_conversation_id, companion_bound
      FROM digital_colleagues"
 }
 
@@ -1488,6 +1695,9 @@ fn map_colleague(row: &rusqlite::Row<'_>) -> rusqlite::Result<DigitalColleagueRe
         created_at: row.get(17)?,
         updated_at: row.get(18)?,
         revoked_at: row.get(19)?,
+        companion_id: row.get(20)?,
+        report_conversation_id: row.get(21)?,
+        companion_bound: row.get::<_, i64>(22)? != 0,
     })
 }
 
@@ -1640,6 +1850,7 @@ fn parse_json_column<T: serde::de::DeserializeOwned>(raw: String) -> rusqlite::R
 mod tests {
     use super::*;
     use crate::database::KnowledgeReference;
+    use crate::database::OWNERSHIP_MISSING;
     use std::path::PathBuf;
 
     fn test_database() -> (Database, PathBuf) {
@@ -1651,21 +1862,26 @@ mod tests {
         )
     }
 
+    fn colleague_input(companion_id: Option<String>) -> CreateDigitalColleagueInput {
+        CreateDigitalColleagueInput {
+            name: "Release guardian".to_owned(),
+            expert_id: "fox-debugger".to_owned(),
+            objective: "Review every release trigger and report evidence.".to_owned(),
+            project_id: None,
+            project_root: None,
+            knowledge_references: Vec::<KnowledgeReference>::new(),
+            max_runs_per_day: 8,
+            max_tokens_per_day: 10_000,
+            max_duration_ms: 60_000,
+            max_output_tokens: 2_000,
+            max_tool_calls: 20,
+            companion_id,
+        }
+    }
+
     fn create_colleague(database: &Database) -> DigitalColleagueRecord {
         database
-            .create_digital_colleague(&CreateDigitalColleagueInput {
-                name: "Release guardian".to_owned(),
-                expert_id: "fox-debugger".to_owned(),
-                objective: "Review every release trigger and report evidence.".to_owned(),
-                project_id: None,
-                project_root: None,
-                knowledge_references: Vec::<KnowledgeReference>::new(),
-                max_runs_per_day: 8,
-                max_tokens_per_day: 10_000,
-                max_duration_ms: 60_000,
-                max_output_tokens: 2_000,
-                max_tool_calls: 20,
-            })
+            .create_digital_colleague(&colleague_input(None))
             .expect("create digital colleague")
     }
 
@@ -3282,5 +3498,426 @@ mod tests {
 
         drop(database);
         let _ = std::fs::remove_file(path);
+    }
+
+    /// K2: the chain contact -> execution conversation -> report chat is
+    /// persisted before dispatch, and every consumer resolves the same contact
+    /// identity through the one entry point.
+    #[test]
+    fn contact_task_binds_the_ownership_chain_before_dispatch() {
+        let (database, path) = test_database();
+        let root = std::env::temp_dir().join(format!("fox-k2-chain-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let contact = database.add_companion(&root, "fox-debugger").expect("add contact");
+        let colleague = database
+            .create_digital_colleague(&colleague_input(Some(contact.profile.id.clone())))
+            .expect("create contact task");
+        assert!(colleague.companion_bound);
+        assert_eq!(colleague.companion_id.as_deref(), Some(contact.profile.id.as_str()));
+        assert_eq!(
+            colleague.report_conversation_id.as_deref(),
+            Some(contact.conversation_id.as_str())
+        );
+        assert_ne!(
+            colleague.conversation_id, contact.conversation_id,
+            "the fixed private chat keeps its unique companion binding"
+        );
+        assert_eq!(
+            colleague.project_root.as_deref(),
+            Some(contact.profile.workspace_dir.as_str()),
+            "a contact task executes inside the contact workspace"
+        );
+
+        let before_dispatch = database
+            .conversation_companion_scope(&colleague.conversation_id)
+            .expect("the chain resolves before any Run exists")
+            .expect("background scope");
+        assert!(before_dispatch.background);
+        assert_eq!(before_dispatch.companion_id, contact.profile.id);
+
+        let accepted = database
+            .accept_digital_colleague_trigger(
+                &colleague.id, "manual", None, "manual:chain", &json!({}), None, "user",
+            )
+            .expect("accept contact task trigger");
+        let run_id = accepted.trigger.run_id.clone().expect("dispatched run");
+        let scope = database
+            .run_companion_scope(&run_id)
+            .expect("resolve run identity")
+            .expect("contact scope");
+        assert_eq!(scope.companion_id, contact.profile.id);
+        assert_eq!(scope.conversation_id, colleague.conversation_id);
+        assert!(scope.background);
+        assert_eq!(
+            scope.report_conversation_id.as_deref(),
+            Some(contact.conversation_id.as_str())
+        );
+        assert_eq!(scope.queue_slot(), (contact.profile.id.clone(), true));
+        for conversation in [&colleague.conversation_id, &contact.conversation_id] {
+            assert_eq!(
+                database
+                    .conversation_companion_id(conversation)
+                    .expect("effective identity")
+                    .as_deref(),
+                Some(contact.profile.id.as_str()),
+                "prompt, notes, directory and grants share one identity"
+            );
+        }
+        assert_eq!(
+            database.companion_background_conversations(&contact.profile.id).unwrap(),
+            vec![colleague.conversation_id.clone()]
+        );
+
+        // K2: the execution conversation carries the task, not an ordinary chat.
+        assert!(
+            !database.list_conversations().unwrap().iter().any(|c| c.id == colleague.conversation_id),
+            "后台执行会话不混入普通对话列表"
+        );
+        assert!(
+            !database.search_conversations("Release guardian", 20).unwrap().iter()
+                .any(|c| c.id == colleague.conversation_id),
+            "私聊搜索不返回后台执行会话"
+        );
+        let hits = database.global_search("Release guardian", 20).unwrap();
+        assert!(
+            !hits.iter().any(|hit| hit.kind == "conversation" && hit.id == colleague.conversation_id),
+            "全局搜索不把后台执行会话当普通对话"
+        );
+        assert!(
+            hits.iter().any(|hit| hit.kind == "digital_colleague" && hit.id == colleague.id),
+            "任务本身仍然可以搜到"
+        );
+        let legacy = create_colleague(&database);
+        assert!(
+            database.list_conversations().unwrap().iter().any(|c| c.id == legacy.conversation_id),
+            "未绑定联系人的旧数字同事会话保持原样"
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// K2: a task marked as background whose chain no longer resolves stops. It
+    /// is never dispatched as an unrestricted ordinary Run.
+    #[test]
+    fn background_task_without_ownership_stops_instead_of_falling_back() {
+        let (database, path) = test_database();
+        let root = std::env::temp_dir().join(format!("fox-k2-broken-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let contact = database.add_companion(&root, "fox-debugger").expect("add contact");
+        let colleague = database
+            .create_digital_colleague(&colleague_input(Some(contact.profile.id.clone())))
+            .expect("create contact task");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE digital_colleagues SET companion_id = NULL WHERE id = ?1",
+                    [&colleague.id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let rejected = database
+            .accept_digital_colleague_trigger(
+                &colleague.id, "manual", None, "manual:broken", &json!({}), None, "user",
+            )
+            .expect_err("a broken chain is a persisted conclusion, not a dispatch");
+        assert_eq!(rejected, OWNERSHIP_MISSING);
+        assert_eq!(
+            conversation_run_count(&database, &colleague.conversation_id),
+            0,
+            "no dispatch without an identity"
+        );
+        assert!(database
+            .list_digital_colleague_triggers(&colleague.id, 100)
+            .unwrap()
+            .is_empty());
+
+        let error = database
+            .conversation_companion_scope(&colleague.conversation_id)
+            .expect_err("a broken chain is an error, not an ordinary conversation");
+        assert!(error.contains(OWNERSHIP_MISSING), "{error}");
+        // Even a Run that already exists in that conversation refuses to start:
+        // the Host resolves the position before queueing it.
+        let stranded = database
+            .create_run(&colleague.conversation_id, "请处理", None)
+            .expect("create run")
+            .run
+            .id;
+        assert!(database.run_companion_slot(&stranded).is_err());
+        assert!(database.run_companion_scope(&stranded).is_err());
+
+        // A legacy colleague that was never bound keeps the ordinary path.
+        let legacy = create_colleague(&database);
+        assert!(!legacy.companion_bound);
+        assert!(database
+            .conversation_companion_scope(&legacy.conversation_id)
+            .expect("legacy resolution")
+            .is_none());
+        let ordinary = database
+            .create_run(&legacy.conversation_id, "请处理", None)
+            .expect("legacy run")
+            .run
+            .id;
+        assert_eq!(database.run_companion_slot(&ordinary).unwrap(), None);
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// K2: the result reaches the fixed private chat with a stable identity tied
+    /// to the source Run, and a recovery delivery adds nothing a second time.
+    #[test]
+    fn contact_task_result_reports_once_into_the_private_chat() {
+        let (database, path) = test_database();
+        let root = std::env::temp_dir().join(format!("fox-k2-report-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let contact = database.add_companion(&root, "fox-debugger").expect("add contact");
+        let colleague = database
+            .create_digital_colleague(&colleague_input(Some(contact.profile.id.clone())))
+            .expect("create contact task");
+        let accepted = database
+            .accept_digital_colleague_trigger(
+                &colleague.id, "manual", None, "manual:report", &json!({}), None, "user",
+            )
+            .expect("accept trigger");
+        let run_id = accepted.trigger.run_id.clone().expect("dispatched run");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO messages(
+                        id, conversation_id, run_id, role, kind, content, status, ordinal,
+                        created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, 'assistant', 'text', '发布检查完成，没有阻塞项。',
+                               'completed', 9, 1, 1)",
+                    params![format!("answer-{run_id}"), colleague.conversation_id, run_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let report_id = format!("dc-report-{run_id}");
+        let count = |sql: &str| {
+            database
+                .with_connection(|connection| {
+                    connection.query_row(sql, [&report_id], |row| row.get::<_, i64>(0))
+                })
+                .unwrap()
+        };
+        assert_eq!(count("SELECT count(*) FROM messages WHERE id = ?1"), 0);
+        complete_trigger(&database, &accepted.trigger);
+        assert_eq!(count("SELECT count(*) FROM messages WHERE id = ?1"), 1);
+        assert_eq!(
+            count("SELECT count(*) FROM contact_bubbles WHERE source_message_id = ?1"),
+            1,
+            "the report is visible in the private chat"
+        );
+        let ledger: (String, String, String, String) = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT colleague_id, companion_id, report_conversation_id, outcome
+                     FROM companion_task_reports WHERE run_id = ?1",
+                    [&run_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+            })
+            .expect("report ledger records the source Run");
+        assert_eq!(ledger.0, colleague.id);
+        assert_eq!(ledger.1, contact.profile.id);
+        assert_eq!(ledger.2, contact.conversation_id);
+        assert_eq!(ledger.3, "completed");
+        let content: String = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT content FROM messages WHERE id = ?1",
+                    [&report_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert!(content.contains(&colleague.name), "{content}");
+        assert!(content.contains("发布检查完成"), "{content}");
+
+        // Recovery delivers the same terminal projection again.
+        database
+            .with_connection(|connection| {
+                let transaction = connection.transaction()?;
+                super::project_digital_colleague_event(
+                    &transaction, &run_id, "run.completed", &json!({}), now_ms(),
+                )?;
+                transaction.commit()
+            })
+            .unwrap();
+        assert_eq!(count("SELECT count(*) FROM messages WHERE id = ?1"), 1);
+        assert_eq!(
+            count("SELECT count(*) FROM contact_bubbles WHERE source_message_id = ?1"),
+            1
+        );
+        assert_eq!(
+            database
+                .with_connection(|connection| connection.query_row(
+                    "SELECT count(*) FROM companion_task_reports WHERE run_id = ?1",
+                    [&run_id],
+                    |row| row.get::<_, i64>(0)
+                ))
+                .unwrap(),
+            1
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// K2/P1: the execution conversation is hidden from the ordinary lists, so
+    /// the background task's pending approval card must load in the contact's
+    /// report chat — with the original Run, tool_call and approval identities,
+    /// so answering it settles the original call.
+    #[test]
+    fn contact_private_chat_loads_the_background_pending_approval() {
+        let (database, path) = test_database();
+        let root = std::env::temp_dir().join(format!("fox-k2-approval-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let contact = database.add_companion(&root, "fox-debugger").expect("add contact");
+        let colleague = database
+            .create_digital_colleague(&colleague_input(Some(contact.profile.id.clone())))
+            .expect("create contact task");
+        let accepted = database
+            .accept_digital_colleague_trigger(
+                &colleague.id, "manual", None, "manual:approval", &json!({}), None, "user",
+            )
+            .expect("accept trigger");
+        let run_id = accepted.trigger.run_id.clone().expect("dispatched run");
+        database
+            .apply_runtime_event(&run_id, 1, &json!({"type":"run.started"}))
+            .expect("start the background run");
+        let tool_call = database
+            .create_host_tool_call(
+                &run_id, "background-approval", "edit_file",
+                &json!({"path":"note.md"}), "pending", true,
+            )
+            .expect("pending background tool call");
+        let approval = database
+            .create_approval(&tool_call.id, "编辑后台文件", &json!({"path":"note.md"}))
+            .expect("create background approval");
+        assert!(
+            !database.list_conversations().unwrap().iter()
+                .any(|summary| summary.id == colleague.conversation_id),
+            "the execution conversation stays hidden from the ordinary list"
+        );
+
+        let detail = database
+            .load_conversation(&contact.conversation_id)
+            .expect("load the private chat");
+        let card = detail.approvals.iter()
+            .find(|item| item.id == approval.id)
+            .expect("the background approval card loads in the report chat");
+        assert_eq!(card.status, "pending");
+        assert_eq!(card.run_id, run_id, "the card keeps the original Run");
+        assert_eq!(card.tool_call_id, tool_call.id, "the card keeps the original tool_call");
+        assert_eq!(card.conversation_id, colleague.conversation_id,
+            "the card keeps the original execution conversation identity");
+
+        let other = database.add_companion(&root, "fox-reviewer").expect("add another contact");
+        assert!(
+            database.load_conversation(&other.conversation_id).unwrap().approvals.iter()
+                .all(|item| item.id != approval.id),
+            "another contact's chat must not see the card"
+        );
+
+        // The answer hits the original call; the settled card leaves the load.
+        database
+            .resolve_approval(&approval.id, crate::database::ApprovalDecision::AllowOnce)
+            .unwrap()
+            .expect("answer from the report chat settles the original approval");
+        let (settled_status, settled_run): (String, String) = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT a.status, t.run_id FROM approvals a
+                     JOIN tool_calls t ON t.id = a.tool_call_id WHERE a.id = ?1",
+                    [&approval.id], |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(settled_status, "approved");
+        assert_eq!(settled_run, run_id, "the decision landed on the original call");
+        assert!(
+            database.load_conversation(&contact.conversation_id).unwrap().approvals.iter()
+                .all(|item| item.id != approval.id),
+            "a settled background card no longer loads as pending"
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// K2: the contact-wide probe sees a background Run even while the private
+    /// chat is idle, an archived contact refuses further execution, and its
+    /// plans stay off when the contact is restored.
+    #[test]
+    fn contact_stop_sweep_covers_background_runs_not_just_the_chat() {
+        let (database, path) = test_database();
+        let root = std::env::temp_dir().join(format!("fox-k2-stop-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let contact = database.add_companion(&root, "fox-debugger").expect("add contact");
+        let colleague = database
+            .create_digital_colleague(&colleague_input(Some(contact.profile.id.clone())))
+            .expect("create contact task");
+        let schedule = database
+            .save_digital_colleague_schedule(None, &colleague.id, "每小时", 3_600, 3_600, true)
+            .expect("enable the contact's plan");
+        assert!(schedule.enabled);
+        let background = database
+            .create_run(&colleague.conversation_id, "请处理", None)
+            .expect("create background run")
+            .run
+            .id;
+        assert!(
+            !database.conversation_has_active_run(&contact.conversation_id).unwrap(),
+            "the private chat itself is idle: the old blind spot"
+        );
+        assert_eq!(
+            database
+                .companion_profile(&contact.profile.id)
+                .unwrap()
+                .active_run_status
+                .as_deref(),
+            Some("queued")
+        );
+        assert_eq!(
+            database.companion_active_run_ids(&contact.profile.id).unwrap(),
+            vec![background.clone()]
+        );
+        assert!(
+            database.archive_companion(&contact.profile.id).is_err(),
+            "a contact with a live background task is not idle"
+        );
+
+        database
+            .apply_runtime_event(&background, 1, &json!({ "type": "run.cancelled" }))
+            .expect("cancel background run");
+        assert!(database.companion_active_run_ids(&contact.profile.id).unwrap().is_empty());
+        database.archive_companion(&contact.profile.id).expect("archive once terminal");
+        assert!(database.ensure_companion_executable(&contact.profile.id).is_err());
+        let error = database
+            .run_companion_scope(&background)
+            .expect_err("an archived contact stops background execution");
+        assert!(error.contains(OWNERSHIP_MISSING), "{error}");
+        let plans = database.list_digital_colleague_schedules(&colleague.id).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert!(!plans[0].enabled, "归档先停止新派发");
+        database.restore_companion(&contact.profile.id).expect("restore contact");
+        assert!(
+            !database.list_digital_colleague_schedules(&colleague.id).unwrap()[0].enabled,
+            "归档恢复不自动启用计划"
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

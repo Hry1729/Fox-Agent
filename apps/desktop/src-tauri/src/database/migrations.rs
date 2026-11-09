@@ -7574,6 +7574,11 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     // per-run capability snapshot. Additive; existing companions get no new
     // capabilities until the user enables them.
     apply_migration(&transaction, COMPANION_TOOL_GRANTS_SCHEMA_VERSION, MIGRATION_110_COMPANION_TOOL_GRANTS, now)?;
+    // v111 (contacts C03b/K2): the background ownership chain and the report
+    // ledger. Existing colleagues stay unbound (companion_bound = 0) and keep
+    // their ordinary execution conversation; only contact tasks resolve a
+    // companion identity.
+    apply_migration(&transaction, COMPANION_BACKGROUND_SCHEMA_VERSION, MIGRATION_111_COMPANION_BACKGROUND, now)?;
     finish_transaction(transaction)
 }
 
@@ -9141,7 +9146,7 @@ mod stage_two_runtime_session_migration_tests {
         // 99 only adds the retired-generation ledger; the v98 mapping itself is
         // unchanged. This test still pins the mapping's version and the
         // database's current version, so a version bump is never silent.
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::COMPANION_TOOL_GRANTS_SCHEMA_VERSION);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::COMPANION_BACKGROUND_SCHEMA_VERSION);
 
         let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
         let columns: Vec<String> = database
@@ -9190,7 +9195,7 @@ mod runtime_session_generation_migration_tests {
             assert!(!upper.contains(forbidden), "the migration must not contain {forbidden}");
         }
         assert_eq!(RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION, 99);
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::COMPANIONS_SCHEMA_VERSION);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::COMPANION_BACKGROUND_SCHEMA_VERSION);
     }
 
     /// A v98 database keeps its single live mapping at generation 1 and gains an
@@ -16851,7 +16856,8 @@ mod delivery_acceptance_migration_tests {
         assert_eq!(CONTACT_BUBBLE_BACKFILLS_SCHEMA_VERSION, 108);
         assert_eq!(COMPANION_MODEL_SCHEMA_VERSION, 109);
         assert_eq!(COMPANION_TOOL_GRANTS_SCHEMA_VERSION, 110);
-        assert_eq!(DATABASE_SCHEMA_VERSION, COMPANION_TOOL_GRANTS_SCHEMA_VERSION);
+        assert_eq!(COMPANION_BACKGROUND_SCHEMA_VERSION, 111);
+        assert_eq!(DATABASE_SCHEMA_VERSION, COMPANION_BACKGROUND_SCHEMA_VERSION);
 
         // The old rows are untouched.
         let title: String = connection
@@ -17156,4 +17162,55 @@ CREATE TABLE companion_tool_grants (
     PRIMARY KEY (companion_id, server_id, tool)
 );
 ALTER TABLE runs ADD COLUMN companion_tools_snapshot TEXT;
+"#;
+
+pub(crate) const COMPANION_BACKGROUND_SCHEMA_VERSION: i64 = 111;
+const _: () = assert!(DATABASE_SCHEMA_VERSION >= COMPANION_BACKGROUND_SCHEMA_VERSION);
+
+/// Background ownership chain and task report ledger (plan C03b/K2).
+///
+/// A contact task keeps its own execution conversation, so the fixed private
+/// chat's unique `conversations.companion_id` binding is untouched. The chain
+/// companion -> execution conversation -> report chat is persisted here before
+/// any dispatch: `companion_bound` marks the task as a contact task once and is
+/// never cleared, so a broken chain stops execution instead of falling back to
+/// the unrestricted ordinary path. `companion_task_reports` keys on the source
+/// Run, which makes result delivery idempotent across restart recovery.
+const MIGRATION_111_COMPANION_BACKGROUND: &str = r#"
+ALTER TABLE digital_colleagues ADD COLUMN companion_id TEXT
+    REFERENCES companion_profiles(id) ON DELETE RESTRICT;
+ALTER TABLE digital_colleagues ADD COLUMN report_conversation_id TEXT
+    REFERENCES conversations(id) ON DELETE SET NULL;
+ALTER TABLE digital_colleagues ADD COLUMN companion_bound INTEGER NOT NULL DEFAULT 0
+    CHECK (companion_bound IN (0, 1));
+CREATE INDEX idx_digital_colleagues_companion
+    ON digital_colleagues(companion_id) WHERE companion_id IS NOT NULL;
+
+CREATE TABLE companion_task_reports (
+    run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    colleague_id TEXT NOT NULL REFERENCES digital_colleagues(id) ON DELETE CASCADE,
+    companion_id TEXT NOT NULL REFERENCES companion_profiles(id) ON DELETE CASCADE,
+    report_conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    message_id TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+DROP TRIGGER memory_companion_notes_owner;
+CREATE TRIGGER memory_companion_notes_owner
+BEFORE INSERT ON memory_entities
+WHEN NEW.scope = 'agent' AND substr(NEW.scope_key, 1, 4) = 'cmp_' AND (
+       NOT EXISTS (SELECT 1 FROM companion_profiles p
+                   WHERE p.id = NEW.scope_key AND p.deleting_at IS NULL)
+    OR (NEW.source_conversation_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM conversations c
+            WHERE c.id = NEW.source_conversation_id AND c.companion_id = NEW.scope_key)
+        AND NOT EXISTS (
+            SELECT 1 FROM digital_colleagues dc
+            WHERE dc.conversation_id = NEW.source_conversation_id
+              AND dc.companion_bound = 1 AND dc.companion_id = NEW.scope_key))
+)
+BEGIN
+    SELECT RAISE(ABORT, 'memory_companion_owner_mismatch');
+END;
 "#;

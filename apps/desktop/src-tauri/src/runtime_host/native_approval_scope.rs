@@ -32,9 +32,9 @@ impl Drop for NativeApprovalRecoveryScope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::{sidecar_sessions, PendingApproval, WorkerHandle};
+    use super::super::{sidecar_sessions, PendingApproval, QueuedRun, WorkerHandle};
     use crate::canonical_json::CanonicalJson;
-    use crate::database::{ApprovalDecision, ChildRunBudget, CreateChildRunInput, CreateDigitalColleagueInput, Database};
+    use crate::database::{ApprovalDecision, ChildRunBudget, CreateChildRunInput, CreateDigitalColleagueInput, Database, OWNERSHIP_MISSING};
     use fox_engine_protocol::{ExecutionAuthority, FrozenPermission, PermissionMode, ResourceExecutor, RunControlBinding, TimeBudgets};
     use rusqlite::params;
     use serde_json::{json, Value};
@@ -118,9 +118,13 @@ mod tests {
         }
 
         fn edit_input(&self, run: &str, call: &str) -> Value {
+            self.edit_input_in(run, call, &self.root.join("project"))
+        }
+
+        fn edit_input_in(&self, run: &str, call: &str, root: &Path) -> Value {
             let path=format!("{call}.txt");
             let before=format!("before-{call}");
-            std::fs::write(self.root.join("project").join(&path),&before).unwrap();
+            std::fs::write(root.join(&path),&before).unwrap();
             let binding=self.database().run_control_binding(run).unwrap().unwrap();
             let cancellation=crate::kernel::CancellationRegistry::default();
             cancellation.register_run(run).unwrap();
@@ -419,7 +423,7 @@ mod tests {
 
         let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {name:"Scoped recovery".into(),expert_id:"fox-debugger".into(),
             objective:"read within the bound MCP scope".into(),project_id:None,project_root:None,knowledge_references:Vec::new(),
-            max_runs_per_day:2,max_tokens_per_day:10_000,max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8}).unwrap();
+            max_runs_per_day:2,max_tokens_per_day:10_000,max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,companion_id:None}).unwrap();
         database.update_conversation_permission_mode(&colleague.conversation_id,"ask").unwrap();
         let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,"native-scope-test",&json!({}),None,"test").unwrap();
         let started=accepted.prepared.expect("digital colleague trigger is admitted").started;
@@ -581,6 +585,456 @@ mod tests {
         assert!(state.worker.as_ref().unwrap().sessions.is_empty());
         assert!(state.cancellation.run_token(&run).is_err());
     }
+
+    /// K2: a background task and the private chat of one contact share a single
+    /// execution position. An answered approval — approved or denied, the Run
+    /// continues either way — is recovered into the contact queue and must not
+    /// execute beside the chat Run that already holds the position.
+    #[test]
+    fn recovered_background_approval_queues_behind_the_contact_foreground_run() {
+        if isolated("runtime_host::native_approval_scope::tests::recovered_background_approval_queues_behind_the_contact_foreground_run") { return; }
+        let app=app();
+        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        fixture.manage(&app);
+        let database=fixture.database();
+        for (decision,expert) in [("approved","fox-debugger"),("denied","fox-reviewer")] {
+            let contact=database.add_companion(&fixture.root,expert).expect("add contact");
+            let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {
+                name:format!("Background {decision}"),expert_id:expert.into(),
+                objective:"report the release evidence".into(),project_id:None,project_root:None,
+                knowledge_references:Vec::new(),max_runs_per_day:2,max_tokens_per_day:10_000,
+                max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,
+                companion_id:Some(contact.profile.id.clone())}).unwrap();
+            let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,
+                &format!("k2-queue-{decision}"),&json!({}),None,"test").unwrap();
+            let background=accepted.prepared.expect("a bound task is admitted").started.run.id;
+            assert_eq!(database.run_companion_slot(&background).unwrap(),
+                Some((contact.profile.id.clone(),true)));
+            let workspace=crate::companion_workspace::repair(database,&fixture.root,&contact.profile.id)
+                .expect("provision the contact workspace");
+            make_native(database,&background,&colleague.conversation_id,Some(&workspace),"legacy");
+            let call=format!("background-{decision}");
+            let input=fixture.edit_input_in(&background,&call,&workspace);
+            let approval_id=approval(database,&background,&call,"edit_file",&input,"tool_execution",decision,false);
+
+            let foreground=database.create_run(&contact.conversation_id,"前台正在执行",None).unwrap().run.id;
+            let session=make_native(database,&foreground,&contact.conversation_id,Some(&workspace),"legacy");
+            {
+                let mut state=fixture.host.state.lock().unwrap();
+                state.worker.as_mut().unwrap().sessions.start(&contact.conversation_id,&session,1,
+                    &foreground,Some((contact.profile.id.as_str(),false))).unwrap();
+            }
+
+            fixture.host.recover_native_approvals_detached().unwrap();
+            fixture.wait(||fixture.host.state.lock().unwrap().worker.as_ref().unwrap()
+                .sessions.by_run(&background).is_some());
+            let settled=|run:&str,call:&str|database.with_connection(|connection|connection.query_row(
+                "SELECT result_json IS NOT NULL FROM kernel_tool_calls WHERE run_id=?1 AND tool_call_id=?2",
+                params![run,call],|row|row.get::<_,bool>(0))).unwrap();
+            {
+                let state=fixture.host.state.lock().unwrap();
+                let worker=state.worker.as_ref().unwrap();
+                let waiting=worker.sessions.by_run(&background).expect("recovered identity");
+                assert!(waiting.waiting,"the background Run yields its position while it queues");
+                assert_eq!(waiting.companion_id.as_deref(),Some(contact.profile.id.as_str()));
+                assert!(waiting.companion_background);
+                assert!(worker.sessions.holds_companion(&contact.profile.id),
+                    "the private chat keeps the contact position");
+                assert!(!worker.sessions.can_admit(&colleague.conversation_id,Some(&contact.profile.id)));
+            }
+            assert!(!settled(&background,&call));
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(!settled(&background,&call),
+                "a recovered background approval must not execute beside the chat Run");
+
+            database.apply_runtime_event(&foreground,1,&json!({"type":"run.completed"})).unwrap();
+            {
+                let mut state=fixture.host.state.lock().unwrap();
+                state.worker.as_mut().unwrap().sessions.finish(&foreground);
+                state.queue_changed.1.notify_all();
+            }
+            fixture.wait(||{
+                if !settled(&background,&call) { return false; }
+                // Recovery commits the result and then settles the Run in a
+                // second transaction; wait for both before asserting.
+                let status:String=database.with_connection(|connection|connection.query_row(
+                    "SELECT status FROM runs WHERE id=?1",[&background],|row|row.get(0))).unwrap();
+                status!="running"
+            });
+            let (body,run_status,run_code):(String,String,Option<String>)=database.with_connection(|connection|connection.query_row(
+                "SELECT k.result_json,r.status,r.error_code FROM kernel_tool_calls k JOIN runs r ON r.id=k.run_id
+                 WHERE k.run_id=?1 AND k.tool_call_id=?2",params![background,call],
+                |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))).unwrap();
+            let result:Value=serde_json::from_str(&body).unwrap();
+            // Recovery settles the call without resuming the model loop, so both
+            // decisions end the same way: a denial fails the tool call, not the Run.
+            assert_eq!(run_status,"interrupted","{decision}");
+            assert_eq!(run_code.as_deref(),Some("runtime.native_approval_recovered"),"{decision}");
+            let target=workspace.join(format!("{call}.txt"));
+            if decision=="denied" {
+                assert_eq!(result["isError"],true,"{result}");
+                assert!(result["error"].as_str().unwrap().contains("denied"),"{result}");
+                assert_eq!(database.get_runtime_tool_call(&background,&call).unwrap().unwrap().status,"failed");
+                assert_eq!(std::fs::read_to_string(&target).unwrap(),format!("before-{call}"),
+                    "a denial fails only the tool call");
+            } else {
+                assert_ne!(result["isError"],true,"{result}");
+                assert_eq!(std::fs::read_to_string(&target).unwrap(),format!("after-{call}"),
+                    "the background Run executes once the contact position is free");
+                let owner:Option<String>=database.with_connection(|connection|connection.query_row(
+                    "SELECT claimed_by_run_id FROM approvals WHERE id=?1",[&approval_id],|row|row.get(0))).unwrap();
+                assert_eq!(owner.as_deref(),Some(background.as_str()));
+            }
+            fixture.wait(||fixture.host.state.lock().unwrap().worker.as_ref().unwrap().sessions.is_empty());
+        }
+    }
+
+    /// K2: the live path. An executing background Run yields the contact position
+    /// when it asks for approval, and the answer — approved or denied, the Run
+    /// continues either way — only takes the position back once the private chat
+    /// Run that claimed it has finished.
+    #[test]
+    fn answered_background_approval_waits_for_the_contact_position() {
+        if isolated("runtime_host::native_approval_scope::tests::answered_background_approval_waits_for_the_contact_position") { return; }
+        let app=app();
+        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        fixture.manage(&app);
+        let database=fixture.database();
+        for (approved,expert) in [(true,"fox-debugger"),(false,"fox-reviewer")] {
+            let contact=database.add_companion(&fixture.root,expert).expect("add contact");
+            let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {
+                name:format!("Live {approved}"),expert_id:expert.into(),
+                objective:"report the release evidence".into(),project_id:None,project_root:None,
+                knowledge_references:Vec::new(),max_runs_per_day:2,max_tokens_per_day:10_000,
+                max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,
+                companion_id:Some(contact.profile.id.clone())}).unwrap();
+            let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,
+                &format!("k2-live-{approved}"),&json!({}),None,"test").unwrap();
+            let background=accepted.prepared.expect("a bound task is admitted").started.run.id;
+            let workspace=crate::companion_workspace::repair(database,&fixture.root,&contact.profile.id)
+                .expect("provision the contact workspace");
+            let background_session=make_native(database,&background,&colleague.conversation_id,Some(&workspace),"legacy");
+            let call=format!("live-{approved}");
+            let input=fixture.edit_input_in(&background,&call,&workspace);
+            let approval_id=approval(database,&background,&call,"edit_file",&input,"tool_execution","pending",false);
+            let foreground=database.create_run(&contact.conversation_id,"前台正在执行",None).unwrap().run.id;
+            let foreground_session=make_native(database,&foreground,&contact.conversation_id,Some(&workspace),"legacy");
+            fixture.host.state.lock().unwrap().worker.as_mut().unwrap().sessions.start(
+                &colleague.conversation_id,&background_session,1,&background,
+                Some((contact.profile.id.as_str(),true))).unwrap();
+
+            let (sender,receiver)=std::sync::mpsc::channel();
+            let (done,answer)=std::sync::mpsc::channel();
+            let waiter={
+                let state=fixture.host.state.clone();
+                let database=database.clone();
+                let run=background.clone();
+                let approval=approval_id.clone();
+                std::thread::spawn(move||{
+                    let _=done.send(super::super::receive_sidecar_run_approval(&database,&state,&run,&approval,&receiver));
+                })
+            };
+            fixture.wait(||fixture.host.state.lock().unwrap().worker.as_ref().unwrap()
+                .sessions.by_run(&background).map(|session|session.waiting).unwrap_or(false));
+            {
+                let state=fixture.host.state.lock().unwrap();
+                let worker=state.worker.as_ref().unwrap();
+                assert!(!worker.sessions.holds_companion(&contact.profile.id),
+                    "asking for approval yields the contact position");
+                assert_eq!(worker.sessions.occupied(),0);
+            }
+            fixture.host.state.lock().unwrap().worker.as_mut().unwrap().sessions.start(
+                &contact.conversation_id,&foreground_session,1,&foreground,
+                Some((contact.profile.id.as_str(),false))).unwrap();
+            sender.send(approved).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(matches!(answer.try_recv(),Err(std::sync::mpsc::TryRecvError::Empty)),
+                "an answered background approval must queue behind the chat Run ({approved})");
+            assert!(fixture.host.state.lock().unwrap().worker.as_ref().unwrap()
+                .sessions.by_run(&background).unwrap().waiting);
+
+            database.apply_runtime_event(&foreground,1,&json!({"type":"run.completed"})).unwrap();
+            {
+                let mut state=fixture.host.state.lock().unwrap();
+                state.worker.as_mut().unwrap().sessions.finish(&foreground);
+                state.queue_changed.1.notify_all();
+            }
+            assert_eq!(answer.recv_timeout(Duration::from_secs(5)).unwrap().unwrap(),approved,
+                "the decision survives the wait");
+            {
+                let state=fixture.host.state.lock().unwrap();
+                let worker=state.worker.as_ref().unwrap();
+                assert!(!worker.sessions.by_run(&background).unwrap().waiting);
+                assert!(worker.sessions.holds_companion(&contact.profile.id));
+            }
+            fixture.host.state.lock().unwrap().worker.as_mut().unwrap().sessions.finish(&background);
+            waiter.join().unwrap();
+        }
+    }
+
+    /// K2/P1: realtime approval events are mirrored into the contact's report
+    /// chat with the original Run/tool_call/approval identities, so the private
+    /// chat sees the pending card without opening the hidden execution chat.
+    #[test]
+    fn background_approval_events_mirror_into_the_report_chat() {
+        use tauri::Listener;
+        let app=app();
+        let database=Database::open(":memory:".into()).unwrap();
+        let root=std::env::temp_dir().join(format!("fox-k2-mirror-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let contact=database.add_companion(&root,"fox-debugger").unwrap();
+        let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {
+            name:"Mirror background".into(),expert_id:"fox-debugger".into(),
+            objective:"report the release evidence".into(),project_id:None,project_root:None,
+            knowledge_references:Vec::new(),max_runs_per_day:2,max_tokens_per_day:10_000,
+            max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,
+            companion_id:Some(contact.profile.id.clone())}).unwrap();
+        let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,
+            "k2-mirror",&json!({}),None,"test").unwrap();
+        let background=accepted.prepared.expect("a bound task is admitted").started.run.id;
+        database.apply_runtime_event(&background,1,&json!({"type":"run.started"})).unwrap();
+        let tool=database.create_host_tool_call(&background,"mirror-call","memory_search",
+            &json!({"query":"mirror"}),"pending",true).unwrap();
+        let approval=database.create_approval(&tool.id,"mirror approval",&json!({"query":"mirror"})).unwrap();
+
+        let mirror=super::super::report_chat_approval_mirror(&database,&approval)
+            .expect("a background approval mirrors into the report chat");
+        assert_eq!(mirror.id,approval.id,"the mirror keeps the original approval id");
+        assert_eq!(mirror.run_id,background,"the mirror keeps the original Run");
+        assert_eq!(mirror.tool_call_id,approval.tool_call_id,"the mirror keeps the original tool_call");
+        assert_eq!(mirror.conversation_id,contact.conversation_id);
+
+        let received=Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink=received.clone();
+        app.listen("fox://approval-requested",move|event|{
+            sink.lock().unwrap().push(event.payload().to_owned());
+        });
+        super::super::emit_approval_event(app.handle(),&database,"fox://approval-requested",&approval).unwrap();
+        let events:Vec<Value>=received.lock().unwrap().iter()
+            .map(|payload|serde_json::from_str(payload).unwrap()).collect();
+        assert_eq!(events.len(),2,"the execution conversation and the report chat both receive the card");
+        for event in &events {
+            assert_eq!(event["id"].as_str().unwrap(),approval.id);
+            assert_eq!(event["runId"].as_str().unwrap(),background);
+            assert_eq!(event["toolCallId"].as_str().unwrap(),approval.tool_call_id);
+        }
+        assert!(events.iter().any(|event|event["conversationId"]==json!(colleague.conversation_id)));
+        assert!(events.iter().any(|event|event["conversationId"]==json!(contact.conversation_id)));
+
+        // The fixed private chat's own approvals are not mirrored anywhere.
+        let foreground=database.create_run(&contact.conversation_id,"前台审批",None).unwrap().run.id;
+        database.apply_runtime_event(&foreground,1,&json!({"type":"run.started"})).unwrap();
+        let foreground_tool=database.create_host_tool_call(&foreground,"mirror-fg","memory_search",
+            &json!({"query":"fg"}),"pending",true).unwrap();
+        let foreground_approval=database.create_approval(&foreground_tool.id,"foreground",&json!({})).unwrap();
+        assert!(super::super::report_chat_approval_mirror(&database,&foreground_approval).is_none());
+
+        let _=std::fs::remove_dir_all(root);
+    }
+
+    /// K2/P2: an answered background approval must not preempt a Run that
+    /// already won dispatch but has not started yet. The answer waits, the
+    /// granted start succeeds (no start failure), and the answer only resumes
+    /// once the contact position is free again.
+    #[test]
+    fn answered_background_approval_cannot_preempt_a_dispatch_reservation() {
+        if isolated("runtime_host::native_approval_scope::tests::answered_background_approval_cannot_preempt_a_dispatch_reservation") { return; }
+        let app=app();
+        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        fixture.manage(&app);
+        let database=fixture.database();
+        let contact=database.add_companion(&fixture.root,"fox-debugger").expect("add contact");
+        let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {
+            name:"Waiting background".into(),expert_id:"fox-debugger".into(),
+            objective:"report the release evidence".into(),project_id:None,project_root:None,
+            knowledge_references:Vec::new(),max_runs_per_day:2,max_tokens_per_day:10_000,
+            max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,
+            companion_id:Some(contact.profile.id.clone())}).unwrap();
+        let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,
+            "k2-dispatch-window",&json!({}),None,"test").unwrap();
+        let background=accepted.prepared.expect("a bound task is admitted").started.run.id;
+        let workspace=crate::companion_workspace::repair(database,&fixture.root,&contact.profile.id)
+            .expect("provision the contact workspace");
+        let background_session=make_native(database,&background,&colleague.conversation_id,Some(&workspace),"legacy");
+        let input=fixture.edit_input_in(&background,"window",&workspace);
+        let approval_id=approval(database,&background,"window","edit_file",&input,"tool_execution","pending",false);
+        fixture.host.state.lock().unwrap().worker.as_mut().unwrap().sessions.start(
+            &colleague.conversation_id,&background_session,1,&background,
+            Some((contact.profile.id.as_str(),true))).unwrap();
+
+        // A second task of the same contact wins dispatch but has not started.
+        let granted_colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {
+            name:"Granted background".into(),expert_id:"fox-debugger".into(),
+            objective:"report the release evidence".into(),project_id:None,project_root:None,
+            knowledge_references:Vec::new(),max_runs_per_day:2,max_tokens_per_day:10_000,
+            max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,
+            companion_id:Some(contact.profile.id.clone())}).unwrap();
+        let granted=database.create_run(&granted_colleague.conversation_id,"已派发未启动",None).unwrap().run.id;
+        let granted_session=make_native(database,&granted,&granted_colleague.conversation_id,Some(&workspace),"legacy");
+        {
+            let mut state=fixture.host.state.lock().unwrap();
+            state.dispatching_runs.insert(granted.clone(),super::super::DispatchReservation {
+                conversation_id:granted_colleague.conversation_id.clone(),
+                companion_id:Some(contact.profile.id.clone()),
+            });
+        }
+
+        let (sender,receiver)=std::sync::mpsc::channel();
+        let (done,answer)=std::sync::mpsc::channel();
+        let waiter={
+            let state=fixture.host.state.clone();
+            let database=database.clone();
+            let run=background.clone();
+            let approval=approval_id.clone();
+            std::thread::spawn(move||{
+                let _=done.send(super::super::receive_sidecar_run_approval(&database,&state,&run,&approval,&receiver));
+            })
+        };
+        fixture.wait(||fixture.host.state.lock().unwrap().worker.as_ref().unwrap()
+            .sessions.by_run(&background).map(|session|session.waiting).unwrap_or(false));
+        sender.send(true).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(matches!(answer.try_recv(),Err(std::sync::mpsc::TryRecvError::Empty)),
+            "the answer must wait for the dispatch reservation");
+        assert!(fixture.host.state.lock().unwrap().worker.as_ref().unwrap()
+            .sessions.by_run(&background).unwrap().waiting);
+
+        // The granted Run starts without a start failure while the answer waits.
+        fixture.host.state.lock().unwrap().worker.as_mut().unwrap().sessions.start(
+            &granted_colleague.conversation_id,&granted_session,1,&granted,
+            Some((contact.profile.id.as_str(),true)))
+            .expect("the dispatch reservation keeps its start admissible");
+        {
+            let mut state=fixture.host.state.lock().unwrap();
+            state.dispatching_runs.remove(&granted);
+            state.queue_changed.1.notify_all();
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(matches!(answer.try_recv(),Err(std::sync::mpsc::TryRecvError::Empty)),
+            "the started contact Run keeps the position");
+        assert!(fixture.host.state.lock().unwrap().worker.as_ref().unwrap()
+            .sessions.by_run(&background).unwrap().waiting);
+
+        database.apply_runtime_event(&granted,1,&json!({"type":"run.completed"})).unwrap();
+        {
+            let mut state=fixture.host.state.lock().unwrap();
+            state.worker.as_mut().unwrap().sessions.finish(&granted);
+            state.queue_changed.1.notify_all();
+        }
+        assert_eq!(answer.recv_timeout(Duration::from_secs(5)).unwrap().unwrap(),true,
+            "the decision survives the wait");
+        fixture.wait(||fixture.host.state.lock().unwrap().worker.as_ref().unwrap()
+            .sessions.by_run(&background).map(|session|!session.waiting).unwrap_or(false));
+        fixture.host.state.lock().unwrap().worker.as_mut().unwrap().sessions.finish(&background);
+        waiter.join().unwrap();
+    }
+
+    /// K2: archiving a contact stops its whole serial range, not just the fixed
+    /// chat. The queued background task is cancelled, the sweep refuses new
+    /// dispatch while it drains, and a later occurrence stops instead of
+    /// falling back to the ordinary path.
+    #[test]
+    fn archiving_a_contact_stops_its_queued_background_task() {
+        if isolated("runtime_host::native_approval_scope::tests::archiving_a_contact_stops_its_queued_background_task") { return; }
+        let app=app();
+        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        fixture.manage(&app);
+        let database=fixture.database();
+        let contact=database.add_companion(&fixture.root,"fox-debugger").unwrap();
+        let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {
+            name:"Queued background".into(),expert_id:"fox-debugger".into(),
+            objective:"report the release evidence".into(),project_id:None,project_root:None,
+            knowledge_references:Vec::new(),max_runs_per_day:4,max_tokens_per_day:10_000,
+            max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,
+            companion_id:Some(contact.profile.id.clone())}).unwrap();
+        let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,
+            "k2-archive",&json!({}),None,"test").unwrap();
+        let started=accepted.prepared.expect("a bound task is admitted").started;
+        let background=started.run.id.clone();
+        {
+            let mut state=fixture.host.state.lock().unwrap();
+            state.queued_runs.push_back(QueuedRun {started:started.clone(),text:"请处理".into(),
+                attachments:Vec::new(),companion:Some((contact.profile.id.clone(),true))});
+        }
+
+        fixture.host.begin_companion_stop(&contact.profile.id).unwrap();
+        fixture.host.dispatch_next_queued_run();
+        {
+            let state=fixture.host.state.lock().unwrap();
+            assert!(state.queued_runs.iter().any(|queued|queued.started.run.id==background),
+                "the sweep refuses new dispatch for this contact");
+            assert!(state.dispatching_runs.is_empty());
+            assert!(state.worker.as_ref().unwrap().sessions.is_empty());
+        }
+        fixture.host.end_companion_stop(&contact.profile.id);
+
+        let archived=fixture.host.archive_companion(&contact.profile.id).expect("archive once every Run is terminal");
+        assert!(archived.profile.archived_at.is_some());
+        assert!(fixture.host.state.lock().unwrap().queued_runs.is_empty());
+        assert!(fixture.host.state.lock().unwrap().stopping_companions.is_empty());
+        let status:String=database.with_connection(|connection|connection.query_row(
+            "SELECT status FROM runs WHERE id=?1",[&background],|row|row.get(0))).unwrap();
+        assert_eq!(status,"cancelled");
+        let report:(String,String)=database.with_connection(|connection|connection.query_row(
+            "SELECT outcome,message_id FROM companion_task_reports WHERE run_id=?1",[&background],
+            |row|Ok((row.get(0)?,row.get(1)?)))).expect("the stopped task still reports into the private chat");
+        assert_eq!(report,(String::from("cancelled"),format!("dc-report-{background}")));
+        assert!(database.ensure_companion_executable(&contact.profile.id).is_err());
+        let rejected=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,
+            "k2-after-archive",&json!({}),None,"test").unwrap_err();
+        assert_eq!(rejected,OWNERSHIP_MISSING);
+    }
+
+    /// K2: a previous process leaves a background Run parked on a pending
+    /// approval — restart protection keeps it recoverable, so this process has
+    /// no live owner to cancel. The stop sweep settles it, ends the approval and
+    /// still reports the outcome into the private chat exactly once.
+    #[test]
+    fn archiving_a_contact_settles_an_orphaned_background_approval() {
+        if isolated("runtime_host::native_approval_scope::tests::archiving_a_contact_settles_an_orphaned_background_approval") { return; }
+        let app=app();
+        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        fixture.manage(&app);
+        let database=fixture.database();
+        let contact=database.add_companion(&fixture.root,"fox-debugger").unwrap();
+        let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {
+            name:"Orphaned background".into(),expert_id:"fox-debugger".into(),
+            objective:"report the release evidence".into(),project_id:None,project_root:None,
+            knowledge_references:Vec::new(),max_runs_per_day:4,max_tokens_per_day:10_000,
+            max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,
+            companion_id:Some(contact.profile.id.clone())}).unwrap();
+        let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,
+            "k2-orphan",&json!({}),None,"test").unwrap();
+        let background=accepted.prepared.expect("a bound task is admitted").started.run.id;
+        let workspace=crate::companion_workspace::repair(database,&fixture.root,&contact.profile.id).unwrap();
+        make_native(database,&background,&colleague.conversation_id,Some(&workspace),"legacy");
+        let input=fixture.edit_input_in(&background,"orphan",&workspace);
+        let approval_id=approval(database,&background,"orphan","edit_file",&input,"tool_execution","pending",false);
+        assert!(fixture.host.state.lock().unwrap().worker.as_ref().unwrap().sessions.is_empty(),
+            "the Run is exactly what a restart leaves behind: no live owner");
+        assert_eq!(database.companion_active_run_ids(&contact.profile.id).unwrap(),
+            vec![background.clone()]);
+
+        let archived=fixture.host.archive_companion(&contact.profile.id)
+            .expect("the sweep settles a Run no process owns");
+        assert!(archived.profile.archived_at.is_some());
+        let (status,code):(String,Option<String>)=database.with_connection(|connection|connection.query_row(
+            "SELECT status,error_code FROM runs WHERE id=?1",[&background],
+            |row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
+        assert_eq!(status,"interrupted");
+        assert_eq!(code.as_deref(),Some("companion.stopping"));
+        let pending:i64=database.with_connection(|connection|connection.query_row(
+            "SELECT COUNT(*) FROM approvals WHERE id=?1 AND status='pending'",[&approval_id],
+            |row|row.get(0))).unwrap();
+        assert_eq!(pending,0,"the waiting approval settles with its Run");
+        let report:(String,String)=database.with_connection(|connection|connection.query_row(
+            "SELECT outcome,message_id FROM companion_task_reports WHERE run_id=?1",[&background],
+            |row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
+        // An interrupted task is a failed occurrence, the same outcome the
+        // trigger ledger records for it.
+        assert_eq!(report,(String::from("failed"),format!("dc-report-{background}")));
+        assert!(fixture.host.state.lock().unwrap().stopping_companions.is_empty());
+    }
 }
 
 impl RuntimeHost {
@@ -595,6 +1049,10 @@ impl RuntimeHost {
             || recorded.as_deref() != Some(mapping.runtime_session_id.as_str()) {
             return Err("native recovery cannot adopt a terminal Run or a retired session".into());
         }
+        // K2: a restart-recovered approval re-enters the same contact queue.
+        // The reservation takes the identity first; the execution position is
+        // only granted once the contact is free (see SidecarExecutionWait).
+        let companion_slot = self.database.run_companion_slot(run)?;
         let mut scoped_host = self.clone();
         if let Some(child) = self.database.child_run(run)? {
             let parent_conversation = self.database.authoritative_run_conversation_id(&child.parent_run_id).map_err(|error| error.to_string())?;
@@ -619,7 +1077,13 @@ impl RuntimeHost {
             let session_lease = if worker.session_leases.contains_key(&binding.conversation_id) { None } else {
                 Some(KernelRunLock::acquire(&self.sessions_dir, &format!("native-session:{}", binding.conversation_id))?)
             };
-            worker.sessions.reserve_waiting(&binding.conversation_id, &mapping.runtime_session_id, mapping.context_generation, run)?;
+            worker.sessions.reserve_waiting(
+                &binding.conversation_id,
+                &mapping.runtime_session_id,
+                mapping.context_generation,
+                run,
+                companion_slot.as_ref().map(|(id, background)| (id.as_str(), *background)),
+            )?;
             if let Err(error) = state.cancellation.register_run(run) {
                 let worker = state.worker.as_mut().unwrap();
                 worker.sessions.finish(run);

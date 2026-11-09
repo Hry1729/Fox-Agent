@@ -145,13 +145,30 @@ pub(crate) fn check_run_tool(
     input: Option<&serde_json::Value>,
     suggest_import: Option<&dyn Fn(&str, &Path)>,
 ) -> Result<(), (&'static str, String)> {
-    let profile: Option<(String, String)> = database.with_connection(|db| {
-        use rusqlite::OptionalExtension;
-        db.query_row("SELECT c.companion_id,c.project_root FROM runs r JOIN conversations c ON c.id=r.conversation_id
-            WHERE r.id=?1 AND c.companion_id IS NOT NULL", [run], |row| Ok((row.get(0)?, row.get(1)?))).optional()
-    }).map_err(|e| ("companion.workspace_unavailable", e))?;
-    let Some((id, project_root)) = profile else {
+    // K2: one identity entry point for the private chat and background tasks.
+    // A contact task with a broken ownership chain stops here instead of
+    // returning Ok(()) like an ordinary conversation.
+    let scope = database
+        .run_companion_scope(run)
+        .map_err(|message| (crate::database::OWNERSHIP_MISSING, message))?;
+    let Some(scope) = scope else {
         return Ok(());
+    };
+    let id = scope.companion_id;
+    let project_root: Option<String> = database
+        .with_connection(|db| {
+            db.query_row(
+                "SELECT project_root FROM conversations WHERE id=?1",
+                [&scope.conversation_id],
+                |row| row.get(0),
+            )
+        })
+        .map_err(|e| ("companion.workspace_unavailable", e))?;
+    let Some(project_root) = project_root else {
+        return Err((
+            "companion.workspace_unavailable",
+            "私聊的项目目录与联系人不符".into(),
+        ));
     };
     // C02/K4: beyond the base file/note whitelist, a tool is callable only
     // when the companion granted it, the run's frozen snapshot contains it,

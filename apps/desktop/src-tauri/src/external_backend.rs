@@ -97,7 +97,7 @@ impl ExternalSink for DesktopSink {
         }
         let approval = self.database.create_approval(&tool.id, &summary, &request)?;
         let _ = self.emit(run_id, conversation_id, json!({ "type": "run.waiting_approval", "approvalId": approval.id, "toolCallId": key }));
-        let _ = self.app.emit("fox://approval-requested", &approval);
+        let _ = crate::runtime_host::emit_approval_event(&self.app, &self.database, "fox://approval-requested", &approval);
         Ok(approval.id)
     }
 
@@ -547,7 +547,7 @@ impl ExternalBackendHost {
         };
         if resolved.tool_name == "web_search" {
             // Fox executes bridge searches and consumes the recorded decision itself.
-            let _ = self.app.emit("fox://approval-resolved", &resolved);
+            let _ = crate::runtime_host::emit_approval_event(&self.app, &self.database, "fox://approval-resolved", &resolved);
             return ApiResponse::success(true);
         }
         let approved = resolved.status == "approved";
@@ -584,7 +584,7 @@ impl ExternalBackendHost {
                 let _ = self.database.complete_host_tool_call(&resolved.run_id, &key, Some(&result), Some(message));
             }
         }
-        let _ = self.app.emit("fox://approval-resolved", &resolved);
+        let _ = crate::runtime_host::emit_approval_event(&self.app, &self.database, "fox://approval-resolved", &resolved);
         ApiResponse::success(true)
     }
 
