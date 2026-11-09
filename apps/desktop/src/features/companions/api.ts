@@ -70,6 +70,15 @@ export interface CompanionNotes {
 export type CompanionGrant = { id: string; projectId: string; projectName: string; grantedAt: number }
 export type RetainedWorkspace = { companionId: string; displayName: string; workspacePath: string }
 
+export type WebCapability = { tool: string; granted: boolean }
+export type ConnectorTool = { name: string; granted: boolean }
+export type ConnectorCapability = {
+  serverId: string; name: string; transport: string; enabled: boolean;
+  status: string; lastError: string | null; tools: ConnectorTool[]
+}
+export type CompanionCapabilities = { web: WebCapability[]; connectors: ConnectorCapability[] }
+export const WEB_SERVER_ID = '@web'
+
 export const direct = <T>(name: string, args?: Record<string, unknown>) => command<T>(name, args, true)
 export const contacts = {
   list: () => command<CompanionsList>('companions_list'),
@@ -77,6 +86,8 @@ export const contacts = {
   add: (expertId: string) => command<Companion>('companion_add_from_expert', { expertId }),
   profile: (companionId: string, edit: Partial<Pick<Companion, 'displayName' | 'avatarRef' | 'duty' | 'personaOverride'>>) => command<Companion>('companion_update_profile', { companionId, ...edit }),
   setModel: (companionId: string, providerId: string | null, modelRef: string | null) => command<Companion>('companion_set_model', { companionId, providerId, modelRef }),
+  capabilities: (companionId: string) => command<CompanionCapabilities>('companion_capabilities_get', { companionId }),
+  setCapability: (companionId: string, serverId: string, tool: string, granted: boolean) => command<void>('companion_capability_set', { companionId, serverId, tool, granted }),
   pin: (companionId: string, pinned: boolean) => command<Companion>('companion_set_pinned', { companionId, pinned }),
   markRead: (companionId: string, ordinal: number) => command<Companion>('companion_mark_read', { companionId, ordinal }),
   archive: (companionId: string) => command<Companion>('companion_archive', { companionId }),
