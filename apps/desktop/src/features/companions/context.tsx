@@ -30,6 +30,13 @@ export function useContactList(enabled: boolean) {
   return { list, refresh, error }
 }
 
+export interface ContactLocateRequest {
+  /** K1 stable bubble id (a user bubble's id is its message id). */
+  id: string
+  /** Changes on every request so repeats retrigger the locate effect. */
+  key: number
+}
+
 export interface ContactsContextValue extends ReturnType<typeof useContactList> {
   current: Companion | undefined
   privateChat: boolean
@@ -44,6 +51,9 @@ export interface ContactsContextValue extends ReturnType<typeof useContactList> 
   add: () => void
   leave: (contact: Companion) => void
   refreshConversation: () => Promise<void>
+  /** C05: jump from the profile's file list back to the source message. */
+  locateRequest?: ContactLocateRequest | null
+  jumpToMessage?: (bubbleId: string) => void
 }
 
 export const ContactsContext = createContext<ContactsContextValue | null>(null)

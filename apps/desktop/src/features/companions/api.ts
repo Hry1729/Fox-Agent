@@ -79,6 +79,21 @@ export type ConnectorCapability = {
 export type CompanionCapabilities = { web: WebCapability[]; connectors: ConnectorCapability[] }
 export const WEB_SERVER_ID = '@web'
 
+export type CompanionFileSource = { bubbleId: string; messageId: string; at: number }
+export type CompanionFileEntry = {
+  kind: 'attachment' | 'artifact'
+  id: string
+  name: string
+  updatedAt: number
+  byteSize: number
+  mediaType: string | null
+  origin: 'chat' | 'task'
+  taskName: string | null
+  source: CompanionFileSource | null
+  missing: boolean
+}
+export type CompanionFiles = { provided: CompanionFileEntry[]; generated: CompanionFileEntry[] }
+
 export const direct = <T>(name: string, args?: Record<string, unknown>) => command<T>(name, args, true)
 export const contacts = {
   list: () => command<CompanionsList>('companions_list'),
@@ -88,6 +103,9 @@ export const contacts = {
   setModel: (companionId: string, providerId: string | null, modelRef: string | null) => command<Companion>('companion_set_model', { companionId, providerId, modelRef }),
   capabilities: (companionId: string) => command<CompanionCapabilities>('companion_capabilities_get', { companionId }),
   setCapability: (companionId: string, serverId: string, tool: string, granted: boolean) => command<void>('companion_capability_set', { companionId, serverId, tool, granted }),
+  files: (companionId: string) => command<CompanionFiles>('companion_files_list', { companionId }),
+  openFile: (companionId: string, kind: CompanionFileEntry['kind'], fileId: string) => command<void>('companion_file_open', { companionId, kind, fileId }),
+  saveFile: (companionId: string, kind: CompanionFileEntry['kind'], fileId: string) => command<string | null>('companion_file_save', { companionId, kind, fileId }),
   pin: (companionId: string, pinned: boolean) => command<Companion>('companion_set_pinned', { companionId, pinned }),
   markRead: (companionId: string, ordinal: number) => command<Companion>('companion_mark_read', { companionId, ordinal }),
   archive: (companionId: string) => command<Companion>('companion_archive', { companionId }),

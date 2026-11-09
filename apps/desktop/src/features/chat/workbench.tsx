@@ -1,5 +1,5 @@
 import { ImportSuggestion, ProjectGrantPrompt, WriteCallsContext } from '@/features/companions/chat-cards'
-import { ContactsContext, useContactList, useReadCursor } from '@/features/companions/context'
+import { ContactsContext, useContactList, useReadCursor, type ContactLocateRequest } from '@/features/companions/context'
 import { ContactTopbar, ContactRepairBanner } from '@/features/companions/chat-controls'
 import { ContactWorkStatus } from '@/features/companions/chat-status'
 import type { Companion } from '@/features/companions/api'
@@ -302,6 +302,7 @@ export function Workbench() {
     return () => query.removeEventListener('change', sync)
   }, [])
   const [rightMode, setRightMode] = useState<RightMode | null>(readStoredRightMode)
+  const [contactLocateRequest, setContactLocateRequest] = useState<ContactLocateRequest | null>(null)
   const [openRightTabs, setOpenRightTabs] = useState<RightMode[]>(readStoredRightTabs)
   const [openFileTabs, setOpenFileTabs] = useState<OpenFileTab[]>([])
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null)
@@ -1739,6 +1740,11 @@ export function Workbench() {
   })
   const addContact = useStableCallback(() => navigate('agents'))
   const showContactProfile = useStableCallback(() => selectRightMode('companion'))
+  const jumpToMessage = useStableCallback((bubbleId: string) => {
+    closeRightMode('companion')
+    if (compactLayout) setCompactRightOpen(false)
+    setContactLocateRequest({ id: bubbleId, key: Date.now() })
+  })
   const leaveContact = useStableCallback((item: Companion) => {
     if (desktopConversation.selectedConversationId === item.conversationId) handleNewChat()
   })
@@ -1754,11 +1760,13 @@ export function Workbench() {
   })
   const contactModel = modelService.service?.modelId || '尚未配置'
   const contactPermission = desktopConversation.detail?.conversation.permissionMode ?? 'ask'
+  useEffect(() => { setContactLocateRequest(null) }, [desktopConversation.selectedConversationId])
   const contactsContext = useMemo(() => ({
     model:contactModel,permission:contactPermission,setPermission:handleComposerPermissionModeChange,openSharedMemory,askToOrganize,
     ...contactList,current:contact,privateChat,projects,open:openContact,add:addContact,
     showProfile:showContactProfile,leave:leaveContact,refreshConversation:refreshContactConversation,
-  }), [contactList.list,contactList.refresh,contactList.error,contactModel,contactPermission,handleComposerPermissionModeChange,openSharedMemory,askToOrganize,contact,privateChat,projects,openContact,addContact,showContactProfile,leaveContact,refreshContactConversation])
+    locateRequest:contactLocateRequest,jumpToMessage,
+  }), [contactList.list,contactList.refresh,contactList.error,contactModel,contactPermission,handleComposerPermissionModeChange,openSharedMemory,askToOrganize,contact,privateChat,projects,openContact,addContact,showContactProfile,leaveContact,refreshContactConversation,contactLocateRequest,jumpToMessage])
   if (activeView === 'onboarding') return <Suspense fallback={<div className="fox-app-loading" role="status" aria-label="正在加载引导页" />}><OnboardingPage dark={dark} navigate={navigate} onExit={finishOnboarding} /></Suspense>
 
   return (

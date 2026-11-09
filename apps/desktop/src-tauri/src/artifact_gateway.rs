@@ -50,7 +50,7 @@ pub(crate) struct ArtifactGatewayError {
 }
 
 impl ArtifactGatewayError {
-    fn new(code: &'static str, message: impl Into<String>, retryable: bool) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>, retryable: bool) -> Self {
         Self {
             code,
             message: message.into(),
@@ -146,10 +146,24 @@ pub(crate) fn inspect(
     state: &AppState,
     request: &ArtifactRequest,
 ) -> Result<ArtifactInspectResponse, ArtifactGatewayError> {
-    let record = load_record(state, &request.conversation_id, &request.artifact_id)?;
-    let roots = authorized_roots(state, &request.conversation_id)?;
+    let record = load_record(&state.database, &request.conversation_id, &request.artifact_id)?;
+    let roots = authorized_roots(&state.database, &state.data_dir, &request.conversation_id)?;
     let path = validate_record(&record, &roots)?;
     Ok(inspect_record(&record, &path))
+}
+
+/// C05: the validated on-disk path of one conversation-scoped artifact, for
+/// callers that already verified the companion ownership chain and only need
+/// the file (e.g. save-as). Same record, root and integrity checks as `action`.
+pub(crate) fn validated_path(
+    database: &crate::database::Database,
+    data_dir: &Path,
+    conversation_id: &str,
+    artifact_id: &str,
+) -> Result<PathBuf, ArtifactGatewayError> {
+    let record = load_record(database, conversation_id, artifact_id)?;
+    let roots = authorized_roots(database, data_dir, conversation_id)?;
+    validate_record(&record, &roots)
 }
 
 pub(crate) fn action(
@@ -168,8 +182,8 @@ pub(crate) fn action(
         ));
     }
 
-    let record = load_record(state, &request.conversation_id, &request.artifact_id)?;
-    let roots = authorized_roots(state, &request.conversation_id)?;
+    let record = load_record(&state.database, &request.conversation_id, &request.artifact_id)?;
+    let roots = authorized_roots(&state.database, &state.data_dir, &request.conversation_id)?;
     let path = validate_record(&record, &roots)?;
     let inspected = inspect_record(&record, &path);
 
@@ -293,12 +307,11 @@ pub(crate) fn system_file_action(
 }
 
 fn load_record(
-    state: &AppState,
+    database: &crate::database::Database,
     conversation_id: &str,
     artifact_id: &str,
 ) -> Result<ArtifactRecord, ArtifactGatewayError> {
-    state
-        .database
+    database
         .artifact_for_conversation(conversation_id, artifact_id)
         .map_err(|error| {
             ArtifactGatewayError::new(
@@ -313,12 +326,12 @@ fn load_record(
 }
 
 fn authorized_roots(
-    state: &AppState,
+    database: &crate::database::Database,
+    data_dir: &Path,
     conversation_id: &str,
 ) -> Result<Vec<PathBuf>, ArtifactGatewayError> {
     let mut roots = Vec::new();
-    if let Some(project_root) = state
-        .database
+    if let Some(project_root) = database
         .conversation_project_root(conversation_id)
         .map_err(|error| {
             ArtifactGatewayError::new(
@@ -342,14 +355,14 @@ fn authorized_roots(
         }
     }
 
-    if let Some(root)=crate::runtime_host::attachment_compute::authorized_artifact_root(&state.data_dir.join("runtime-sessions"),conversation_id)
+    if let Some(root)=crate::runtime_host::attachment_compute::authorized_artifact_root(&data_dir.join("runtime-sessions"),conversation_id)
         .map_err(|e|ArtifactGatewayError::new("artifact.path_denied",e,false))? { roots.push(root); }
     // Host-private rendered previews. They are opened through the result's own
     // preview entry rather than listed as deliverables, so the gateway must be
     // able to resolve them — but only inside this conversation's own preview
     // folder, never any other application data.
     if let Some(root) =
-        crate::runtime_host::artifact_store::existing_preview_root(&state.data_dir, conversation_id)
+        crate::runtime_host::artifact_store::existing_preview_root(data_dir, conversation_id)
     {
         roots.push(root);
     }

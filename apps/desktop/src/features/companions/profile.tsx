@@ -6,6 +6,7 @@ import { desktopClient, desktopErrorDetails } from '@/features/conversations/api
 import type { ProjectFileEntry } from '@/features/conversations/model/types'
 import { contacts, direct, type Companion, type CompanionGrant, type RetainedWorkspace, type TemplateStatus } from './api'
 import { ContactCapabilities } from './capabilities'
+import { ContactFiles } from './files'
 import { showContactError, useContacts } from './context'
 import { ContactDelete } from './delete'
 import { ContactModelSelect } from './model-select'
@@ -38,6 +39,7 @@ export function ContactProfile({ contact }: { contact: Companion }) {
   const [deleting, setDeleting] = useState(false)
   const [tab, setTab] = useState<'profile' | 'notes'>('profile')
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false)
+  const [libraryOpen, setLibraryOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [files, setFiles] = useState<ProjectFileEntry[]>([])
   const [filesOpen, setFilesOpen] = useState(false)
@@ -56,9 +58,9 @@ export function ContactProfile({ contact }: { contact: Companion }) {
     if (adopt) await ctx?.refreshConversation()
   }
   return <div className="fox-contact-panel"><div className="fox-contact-actions" role="group" aria-label="资料分类">
-    <Button size="sm" variant={tab === 'profile' ? 'secondary' : 'ghost'} onClick={() => { setTab('profile'); setCapabilitiesOpen(false) }}>资料</Button>
+    <Button size="sm" variant={tab === 'profile' ? 'secondary' : 'ghost'} onClick={() => { setTab('profile'); setCapabilitiesOpen(false); setLibraryOpen(false) }}>资料</Button>
     <Button size="sm" variant={tab === 'notes' ? 'secondary' : 'ghost'} onClick={() => setTab('notes')}>笔记</Button></div>
-    {tab === 'notes' ? <ContactNotes contact={contact} /> : capabilitiesOpen ? <ContactCapabilities contact={contact} onBack={() => setCapabilitiesOpen(false)} /> : <>
+    {tab === 'notes' ? <ContactNotes contact={contact} /> : capabilitiesOpen ? <ContactCapabilities contact={contact} onBack={() => setCapabilitiesOpen(false)} /> : libraryOpen ? <ContactFiles contact={contact} onBack={() => setLibraryOpen(false)} /> : <>
       <form className="fox-contact-section" onSubmit={e => { e.preventDefault(); void run(async () => { await contacts.profile(contact.id, { displayName: name, avatarRef: avatar, duty, personaOverride: persona }); toast.success('已保存联系人资料') }) }}>
         <label>名字<input value={name} required maxLength={40} onChange={e => setName(e.target.value)} /></label>
         <label>头像<input value={avatar} onChange={e => setAvatar(e.target.value)} placeholder="输入表情或头像资源路径" /></label>
@@ -76,7 +78,8 @@ export function ContactProfile({ contact }: { contact: Companion }) {
       <SettingsGroup title="对话设置"><SettingsRow title="模型"><ContactModelSelect contact={contact} /></SettingsRow>
         <SettingsRow title="权限"><select aria-label="私聊权限" value={ctx?.permission ?? 'ask'} onChange={e => ctx?.setPermission(e.target.value as 'read_only' | 'ask' | 'allow')}><option value="read_only">只读</option><option value="ask">询问</option><option value="allow">自动</option></select></SettingsRow>
         <SettingsRow title="共享记忆"><Button size="sm" variant="ghost" onClick={ctx?.openSharedMemory}>查看共享记忆</Button></SettingsRow>
-        <SettingsRow title="可用能力" description="网页搜索、读取网页和连接器工具"><Button size="sm" variant="ghost" onClick={() => setCapabilitiesOpen(true)}>查看和设置</Button></SettingsRow></SettingsGroup>
+        <SettingsRow title="可用能力" description="网页搜索、读取网页和连接器工具"><Button size="sm" variant="ghost" onClick={() => { setCapabilitiesOpen(true); setLibraryOpen(false) }}>查看和设置</Button></SettingsRow>
+        <SettingsRow title="文件与成果" description="我提供的文件和联系人生成的结果"><Button size="sm" variant="ghost" onClick={() => { setLibraryOpen(true); setCapabilitiesOpen(false) }}>查看</Button></SettingsRow></SettingsGroup>
       <section className="fox-contact-section"><h3>工作目录</h3><code>{contact.workspaceDir}</code>
         {contact.workspaceError && <p role="alert">{contact.workspaceError}</p>}
         <div className="fox-contact-actions"><Button size="sm" variant="outline" onClick={() => void run(() => desktopClient.openProjectFolder(contact.conversationId))}>打开文件夹</Button>

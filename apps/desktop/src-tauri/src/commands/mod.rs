@@ -1,4 +1,5 @@
 pub(crate) mod companion_notes;
+pub(crate) mod companion_files;
 pub(crate) mod companions;
 pub(crate) mod agent_backend_routing;
 mod kernel_reliability;

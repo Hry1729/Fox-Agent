@@ -36,6 +36,7 @@ mod app_management;
 mod bundled_capabilities;
 pub(crate) mod companions;
 pub(crate) mod companion_capabilities;
+pub(crate) mod companion_files;
 pub(crate) mod companion_ownership;
 use self::companion_ownership::ORDINARY_CHAT_FILTER;
 mod computed_artifacts;

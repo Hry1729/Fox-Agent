@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronUp, LoaderCircle, Search, X } from 'lucide-react'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
+import { notify as toast } from '@/features/notifications'
 import type { ContactBubbleSearchHit, ConversationDetail } from '@/features/conversations/model/types'
 import { formatClockTime } from '@/lib/time-format'
 import type { Companion } from './api'
 import { ContactAvatar } from './chat-controls'
+import type { ContactLocateRequest } from './context'
 
 export type ContactSearchMode = 'closed' | 'panel' | 'locating' | 'chip'
 export type ContactSearchRange = 'all' | '7d' | '30d' | 'custom'
@@ -93,10 +95,11 @@ function highlightBubble(element: HTMLElement, query: string) {
   if (ranges.length) CSS.highlights.set('fox-contact-search', new Highlight(...ranges))
 }
 
-export function useContactChatSearch({ conversationId, detail, loadEarlierMessages }: {
+export function useContactChatSearch({ conversationId, detail, loadEarlierMessages, locateRequest }: {
   conversationId: string | undefined
   detail: ConversationDetail | null
   loadEarlierMessages: () => Promise<void>
+  locateRequest?: ContactLocateRequest | null
 }): ContactChatSearch {
   const [mode, setMode] = useState<ContactSearchMode>('closed')
   const [draft, setDraft] = useState('')
@@ -113,9 +116,13 @@ export function useContactChatSearch({ conversationId, detail, loadEarlierMessag
   const [error, setError] = useState<string | null>(null)
   const loaderRef = useRef(loadEarlierMessages)
   loaderRef.current = loadEarlierMessages
+  // C05 external locate (profile file list): ring the bubble, then return the
+  // topbar to normal instead of showing the search chip.
+  const externalRef = useRef(false)
 
   const close = useCallback(() => {
     clearContactSearchHighlight()
+    externalRef.current = false
     setMode('closed')
     setTarget(null)
     setDraft('')
@@ -133,6 +140,16 @@ export function useContactChatSearch({ conversationId, detail, loadEarlierMessag
 
   // Switching contacts must not carry the previous contact's results or hit.
   useEffect(() => { close() }, [conversationId, close])
+
+  useEffect(() => {
+    if (!locateRequest || !conversationId) return
+    externalRef.current = true
+    setTarget({ id: locateRequest.id } as ContactBubbleSearchHit)
+    setQuery('')
+    setError(null)
+    setMode('locating')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locateRequest?.key, conversationId])
 
   useEffect(() => {
     if (mode !== 'panel') return
@@ -169,10 +186,18 @@ export function useContactChatSearch({ conversationId, detail, loadEarlierMessag
   // loader guards concurrent calls itself; each merged page re-runs this effect.
   useEffect(() => {
     if (mode !== 'locating' || !target || !conversationId) return
+    const settle = (element: HTMLElement) => {
+      highlightBubble(element, query)
+      if (externalRef.current) {
+        externalRef.current = false
+        setMode('closed')
+      } else {
+        setMode('chip')
+      }
+    }
     const element = findBubbleElement(target.id)
     if (element) {
-      highlightBubble(element, query)
-      setMode('chip')
+      settle(element)
       return
     }
     if (detail?.conversation?.id === conversationId && detail.hasEarlierMessages) {
@@ -185,12 +210,15 @@ export function useContactChatSearch({ conversationId, detail, loadEarlierMessag
       if (cancelled) return
       const found = findBubbleElement(target.id)
       if (found) {
-        highlightBubble(found, query)
-        setMode('chip')
+        settle(found)
         return
       }
       if (++attempts < 30) requestAnimationFrame(retry)
-      else {
+      else if (externalRef.current) {
+        externalRef.current = false
+        toast.error('未能在历史中找到这条消息')
+        setMode('closed')
+      } else {
         setError('未能在历史中找到这条消息')
         setMode('panel')
       }
@@ -248,8 +276,8 @@ export function ContactSearchBar({ search }: { search: ContactChatSearch }) {
 export function ContactSearchChip({ search }: { search: ContactChatSearch }) {
   return <div className="fox-contact-search-chip" role="status" aria-label="搜索定位">
     <Search size={13} aria-hidden="true" />
-    <b>{search.query}</b>
-    <span>{search.results.length ? `${search.activeIndex + 1} / ${search.results.length}` : '0 / 0'}</span>
+    <b>{search.query || '定位消息'}</b>
+    <span>{search.results.length ? `${search.activeIndex + 1} / ${search.results.length}` : search.query ? '0 / 0' : '正在定位…'}</span>
     <button type="button" className="fox-icon-button" aria-label="上一条结果" disabled={!search.results.length} onClick={() => search.step(-1)}><ChevronUp size={14} /></button>
     <button type="button" className="fox-icon-button" aria-label="下一条结果" disabled={!search.results.length} onClick={() => search.step(1)}><ChevronDown size={14} /></button>
     <button type="button" className="fox-icon-button" aria-label="关闭搜索" onClick={search.close}><X size={14} /></button>

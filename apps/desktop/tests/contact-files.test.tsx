@@ -1,0 +1,162 @@
+import { afterEach, describe, expect, test } from 'bun:test'
+import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/react'
+import { mockIPC, clearMocks } from '@tauri-apps/api/mocks'
+import { ContactsContext, type ContactsContextValue } from '../src/features/companions/context'
+import { ContactFiles, FILES_WORKDIR_HINT } from '../src/features/companions/files'
+import { ContactProfile } from '../src/features/companions/profile'
+import type { Companion, CompanionFileEntry, CompanionFiles } from '../src/features/companions/api'
+
+const contact: Companion = {
+  id: 'contact', conversationId: 'chat', templateAgentId: 'expert', displayName: '资料伙伴', avatarRef: '📚',
+  duty: '', personaOverride: null, workspaceDir: 'D:/contact', workspaceState: 'ready', workspaceError: null,
+  isDefault: false, pinnedAt: null, lastReadOrdinal: 0, modelProviderId: null, modelRef: null,
+  unreadCount: 0, activeRunStatus: null, archivedAt: null, deletingAt: null,
+}
+
+const now = Date.now()
+const entry = (patch: Partial<CompanionFileEntry> = {}): CompanionFileEntry => ({
+  kind: 'attachment', id: 'att-1', name: '报价单.pdf', updatedAt: now - 60_000, byteSize: 1024,
+  mediaType: 'application/pdf', origin: 'chat', taskName: null,
+  source: { bubbleId: 'msg-1', messageId: 'msg-1', at: now - 60_000 }, missing: false,
+  ...patch,
+})
+const files = (patch: Partial<CompanionFiles> = {}): CompanionFiles => ({
+  provided: [entry()],
+  generated: [
+    entry({ kind: 'artifact', id: 'art-1', name: '分析结果.md', updatedAt: now - 30_000, mediaType: 'text/markdown', source: { bubbleId: 'run-1:response:0', messageId: 'msg-2', at: now - 30_000 } }),
+    entry({ kind: 'artifact', id: 'art-2', name: '周报.docx', origin: 'task', taskName: '每周周报', updatedAt: now - 20_000, source: { bubbleId: 'dc-report-run-2', messageId: 'dc-report-run-2', at: now - 20_000 } }),
+    entry({ kind: 'artifact', id: 'art-3', name: '丢失的产物.txt', updatedAt: now - 10_000, source: null, missing: true }),
+  ],
+  ...patch,
+})
+
+const context = (current: Companion, jumpToMessage?: (bubbleId: string) => void): ContactsContextValue => ({
+  current, privateChat: true, list: { companions: [current], pendingDeletions: [] }, projects: [], model: '全局模型', permission: 'ask', error: '',
+  refresh: async () => {}, refreshConversation: async () => {}, open: () => {}, add: () => {}, showProfile: () => {},
+  leave: () => {}, setPermission: () => {}, openSharedMemory: () => {}, askToOrganize: () => {},
+  locateRequest: null, jumpToMessage,
+})
+
+interface Harness { gets: number; calls: Record<string, unknown>[] }
+function mockFiles(data: CompanionFiles = files(), harness: Harness = { gets: 0, calls: [] }) {
+  mockIPC((command, args) => {
+    if (command === 'companion_files_list') { harness.gets += 1; return { ok: true, data } }
+    if (command === 'companion_file_open' || command === 'companion_file_save' || command === 'project_folder_open') {
+      harness.calls.push({ command, ...(args as Record<string, unknown>) }); return { ok: true, data: null }
+    }
+    throw new Error('Unexpected command: ' + command)
+  })
+  return harness
+}
+
+const renderFiles = (jumpToMessage?: (bubbleId: string) => void) =>
+  render(<ContactsContext.Provider value={context(contact, jumpToMessage)}><ContactFiles contact={contact} /></ContactsContext.Provider>)
+
+afterEach(() => { cleanup(); clearMocks() })
+
+describe('联系人文件与成果', () => {
+  test('分清我提供的文件与联系人生成的结果，标注来源与任务名', async () => {
+    const harness = mockFiles()
+    const view = renderFiles()
+    await waitFor(() => expect(harness.gets).toBe(1))
+    expect(view.getByText('我提供的文件')).toBeDefined()
+    expect(view.getByText('联系人生成的结果')).toBeDefined()
+    const provided = view.getByLabelText('报价单.pdf')
+    expect(provided.closest('section')?.querySelector('h3')?.textContent).toBe('我提供的文件')
+    expect(within(provided).getByText(/来源消息/)).toBeDefined()
+    const task = view.getByLabelText('周报.docx')
+    expect(task.closest('section')?.querySelector('h3')?.textContent).toBe('联系人生成的结果')
+    expect(within(task).getByText(/定时任务「每周周报」/)).toBeDefined()
+    expect(within(task).getByText(/来源消息/)).toBeDefined()
+    expect(view.getByText(FILES_WORKDIR_HINT)).toBeDefined()
+  })
+
+  test('缺失文件写明状态并禁用打开与另存，无来源消息禁用回到消息', async () => {
+    mockFiles()
+    const view = renderFiles()
+    const missing = await waitFor(() => view.getByLabelText('丢失的产物.txt'))
+    expect(within(missing).getByText(/文件缺失/)).toBeDefined()
+    expect(within(missing).getByText('暂无来源消息')).toBeDefined()
+    expect((within(missing).getByText('打开') as HTMLButtonElement).disabled).toBe(true)
+    expect((within(missing).getByText('另存为') as HTMLButtonElement).disabled).toBe(true)
+    expect((within(missing).getByText('回到消息') as HTMLButtonElement).disabled).toBe(true)
+    const ok = view.getByLabelText('报价单.pdf')
+    expect((within(ok).getByText('打开') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  test('打开与另存为带上联系人与文件标识交给后端核验', async () => {
+    const harness = mockFiles()
+    const view = renderFiles()
+    const row = await waitFor(() => view.getByLabelText('分析结果.md'))
+    fireEvent.click(within(row).getByText('打开'))
+    await waitFor(() => expect(harness.calls).toHaveLength(1))
+    await waitFor(() => expect((within(row).getByText('另存为') as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(within(row).getByText('另存为'))
+    await waitFor(() => expect(harness.calls).toHaveLength(2))
+    expect(harness.calls[0]).toEqual({ command: 'companion_file_open', request: { companionId: 'contact', kind: 'artifact', fileId: 'art-1' } })
+    expect(harness.calls[1]).toEqual({ command: 'companion_file_save', request: { companionId: 'contact', kind: 'artifact', fileId: 'art-1' } })
+  })
+
+  test('回到消息使用稳定气泡标识，含后台任务回报消息', async () => {
+    const jumps: string[] = []
+    mockFiles()
+    const view = renderFiles(id => jumps.push(id))
+    const provided = await waitFor(() => view.getByLabelText('报价单.pdf'))
+    fireEvent.click(within(provided).getByText('回到消息'))
+    const task = view.getByLabelText('周报.docx')
+    fireEvent.click(within(task).getByText('回到消息'))
+    expect(jumps).toEqual(['msg-1', 'dc-report-run-2'])
+  })
+
+  test('空列表给出两类空态提示', async () => {
+    mockFiles(files({ provided: [], generated: [] }))
+    const view = renderFiles()
+    await waitFor(() => expect(view.getByText('还没有通过消息提供过文件。')).toBeDefined())
+    expect(view.getByText('还没有生成过文件。')).toBeDefined()
+  })
+
+  test('读取失败显示原因并可重试', async () => {
+    let fail = true
+    const harness = { gets: 0, calls: [] }
+    mockIPC(command => {
+      if (command === 'companion_files_list') {
+        harness.gets += 1
+        return fail ? { ok: false, error: { code: 'companion.file_list_failed', message: '读取失败', retryable: true } } : { ok: true, data: files() }
+      }
+      throw new Error('Unexpected command: ' + command)
+    })
+    const view = renderFiles()
+    await waitFor(() => expect(view.getByRole('alert').textContent).toContain('读取失败'))
+    fail = false
+    fireEvent.click(view.getByText('重试'))
+    await waitFor(() => expect(view.getByLabelText('报价单.pdf')).toBeDefined())
+    expect(harness.gets).toBe(2)
+  })
+
+  test('打开工作目录走既有入口', async () => {
+    const harness = mockFiles()
+    const view = renderFiles()
+    fireEvent.click(await waitFor(() => view.getByText('打开工作目录')))
+    await waitFor(() => expect(harness.calls).toHaveLength(1))
+    expect(harness.calls[0]).toEqual({ command: 'project_folder_open', request: { conversationId: 'chat' } })
+  })
+
+  test('资料页入口打开文件与成果，并可返回资料', async () => {
+    const harness: Harness = { gets: 0, calls: [] }
+    mockIPC(command => {
+      if (command === 'companion_template_status') return { ok: true, data: { latestHash: null, boundSnapshot: null, latestSnapshot: null, updateAvailable: false, dismissed: false } }
+      if (command === 'model_providers_list') return { ok: true, data: [] }
+      if (command === 'companion_files_list') { harness.gets += 1; return { ok: true, data: files() } }
+      throw new Error('Unexpected command: ' + command)
+    })
+    const view = render(<ContactsContext.Provider value={context(contact)}>
+      <ContactProfile contact={contact} />
+    </ContactsContext.Provider>)
+    fireEvent.click(await waitFor(() => view.getByText('查看')))
+    await waitFor(() => expect(harness.gets).toBe(1))
+    await waitFor(() => expect(view.getByLabelText('报价单.pdf')).toBeDefined())
+    fireEvent.click(view.getByText('返回资料'))
+    await waitFor(() => expect(view.getByText('查看')).toBeDefined())
+    expect(view.queryByLabelText('报价单.pdf')).toBeNull()
+  })
+})

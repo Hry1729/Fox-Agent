@@ -301,7 +301,7 @@ fn export_source(root: &Path, path: &str) -> Result<PathBuf, String> {
     })
 }
 
-fn export_copy(source: &Path, destination: &Path) -> Result<(), String> {
+pub(crate) fn export_copy(source: &Path, destination: &Path) -> Result<(), String> {
     if destination.canonicalize().ok().as_deref() == Some(source) {
         return Err("请选择另一个文件路径".into());
     }

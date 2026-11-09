@@ -80,6 +80,7 @@ export function ContactTopbar({ detail, onReset, loadEarlierMessages }: {
     conversationId: detail?.conversation?.id,
     detail,
     loadEarlierMessages: loadEarlierMessages ?? (async () => {}),
+    locateRequest: ctx?.locateRequest,
   })
   const searching = search.mode !== 'closed'
   const contactName = ctx?.current?.displayName ?? '联系人'

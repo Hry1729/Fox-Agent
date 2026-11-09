@@ -88,6 +88,14 @@
 .fox-contact-capability-tool input { flex:none; }
 .fox-contact-capability-boundary { padding:6px 10px; border-radius:8px; background:var(--muted); font-size:12px; color:var(--muted-foreground); }
 .fox-contact-capability-foot { font-size:12px; color:var(--muted-foreground); }
+.fox-contact-files { display:grid; gap:4px; min-width:0; padding:4px 0; }
+.fox-contact-file { display:grid; gap:6px; padding:10px 0; min-width:0; overflow-wrap:anywhere; }
+.fox-contact-file + .fox-contact-file { border-top:1px solid var(--border); }
+.fox-contact-file-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.fox-contact-file-head b { min-width:0; overflow-wrap:anywhere; }
+.fox-contact-file-head time { flex:none; font-size:12px; color:var(--muted-foreground); }
+.fox-contact-file-source { margin:0; font-size:12px; color:var(--muted-foreground); }
+.fox-contact-file-missing { color:var(--destructive); }
 
 .fox-contact-search-bar,.fox-contact-search-chip {
   justify-self: center;
