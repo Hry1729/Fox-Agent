@@ -7579,6 +7579,11 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     // their ordinary execution conversation; only contact tasks resolve a
     // companion identity.
     apply_migration(&transaction, COMPANION_BACKGROUND_SCHEMA_VERSION, MIGRATION_111_COMPANION_BACKGROUND, now)?;
+    // v112 (contacts C06/K6): reminder preferences and bubble-level read state.
+    // Additive columns; existing contacts follow the global notification behavior
+    // and keep their legacy ordinal cursor until the bubble backfill converts it.
+    apply_migration(&transaction, COMPANION_REMINDERS_SCHEMA_VERSION, MIGRATION_112_COMPANION_REMINDERS, now)?;
+    super::repositories::companions::convert_pending_read_cursors(&transaction)?;
     finish_transaction(transaction)
 }
 
@@ -9146,7 +9151,7 @@ mod stage_two_runtime_session_migration_tests {
         // 99 only adds the retired-generation ledger; the v98 mapping itself is
         // unchanged. This test still pins the mapping's version and the
         // database's current version, so a version bump is never silent.
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::COMPANION_BACKGROUND_SCHEMA_VERSION);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::COMPANION_REMINDERS_SCHEMA_VERSION);
 
         let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
         let columns: Vec<String> = database
@@ -9195,7 +9200,7 @@ mod runtime_session_generation_migration_tests {
             assert!(!upper.contains(forbidden), "the migration must not contain {forbidden}");
         }
         assert_eq!(RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION, 99);
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::COMPANION_BACKGROUND_SCHEMA_VERSION);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::COMPANION_REMINDERS_SCHEMA_VERSION);
     }
 
     /// A v98 database keeps its single live mapping at generation 1 and gains an
@@ -16857,7 +16862,8 @@ mod delivery_acceptance_migration_tests {
         assert_eq!(COMPANION_MODEL_SCHEMA_VERSION, 109);
         assert_eq!(COMPANION_TOOL_GRANTS_SCHEMA_VERSION, 110);
         assert_eq!(COMPANION_BACKGROUND_SCHEMA_VERSION, 111);
-        assert_eq!(DATABASE_SCHEMA_VERSION, COMPANION_BACKGROUND_SCHEMA_VERSION);
+        assert_eq!(COMPANION_REMINDERS_SCHEMA_VERSION, 112);
+        assert_eq!(DATABASE_SCHEMA_VERSION, COMPANION_REMINDERS_SCHEMA_VERSION);
 
         // The old rows are untouched.
         let title: String = connection
@@ -17213,4 +17219,62 @@ WHEN NEW.scope = 'agent' AND substr(NEW.scope_key, 1, 4) = 'cmp_' AND (
 BEGIN
     SELECT RAISE(ABORT, 'memory_companion_owner_mismatch');
 END;
+"#;
+
+pub(crate) const COMPANION_REMINDERS_SCHEMA_VERSION: i64 = 112;
+const _: () = assert!(DATABASE_SCHEMA_VERSION >= COMPANION_REMINDERS_SCHEMA_VERSION);
+
+/// Contact reminder preferences and bubble-level read/unread state (plan C06/K6).
+///
+/// `reminder_mode` defaults to `follow_global` so existing contacts keep the
+/// current global notification behavior until the user chooses otherwise.
+/// `last_read_delivery_order` is the auto-read cursor expressed in K1 bubble
+/// delivery order; NULL means the legacy `last_read_ordinal` has not been
+/// converted yet (conversion runs once the chat's bubble backfill completes).
+/// `manual_unread_from_order` is an independent override start: that bubble and
+/// every later delivered contact bubble show as unread without rewinding the
+/// auto-read cursor. `manual_unread_at` timestamps the override so a stale
+/// auto-read report cannot immediately cancel a fresh mark-unread.
+const MIGRATION_112_COMPANION_REMINDERS: &str = r#"
+ALTER TABLE companion_profiles ADD COLUMN reminder_mode TEXT NOT NULL DEFAULT 'follow_global'
+    CHECK (reminder_mode IN ('follow_global', 'all', 'action_only', 'muted'));
+ALTER TABLE companion_profiles ADD COLUMN last_read_delivery_order INTEGER
+    CHECK (last_read_delivery_order IS NULL OR last_read_delivery_order >= 0);
+ALTER TABLE companion_profiles ADD COLUMN manual_unread_from_order INTEGER
+    CHECK (manual_unread_from_order IS NULL OR manual_unread_from_order >= 0);
+ALTER TABLE companion_profiles ADD COLUMN manual_unread_at INTEGER;
+-- K6 adds a `message` reminder kind for "全部提醒" new-message notifications.
+-- SQLite cannot widen a CHECK in place, so rebuild the table preserving rows.
+CREATE TABLE app_notifications_v112 (
+    id TEXT PRIMARY KEY,
+    merge_key TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL CHECK(kind IN ('approval', 'question', 'progress', 'completed', 'failed', 'message')),
+    severity TEXT NOT NULL CHECK(severity IN ('quiet', 'normal', 'high')),
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    workspace_view TEXT,
+    entity_id TEXT,
+    progress INTEGER CHECK(progress IS NULL OR progress BETWEEN 0 AND 100),
+    status TEXT NOT NULL,
+    action_json TEXT NOT NULL DEFAULT '{}'
+        CHECK(json_valid(action_json) AND json_type(action_json) = 'object'),
+    read_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    dismissed_at INTEGER
+);
+INSERT INTO app_notifications_v112
+    SELECT id, merge_key, kind, severity, title, body, source_type, source_id,
+           workspace_view, entity_id, progress, status, action_json, read_at,
+           created_at, updated_at, dismissed_at FROM app_notifications;
+DROP TABLE app_notifications;
+ALTER TABLE app_notifications_v112 RENAME TO app_notifications;
+CREATE INDEX idx_app_notifications_read_updated
+    ON app_notifications(read_at, updated_at DESC, id);
+CREATE INDEX idx_app_notifications_kind_status
+    ON app_notifications(kind, status, updated_at DESC);
+CREATE INDEX idx_app_notifications_visible_updated
+    ON app_notifications(dismissed_at, read_at, updated_at DESC, id);
 "#;

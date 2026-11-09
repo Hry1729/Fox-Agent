@@ -368,6 +368,8 @@ pub fn run() {
             commands::companion_files::companion_file_save,
             commands::companions::companion_set_pinned,
             commands::companions::companion_mark_read,
+            commands::companions::companion_mark_unread,
+            commands::companions::companion_set_reminder_mode,
             commands::companions::companion_archive,
             commands::companions::companion_restore,
             commands::companions::companion_template_status,

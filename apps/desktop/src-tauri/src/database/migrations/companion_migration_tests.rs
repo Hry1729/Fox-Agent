@@ -463,3 +463,34 @@ fn v110_grants_start_empty_and_the_snapshot_column_defaults_to_null() {
     denied(&db, "INSERT INTO companion_tool_grants(companion_id,server_id,tool,created_at) VALUES ('cmp_gone','@web','web_search',1)", "FOREIGN KEY");
     check_foreign_keys_after_migration(&db).unwrap();
 }
+
+#[test]
+fn v112_reminders_default_to_global_and_legacy_read_converts_after_backfill() {
+    let db = database();
+    // 升级保留原有通知偏好：旧联系人默认沿用全局，游标尚未转换。
+    assert_eq!(number(&db, "SELECT count(*) FROM companion_profiles WHERE reminder_mode='follow_global'"), 2);
+    assert_eq!(number(&db, "SELECT count(*) FROM companion_profiles WHERE last_read_delivery_order IS NULL"), 2);
+    denied(&db, "UPDATE companion_profiles SET reminder_mode='loud' WHERE id='cmp_a'", "CHECK");
+    // 通知中心接受新的 message 提醒类型，未知类型仍被拒绝。
+    db.execute_batch("INSERT INTO app_notifications(id,merge_key,kind,severity,title,body,source_type,source_id,status,created_at,updated_at)
+        VALUES ('n1','companion-messages:cmp_a','message','normal','Fox','1 条新消息','companion_messages','cmp_a','bubble:1000',1,1)").unwrap();
+    denied(&db, "INSERT INTO app_notifications(id,merge_key,kind,severity,title,body,source_type,source_id,status,created_at,updated_at)
+        VALUES ('n2','x','bogus','normal','t','b','s','sid','s',1,1)", "CHECK");
+    // 旧已读进度按 K6 转换为气泡阅读位置（回填完成后）。
+    db.execute_batch("
+        INSERT INTO messages(id,conversation_id,role,kind,content,status,ordinal,created_at,updated_at)
+        VALUES ('m1','private-a','assistant','text','一','completed',1,1,1),
+               ('m2','private-a','assistant','text','二','completed',2,1,1),
+               ('m3','private-a','assistant','text','三','completed',3,1,1);
+        INSERT INTO contact_bubbles(bubble_id,conversation_id,run_id,source_message_id,source_ordinal,author,projection,segment_start,segment_end,delivery_order,delivered_at,content,fingerprint,created_at)
+        VALUES ('b1','private-a',NULL,'m1',1,'companion','message',NULL,NULL,1000,1,'一','f',1),
+               ('b2','private-a',NULL,'m2',2,'companion','message',NULL,NULL,2000,1,'二','f',1),
+               ('b3','private-a',NULL,'m3',3,'companion','message',NULL,NULL,3000,1,'三','f',1);
+        INSERT INTO contact_bubble_backfills(conversation_id,completed_at) VALUES ('private-a',1);
+        UPDATE companion_profiles SET last_read_ordinal=2 WHERE id='cmp_a';").unwrap();
+    super::super::repositories::companions::convert_pending_read_cursors(&db).unwrap();
+    assert_eq!(number(&db, "SELECT last_read_delivery_order FROM companion_profiles WHERE id='cmp_a'"), 2000);
+    // 未回填的联系人游标保持 NULL（VIEW 仍按旧 ordinal 计算有效位置）。
+    assert_eq!(number(&db, "SELECT count(*) FROM companion_profiles WHERE id='cmp_b' AND last_read_delivery_order IS NULL"), 1);
+    check_foreign_keys_after_migration(&db).unwrap();
+}

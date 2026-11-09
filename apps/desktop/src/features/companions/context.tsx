@@ -1,8 +1,9 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { notify as toast } from '@/features/notifications'
 import { desktopClient, desktopErrorDetails } from '@/features/conversations/api/desktop-client'
 import type { ConversationDetail, ProjectRecord } from '@/features/conversations/model/types'
 import { contacts, type Companion, type CompanionsList } from './api'
+import { companionBubbleOrders, readWalkBase, reportableReadOrder, shouldReportRead } from './read-position'
 
 export const showContactError = (error: unknown) => toast.error(desktopErrorDetails(error).message)
 export function useContactList(enabled: boolean) {
@@ -58,21 +59,95 @@ export interface ContactsContextValue extends ReturnType<typeof useContactList> 
 
 export const ContactsContext = createContext<ContactsContextValue | null>(null)
 export const useContacts = () => useContext(ContactsContext)
+/** K6: auto-read follows the bubbles the user actually sees, not window focus or
+ * the last loaded message. A bubble counts as seen only when it enters the
+ * visible reading area while the page is active; the reported position is a
+ * contiguous seen-walk that never jumps an unseen unread interval. A manual
+ * unread override resets what counts as seen, so the reading state at the moment
+ * of marking cannot immediately clear it — only re-opening and re-reading does. */
 export function useReadCursor(contact: Companion | undefined, detail: ConversationDetail | null, visible: boolean, refresh: () => Promise<void>) {
-  const ordinal = detail?.messages.findLast(message => message.role === 'assistant' && message.status === 'completed')?.ordinal
   const id = contact?.id
-  const read = contact?.lastReadOrdinal
+  const readOrder = contact?.readDeliveryOrder ?? 0
+  const overrideFrom = contact?.manualUnreadFromOrder ?? null
+  const overrideKey = overrideFrom == null ? null : `${overrideFrom}:${contact?.manualUnreadAt ?? 0}`
+  const orders = useMemo(() => companionBubbleOrders(detail?.bubbles), [detail])
+  const hasEarlierMessages = detail?.hasEarlierMessages ?? false
+  const seenRef = useRef<Set<number>>(new Set())
+  const visibleRef = useRef<Set<number>>(new Set())
+  const reportedRef = useRef(-1)
+  const lastIdRef = useRef<string | undefined>(undefined)
+  const wasVisibleRef = useRef(false)
+  const lastOverrideRef = useRef<string | null>(overrideKey)
+  const stateRef = useRef({ id, readOrder, overrideFrom, orders, visible, hasEarlierMessages })
+  stateRef.current = { id, readOrder, overrideFrom, orders, visible, hasEarlierMessages }
+
+  const report = useCallback(() => {
+    const state = stateRef.current
+    if (!state.visible || !state.id) return
+    if (document.visibilityState !== 'visible' || !document.hasFocus()) return
+    const base = readWalkBase(state.readOrder, state.overrideFrom)
+    const target = reportableReadOrder(state.orders, base, seenRef.current, state.hasEarlierMessages, state.overrideFrom)
+    if (!shouldReportRead(target, state.readOrder, state.overrideFrom, reportedRef.current)) return
+    reportedRef.current = target
+    void contacts.markRead(state.id, target, Date.now()).then(refresh).catch(showContactError)
+  }, [refresh])
+
+  // A fresh mark-unread invalidates the seen set without re-observing: bubbles
+  // already on screen stay "visible" so they must leave and re-enter (or the chat
+  // must be reopened) before they count as read again.
   useEffect(() => {
-    if (!visible || !id || !ordinal || read === undefined || ordinal <= read) return
-    const update = () => {
-      if (document.visibilityState === 'visible' && document.hasFocus()) void contacts.markRead(id, ordinal).then(refresh).catch(showContactError)
+    if (lastOverrideRef.current === overrideKey) return
+    lastOverrideRef.current = overrideKey
+    seenRef.current.clear()
+    reportedRef.current = -1
+  }, [overrideKey])
+
+  useEffect(() => {
+    if (!visible || !id) {
+      wasVisibleRef.current = false
+      return
     }
-    update()
-    window.addEventListener('focus', update)
-    document.addEventListener('visibilitychange', update)
+    if (lastIdRef.current !== id) {
+      lastIdRef.current = id
+      seenRef.current.clear()
+      visibleRef.current.clear()
+      reportedRef.current = -1
+    } else if (!wasVisibleRef.current) {
+      // Reopening the same chat is a fresh viewport entry: bubbles still on
+      // screen must re-enter the visible set so re-reading them counts again
+      // (this is how a manual unread clears after reopen). The seen set stays,
+      // so within one visit marking unread cannot immediately re-clear itself.
+      visibleRef.current.clear()
+    }
+    wasVisibleRef.current = true
+    if (typeof IntersectionObserver === 'undefined') return
+    const sections = Array.from(document.querySelectorAll<HTMLElement>('[data-delivery-order]'))
+    if (!sections.length) return
+    const observer = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        const order = Number((entry.target as HTMLElement).dataset.deliveryOrder)
+        if (Number.isNaN(order)) continue
+        if (entry.isIntersecting) {
+          if (!visibleRef.current.has(order)) {
+            visibleRef.current.add(order)
+            if (document.visibilityState === 'visible' && document.hasFocus()) seenRef.current.add(order)
+          }
+        } else {
+          visibleRef.current.delete(order)
+        }
+      }
+      report()
+    }, { threshold: 0.6 })
+    sections.forEach(section => observer.observe(section))
+    // Focus or visibility alone only reports what was already seen — it never
+    // adds unseen bubbles, so merely focusing the window cannot mark them read.
+    const onFocus = () => report()
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onFocus)
     return () => {
-      window.removeEventListener('focus', update)
-      document.removeEventListener('visibilitychange', update)
+      observer.disconnect()
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onFocus)
     }
-  }, [id, ordinal, read, visible, refresh])
+  }, [id, visible, orders, report])
 }

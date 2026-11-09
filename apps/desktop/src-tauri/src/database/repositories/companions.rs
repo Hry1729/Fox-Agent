@@ -22,6 +22,9 @@ pub(crate) enum CompanionError {
     TemplateChanged,
     BuiltinTemplate,
     ModelUnavailable(String),
+    ReminderModeInvalid,
+    BubbleNotFound,
+    BackfillPending,
     Storage(String),
 }
 
@@ -38,6 +41,9 @@ impl CompanionError {
             Self::TemplateChanged => ("companion.template_changed", "专家模板已变化，请重新查看"),
             Self::BuiltinTemplate => ("companion.builtin_template", "小狐的模板随 Fox 更新"),
             Self::ModelUnavailable(message) => ("companion.model_unavailable", message.as_str()),
+            Self::ReminderModeInvalid => ("companion.reminder_mode_invalid", "未知的提醒模式"),
+            Self::BubbleNotFound => ("companion.bubble_not_found", "这条消息还不能标为未读"),
+            Self::BackfillPending => ("companion.backfill_pending", "私聊历史仍在整理，稍后再试"),
             Self::Storage(message) => ("storage.error", message),
         }
     }
@@ -59,6 +65,10 @@ pub(crate) struct CompanionView {
     pub conversation_id: String,
     pub unread_count: i64,
     pub active_run_status: Option<String>,
+    /// K6: the effective bubble read position (converted legacy cursor included).
+    pub read_delivery_order: i64,
+    /// K6: outstanding approvals + questions across the contact's serial range.
+    pub pending_action_count: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,19 +107,35 @@ pub(crate) struct CompanionTemplateStatus {
     pub dismissed: bool,
 }
 
+/// K6: the unread unit is the K1-persisted companion bubble, not the settled
+/// assistant message. The effective read position is the converted delivery
+/// cursor; before the chat backfill completes (cursor still NULL) it falls back
+/// to the legacy ordinal mapped onto bubble delivery order, so a contact never
+/// shows a wrong unread count while its history is still being organised.
+const EFFECTIVE_READ: &str = "coalesce(p.last_read_delivery_order,
+        (SELECT max(b.delivery_order) FROM contact_bubbles b
+            WHERE b.conversation_id=c.id AND b.source_ordinal<=p.last_read_ordinal), 0)";
+
 /// K2: the active Run probe covers the contact's whole serial range — the fixed
 /// private chat and every bound background execution conversation — so archive,
 /// restore and delete cannot see an idle contact while a task is still running.
-const VIEW: &str = "SELECT p.*, c.id AS conversation_id,
-    (SELECT count(*) FROM messages m WHERE m.conversation_id=c.id AND m.ordinal>p.last_read_ordinal
-        AND m.role='assistant' AND m.status='completed') AS unread_count,
-    (SELECT r.status FROM runs r
-        WHERE r.status IN ('queued','running','cancelling','awaiting_confirmation')
-          AND (r.conversation_id=c.id OR r.conversation_id IN (
-              SELECT dc.conversation_id FROM digital_colleagues dc
-              WHERE dc.companion_id=p.id AND dc.companion_bound=1))
-        ORDER BY r.created_at DESC LIMIT 1) AS active_run_status
-    FROM companion_profiles p JOIN conversations c ON c.companion_id=p.id";
+fn view_sql() -> String {
+    format!(
+        "SELECT p.*, c.id AS conversation_id,
+            ({effective}) AS read_delivery_order,
+            (SELECT count(*) FROM contact_bubbles b WHERE b.conversation_id=c.id AND b.author='companion'
+                AND (b.delivery_order > ({effective})
+                  OR (p.manual_unread_from_order IS NOT NULL AND b.delivery_order>=p.manual_unread_from_order))) AS unread_count,
+            (SELECT r.status FROM runs r
+                WHERE r.status IN ('queued','running','cancelling','awaiting_confirmation')
+                  AND (r.conversation_id=c.id OR r.conversation_id IN (
+                      SELECT dc.conversation_id FROM digital_colleagues dc
+                      WHERE dc.companion_id=p.id AND dc.companion_bound=1))
+                ORDER BY r.created_at DESC LIMIT 1) AS active_run_status
+            FROM companion_profiles p JOIN conversations c ON c.companion_id=p.id",
+        effective = EFFECTIVE_READ,
+    )
+}
 
 fn view(row: &rusqlite::Row<'_>) -> rusqlite::Result<CompanionView> {
     Ok(CompanionView {
@@ -130,6 +156,10 @@ fn view(row: &rusqlite::Row<'_>) -> rusqlite::Result<CompanionView> {
             template_notice_dismissed_hash: row.get("template_notice_dismissed_hash")?,
             model_provider_id: row.get("model_provider_id")?,
             model_ref: row.get("model_ref")?,
+            reminder_mode: row.get("reminder_mode")?,
+            last_read_delivery_order: row.get("last_read_delivery_order")?,
+            manual_unread_from_order: row.get("manual_unread_from_order")?,
+            manual_unread_at: row.get("manual_unread_at")?,
             archived_at: row.get("archived_at")?,
             deleting_at: row.get("deleting_at")?,
             created_at: row.get("created_at")?,
@@ -138,12 +168,111 @@ fn view(row: &rusqlite::Row<'_>) -> rusqlite::Result<CompanionView> {
         conversation_id: row.get("conversation_id")?,
         unread_count: row.get("unread_count")?,
         active_run_status: row.get("active_run_status")?,
+        read_delivery_order: row.get("read_delivery_order")?,
+        pending_action_count: 0,
     })
+}
+
+/// K6 upgrade: convert a legacy `last_read_ordinal` into a bubble delivery-order
+/// read position, but only once the chat's K1 backfill is complete (otherwise the
+/// mapping would be premature). Idempotent — runs at migration and again when a
+/// backfill finishes. Until converted, the VIEW computes the same position on the
+/// fly, so the unread count is correct even mid-backfill.
+pub(crate) fn convert_pending_read_cursors(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE companion_profiles SET last_read_delivery_order = coalesce((
+            SELECT max(b.delivery_order) FROM contact_bubbles b
+            JOIN conversations c ON c.id = b.conversation_id
+            WHERE c.companion_id = companion_profiles.id
+                AND b.source_ordinal <= companion_profiles.last_read_ordinal), 0)
+        WHERE last_read_delivery_order IS NULL AND EXISTS (
+            SELECT 1 FROM contact_bubble_backfills f
+            JOIN conversations c ON c.id = f.conversation_id
+            WHERE c.companion_id = companion_profiles.id)",
+        [],
+    )?;
+    Ok(())
+}
+
+/// K6: outstanding approvals + questions across each contact's serial range (the
+/// fixed private chat plus bound background execution conversations). Mirrors the
+/// pending-question detection in `apply_active_run_activity`: a question stays
+/// pending until it is answered, the run terminates, or a later unrelated user
+/// message supersedes it.
+const PENDING_ACTIONS_SQL: &str = "
+WITH contact_chats AS (
+    SELECT p.id AS companion_id, c.id AS conversation_id
+    FROM companion_profiles p JOIN conversations c ON c.companion_id = p.id
+    UNION ALL
+    SELECT dc.companion_id, dc.conversation_id
+    FROM digital_colleagues dc
+    WHERE dc.companion_bound = 1 AND dc.companion_id IS NOT NULL
+),
+approval_counts AS (
+    SELECT cc.companion_id AS companion_id, count(*) AS n
+    FROM contact_chats cc
+    JOIN runs r ON r.conversation_id = cc.conversation_id
+        AND r.status IN ('queued','running','cancelling','awaiting_confirmation')
+    JOIN tool_calls t ON t.run_id = r.id
+    JOIN approvals a ON a.tool_call_id = t.id AND a.status = 'pending'
+    GROUP BY cc.companion_id
+),
+question_events AS (
+    SELECT run_id,
+        MAX(CASE WHEN event_type = 'user.question.requested'
+            AND CASE WHEN json_valid(event_json) AND json_type(event_json,'$.questions')='array'
+                THEN EXISTS(SELECT 1 FROM json_each(event_json,'$.questions') q
+                    WHERE CASE WHEN q.type='object' THEN json_type(q.value,'$.question')='text'
+                        AND length(trim(json_extract(q.value,'$.question')))>0 ELSE 0 END)
+                ELSE 0 END
+            THEN seq END) AS requested,
+        MAX(CASE WHEN event_type IN ('user.question.responded','run.failed','run.cancelled','run.interrupted')
+            OR (event_type='run.completed' AND coalesce(json_extract(
+                CASE WHEN json_valid(event_json) THEN event_json ELSE '{}' END,'$.completionReason'),'') <> 'awaiting_user')
+            THEN seq END) AS responded
+    FROM run_events
+    WHERE run_id IN (SELECT r.id FROM runs r JOIN contact_chats cc ON cc.conversation_id=r.conversation_id)
+        AND event_type IN ('user.question.requested','user.question.responded','run.completed','run.failed','run.cancelled','run.interrupted')
+    GROUP BY run_id
+),
+question_counts AS (
+    SELECT cc.companion_id AS companion_id, count(*) AS n
+    FROM question_events q
+    JOIN runs r ON r.id = q.run_id
+    JOIN contact_chats cc ON cc.conversation_id = r.conversation_id
+    JOIN run_events requested ON requested.run_id = q.run_id AND requested.seq = q.requested
+    WHERE r.status NOT IN ('failed','cancelled','interrupted')
+        AND coalesce(q.requested,-1) > coalesce(q.responded,-1)
+        AND NOT EXISTS (
+            SELECT 1 FROM messages m WHERE m.conversation_id = r.conversation_id
+                AND m.role='user' AND m.created_at > requested.created_at
+                AND (m.run_id IS NULL OR m.run_id <> r.id)
+                AND NOT EXISTS (
+                    SELECT 1 FROM json_each(requested.event_json,'$.questions') question
+                    WHERE CASE WHEN question.type='object' AND json_type(question.value,'$.question')='text'
+                        AND length(trim(json_extract(question.value,'$.question')))>0
+                        THEN instr(m.content, trim(json_extract(question.value,'$.question')) || '：') = 0
+                            AND instr(m.content, trim(json_extract(question.value,'$.question')) || ':') = 0
+                        ELSE 0 END
+                )
+        )
+    GROUP BY cc.companion_id
+)
+SELECT companion_id, sum(n) FROM (
+    SELECT companion_id, n FROM approval_counts
+    UNION ALL
+    SELECT companion_id, n FROM question_counts
+) GROUP BY companion_id";
+
+fn pending_action_counts(conn: &Connection) -> rusqlite::Result<std::collections::HashMap<String, i64>> {
+    let mut stmt = conn.prepare(PENDING_ACTIONS_SQL)?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+    rows.collect()
 }
 
 fn profile(conn: &Connection, id: &str) -> Result<CompanionView> {
     let record = conn
-        .query_row(&format!("{VIEW} WHERE p.id=?1"), [id], view)
+        .query_row(&format!("{} WHERE p.id=?1", view_sql()), [id], view)
         .optional()?
         .ok_or(CompanionError::NotFound)?;
     if record.profile.deleting_at.is_some() {
@@ -239,12 +368,20 @@ impl Database {
             .lock()
             .map_err(|_| CompanionError::Storage("数据库锁已损坏".into()))?;
         let mut query = conn.prepare(&format!(
-            "{VIEW} ORDER BY p.pinned_at DESC,
-            coalesce(c.last_message_at,p.created_at) DESC, p.id"
+            "{} ORDER BY p.pinned_at DESC,
+            coalesce(c.last_message_at,p.created_at) DESC, p.id",
+            view_sql()
         ))?;
-        let companions = query
+        let mut companions: Vec<CompanionView> = query
             .query_map([], view)?
             .collect::<rusqlite::Result<_>>()?;
+        // K6: the sidebar's "需要你确认" marker counts outstanding approvals and
+        // questions. Computed once for the whole list rather than per profile().
+        let pending = pending_action_counts(&conn)?;
+        for companion in &mut companions {
+            companion.pending_action_count =
+                pending.get(&companion.profile.id).copied().unwrap_or(0);
+        }
         let mut query = conn.prepare(
             "SELECT companion_id,display_name,error FROM companion_deletions
             WHERE state='deleting' ORDER BY started_at",
@@ -430,14 +567,86 @@ impl Database {
         })
     }
 
-    pub(crate) fn read_companion_through(&self, id: &str, ordinal: i64) -> Result<CompanionView> {
+    /// K6: advance the bubble read cursor to a position the user actually saw.
+    /// Monotonic (never rewinds), and only a durable bubble of this private chat
+    /// can move it — a stale or foreign report is ignored. Reading never touches
+    /// pending approvals or questions. A manual unread override clears only when
+    /// a *fresh* report (observed after the mark) actually covers its start, so an
+    /// in-flight auto-read update cannot immediately cancel a fresh mark-unread.
+    pub(crate) fn read_companion_through(
+        &self,
+        id: &str,
+        delivery_order: i64,
+        observed_at: i64,
+    ) -> Result<CompanionView> {
         self.companion_transaction(|tx| {
             let current = profile(tx, id)?;
+            let known: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM contact_bubbles WHERE conversation_id=?1 AND delivery_order=?2)",
+                params![current.conversation_id, delivery_order],
+                |row| row.get(0),
+            )?;
+            if !known {
+                return Ok(current);
+            }
+            let target = current.read_delivery_order.max(delivery_order);
             tx.execute(
-                "UPDATE companion_profiles SET last_read_ordinal=max(last_read_ordinal,
-                coalesce((SELECT max(ordinal) FROM messages WHERE conversation_id=?3 AND ordinal<=?2
-                    AND role='assistant' AND status='completed'),0)) WHERE id=?1",
-                params![id, ordinal, current.conversation_id],
+                "UPDATE companion_profiles SET last_read_delivery_order=?2, updated_at=?3 WHERE id=?1",
+                params![id, target, now_ms()],
+            )?;
+            if let Some(from) = current.profile.manual_unread_from_order {
+                if delivery_order >= from
+                    && observed_at > current.profile.manual_unread_at.unwrap_or(0)
+                {
+                    tx.execute(
+                        "UPDATE companion_profiles SET manual_unread_from_order=NULL, manual_unread_at=NULL, updated_at=?2 WHERE id=?1",
+                        params![id, now_ms()],
+                    )?;
+                }
+            }
+            profile(tx, id)
+        })
+    }
+
+    /// K6: mark a contact-sent visible bubble unread from its position onward.
+    /// Independent of the auto-read cursor (which never rewinds). Requires the
+    /// chat's K1 backfill to be complete so the mark lands on a durable bubble.
+    pub(crate) fn mark_companion_unread(&self, id: &str, bubble_id: &str) -> Result<CompanionView> {
+        self.companion_transaction(|tx| {
+            let current = profile(tx, id)?;
+            if !super::contact_bubbles::backfill_complete(tx, &current.conversation_id)? {
+                return Err(CompanionError::BackfillPending);
+            }
+            let order: Option<i64> = tx
+                .query_row(
+                    "SELECT delivery_order FROM contact_bubbles WHERE bubble_id=?1 AND conversation_id=?2 AND author='companion'",
+                    params![bubble_id, current.conversation_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(order) = order else {
+                return Err(CompanionError::BubbleNotFound);
+            };
+            let now = now_ms();
+            tx.execute(
+                "UPDATE companion_profiles SET manual_unread_from_order=?2, manual_unread_at=?3, updated_at=?3 WHERE id=?1",
+                params![id, order, now],
+            )?;
+            profile(tx, id)
+        })
+    }
+
+    /// K6: per-contact reminder mode. `follow_global` defers to the global
+    /// notification preferences; the other three override them.
+    pub(crate) fn set_companion_reminder_mode(&self, id: &str, mode: &str) -> Result<CompanionView> {
+        if !matches!(mode, "follow_global" | "all" | "action_only" | "muted") {
+            return Err(CompanionError::ReminderModeInvalid);
+        }
+        self.companion_transaction(|tx| {
+            profile(tx, id)?;
+            tx.execute(
+                "UPDATE companion_profiles SET reminder_mode=?2, updated_at=?3 WHERE id=?1",
+                params![id, mode, now_ms()],
             )?;
             profile(tx, id)
         })
@@ -615,6 +824,36 @@ mod tests {
         fn add(&self, expert: &str) -> CompanionView {
             self.db.add_companion(&self.root, expert).unwrap()
         }
+
+        /// K6 test helper: insert a durable bubble directly so delivery order is
+        /// deterministic, independent of the projection pipeline.
+        fn bubble(&self, chat: &str, ordinal: i64, author: &str, order: i64, content: &str) -> String {
+            let id = format!("bubble-{order}");
+            let source = format!("src-{order}");
+            let role = if author == "companion" { "assistant" } else { "user" };
+            self.db.with_connection(|c| {
+                c.execute(
+                    "INSERT OR IGNORE INTO messages(id,conversation_id,role,kind,content,status,ordinal,created_at,updated_at)
+                     VALUES (?1,?2,?3,'text',?4,'completed',?5,1,1)",
+                    params![source, chat, role, content, ordinal],
+                )?;
+                c.execute(
+                    "INSERT OR IGNORE INTO contact_bubbles(bubble_id, conversation_id, run_id, source_message_id, source_ordinal,
+                        author, projection, segment_start, segment_end, delivery_order, delivered_at, content, fingerprint, created_at)
+                     VALUES (?1, ?2, NULL, ?3, ?4, ?5, 'message', NULL, NULL, ?6, ?7, ?8, ?8, 1)",
+                    params![id, chat, source, ordinal, author, order, order, content],
+                )?;
+                Ok(())
+            }).unwrap();
+            id
+        }
+
+        fn complete_backfill(&self, chat: &str) {
+            self.db.with_connection(|c| {
+                c.execute("INSERT OR IGNORE INTO contact_bubble_backfills(conversation_id, completed_at) VALUES (?1, 1)", [chat])?;
+                Ok(())
+            }).unwrap();
+        }
     }
 
     #[test]
@@ -711,12 +950,12 @@ mod tests {
             Err(CompanionError::NameTaken)
         ));
         f.db.pin_companion(id, true).unwrap();
+        // K6: unread counts durable companion bubbles, not settled message rows.
+        f.bubble(&first.conversation_id, 1, "user", 1000, "");
+        f.bubble(&first.conversation_id, 2, "companion", 2000, "第一条回复");
+        f.bubble(&first.conversation_id, 3, "companion", 3000, "第二条回复");
+        f.complete_backfill(&first.conversation_id);
         f.db.with_connection(|c| {
-            for (ord,role,status) in [(1,"user","completed"),(2,"assistant","completed"),(3,"assistant","completed"),(4,"assistant","streaming")] {
-                c.execute("INSERT INTO messages(id,conversation_id,role,kind,content,status,ordinal,created_at,updated_at)
-                    VALUES (?1,?2,?3,'text','message',?4,?5,1,1)",
-                    params![Uuid::new_v4().to_string(),first.conversation_id,role,status,ord])?;
-            }
             c.execute("INSERT INTO runs(id,conversation_id,status,model,created_at)
                 VALUES ('test-active',?1,'running','fox',1)",[&first.conversation_id])?;
             Ok(())
@@ -728,13 +967,13 @@ mod tests {
         ));
         f.db.execute_raw_sql("UPDATE runs SET status='completed' WHERE id='test-active'")
             .unwrap();
-        assert_eq!(f.db.read_companion_through(id, 2).unwrap().unread_count, 1);
+        assert_eq!(f.db.read_companion_through(id, 2000, 10).unwrap().unread_count, 1);
+        // Monotonic: reporting an earlier bubble never rewinds the cursor.
         assert_eq!(
-            f.db.read_companion_through(id, 1)
+            f.db.read_companion_through(id, 1000, 11)
                 .unwrap()
-                .profile
-                .last_read_ordinal,
-            2
+                .read_delivery_order,
+            2000
         );
         f.db.archive_companion(id).unwrap();
         assert_eq!(f.add("fox-security").profile.display_name, "Fox");
@@ -742,14 +981,170 @@ mod tests {
         assert_eq!(restored.conversation_id, first.conversation_id);
         assert_eq!(restored.profile.display_name, "Fox（3）");
         assert!(restored.profile.pinned_at.is_some());
-        assert_eq!(restored.profile.last_read_ordinal, 2);
+        assert_eq!(restored.read_delivery_order, 2000);
         assert_eq!(
-            f.db.read_companion_through(id, 1000)
+            f.db.read_companion_through(id, 3000, 12)
                 .unwrap()
-                .profile
-                .last_read_ordinal,
-            3
+                .read_delivery_order,
+            3000
         );
+        assert_eq!(f.db.companion_profile(id).unwrap().unread_count, 0);
+        drop(f.db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    #[test]
+    fn c06_reminder_mode_is_per_contact_and_gates_alerts_independently() {
+        use crate::database::repositories::app_management::reminder_allows_alert;
+        let f = Fixture::new();
+        let a = f.add("fox-debugger");
+        let b = f.add("fox-reviewer");
+        assert_eq!(a.profile.reminder_mode, "follow_global");
+        f.db.set_companion_reminder_mode(&a.profile.id, "muted").unwrap();
+        let list = f.db.list_companions().unwrap().companions;
+        let ra = list.iter().find(|c| c.profile.id == a.profile.id).unwrap();
+        let rb = list.iter().find(|c| c.profile.id == b.profile.id).unwrap();
+        assert_eq!(ra.profile.reminder_mode, "muted");
+        // 静音互不影响：the other contact keeps following global.
+        assert_eq!(rb.profile.reminder_mode, "follow_global");
+        assert!(!reminder_allows_alert("muted", "approval"));
+        assert!(!reminder_allows_alert("muted", "message"));
+        assert!(reminder_allows_alert("action_only", "approval"));
+        assert!(reminder_allows_alert("action_only", "question"));
+        assert!(!reminder_allows_alert("action_only", "message"));
+        assert!(!reminder_allows_alert("action_only", "completed"));
+        assert!(reminder_allows_alert("all", "message"));
+        assert!(reminder_allows_alert("follow_global", "approval"));
+        assert!(matches!(
+            f.db.set_companion_reminder_mode(&a.profile.id, "loud"),
+            Err(CompanionError::ReminderModeInvalid)
+        ));
+        drop(f.db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    #[test]
+    fn c06_mid_run_delivered_bubbles_stay_unread_after_cancel() {
+        let f = Fixture::new();
+        let c = f.add("fox-debugger");
+        let chat = c.conversation_id.clone();
+        f.db.with_connection(|conn| {
+            conn.execute("INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES ('r1',?1,'running','fox',1)", [&chat])?;
+            Ok(())
+        }).unwrap();
+        f.bubble(&chat, 2, "companion", 2000, "中途一");
+        f.bubble(&chat, 3, "companion", 3000, "中途二");
+        f.db.execute_raw_sql(&format!("UPDATE contact_bubbles SET run_id='r1' WHERE conversation_id='{chat}'")).unwrap();
+        assert_eq!(f.db.companion_profile(&c.profile.id).unwrap().unread_count, 2);
+        // 整轮取消不撤销已送达气泡的未读资格。
+        f.db.execute_raw_sql("UPDATE runs SET status='cancelled' WHERE id='r1'").unwrap();
+        let after = f.db.companion_profile(&c.profile.id).unwrap();
+        assert_eq!(after.unread_count, 2);
+        assert!(after.active_run_status.is_none());
+        drop(f.db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    #[test]
+    fn c06_manual_unread_survives_restart_and_clears_only_on_fresh_read() {
+        let f = Fixture::new();
+        let c = f.add("fox-debugger");
+        let chat = c.conversation_id.clone();
+        let id = c.profile.id.clone();
+        f.bubble(&chat, 2, "companion", 2000, "一");
+        f.bubble(&chat, 3, "companion", 3000, "二");
+        f.complete_backfill(&chat);
+        f.db.read_companion_through(&id, 3000, 100).unwrap();
+        assert_eq!(f.db.companion_profile(&id).unwrap().unread_count, 0);
+        let marked = f.db.mark_companion_unread(&id, "bubble-2000").unwrap();
+        assert_eq!(marked.profile.manual_unread_from_order, Some(2000));
+        assert_eq!(marked.unread_count, 2);
+        // 独立覆盖起点，不倒退自动已读游标。
+        assert_eq!(marked.read_delivery_order, 3000);
+        let mark_at = marked.profile.manual_unread_at.unwrap();
+        // 自动已读更新不能立即抵消手动覆盖（observed_at 不晚于设置时刻）。
+        let stale = f.db.read_companion_through(&id, 3000, mark_at).unwrap();
+        assert_eq!(stale.profile.manual_unread_from_order, Some(2000));
+        assert_eq!(stale.unread_count, 2);
+        drop(f.db);
+        let db = Database::open(f.root.join("fox.db")).unwrap();
+        let after = db.companion_profile(&id).unwrap();
+        assert_eq!(after.profile.manual_unread_from_order, Some(2000));
+        assert_eq!(after.unread_count, 2);
+        // 实际阅读对应位置后清除覆盖。
+        let cleared = db.read_companion_through(&id, 3000, mark_at + 1).unwrap();
+        assert_eq!(cleared.profile.manual_unread_from_order, None);
+        assert_eq!(cleared.unread_count, 0);
+        drop(db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    #[test]
+    fn c06_mark_unread_requires_durable_companion_bubble_and_backfill() {
+        let f = Fixture::new();
+        let c = f.add("fox-debugger");
+        let chat = c.conversation_id.clone();
+        let id = c.profile.id.clone();
+        f.bubble(&chat, 2, "companion", 2000, "一");
+        // 回填未完成时不能永久标记。
+        assert!(matches!(f.db.mark_companion_unread(&id, "bubble-2000"), Err(CompanionError::BackfillPending)));
+        f.complete_backfill(&chat);
+        // 用户气泡或未知气泡不可标记。
+        assert!(matches!(f.db.mark_companion_unread(&id, "missing"), Err(CompanionError::BubbleNotFound)));
+        f.bubble(&chat, 1, "user", 1000, "");
+        assert!(matches!(f.db.mark_companion_unread(&id, "bubble-1000"), Err(CompanionError::BubbleNotFound)));
+        assert!(f.db.mark_companion_unread(&id, "bubble-2000").is_ok());
+        drop(f.db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    #[test]
+    fn c06_reading_does_not_clear_pending_actions() {
+        let f = Fixture::new();
+        let c = f.add("fox-debugger");
+        let chat = c.conversation_id.clone();
+        let id = c.profile.id.clone();
+        f.bubble(&chat, 2, "companion", 2000, "回复");
+        f.complete_backfill(&chat);
+        f.db.with_connection(|conn| {
+            conn.execute("INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES ('r1',?1,'awaiting_confirmation','fox',1)", [&chat])?;
+            conn.execute("INSERT INTO tool_calls(id,runtime_tool_call_id,run_id,conversation_id,tool_name,status,started_at,updated_at)
+                VALUES ('t1','rt1','r1',?1,'write_file','pending',1,1)", [&chat])?;
+            conn.execute("INSERT INTO approvals(id,tool_call_id,status,requested_action,requested_at) VALUES ('a1','t1','pending','write_file',1)", [])?;
+            Ok(())
+        }).unwrap();
+        let before = f.db.list_companions().unwrap().companions.into_iter().find(|x| x.profile.id == id).unwrap();
+        assert_eq!(before.pending_action_count, 1);
+        f.db.read_companion_through(&id, 2000, 100).unwrap();
+        let after = f.db.list_companions().unwrap().companions.into_iter().find(|x| x.profile.id == id).unwrap();
+        // 阅读不消除待处理审批。
+        assert_eq!(after.pending_action_count, 1);
+        assert_eq!(after.unread_count, 0);
+        drop(f.db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    #[test]
+    fn c06_legacy_read_ordinal_converts_to_bubble_position() {
+        let f = Fixture::new();
+        let c = f.add("fox-debugger");
+        let chat = c.conversation_id.clone();
+        let id = c.profile.id.clone();
+        f.bubble(&chat, 1, "companion", 1000, "一");
+        f.bubble(&chat, 2, "companion", 2000, "二");
+        f.bubble(&chat, 3, "companion", 3000, "三");
+        f.db.execute_raw_sql(&format!("UPDATE companion_profiles SET last_read_ordinal=2, last_read_delivery_order=NULL WHERE id='{id}'")).unwrap();
+        // 转换前 VIEW 仍按旧 ordinal 映射出正确位置。
+        let before = f.db.companion_profile(&id).unwrap();
+        assert_eq!(before.read_delivery_order, 2000);
+        assert_eq!(before.unread_count, 1);
+        f.complete_backfill(&chat);
+        f.db.with_connection(|conn| { super::convert_pending_read_cursors(conn)?; Ok(()) }).unwrap();
+        let after = f.db.companion_profile(&id).unwrap();
+        assert_eq!(after.profile.last_read_delivery_order, Some(2000));
+        assert_eq!(after.read_delivery_order, 2000);
+        // 旧游标之后的已送达气泡按新规则计未读。
+        assert_eq!(after.unread_count, 1);
         drop(f.db);
         std::fs::remove_dir_all(f.root).unwrap();
     }

@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button'
 import { notify as toast } from '@/features/notifications'
 import { desktopClient, desktopErrorDetails } from '@/features/conversations/api/desktop-client'
 import type { ProjectFileEntry } from '@/features/conversations/model/types'
-import { contacts, direct, type Companion, type CompanionGrant, type RetainedWorkspace, type TemplateStatus } from './api'
+import { contacts, direct, type Companion, type CompanionGrant, type ReminderMode, type RetainedWorkspace, type TemplateStatus } from './api'
 import { ContactCapabilities } from './capabilities'
 import { ContactFiles } from './files'
 import { showContactError, useContacts } from './context'
@@ -76,6 +76,7 @@ export function ContactProfile({ contact }: { contact: Companion }) {
           <div className="fox-contact-actions"><Button size="sm" disabled={busy || Boolean(contact.activeRunStatus)} onClick={() => void run(() => decide(true))}>采用新版</Button><Button size="sm" variant="ghost" disabled={busy || template.dismissed} onClick={() => void run(() => decide(false))}>暂不更新</Button></div></details>}
       </section>
       <SettingsGroup title="对话设置"><SettingsRow title="模型"><ContactModelSelect contact={contact} /></SettingsRow>
+        <SettingsRow title="提醒" description="静音只关闭主动弹窗和声音，侧栏未读与待处理标记仍保留"><select aria-label="提醒方式" value={contact.reminderMode} disabled={busy} onChange={e => void run(() => contacts.setReminderMode(contact.id, e.target.value as ReminderMode))}><option value="follow_global">沿用全局</option><option value="all">全部提醒</option><option value="action_only">仅需要处理</option><option value="muted">静音</option></select></SettingsRow>
         <SettingsRow title="权限"><select aria-label="私聊权限" value={ctx?.permission ?? 'ask'} onChange={e => ctx?.setPermission(e.target.value as 'read_only' | 'ask' | 'allow')}><option value="read_only">只读</option><option value="ask">询问</option><option value="allow">自动</option></select></SettingsRow>
         <SettingsRow title="共享记忆"><Button size="sm" variant="ghost" onClick={ctx?.openSharedMemory}>查看共享记忆</Button></SettingsRow>
         <SettingsRow title="可用能力" description="网页搜索、读取网页和连接器工具"><Button size="sm" variant="ghost" onClick={() => { setCapabilitiesOpen(true); setLibraryOpen(false) }}>查看和设置</Button></SettingsRow>

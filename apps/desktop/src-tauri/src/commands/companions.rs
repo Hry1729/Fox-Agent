@@ -94,7 +94,22 @@ pub(crate) struct PinCompanion {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MarkRead {
     companion_id: String,
-    ordinal: i64,
+    delivery_order: i64,
+    observed_at: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MarkUnread {
+    companion_id: String,
+    bubble_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetReminderMode {
+    companion_id: String,
+    mode: String,
 }
 
 #[derive(Deserialize)]
@@ -282,10 +297,36 @@ pub(crate) fn companion_mark_read(
     state: State<'_, AppState>,
     request: MarkRead,
 ) -> ApiResponse<CompanionView> {
+    response(state.database.read_companion_through(
+        &request.companion_id,
+        request.delivery_order,
+        request.observed_at,
+    ))
+}
+
+/// K6: mark a contact-sent visible bubble unread from its position onward.
+#[tauri::command]
+pub(crate) fn companion_mark_unread(
+    state: State<'_, AppState>,
+    request: MarkUnread,
+) -> ApiResponse<CompanionView> {
     response(
         state
             .database
-            .read_companion_through(&request.companion_id, request.ordinal),
+            .mark_companion_unread(&request.companion_id, &request.bubble_id),
+    )
+}
+
+/// K6: per-contact reminder mode (follow_global / all / action_only / muted).
+#[tauri::command]
+pub(crate) fn companion_set_reminder_mode(
+    state: State<'_, AppState>,
+    request: SetReminderMode,
+) -> ApiResponse<CompanionView> {
+    response(
+        state
+            .database
+            .set_companion_reminder_mode(&request.companion_id, &request.mode),
     )
 }
 

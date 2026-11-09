@@ -17,11 +17,20 @@ export interface Companion {
   lastReadOrdinal: number
   modelProviderId: string | null
   modelRef: string | null
+  reminderMode: ReminderMode
+  lastReadDeliveryOrder: number | null
+  manualUnreadFromOrder: number | null
+  manualUnreadAt: number | null
+  readDeliveryOrder: number
+  pendingActionCount: number
   unreadCount: number
   activeRunStatus: string | null
   archivedAt: number | null
   deletingAt: number | null
 }
+
+/** K6: per-contact reminder preference. `follow_global` defers to global settings. */
+export type ReminderMode = 'follow_global' | 'all' | 'action_only' | 'muted'
 
 export interface CompanionsList {
   companions: Companion[]
@@ -107,7 +116,9 @@ export const contacts = {
   openFile: (companionId: string, kind: CompanionFileEntry['kind'], fileId: string) => command<void>('companion_file_open', { companionId, kind, fileId }),
   saveFile: (companionId: string, kind: CompanionFileEntry['kind'], fileId: string) => command<string | null>('companion_file_save', { companionId, kind, fileId }),
   pin: (companionId: string, pinned: boolean) => command<Companion>('companion_set_pinned', { companionId, pinned }),
-  markRead: (companionId: string, ordinal: number) => command<Companion>('companion_mark_read', { companionId, ordinal }),
+  markRead: (companionId: string, deliveryOrder: number, observedAt: number) => command<Companion>('companion_mark_read', { companionId, deliveryOrder, observedAt }),
+  markUnread: (companionId: string, bubbleId: string) => command<Companion>('companion_mark_unread', { companionId, bubbleId }),
+  setReminderMode: (companionId: string, mode: ReminderMode) => command<Companion>('companion_set_reminder_mode', { companionId, mode }),
   archive: (companionId: string) => command<Companion>('companion_archive', { companionId }),
   restore: (companionId: string) => command<Companion>('companion_restore', { companionId }),
   template: (companionId: string) => command<TemplateStatus>('companion_template_status', { companionId }),

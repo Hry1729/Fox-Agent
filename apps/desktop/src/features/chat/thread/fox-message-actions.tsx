@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { CheckIcon, CopyIcon, GitFork } from 'lucide-react'
+import { CheckIcon, CopyIcon, GitFork, MailPlus } from 'lucide-react'
 import { MessageActions } from '@/components/assistant-ui/upstream/elements/message-actions'
 import { ghostButton, iconSwap, iconSwapIn, iconSwapOut } from '@/components/assistant-ui/upstream/elements/surfaces'
 import { cn } from '@/lib/utils'
@@ -59,5 +59,24 @@ export function FoxCopyMessageButton({ onCopy }: { onCopy: CopyAction }) {
     aria-label={copied ? '已复制消息' : '复制消息'} title={copied ? '已复制消息' : '复制消息'} aria-busy={copying} disabled={copying} onClick={() => void copy()}>
     <CopyIcon aria-hidden="true" className={cn(iconSwap, 'size-3.5', copied ? iconSwapOut : iconSwapIn)} />
     <CheckIcon aria-hidden="true" className={cn(iconSwap, 'size-3.5', copied ? iconSwapIn : iconSwapOut)} />
+  </button>
+}
+
+/** C06/K6: mark a contact-sent visible bubble unread from its position onward. */
+export function FoxMarkUnreadButton({ onMark }: { onMark: () => void | Promise<unknown> }) {
+  const [marked, setMarked] = useState(false)
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => clearTimeout(timer.current), [])
+  const mark = () => {
+    void Promise.resolve(onMark()).then(() => {
+      setMarked(true)
+      clearTimeout(timer.current)
+      timer.current = setTimeout(() => setMarked(false), 1800)
+    }).catch(() => {})
+  }
+  return <button type="button" className={cn(ghostButton, 'fox-thread-action-button fox-thread-unread-button', marked && 'is-marked')}
+    aria-label={marked ? '已标为未读' : '标为未读'} title={marked ? '已标为未读' : '标为未读'} onClick={mark}>
+    <MailPlus aria-hidden="true" className={cn(iconSwap, 'size-3.5', marked ? iconSwapOut : iconSwapIn)} />
+    <CheckIcon aria-hidden="true" className={cn(iconSwap, 'size-3.5', marked ? iconSwapIn : iconSwapOut)} />
   </button>
 }

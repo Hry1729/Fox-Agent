@@ -252,7 +252,7 @@ export interface ProjectManagementRecord {
 export interface AppNotificationRecord {
   id: string
   mergeKey: string
-  kind: 'approval' | 'question' | 'progress' | 'completed' | 'failed'
+  kind: 'approval' | 'question' | 'progress' | 'completed' | 'failed' | 'message'
   severity: 'quiet' | 'normal' | 'high'
   title: string
   body: string

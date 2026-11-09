@@ -30,7 +30,17 @@ function displayBody(item: Pick<AppNotificationRecord, 'kind' | 'body'>): string
   if (item.kind !== 'failed') return item.body
   return userFacingError(item.body, readDeveloperUi(), '这次没有完成，请重试。')
 }
-const toastType: Record<AppNotificationRecord['kind'], ToastType> = { completed: 'success', failed: 'error', progress: 'loading', approval: 'warning', question: 'info' }
+const toastType: Record<AppNotificationRecord['kind'], ToastType> = { completed: 'success', failed: 'error', progress: 'loading', approval: 'warning', question: 'info', message: 'info' }
+
+/** K6: per-contact reminder mode gates active alerts (popup/sound/toast). The
+ * center keeps the entry in every mode; only the interruption is suppressed.
+ * Mirrors the backend `reminder_allows_alert`. */
+function contactReminderAllowsAlert(item: AppNotificationRecord): boolean {
+  const mode = item.action?.reminderMode
+  if (mode === 'muted') return false
+  if (mode === 'action_only') return item.kind === 'approval' || item.kind === 'question'
+  return true
+}
 
 function notificationFingerprint(item: AppNotificationRecord): string {
   return JSON.stringify([item.kind, item.severity, item.title, item.body, item.progress, item.status])
@@ -177,7 +187,7 @@ function NotificationCenterContent({
       if (observedNotifications.current) {
         const changed = presentedItems.filter((item) => item.readAt == null && observedNotifications.current?.get(item.id) !== notificationFingerprint(item))
         // A refusal the page already toasted directly (toastNow) is only recorded here.
-        const shouldAlert = changed.filter((item) => !(nextPreferences.quietProgress && item.kind === 'progress') && !directToastRecently(item.mergeKey))
+        const shouldAlert = changed.filter((item) => !(nextPreferences.quietProgress && item.kind === 'progress') && !directToastRecently(item.mergeKey) && contactReminderAllowsAlert(item))
         shouldAlert.slice(0, 12).reverse().forEach((item) => enqueueToast(item))
         if (shouldAlert.length && nextPreferences.sound) playNotificationSound(normalizeNotificationSoundId(nextPreferences.soundId))
         if (shouldAlert.length && nextPreferences.systemPopup && typeof Notification !== 'undefined' && Notification.permission === 'granted') {

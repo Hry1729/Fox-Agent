@@ -11,7 +11,8 @@ mod migration_copy_tests;
 /// v109 adds the companion model override and the per-run model snapshot (C04/K5).
 /// v110 adds companion tool grants and the per-run capability snapshot (C02/K4).
 /// v111 adds the background ownership chain and the task report ledger (C03b/K2).
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 111;
+/// v112 adds contact reminder preferences and bubble-level read/unread state (C06/K6).
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 112;
 pub(crate) use repositories::{AcceptanceBinding, AcceptanceRow, AcceptanceWrite};
 pub(crate) use repositories::kernel_execution_admission;
 pub(crate) use repositories::permission_rules::{ConversationAccess, PermissionAuditRecord, PermissionRuleRecord};

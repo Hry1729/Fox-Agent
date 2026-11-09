@@ -28,7 +28,7 @@ describe('联系人桌面组件', () => {
   test('侧栏展示活跃身份、未读与选中会话，归档身份不占位置', () => {
     const html = render(<ContactSidebar activeId="chat" />)
     expect(html).toContain('当前联系人')
-    expect(html).toContain('2 条未读')
+    expect(html).toContain('2 条新消息')
     expect(html).toContain('aria-current="page"')
     expect(html).not.toContain('已归档角色')
   })

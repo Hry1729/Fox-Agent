@@ -108,8 +108,43 @@ pub struct ProjectManagementRecord {
     pub updated_at: i64,
 }
 
+/// K6: stamp a contact-related notification with its companion id and reminder
+/// mode so the alert layer can gate popups/sound per contact. Non-contact events
+/// pass through unchanged.
+fn contact_action(
+    base: Value,
+    contacts: &std::collections::HashMap<String, (String, String, String)>,
+    conversation_id: &str,
+) -> Value {
+    let mut value = base;
+    if let Some((companion_id, mode, _name)) = contacts.get(conversation_id) {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("companionId".to_owned(), json!(companion_id));
+            object.insert("reminderMode".to_owned(), json!(mode));
+        }
+    }
+    value
+}
+
+/// K6: whether a contact's reminder mode permits an active alert (popup/sound)
+/// for a notification kind. `muted` silences everything; `action_only` keeps only
+/// questions and confirmations; `all` and `follow_global` defer to the global
+/// notification preferences. The center entry itself is kept in every mode.
+pub(crate) fn reminder_allows_alert(mode: &str, kind: &str) -> bool {
+    match mode {
+        "muted" => false,
+        "action_only" => matches!(kind, "approval" | "question"),
+        _ => true,
+    }
+}
+
 impl Database {
     pub fn sync_app_notifications(&self) -> Result<(), String> {
+        // K6: contact reminders merge into the existing notification events. Each
+        // contact-related event carries its companion id and reminder mode so the
+        // alert layer can gate popups/sound per contact while the center keeps the
+        // entry in every mode.
+        let contacts = self.contact_reminder_map()?;
         let approval_items = self.with_connection(|connection| {
             let mut statement = connection.prepare(
                 "SELECT a.id, a.status, a.requested_action, a.requested_at,
@@ -151,10 +186,10 @@ impl Database {
                 source_type: "approval".to_owned(),
                 source_id: id,
                 workspace_view: Some("chat".to_owned()),
-                entity_id: Some(conversation_id),
+                entity_id: Some(conversation_id.clone()),
                 progress: None,
                 status,
-                action: json!({"open": "conversation"}),
+                action: contact_action(json!({"open": "conversation"}), &contacts, &conversation_id),
             })?;
         }
 
@@ -203,18 +238,21 @@ impl Database {
                 source_type: "run".to_owned(),
                 source_id: id,
                 workspace_view: Some("chat".to_owned()),
-                entity_id: Some(conversation_id),
+                entity_id: Some(conversation_id.clone()),
                 progress,
                 status,
-                action: json!({"open": "conversation"}),
+                action: contact_action(json!({"open": "conversation"}), &contacts, &conversation_id),
             })?;
         }
 
         let colleague_items = self.with_connection(|connection| {
             let mut statement = connection.prepare(
-                "SELECT t.id, t.status, t.error_message, t.colleague_id, d.name
+                "SELECT t.id, t.status, t.error_message, t.colleague_id, d.name,
+                        d.companion_id, p.reminder_mode
                  FROM digital_colleague_triggers t
                  JOIN digital_colleagues d ON d.id = t.colleague_id
+                 LEFT JOIN companion_profiles p ON p.id = d.companion_id
+                    AND p.archived_at IS NULL AND p.deleting_at IS NULL
                  ORDER BY t.updated_at DESC LIMIT 100",
             )?;
             let records = statement
@@ -225,12 +263,14 @@ impl Database {
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(records)
         })?;
-        for (id, status, error, colleague_id, name) in colleague_items {
+        for (id, status, error, colleague_id, name, companion_id, reminder_mode) in colleague_items {
             let (kind, severity, body) = match status.as_str() {
                 "accepted" | "queued" | "running" => {
                     ("progress", "quiet", "数字同事正在执行".to_owned())
@@ -244,6 +284,15 @@ impl Database {
                 "cancelled" | "skipped" => ("completed", "normal", format!("运行已{status}")),
                 _ => continue,
             };
+            // K6: a bound contact's background task follows the contact's reminder
+            // preference — muted/action-only must not popup or sound for it.
+            let mut action = json!({"open": "digital_colleague"});
+            if let (Some(companion_id), Some(mode)) = (companion_id, reminder_mode) {
+                if let Some(object) = action.as_object_mut() {
+                    object.insert("companionId".to_owned(), json!(companion_id));
+                    object.insert("reminderMode".to_owned(), json!(mode));
+                }
+            }
             self.upsert_app_notification(AppNotificationUpsert {
                 merge_key: format!("digital-colleague:{id}"),
                 kind: kind.to_owned(),
@@ -256,10 +305,220 @@ impl Database {
                 entity_id: Some(colleague_id),
                 progress: None,
                 status,
-                action: json!({"open": "digital_colleague"}),
+                action,
             })?;
         }
+
+        // K6: "仅需要处理" alerts on questions, so pending contact questions need a
+        // center entry of their own (approvals already produce one above).
+        let mut pending_question_runs = Vec::new();
+        for (run_id, conversation_id, companion_id, mode, name, question) in
+            self.pending_contact_questions(&contacts)?
+        {
+            pending_question_runs.push(run_id.clone());
+            self.upsert_app_notification(AppNotificationUpsert {
+                merge_key: format!("question:{run_id}"),
+                kind: "question".to_owned(),
+                severity: "high".to_owned(),
+                title: name,
+                body: question,
+                source_type: "run".to_owned(),
+                source_id: run_id,
+                workspace_view: Some("chat".to_owned()),
+                entity_id: Some(conversation_id.clone()),
+                progress: None,
+                status: "awaiting_user".to_owned(),
+                action: contact_action(
+                    json!({"open": "conversation", "companionId": companion_id, "reminderMode": mode}),
+                    &contacts,
+                    &conversation_id,
+                ),
+            })?;
+        }
+        // Answered (or superseded) questions resolve instead of lingering pending.
+        self.resolve_notifications("run", "question:%", "question", &pending_question_runs)?;
+
+        // K6: "全部提醒" includes new messages. Only explicit `all` contacts get a
+        // new-message reminder; `follow_global` keeps today's global behaviour.
+        let mut unread_message_contacts = Vec::new();
+        for (companion_id, name, conversation_id, max_order, unread) in
+            self.contact_new_messages()?
+        {
+            unread_message_contacts.push(companion_id.clone());
+            self.upsert_app_notification(AppNotificationUpsert {
+                merge_key: format!("companion-messages:{companion_id}"),
+                kind: "message".to_owned(),
+                severity: "normal".to_owned(),
+                title: name,
+                body: format!("{unread} 条新消息"),
+                source_type: "companion_messages".to_owned(),
+                source_id: companion_id.clone(),
+                workspace_view: Some("chat".to_owned()),
+                entity_id: Some(conversation_id.clone()),
+                progress: None,
+                // A later delivered bubble advances the status, reopening the
+                // entry so a refresh never re-alerts the same bubble twice.
+                status: format!("bubble:{max_order}"),
+                action: json!({"open": "conversation", "companionId": companion_id, "reminderMode": "all", "conversationId": conversation_id}),
+            })?;
+        }
+        // Once read (or the contact leaves `all` mode) the reminder resolves.
+        self.resolve_notifications("companion_messages", "companion-messages:%", "message", &unread_message_contacts)?;
         Ok(())
+    }
+
+    /// K6: resolve reminder entries whose subject is no longer outstanding, so an
+    /// answered question or a read message never lingers as a pending card.
+    fn resolve_notifications(
+        &self,
+        source_type: &str,
+        merge_prefix: &str,
+        kind: &str,
+        keep_ids: &[String],
+    ) -> Result<(), String> {
+        let now = now_ms();
+        self.with_connection(|connection| {
+            connection.execute(
+                "UPDATE app_notifications SET kind='completed', severity='normal',
+                    status='resolved', read_at=?1, updated_at=?1, dismissed_at=NULL
+                 WHERE source_type=?2 AND merge_key LIKE ?3 AND kind=?4
+                   AND source_id NOT IN (SELECT value FROM json_each(?5))",
+                params![now, source_type, merge_prefix, kind, json!(keep_ids).canonical_string()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// K6: conversation id → (companion id, reminder mode, display name) across the
+    /// contact's serial range — the fixed private chat and bound background chats.
+    fn contact_reminder_map(
+        &self,
+    ) -> Result<std::collections::HashMap<String, (String, String, String)>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT c.id, p.id, p.reminder_mode, p.display_name
+                 FROM conversations c JOIN companion_profiles p ON p.id = c.companion_id
+                 WHERE p.archived_at IS NULL AND p.deleting_at IS NULL
+                 UNION ALL
+                 SELECT dc.conversation_id, p.id, p.reminder_mode, p.display_name
+                 FROM digital_colleagues dc JOIN companion_profiles p ON p.id = dc.companion_id
+                 WHERE dc.companion_bound = 1 AND p.archived_at IS NULL AND p.deleting_at IS NULL",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?),
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<_>>()
+        })
+    }
+
+    /// K6: pending questions in contact chats, mirroring the awaiting-reply rule
+    /// in `apply_active_run_activity` (a question outlives run.completed until it
+    /// is answered, the run terminates, or a later unrelated user message supersedes it).
+    fn pending_contact_questions(
+        &self,
+        contacts: &std::collections::HashMap<String, (String, String, String)>,
+    ) -> Result<Vec<(String, String, String, String, String, String)>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "WITH questions AS (
+                    SELECT run_id,
+                        MAX(CASE WHEN event_type = 'user.question.requested'
+                          AND CASE WHEN json_valid(event_json) AND json_type(event_json,'$.questions')='array'
+                            THEN EXISTS(SELECT 1 FROM json_each(event_json,'$.questions') q
+                              WHERE CASE WHEN q.type='object' THEN json_type(q.value,'$.question')='text'
+                                AND length(trim(json_extract(q.value,'$.question')))>0 ELSE 0 END)
+                            ELSE 0 END THEN seq END) AS requested,
+                        MAX(CASE WHEN event_type IN ('user.question.responded','run.failed','run.cancelled','run.interrupted')
+                          OR (event_type='run.completed' AND coalesce(json_extract(
+                            CASE WHEN json_valid(event_json) THEN event_json ELSE '{}' END,'$.completionReason'),'') <> 'awaiting_user')
+                          THEN seq END) AS responded
+                    FROM run_events
+                    WHERE event_type IN ('user.question.requested','user.question.responded','run.completed','run.failed','run.cancelled','run.interrupted')
+                    GROUP BY run_id
+                )
+                SELECT q.run_id, r.conversation_id, requested.event_json
+                FROM questions q
+                JOIN runs r ON r.id = q.run_id
+                JOIN run_events requested ON requested.run_id = q.run_id AND requested.seq = q.requested
+                WHERE r.status NOT IN ('failed','cancelled','interrupted')
+                  AND coalesce(q.requested,-1) > coalesce(q.responded,-1)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM messages m WHERE m.conversation_id = r.conversation_id
+                      AND m.role='user' AND m.created_at > requested.created_at
+                      AND (m.run_id IS NULL OR m.run_id <> r.id)
+                      AND NOT EXISTS (
+                        SELECT 1 FROM json_each(requested.event_json,'$.questions') question
+                        WHERE CASE WHEN question.type='object' AND json_type(question.value,'$.question')='text'
+                          AND length(trim(json_extract(question.value,'$.question')))>0
+                          THEN instr(m.content, trim(json_extract(question.value,'$.question')) || '：') = 0
+                            AND instr(m.content, trim(json_extract(question.value,'$.question')) || ':') = 0
+                          ELSE 0 END
+                      )
+                  )",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (run_id, conversation_id, event_json) = row?;
+                let Some((companion_id, mode, name)) = contacts.get(&conversation_id) else {
+                    continue;
+                };
+                let question = serde_json::from_str::<Value>(&event_json)
+                    .ok()
+                    .and_then(|value| {
+                        value.get("questions")?.as_array()?.first()?.get("question")?.as_str().map(str::to_owned)
+                    })
+                    .unwrap_or_else(|| "有一个问题等待回答".to_owned());
+                out.push((run_id, conversation_id, companion_id.clone(), mode.clone(), name.clone(), question));
+            }
+            Ok(out)
+        })
+    }
+
+    /// K6: contacts in explicit `all` mode with unread companion bubbles, returning
+    /// (companion id, name, conversation id, latest delivery order, unread count).
+    fn contact_new_messages(&self) -> Result<Vec<(String, String, String, i64, i64)>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT p.id, p.display_name, c.id,
+                    (SELECT max(b.delivery_order) FROM contact_bubbles b
+                        WHERE b.conversation_id=c.id AND b.author='companion') AS max_order,
+                    (SELECT count(*) FROM contact_bubbles b WHERE b.conversation_id=c.id AND b.author='companion'
+                        AND b.delivery_order > coalesce(p.last_read_delivery_order,
+                            (SELECT max(b2.delivery_order) FROM contact_bubbles b2
+                                WHERE b2.conversation_id=c.id AND b2.source_ordinal<=p.last_read_ordinal), 0)) AS unread
+                 FROM companion_profiles p JOIN conversations c ON c.companion_id=p.id
+                 WHERE p.reminder_mode='all' AND p.archived_at IS NULL AND p.deleting_at IS NULL",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (id, name, conversation_id, max_order, unread) = row?;
+                if unread > 0 {
+                    if let Some(max_order) = max_order {
+                        out.push((id, name, conversation_id, max_order, unread));
+                    }
+                }
+            }
+            Ok(out)
+        })
     }
 
     pub fn upsert_app_notification(&self, item: AppNotificationUpsert) -> Result<(), String> {
@@ -1104,5 +1363,120 @@ mod tests {
 
         drop(database);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn c06_contact_reminders_merge_into_notification_center_and_resolve() {
+        let (database, path) = test_database();
+        let root = std::env::temp_dir().join(format!("fox-c06-notif-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let contact = database.seed_default_companion(&root).unwrap();
+        let chat = contact.conversation_id.clone();
+        let id = contact.profile.id.clone();
+        database.with_connection(|c| {
+            c.execute("INSERT INTO messages(id,conversation_id,role,kind,content,status,ordinal,created_at,updated_at)
+                VALUES ('m1',?1,'assistant','text','你好','completed',1,1,1)", [&chat])?;
+            c.execute("INSERT INTO contact_bubbles(bubble_id,conversation_id,run_id,source_message_id,source_ordinal,author,projection,segment_start,segment_end,delivery_order,delivered_at,content,fingerprint,created_at)
+                VALUES ('b1',?1,NULL,'m1',1,'companion','message',NULL,NULL,1000,1,'你好','fp',1)", [&chat])?;
+            c.execute("INSERT INTO contact_bubble_backfills(conversation_id,completed_at) VALUES (?1,1)", [&chat])?;
+            Ok(())
+        }).unwrap();
+        // follow_global keeps today's global behaviour: no new-message reminder.
+        database.sync_app_notifications().unwrap();
+        assert!(!database.list_app_notifications(false, 50).unwrap().iter()
+            .any(|n| n.merge_key == format!("companion-messages:{id}")));
+        // all: a new-message reminder appears, tagged with the contact's mode.
+        database.set_companion_reminder_mode(&id, "all").unwrap();
+        database.sync_app_notifications().unwrap();
+        let message = database.list_app_notifications(false, 50).unwrap().into_iter()
+            .find(|n| n.merge_key == format!("companion-messages:{id}")).unwrap();
+        assert_eq!(message.kind, "message");
+        assert_eq!(message.action.get("reminderMode").unwrap(), "all");
+        assert!(message.read_at.is_none());
+        // A pending approval in the contact chat carries the companion + mode.
+        database.with_connection(|c| {
+            c.execute("INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES ('r1',?1,'awaiting_confirmation','fox',1)", [&chat])?;
+            c.execute("INSERT INTO tool_calls(id,runtime_tool_call_id,run_id,conversation_id,tool_name,status,started_at,updated_at) VALUES ('t1','rt1','r1',?1,'write_file','pending',1,1)", [&chat])?;
+            c.execute("INSERT INTO approvals(id,tool_call_id,status,requested_action,requested_at) VALUES ('a1','t1','pending','write_file',1)", [])?;
+            Ok(())
+        }).unwrap();
+        database.sync_app_notifications().unwrap();
+        let approval = database.list_app_notifications(false, 50).unwrap().into_iter()
+            .find(|n| n.merge_key == "approval:a1").unwrap();
+        assert_eq!(approval.action.get("companionId").unwrap(), &id);
+        assert_eq!(approval.action.get("reminderMode").unwrap(), "all");
+        // muted: the new-message reminder resolves; history stays, unread clears.
+        database.set_companion_reminder_mode(&id, "muted").unwrap();
+        database.sync_app_notifications().unwrap();
+        let resolved = database.list_app_notifications(false, 50).unwrap().into_iter()
+            .find(|n| n.merge_key == format!("companion-messages:{id}")).unwrap();
+        assert_eq!(resolved.kind, "completed");
+        assert!(resolved.read_at.is_some());
+        drop(database);
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn c06_digital_colleague_notifications_follow_contact_reminder_mode() {
+        let (database, path) = test_database();
+        let root = std::env::temp_dir().join(format!("fox-c06-colleague-notif-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let contact = database.seed_default_companion(&root).unwrap();
+        let id = contact.profile.id.clone();
+        let input = |name: &str, companion_id: Option<String>| crate::database::CreateDigitalColleagueInput {
+            name: name.to_owned(),
+            expert_id: "fox-debugger".to_owned(),
+            objective: "整理资料".to_owned(),
+            project_id: None,
+            project_root: None,
+            knowledge_references: Vec::new(),
+            max_runs_per_day: 2,
+            max_tokens_per_day: 10_000,
+            max_duration_ms: 60_000,
+            max_output_tokens: 1_024,
+            max_tool_calls: 8,
+            companion_id,
+        };
+        let colleague = database.create_digital_colleague(&input("绑定后台", Some(id.clone()))).unwrap();
+        let unbound = database.create_digital_colleague(&input("普通同事", None)).unwrap();
+        database.with_connection(|c| {
+            c.execute("INSERT INTO digital_colleague_triggers(id,colleague_id,source_type,idempotency_key,status,payload_json,created_at,updated_at)
+                VALUES ('dt1',?1,'manual','k1','completed','{}',1,1)", [&colleague.id])?;
+            c.execute("INSERT INTO digital_colleague_triggers(id,colleague_id,source_type,idempotency_key,status,payload_json,created_at,updated_at)
+                VALUES ('dt2',?1,'manual','k2','completed','{}',1,1)", [&unbound.id])?;
+            Ok(())
+        }).unwrap();
+        let entry = |database: &Database, merge_key: &str| {
+            database.list_app_notifications(false, 100).unwrap().into_iter()
+                .find(|n| n.merge_key == merge_key).unwrap()
+        };
+        database.set_companion_reminder_mode(&id, "all").unwrap();
+        database.sync_app_notifications().unwrap();
+        let bound = entry(&database, "digital-colleague:dt1");
+        assert_eq!(bound.action.get("companionId").unwrap(), &id);
+        assert_eq!(bound.action.get("reminderMode").unwrap(), "all");
+        assert!(reminder_allows_alert("all", &bound.kind));
+        // action_only keeps questions/approvals; a completed background run must
+        // not popup or sound.
+        database.set_companion_reminder_mode(&id, "action_only").unwrap();
+        database.sync_app_notifications().unwrap();
+        let bound = entry(&database, "digital-colleague:dt1");
+        assert_eq!(bound.kind, "completed");
+        assert_eq!(bound.action.get("reminderMode").unwrap(), "action_only");
+        assert!(!reminder_allows_alert("action_only", &bound.kind));
+        // muted silences everything; the center entry itself stays.
+        database.set_companion_reminder_mode(&id, "muted").unwrap();
+        database.sync_app_notifications().unwrap();
+        let bound = entry(&database, "digital-colleague:dt1");
+        assert_eq!(bound.action.get("reminderMode").unwrap(), "muted");
+        assert!(!reminder_allows_alert("muted", &bound.kind));
+        // Unbound colleagues keep the global behaviour: no reminder mode stamp.
+        let plain = entry(&database, "digital-colleague:dt2");
+        assert!(plain.action.get("reminderMode").is_none());
+        assert!(plain.action.get("companionId").is_none());
+        drop(database);
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir_all(root);
     }
 }

@@ -1583,6 +1583,11 @@ impl Database {
                 )?;
                 completed += 1;
             }
+            if completed > 0 {
+                // K6: now that these chats have durable bubbles, convert any
+                // legacy ordinal read cursor into a delivery-order position.
+                companions::convert_pending_read_cursors(connection)?;
+            }
             Ok(completed)
         })
     }

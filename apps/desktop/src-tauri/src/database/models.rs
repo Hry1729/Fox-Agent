@@ -23,6 +23,19 @@ pub struct CompanionProfile {
     /// error at send time, never a silent fallback.
     pub model_provider_id: Option<String>,
     pub model_ref: Option<String>,
+    /// C06: reminder preference. `follow_global` keeps the current global
+    /// notification behavior; `all` adds new-message reminders; `action_only`
+    /// alerts only on questions and approvals; `muted` silences active popups
+    /// and sound. Every mode keeps the sidebar unread and pending markers.
+    pub reminder_mode: String,
+    /// C06/K6: auto-read cursor in K1 bubble delivery order. NULL until the
+    /// legacy `last_read_ordinal` is converted (after the bubble backfill).
+    pub last_read_delivery_order: Option<i64>,
+    /// C06/K6: independent manual-unread override start (bubble delivery order).
+    /// That bubble and every later delivered contact bubble show as unread
+    /// without rewinding the auto-read cursor.
+    pub manual_unread_from_order: Option<i64>,
+    pub manual_unread_at: Option<i64>,
     pub archived_at: Option<i64>,
     pub deleting_at: Option<i64>,
     pub created_at: i64,

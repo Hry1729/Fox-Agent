@@ -99,6 +99,30 @@ describe('联系人按条送达', () => {
       .toEqual(['run:response:3', 'run:response:5'])
   })
 
+  test('运行中已落库气泡匹配稳定身份并带阅读序号，流式预览仍无阅读身份', async () => {
+    const committed = {
+      id: 'run:kernel:2:response', conversationId: 'chat', runId: 'run', messageId: 'kernel-message:run:2', sourceOrdinal: 2,
+      author: 'companion' as const, projection: 'message' as const, segmentStart: null, segmentEnd: null,
+      deliveryOrder: 3000, deliveredAt: 1700000000002, content: '第一条已落库', fingerprint: '',
+    }
+    const snapshot = detail({
+      messages: [
+        message(2, '第一条已落库'),
+        message(4, '正在输入…', { status: 'streaming', kernelPreview: { checkpointSeq: 4, revision: 1 } }),
+      ],
+      bubbles: [committed],
+    })
+    const view = render(renderChat(snapshot))
+    await waitFor(() => expect(view.container.querySelectorAll('.fox-contact-bubble')).toHaveLength(2))
+    const sections = [...view.container.querySelectorAll('[data-contact-message-id]')]
+    expect(sections[0].getAttribute('data-contact-message-id')).toBe('run:kernel:2:response')
+    expect(sections[0].getAttribute('data-delivery-order')).toBe('3000')
+    expect(sections[0].getAttribute('data-bubble-id')).toBe('run:kernel:2:response')
+    expect(sections[1].getAttribute('data-contact-message-id')).toBe('run:kernel:4:response')
+    expect(sections[1].getAttribute('data-delivery-order')).toBeNull()
+    expect(sections[1].getAttribute('data-bubble-id')).toBeNull()
+  })
+
   test('不按标点切分，不把内部思考变成气泡，重复内容保留真实消息数', () => {
     const saved = detail({ messages: [message(2, '<think>内部分析</think>正文。第二句。'), message(4, '正文。第二句。')] })
     const row = deriveFoxThreadMessages({ detail: saved })[0]
