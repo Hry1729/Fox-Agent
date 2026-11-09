@@ -120,7 +120,7 @@ interface DesktopConversationState {
   error: string | null
   errorDetails: DesktopErrorDetails | null
   /** `true` started, `false` failed, `'agent_backend_refused'` refused by backend routing (nothing started). */
-  send: (text: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => Promise<boolean | AgentBackendRefusedOutcome>
+  send: (text: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string, quoteBubbleId?: string) => Promise<boolean | AgentBackendRefusedOutcome>
   /** "code: message" of the last send that did not start (null after a successful start). */
   lastSendFailureReason: () => string | null
   rerunFromMessage: (messageId: string, text: string, model?: string) => Promise<boolean>
@@ -569,6 +569,8 @@ export function useDesktopConversation(): DesktopConversationState {
           attachments: merge(page.attachments, value.attachments, (item) => item.id),
           artifacts: merge(page.artifacts, value.artifacts, (item) => item.id),
           bubbles: merge(page.bubbles ?? [], value.bubbles ?? [], (item) => item.id).sort((a, b) => a.deliveryOrder - b.deliveryOrder),
+          bubbleMarks: merge(page.bubbleMarks ?? [], value.bubbleMarks ?? [], (item) => item.bubbleId),
+          messageQuotes: merge(page.messageQuotes ?? [], value.messageQuotes ?? [], (item) => item.messageId),
           hasEarlierMessages: page.hasEarlierMessages,
         }
       })
@@ -1140,7 +1142,7 @@ export function useDesktopConversation(): DesktopConversationState {
     }
   }, [activeConversationId, activeRunId, activeRunStatus, detail?.lastRun?.errorCode, refreshList])
 
-  const send = useCallback(async (text: string, model?: string, files: Array<{ filename?: string; mediaType?: string; url?: string }> = [], runtimeText?: string) => {
+  const send = useCallback(async (text: string, model?: string, files: Array<{ filename?: string; mediaType?: string; url?: string }> = [], runtimeText?: string, quoteBubbleId?: string) => {
     const selectionVersion = selectionVersionRef.current
     const cleanText = text.trim()
     const cleanRuntimeText = runtimeText?.trim() || cleanText
@@ -1317,6 +1319,7 @@ export function useDesktopConversation(): DesktopConversationState {
         text: cleanText,
         runtimeText: `${cleanRuntimeText}${attachmentNote}${extractedContext}`,
         model,
+        quoteBubbleId,
         attachmentIds: attachments.map((item) => item.id),
         agentBackend: conversationAgentBackend(activeConversation.conversation),
       })
@@ -1329,6 +1332,9 @@ export function useDesktopConversation(): DesktopConversationState {
         return {
           ...current,
           messages: current.messages.map((message) => message.id === pendingMessageId ? started.userMessage : message),
+          messageQuotes: started.quote
+            ? [...(current.messageQuotes ?? []).filter((quote) => quote.messageId !== started.userMessage.id), started.quote]
+            : current.messageQuotes,
           attachments: [
             ...current.attachments.filter((item) => !started.attachments.some((attachment) => attachment.id === item.id)),
             ...started.attachments,

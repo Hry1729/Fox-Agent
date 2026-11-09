@@ -1,9 +1,9 @@
-import { describe, expect, test, mock } from 'bun:test'
+import { afterAll, describe, expect, test, mock } from 'bun:test'
 
 // The restore request identity is the contract that lets the Host deduplicate a
 // repeated delivery of ONE user action. These tests pin the client half of it:
 // the identity is forwarded verbatim, never regenerated per call.
-const realTauriCore = await import('@tauri-apps/api/core')
+const realTauriCore = { ...(await import('@tauri-apps/api/core')) }
 const invokeCalls: Array<{ command: string; args: Record<string, any> }> = []
 mock.module('@tauri-apps/api/core', () => ({
   ...realTauriCore,
@@ -12,6 +12,9 @@ mock.module('@tauri-apps/api/core', () => ({
     return { ok: true, data: { id: 'v-new', versionNo: 3 } }
   },
 }))
+
+// mock.module 是进程级的：不还回去，后面的测试会继承这个只会回 ok 的 invoke。
+afterAll(() => { mock.module('@tauri-apps/api/core', () => realTauriCore) })
 
 const { desktopClient } = await import(
   '../src/features/conversations/api/desktop-client'

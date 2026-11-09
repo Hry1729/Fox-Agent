@@ -494,3 +494,39 @@ fn v112_reminders_default_to_global_and_legacy_read_converts_after_backfill() {
     assert_eq!(number(&db, "SELECT count(*) FROM companion_profiles WHERE id='cmp_b' AND last_read_delivery_order IS NULL"), 1);
     check_foreign_keys_after_migration(&db).unwrap();
 }
+
+#[test]
+fn v113_message_marks_are_additive_and_bound_to_durable_bubbles() {
+    let mut db = database();
+    // 升级只加空表：历史消息不会凭空多出引用、收藏或表情。
+    assert_eq!(number(&db, "SELECT count(*) FROM contact_message_quotes"), 0);
+    assert_eq!(number(&db, "SELECT count(*) FROM contact_bubble_marks"), 0);
+    assert_eq!(number(&db, "SELECT max(version) FROM schema_migrations"), 113);
+    db.execute_batch("
+        INSERT INTO messages(id,conversation_id,role,kind,content,status,ordinal,created_at,updated_at)
+        VALUES ('m1','private-a','assistant','text','一','completed',1,1,1),
+               ('m2','private-a','user','text','二','completed',2,1,1);
+        INSERT INTO contact_bubbles(bubble_id,conversation_id,run_id,source_message_id,source_ordinal,author,projection,segment_start,segment_end,delivery_order,delivered_at,content,fingerprint,created_at)
+        VALUES ('b1','private-a',NULL,'m1',1,'companion','message',NULL,NULL,1000,1,'一','f',1);
+        INSERT INTO contact_bubble_backfills(conversation_id,completed_at) VALUES ('private-a',1);
+        INSERT INTO contact_message_quotes(message_id,conversation_id,bubble_id,author,summary,excerpt,delivered_at,source_ordinal,created_at)
+        VALUES ('m2','private-a','b1','companion','一','一',1000,1,1);
+        INSERT INTO contact_bubble_marks(bubble_id,conversation_id,favorited_at,reaction,reaction_at,updated_at)
+        VALUES ('b1','private-a',1,'👍',1,1);").unwrap();
+    // 只接受六种表情；标记必须挂在已落库气泡上，引用必须挂在真实消息上。
+    denied(&db, "UPDATE contact_bubble_marks SET reaction='🔥' WHERE bubble_id='b1'", "CHECK");
+    denied(&db, "INSERT INTO contact_bubble_marks(bubble_id,conversation_id,favorited_at,updated_at) VALUES ('live','private-a',1,1)", "FOREIGN KEY");
+    denied(&db, "INSERT INTO contact_message_quotes(message_id,conversation_id,bubble_id,author,summary,excerpt,delivered_at,source_ordinal,created_at)
+        VALUES ('missing','private-a','b1','user','s','e',1,1,1)", "FOREIGN KEY");
+    denied(&db, "INSERT INTO contact_message_quotes(message_id,conversation_id,bubble_id,author,summary,excerpt,delivered_at,source_ordinal,created_at)
+        VALUES ('m2','private-a','b1','companion','s','e',1,1,1)", "UNIQUE");
+    // 源气泡消失：标记随之消失，已发出的引用保留摘要（不指向别的消息）。
+    db.execute_batch("DELETE FROM contact_bubbles WHERE bubble_id='b1'").unwrap();
+    assert_eq!(number(&db, "SELECT count(*) FROM contact_bubble_marks"), 0);
+    assert_eq!(number(&db, "SELECT count(*) FROM contact_message_quotes"), 1);
+    assert_eq!(number(&db, "SELECT length(excerpt) FROM contact_message_quotes WHERE message_id='m2'"), 1);
+    // 重复执行迁移保留用户已保存的引用。
+    run(&mut db, 2).unwrap();
+    assert_eq!(number(&db, "SELECT count(*) FROM contact_message_quotes"), 1);
+    check_foreign_keys_after_migration(&db).unwrap();
+}

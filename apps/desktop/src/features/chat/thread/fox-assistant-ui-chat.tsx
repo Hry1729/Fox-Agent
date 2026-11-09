@@ -90,6 +90,13 @@ export default function AssistantUiChat({ statusBar, approvalSlot, conversation,
     }
     return grouped
   }, [detail])
+  // C07: a user message is markable only once its own bubble is committed; an
+  // attachment-only message has no bubble at all.
+  const contactUserBubbleIds = useMemo(() => new Set((detail?.bubbles ?? []).filter((bubble) => bubble.author === 'user').map((bubble) => bubble.id)), [detail])
+  // C07: the user's own marks and the quotes of the loaded window, keyed by the
+  // durable identity they address (a user bubble's id is its message id).
+  const contactBubbleMarks = useMemo(() => new Map((detail?.bubbleMarks ?? []).map((mark) => [mark.bubbleId, mark])), [detail])
+  const contactMessageQuotes = useMemo(() => new Map((detail?.messageQuotes ?? []).map((quote) => [quote.messageId, quote])), [detail])
   const attachments = useMemo(() => detail?.attachments ?? [], [detail])
   const attachmentNames = useMemo(() => new Map(attachments.map((attachment) => [attachment.id, attachment.displayName])), [attachments])
   const attachmentsByMessage = useMemo(() => {
@@ -119,6 +126,9 @@ export default function AssistantUiChat({ statusBar, approvalSlot, conversation,
     eventsByRun,
     contactBubblesByRun,
     contactKernelPreviewsByRun,
+    contactUserBubbleIds,
+    contactBubbleMarks,
+    contactMessageQuotes,
     toolCalls,
     attachmentNames,
     attachmentsByMessage,
@@ -128,7 +138,7 @@ export default function AssistantUiChat({ statusBar, approvalSlot, conversation,
     onOpenArtifact,
     onOpenFileInSidebar,
     onRevealFileInExplorer,
-  }), [companion?.privateChat, companion?.current?.conversationId, detail, onResolveApproval, onSubmitQuestion, events, eventsByRun, contactBubblesByRun, contactKernelPreviewsByRun, toolCalls, attachmentNames, attachmentsByMessage, timelineContext.knowledgeBindings, timelineContext.onOpenSource, groupHelpers, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer])
+  }), [companion?.privateChat, companion?.current?.conversationId, detail, onResolveApproval, onSubmitQuestion, events, eventsByRun, contactBubblesByRun, contactKernelPreviewsByRun, contactUserBubbleIds, contactBubbleMarks, contactMessageQuotes, toolCalls, attachmentNames, attachmentsByMessage, timelineContext.knowledgeBindings, timelineContext.onOpenSource, groupHelpers, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer])
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <FoxThread statusBar={statusBar} approvalSlot={approvalSlot} fox={fox} suggestions={suggestions} onStart={onStart} planRevision={planRevision} turnRailMessages={detail?.messages} turnRailArtifacts={detail?.artifacts} />

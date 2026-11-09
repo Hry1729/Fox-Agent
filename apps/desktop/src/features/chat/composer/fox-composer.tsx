@@ -1,4 +1,5 @@
 import { ContactComposerFooter } from '@/features/companions/chat-controls'
+import { ContactQuoteDraft } from '@/features/companions/marks'
 import { useContacts } from '@/features/companions/context'
 import { ExpertBindingChip } from '../components/ExpertBindingChip'
 import { ComposerProjectBar } from './composer-project-bar'
@@ -789,6 +790,12 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
             // The text belongs to the running task, not to a new one. Anything
             // the steering queue cannot carry is refused with a reason instead of
             // being dropped on the floor, and the draft is kept.
+            if (companion?.quoteDraft) {
+              toast.error('补充要求不支持引用', {
+                description: '引用只能作为新消息发送，请等本任务结束后再发送，或先取消引用。',
+              })
+              return false
+            }
             if (submittedFiles.length > 0) {
               toast.error('补充要求只支持文字', {
                 description: '附件无法进入运行中任务的补充通道，请等本任务结束后作为新任务发送。',
@@ -853,6 +860,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
         <ComposerAttachmentCommandBridge openRef={attachmentDialogRef} />
         <ComposerInitialAttachmentBridge request={initialAttachments} onConsumed={onInitialAttachmentsConsumed} />
         <ComposerAttachmentPreview knowledgeChips={runtimeControlled ? knowledgeChips : []} onKnowledge={openKnowledge} />
+        {companion?.privateChat && <ContactQuoteDraft />}
         <PromptInputBody>
           <PromptInputTextarea value={draft} disabled={questionSubmitting || Boolean(inputLockedReason)} aria-disabled={inputLockedReason ? true : undefined} title={inputLockedReason ?? undefined} spellCheck={spellcheckEnabled} onChange={onDraftChange} onKeyDown={onComposerKeyDown} className="fox-prompt-textarea" placeholder={inputLockedReason ? '此会话为只读，不能发送' : activeQuestionRequest ? '补充你的答案，或直接选择上方选项' : (companion?.current ? '给'+companion.current.displayName+'发消息…' : '给 Fox 发消息，输入 / 查看命令，@ 引用文件…')} />
         </PromptInputBody>

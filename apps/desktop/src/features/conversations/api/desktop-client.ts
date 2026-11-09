@@ -764,7 +764,7 @@ export const desktopClient = {
   },
   // `agentBackend` is optional; the Host routes by the conversation's frozen
   // value and refuses a different one as `agent_backend_misrouted`.
-  startRun: (request: { conversationId: string; text: string; runtimeText?: string; model?: string; attachmentIds?: string[]; budget?: import("../../chat/components/run-budget").RunBudgetSelection; agentBackend?: AgentBackendId }) =>
+  startRun: (request: { conversationId: string; text: string; runtimeText?: string; model?: string; attachmentIds?: string[]; quoteBubbleId?: string; budget?: import("../../chat/components/run-budget").RunBudgetSelection; agentBackend?: AgentBackendId }) =>
     command<StartRunResult>('run_start', request),
   rewindRun: (request: { conversationId: string; messageId: string; text: string; runtimeText?: string; model?: string }) =>
     command<StartRunResult>('run_rewind', request),

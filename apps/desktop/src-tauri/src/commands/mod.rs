@@ -2898,7 +2898,7 @@ pub fn run_start(
             .state::<crate::external_backend::ExternalBackendHost>()
             .start_run(&request, backend);
     }
-    let runtime_text = request
+    let mut runtime_text = request
         .runtime_text
         .clone()
         .unwrap_or_else(|| request.text.clone());
@@ -2965,14 +2965,39 @@ pub fn run_start(
             return ApiResponse::failure("attachment.image_invalid", error, false);
         }
     }
-    let started = match state.database.create_run_checked(
+    let started = match state.database.create_run_checked_with_quote(
         &request.conversation_id,
         &request.text,
         request.model.as_deref(),
+        request.quote_bubble_id.as_deref(),
     ) {
         Ok(started) => started,
         Err(error) => return create_run_refusal(&state.data_dir, &error),
     };
+    // C07: the quote must reach the model, not just the bubble. The stored
+    // excerpt is prefixed with the same labelled block the history reader uses,
+    // so the request carries it as user-quoted data and the transcript's copy of
+    // this turn stays identical (the runtime drops the duplicated last user
+    // message by comparing the two).
+    let mut quote = None;
+    if request.quote_bubble_id.is_some() {
+        match state.database.contact_message_quote(&started.user_message.id) {
+            Ok(Some(stored)) => {
+                runtime_text = format!(
+                    "{}{runtime_text}",
+                    crate::database::contact_quote_prompt_block(&stored)
+                );
+                quote = Some(stored);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = state
+                    .database
+                    .mark_run_failed(&started.run.id, "companion.quote_read_failed", &error);
+                return ApiResponse::failure("companion.quote_read_failed", error, true);
+            }
+        }
+    }
     // Freeze the resolved model before dispatch: queueing, retry and restart
     // reuse this snapshot instead of re-reading the global model.
     if let Some(service) = &effective_model {
@@ -3020,6 +3045,7 @@ pub fn run_start(
         &state,
         StartRunResult {
             attachments,
+            quote,
             ..started
         },
         runtime_text,

@@ -3,7 +3,9 @@ use super::{
     query_agent_record, query_conversation_expert_binding_by_state, Database, DEFAULT_AGENT_ID,
 };
 use crate::data_paths::{companion_notes_dir, companion_workspace};
-use crate::database::{AgentRecord, CompanionProfile};
+use crate::database::{
+    AgentRecord, CompanionProfile, ContactBubbleMarkRecord, ContactFavoriteEntry, ContactQuotePreview,
+};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -25,6 +27,11 @@ pub(crate) enum CompanionError {
     ReminderModeInvalid,
     BubbleNotFound,
     BackfillPending,
+    /// C07: no committed bubble of this chat carries that identity yet (live
+    /// draft, replaceable preview, foreign chat, or an unknown id).
+    BubbleNotDurable,
+    NotContactChat,
+    ReactionInvalid,
     Storage(String),
 }
 
@@ -44,6 +51,9 @@ impl CompanionError {
             Self::ReminderModeInvalid => ("companion.reminder_mode_invalid", "未知的提醒模式"),
             Self::BubbleNotFound => ("companion.bubble_not_found", "这条消息还不能标为未读"),
             Self::BackfillPending => ("companion.backfill_pending", "私聊历史仍在整理，稍后再试"),
+            Self::BubbleNotDurable => ("companion.bubble_not_durable", "这条消息还没有保存，暂时不能引用、收藏或加表情"),
+            Self::NotContactChat => ("companion.not_private_chat", "只有联系人私聊支持引用和消息标记"),
+            Self::ReactionInvalid => ("companion.reaction_invalid", "未知的表情"),
             Self::Storage(message) => ("storage.error", message),
         }
     }
@@ -633,6 +643,40 @@ impl Database {
                 params![id, order, now],
             )?;
             profile(tx, id)
+        })
+    }
+
+    /// C07: the composer's quote draft. The private chat is derived from the
+    /// contact, never supplied by the caller, so one contact's bubble id can
+    /// never be quoted into another contact's chat.
+    pub(crate) fn quote_companion_bubble(&self, id: &str, bubble_id: &str) -> Result<ContactQuotePreview> {
+        self.companion_transaction(|tx| {
+            let current = profile(tx, id)?;
+            super::contact_marks::quote_preview_on(tx, &current.conversation_id, bubble_id)
+        })
+    }
+
+    /// C07: the user's own favorite, on a user message or a contact reply.
+    pub(crate) fn favorite_companion_bubble(&self, id: &str, bubble_id: &str, favorited: bool) -> Result<ContactBubbleMarkRecord> {
+        self.companion_transaction(|tx| {
+            let current = profile(tx, id)?;
+            super::contact_marks::set_favorite_on(tx, &current.conversation_id, bubble_id, favorited)
+        })
+    }
+
+    /// C07: one reaction per bubble — same one clears it, another replaces it.
+    pub(crate) fn react_companion_bubble(&self, id: &str, bubble_id: &str, reaction: &str) -> Result<ContactBubbleMarkRecord> {
+        self.companion_transaction(|tx| {
+            let current = profile(tx, id)?;
+            super::contact_marks::toggle_reaction_on(tx, &current.conversation_id, bubble_id, reaction)
+        })
+    }
+
+    /// C07: the contact's favorites list (summary + time), newest marked first.
+    pub(crate) fn companion_favorites(&self, id: &str, limit: usize) -> Result<Vec<ContactFavoriteEntry>> {
+        self.companion_transaction(|tx| {
+            let current = profile(tx, id)?;
+            super::contact_marks::favorites_on(tx, &current.conversation_id, limit)
         })
     }
 

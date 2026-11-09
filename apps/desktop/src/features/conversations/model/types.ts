@@ -598,6 +598,10 @@ export interface ConversationDetail {
   artifacts: ArtifactRecord[]
   /** Committed contact bubbles in the loaded window (C00/K1). */
   bubbles?: ContactBubbleRecord[]
+  /** C07: the user's own favorites / reactions on those bubbles. */
+  bubbleMarks?: ContactBubbleMarkRecord[]
+  /** C07: the quotes the loaded messages were sent with. */
+  messageQuotes?: ContactMessageQuoteRecord[]
   /** Host read projection of this conversation's current last Run. Missing is not a verdict. */
   deliveryChecklist?: DeliveryChecklistRecord[]
   deliveryChecklistTruncated?: boolean
@@ -694,6 +698,8 @@ export interface ConversationHistoryPage {
   attachments: AttachmentRecord[]
   artifacts: ArtifactRecord[]
   bubbles?: ContactBubbleRecord[]
+  bubbleMarks?: ContactBubbleMarkRecord[]
+  messageQuotes?: ContactMessageQuoteRecord[]
   hasEarlierMessages: boolean
 }
 
@@ -713,6 +719,29 @@ export interface ContactBubbleRecord {
   deliveredAt: number
   content: string
   fingerprint: string
+}
+
+/** C07: the user's own favorite / reaction on one committed bubble. A bubble
+ * with neither mark has no record at all, so cancelling leaves nothing behind. */
+export interface ContactBubbleMarkRecord {
+  bubbleId: string
+  favoritedAt: number | null
+  reaction: string | null
+  reactionAt: number | null
+}
+
+/** C07: the quote a message was sent with. `summary` is the one line the bubble
+ * shows; `available` is false once the source bubble is gone — the summary stays
+ * and the jump is refused rather than landing on a neighbouring message. */
+export interface ContactMessageQuoteRecord {
+  messageId: string
+  bubbleId: string
+  author: 'user' | 'companion'
+  summary: string
+  excerpt: string
+  deliveredAt: number
+  sourceOrdinal: number
+  available: boolean
 }
 
 /** One C01 search hit: a committed bubble with a snippet around the first
@@ -866,6 +895,8 @@ export interface StartRunResult {
   run: RunRecord
   userMessage: ConversationMessage
   attachments: AttachmentRecord[]
+  /** C07: the quote written with this message, when it was sent as a reply. */
+  quote?: ContactMessageQuoteRecord | null
 }
 
 export interface SetGoalRunningResult {

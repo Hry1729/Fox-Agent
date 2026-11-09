@@ -2,20 +2,16 @@ import { useMemo } from 'react'
 import { MessagePrimitive, useAuiState } from '@assistant-ui/react'
 import type { FoxThreadMessage } from '@/features/chat/thread/convert-detail'
 import { useFoxThread } from '@/features/chat/thread/fox-thread-context'
-import { FoxCopyMessageButton, FoxMarkUnreadButton } from '@/features/chat/thread/fox-message-actions'
-import { copyMessageResponse } from '@/components/assistant-ui/elements/message-actions'
-import { StreamingText } from '@/features/chat/components/StreamingText'
 import { RuntimeArtifacts } from '@/features/chat/runtime-artifacts'
 import { resolveFinalArtifactReference } from '@/features/chat/final-artifact-references'
 import { ErrorPrompt } from '@/features/chat/demo/fox-demo-prompts'
-import { formatClockTime } from '@/lib/time-format'
 import { notify as toast } from '@/features/notifications'
 import { ContactWriteCards } from './chat-cards'
 import { ContactDecisionCards } from './chat-decisions'
 import { contactReplies } from './chat-message-model'
 import { ContactAvatar } from './chat-controls'
-import { contacts } from './api'
-import { showContactError, useContacts } from './context'
+import { ContactReplyBubble } from './marks'
+import { useContacts } from './context'
 import './contact-chat.css'
 
 export function ContactAssistantMessage() {
@@ -67,16 +63,8 @@ export function ContactAssistantMessage() {
     }}>
       {contact && <ContactAvatar contact={contact} />}
       <div className="fox-contact-run-body">
-        {replies.map(reply => <section className="fox-contact-message" key={reply.id} data-contact-message-id={reply.id}
-          data-bubble-id={reply.deliveryOrder != null ? reply.id : undefined}
-          data-delivery-order={reply.deliveryOrder != null ? reply.deliveryOrder : undefined}>
-          <div className="fox-contact-bubble"><StreamingText text={reply.text} streaming={false} className="fox-answer-response" /></div>
-          <div className="fox-contact-message-meta">
-            <FoxCopyMessageButton onCopy={() => copyMessageResponse(reply.text)} />
-            {reply.deliveryOrder != null && contact && <FoxMarkUnreadButton onMark={() => contacts.markUnread(contact.id, reply.id).then(() => contactsCtx?.refresh()).catch(showContactError)} />}
-            <time dateTime={new Date(reply.createdAt).toISOString()}>{formatClockTime(reply.createdAt)}</time>
-          </div>
-        </section>)}
+        {replies.map(reply => <ContactReplyBubble key={reply.id} contact={contact} reply={reply}
+          initialMark={fox.contactBubbleMarks?.get(reply.id)} />)}
       {lastInRun && <>
         <RuntimeArtifacts artifacts={artifacts.filter(artifact => artifact.declaredAt != null)} onOpenArtifact={fox.onOpenArtifact} />
         {message.runId && <ContactDecisionCards runId={message.runId} />}

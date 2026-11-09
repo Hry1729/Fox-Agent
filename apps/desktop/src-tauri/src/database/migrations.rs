@@ -7583,6 +7583,10 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     // Additive columns; existing contacts follow the global notification behavior
     // and keep their legacy ordinal cursor until the bubble backfill converts it.
     apply_migration(&transaction, COMPANION_REMINDERS_SCHEMA_VERSION, MIGRATION_112_COMPANION_REMINDERS, now)?;
+    // v113 (contacts C07): message quotes and the user's own bubble marks.
+    // Additive and empty on upgrade: no history gains a quote, a favorite or a
+    // reaction the user never chose.
+    apply_migration(&transaction, CONTACT_MESSAGE_MARKS_SCHEMA_VERSION, MIGRATION_113_CONTACT_MESSAGE_MARKS, now)?;
     super::repositories::companions::convert_pending_read_cursors(&transaction)?;
     finish_transaction(transaction)
 }
@@ -9151,7 +9155,7 @@ mod stage_two_runtime_session_migration_tests {
         // 99 only adds the retired-generation ledger; the v98 mapping itself is
         // unchanged. This test still pins the mapping's version and the
         // database's current version, so a version bump is never silent.
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::COMPANION_REMINDERS_SCHEMA_VERSION);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::CONTACT_MESSAGE_MARKS_SCHEMA_VERSION);
 
         let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
         let columns: Vec<String> = database
@@ -9200,7 +9204,7 @@ mod runtime_session_generation_migration_tests {
             assert!(!upper.contains(forbidden), "the migration must not contain {forbidden}");
         }
         assert_eq!(RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION, 99);
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::COMPANION_REMINDERS_SCHEMA_VERSION);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::CONTACT_MESSAGE_MARKS_SCHEMA_VERSION);
     }
 
     /// A v98 database keeps its single live mapping at generation 1 and gains an
@@ -16863,7 +16867,8 @@ mod delivery_acceptance_migration_tests {
         assert_eq!(COMPANION_TOOL_GRANTS_SCHEMA_VERSION, 110);
         assert_eq!(COMPANION_BACKGROUND_SCHEMA_VERSION, 111);
         assert_eq!(COMPANION_REMINDERS_SCHEMA_VERSION, 112);
-        assert_eq!(DATABASE_SCHEMA_VERSION, COMPANION_REMINDERS_SCHEMA_VERSION);
+        assert_eq!(CONTACT_MESSAGE_MARKS_SCHEMA_VERSION, 113);
+        assert_eq!(DATABASE_SCHEMA_VERSION, CONTACT_MESSAGE_MARKS_SCHEMA_VERSION);
 
         // The old rows are untouched.
         let title: String = connection
@@ -17277,4 +17282,49 @@ CREATE INDEX idx_app_notifications_kind_status
     ON app_notifications(kind, status, updated_at DESC);
 CREATE INDEX idx_app_notifications_visible_updated
     ON app_notifications(dismissed_at, read_at, updated_at DESC, id);
+"#;
+
+pub(crate) const CONTACT_MESSAGE_MARKS_SCHEMA_VERSION: i64 = 113;
+const _: () = assert!(DATABASE_SCHEMA_VERSION >= CONTACT_MESSAGE_MARKS_SCHEMA_VERSION);
+
+/// Message quotes and the user's own bubble marks (plan C07).
+///
+/// A quote belongs to the message that was sent with it and is written in the
+/// same transaction as that message. `summary` is what the bubble shows;
+/// `excerpt` is the bounded original text that goes to the model, labelled as
+/// user-quoted data. `bubble_id` deliberately has **no** foreign key: when the
+/// source bubble disappears the sent quote must survive as「原消息不可用」with
+/// its summary, and must never be re-pointed at a neighbouring message.
+///
+/// `contact_bubble_marks` is the user's own marking, independent of the
+/// contact's notes and of run state. One row per K1 bubble identity holds at
+/// most one favorite timestamp and one of the six reactions; NULL means the
+/// mark is off, so cancelling leaves no residue that a restart could revive.
+/// The foreign key to `contact_bubbles` means a mark can only exist on a
+/// durable, delivered bubble.
+const MIGRATION_113_CONTACT_MESSAGE_MARKS: &str = r#"
+CREATE TABLE contact_message_quotes (
+    message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    bubble_id TEXT NOT NULL,
+    author TEXT NOT NULL CHECK (author IN ('user', 'companion')),
+    summary TEXT NOT NULL,
+    excerpt TEXT NOT NULL,
+    delivered_at INTEGER NOT NULL,
+    source_ordinal INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX idx_contact_message_quotes_conversation
+    ON contact_message_quotes(conversation_id);
+
+CREATE TABLE contact_bubble_marks (
+    bubble_id TEXT PRIMARY KEY REFERENCES contact_bubbles(bubble_id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    favorited_at INTEGER,
+    reaction TEXT CHECK (reaction IS NULL OR reaction IN ('👍', '❤️', '😂', '🎉', '😮', '👀')),
+    reaction_at INTEGER,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX idx_contact_bubble_marks_favorites
+    ON contact_bubble_marks(conversation_id, favorited_at DESC);
 "#;

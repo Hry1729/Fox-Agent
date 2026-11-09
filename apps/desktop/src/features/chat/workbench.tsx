@@ -1,8 +1,8 @@
 import { ImportSuggestion, ProjectGrantPrompt, WriteCallsContext } from '@/features/companions/chat-cards'
-import { ContactsContext, useContactList, useReadCursor, type ContactLocateRequest } from '@/features/companions/context'
+import { ContactsContext, showContactError, useContactList, useReadCursor, type ContactLocateRequest } from '@/features/companions/context'
 import { ContactTopbar, ContactRepairBanner } from '@/features/companions/chat-controls'
 import { ContactWorkStatus } from '@/features/companions/chat-status'
-import type { Companion } from '@/features/companions/api'
+import { contacts, type Companion, type QuotePreview } from '@/features/companions/api'
 import { FoxRunStatusBar } from './components/FoxRunStatusBar'
 import { AgentBackendPanel } from './components/AgentBackendPanel'
 import { AGENT_BACKEND_REFUSED, agentBackendAccess, agentBackendInputLockedReason, conversationAgentBackend, isAgentBackendHidden, isAgentBackendRetired, NEW_CONVERSATION_AGENT_BACKEND, type AgentBackendId } from '@/features/conversations/model/agent-backend'
@@ -33,7 +33,7 @@ import { useProjectCatalog } from '@/features/conversations/hooks/use-project-ca
 import { conversationRunState } from '@/features/conversations/model/kernel-snapshot'
 import { pendingRuntimeApprovals, pendingRuntimeQuestion } from '@/features/conversations/model/pending-interactions'
 import { lastAgentBackendFailure } from '@/features/conversations/model/agent-backend-failure'
-import { type ApprovalDecision, type ArtifactRecord, type ChildRunRecord, type ConversationMessage, type ConversationSummary, type KnowledgeBaseRecord, type KnowledgeReference, type ProjectRecord, type TaskEvidenceRecord } from '@/features/conversations/model/types'
+import { type ApprovalDecision, type ArtifactRecord, type ChildRunRecord, type ContactBubbleMarkRecord, type ConversationMessage, type ConversationSummary, type KnowledgeBaseRecord, type KnowledgeReference, type ProjectRecord, type TaskEvidenceRecord } from '@/features/conversations/model/types'
 import { useKnowledgeBases } from '@/features/knowledge/use-knowledge'
 import { notify as toast } from '@/features/notifications'
 import { confirmDialog } from '@/components/ui/confirm-dialog'
@@ -303,6 +303,17 @@ export function Workbench() {
   }, [])
   const [rightMode, setRightMode] = useState<RightMode | null>(readStoredRightMode)
   const [contactLocateRequest, setContactLocateRequest] = useState<ContactLocateRequest | null>(null)
+  // C07: the composer's quote draft. It belongs to one private chat and is never
+  // carried into another conversation or into the next message after a send.
+  const [contactQuote, setContactQuote] = useState<QuotePreview | null>(null)
+  // A quote preview is async: only the newest request for the conversation still
+  // on screen may fill the draft.
+  const contactQuoteRequestRef = useRef<{ conversationId: string | null; version: number }>({ conversationId: null, version: 0 })
+  // C07: Host-confirmed marks shared by the bubble menus and the favorites page.
+  const [contactMarkUpdates, setContactMarkUpdates] = useState<ReadonlyMap<string, ContactBubbleMarkRecord>>(new Map())
+  const publishContactBubbleMark = useStableCallback((mark: ContactBubbleMarkRecord) => {
+    setContactMarkUpdates(current => new Map(current).set(mark.bubbleId, mark))
+  })
   const [openRightTabs, setOpenRightTabs] = useState<RightMode[]>(readStoredRightTabs)
   const [openFileTabs, setOpenFileTabs] = useState<OpenFileTab[]>([])
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null)
@@ -1435,7 +1446,10 @@ export function Workbench() {
     setEmptyConversation(false)
     if (desktopConversation.enabled) {
       setChatState('running')
-      const started = await desktopConversation.send(prompt, conversationModelOverride(activeAgent, model, yuxiModels.models), submittedFiles, runtimeText)
+      const started = await desktopConversation.send(prompt, conversationModelOverride(activeAgent, model, yuxiModels.models), submittedFiles, runtimeText, privateChat ? contactQuote?.bubbleId : undefined)
+      // A cancelled or refused send keeps the draft quote; only a message that
+      // actually went out consumes it.
+      if (started === true) setContactQuote(null)
       if (started === AGENT_BACKEND_REFUSED) {
         // 路由拒绝没有写入消息。通知由 composer 发出，这里不留乐观消息，也不切到「处理失败」。
         setPendingUserMessage(null)
@@ -1740,6 +1754,27 @@ export function Workbench() {
   })
   const addContact = useStableCallback(() => navigate('agents'))
   const showContactProfile = useStableCallback(() => selectRightMode('companion'))
+  const getSelectedConversationId = useStableCallback(
+    () => desktopConversation.selectedConversationId,
+  )
+  const quoteContactBubble = useStableCallback(async (bubbleId: string) => {
+    if (!contact) return
+    const conversationId = contact.conversationId
+    if (getSelectedConversationId() !== conversationId) return
+    const version = ++contactQuoteRequestRef.current.version
+    contactQuoteRequestRef.current.conversationId = conversationId
+    try {
+      const preview = await contacts.quotePreview(contact.id, bubbleId)
+      const request = contactQuoteRequestRef.current
+      if (
+        getSelectedConversationId() !== conversationId ||
+        request.version !== version ||
+        request.conversationId !== conversationId
+      ) return
+      setContactQuote(preview)
+    } catch (error) { showContactError(error) }
+  })
+  const clearContactQuote = useStableCallback(() => setContactQuote(null))
   const jumpToMessage = useStableCallback((bubbleId: string) => {
     closeRightMode('companion')
     if (compactLayout) setCompactRightOpen(false)
@@ -1760,13 +1795,19 @@ export function Workbench() {
   })
   const contactModel = modelService.service?.modelId || '尚未配置'
   const contactPermission = desktopConversation.detail?.conversation.permissionMode ?? 'ask'
-  useEffect(() => { setContactLocateRequest(null) }, [desktopConversation.selectedConversationId])
+  useEffect(() => {
+    setContactLocateRequest(null)
+    setContactQuote(null)
+    setContactMarkUpdates(new Map())
+    contactQuoteRequestRef.current = { conversationId: desktopConversation.selectedConversationId, version: contactQuoteRequestRef.current.version + 1 }
+  }, [desktopConversation.selectedConversationId])
   const contactsContext = useMemo(() => ({
     model:contactModel,permission:contactPermission,setPermission:handleComposerPermissionModeChange,openSharedMemory,askToOrganize,
     ...contactList,current:contact,privateChat,projects,open:openContact,add:addContact,
     showProfile:showContactProfile,leave:leaveContact,refreshConversation:refreshContactConversation,
-    locateRequest:contactLocateRequest,jumpToMessage,
-  }), [contactList.list,contactList.refresh,contactList.error,contactModel,contactPermission,handleComposerPermissionModeChange,openSharedMemory,askToOrganize,contact,privateChat,projects,openContact,addContact,showContactProfile,leaveContact,refreshContactConversation,contactLocateRequest,jumpToMessage])
+    locateRequest:contactLocateRequest,jumpToMessage,quoteDraft:contactQuote,quoteBubble:quoteContactBubble,clearQuote:clearContactQuote,
+    bubbleMarkUpdates:contactMarkUpdates,publishBubbleMark:publishContactBubbleMark,
+  }), [contactList.list,contactList.refresh,contactList.error,contactModel,contactPermission,handleComposerPermissionModeChange,openSharedMemory,askToOrganize,contact,privateChat,projects,openContact,addContact,showContactProfile,leaveContact,refreshContactConversation,contactLocateRequest,jumpToMessage,contactQuote,quoteContactBubble,clearContactQuote,contactMarkUpdates,publishContactBubbleMark])
   if (activeView === 'onboarding') return <Suspense fallback={<div className="fox-app-loading" role="status" aria-label="正在加载引导页" />}><OnboardingPage dark={dark} navigate={navigate} onExit={finishOnboarding} /></Suspense>
 
   return (

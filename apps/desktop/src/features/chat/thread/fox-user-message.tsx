@@ -1,4 +1,6 @@
 import { useContacts } from '@/features/companions/context'
+import { ContactQuoteRef, ContactUserMarks } from '@/features/companions/marks'
+import { useFoxThread } from './fox-thread-context'
 import { ActionBarPrimitive, MessagePrimitive, useAui, useAuiState } from '@assistant-ui/react'
 import type { TextMessagePartProps, Attachment as AuiAttachment } from '@assistant-ui/react'
 import { UserMessageBubble } from '../components/UserMessageBubble'
@@ -37,6 +39,17 @@ export function FoxUserMessage() {
   const running = useAuiState(state => state.thread.isRunning)
   const isLatestUser = useAuiState(state => state.thread.messages.findLast(message => message.role === 'user')?.id === state.message.id)
   const contactChat = Boolean(companion?.privateChat)
+  const fox = useFoxThread()
+  // C07: a user bubble's durable identity is its message id. Until the bubble is
+  // committed (an optimistic send, or an attachment-only message) it offers no
+  // quote, favorite or reaction.
+  const durableContact = contactChat && !isEditing && Boolean(fox.contactUserBubbleIds?.has(messageId))
+  const quote = contactChat ? fox.contactMessageQuotes?.get(messageId) : undefined
+  const contactMarks = durableContact && companion?.current && !isEditing
+    ? <ContactUserMarks contact={companion.current} messageId={messageId} createdAt={createdAt}
+        initialMark={fox.contactBubbleMarks?.get(messageId)}
+        getText={() => aui.message.getState().content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n\n')} />
+    : null
   const meta = !isEditing && <div className="fox-user-meta">
     <time className="fox-message-time" dateTime={createdAt.toISOString()}>{formatDateTime(createdAt)}</time>
     <ActionBarPrimitive.Root autohide="never" className="fox-user-actions">
@@ -61,7 +74,10 @@ export function FoxUserMessage() {
         </MessagePrimitive.If>
         <FoxEditComposer />
         {contactChat
-          ? <div className="fox-contact-user-row"><MessagePrimitive.Parts components={{ Text: FoxUserText }} />{meta}</div>
+          ? <div className="fox-contact-user-turn">
+              {quote && <ContactQuoteRef quote={quote} contactName={companion?.current?.displayName ?? '联系人'} />}
+              <div className="fox-contact-user-row"><MessagePrimitive.Parts components={{ Text: FoxUserText }} />{contactMarks ?? (durableContact ? null : meta)}</div>
+            </div>
           : <><MessagePrimitive.Parts components={{ Text: FoxUserText }} />{meta}</>}
       </MessagePrimitive.Root>
     </div>

@@ -12,13 +12,15 @@ mod migration_copy_tests;
 /// v110 adds companion tool grants and the per-run capability snapshot (C02/K4).
 /// v111 adds the background ownership chain and the task report ledger (C03b/K2).
 /// v112 adds contact reminder preferences and bubble-level read/unread state (C06/K6).
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 112;
+/// v113 adds message quotes and the user's own bubble marks (C07).
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 113;
 pub(crate) use repositories::{AcceptanceBinding, AcceptanceRow, AcceptanceWrite};
 pub(crate) use repositories::kernel_execution_admission;
 pub(crate) use repositories::permission_rules::{ConversationAccess, PermissionAuditRecord, PermissionRuleRecord};
 pub(crate) use repositories::companions;
 pub(crate) use repositories::companion_capabilities::{capability_id, ensure_granted_on, WEB_SERVER_ID, WEB_TOOLS};
 pub(crate) use repositories::companion_files::{CompanionFile, CompanionFileEntry};
+pub(crate) use repositories::contact_marks::prompt_block as contact_quote_prompt_block;
 pub(crate) use repositories::companion_ownership::OWNERSHIP_MISSING;
 pub(crate) use repositories::RunBackendIdentity;
 pub(crate) use repositories::{EXECUTOR_ROUTE_RETIRED, EXECUTOR_ROUTE_RETIRED_MESSAGE, EXECUTOR_ROUTE_UNKNOWN};

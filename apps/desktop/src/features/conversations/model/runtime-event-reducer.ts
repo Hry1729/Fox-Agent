@@ -62,6 +62,21 @@ function mergeRecords<T>(persisted: T[], current: T[], key: (item: T) => string)
   return [...records.values()]
 }
 
+// Quotes and marks are windowed reads: inside the fresh window the Host answer
+// is the whole truth (a cancelled mark leaves no row, so absence clears it);
+// entries paged in beyond the window are never re-read and must survive a
+// regular refresh.
+function mergeWindowed<T>(
+  window: T[] | undefined,
+  previous: T[] | undefined,
+  windowKeys: ReadonlySet<string>,
+  key: (item: T) => string,
+) {
+  if (!window) return previous
+  if (!previous?.length) return window
+  return [...previous.filter((item) => !windowKeys.has(key(item))), ...window]
+}
+
 function objectValue(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -174,6 +189,18 @@ export function mergeConversationDetail(persisted: ConversationDetail, current: 
     artifacts: mergeRecords(persisted.artifacts, current.artifacts, (artifact) => artifact.id),
     bubbles: mergeRecords(persisted.bubbles ?? [], current.bubbles ?? [], (bubble) => bubble.id)
       .sort((left, right) => left.deliveryOrder - right.deliveryOrder),
+    bubbleMarks: mergeWindowed(
+      persisted.bubbleMarks,
+      current.bubbleMarks,
+      new Set((persisted.bubbles ?? []).map((bubble) => bubble.id)),
+      (mark) => mark.bubbleId,
+    ),
+    messageQuotes: mergeWindowed(
+      persisted.messageQuotes,
+      current.messageQuotes,
+      new Set(persisted.messages.map((message) => message.id)),
+      (quote) => quote.messageId,
+    ),
     knowledgeBindings: mergeRecords(
       persisted.knowledgeBindings,
       current.knowledgeBindings,

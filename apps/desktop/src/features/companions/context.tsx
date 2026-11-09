@@ -1,8 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { notify as toast } from '@/features/notifications'
 import { desktopClient, desktopErrorDetails } from '@/features/conversations/api/desktop-client'
-import type { ConversationDetail, ProjectRecord } from '@/features/conversations/model/types'
-import { contacts, type Companion, type CompanionsList } from './api'
+import type { ContactBubbleMarkRecord, ConversationDetail, ProjectRecord } from '@/features/conversations/model/types'
+import { contacts, type Companion, type CompanionsList, type QuotePreview } from './api'
 import { companionBubbleOrders, readWalkBase, reportableReadOrder, shouldReportRead } from './read-position'
 
 export const showContactError = (error: unknown) => toast.error(desktopErrorDetails(error).message)
@@ -55,6 +55,15 @@ export interface ContactsContextValue extends ReturnType<typeof useContactList> 
   /** C05: jump from the profile's file list back to the source message. */
   locateRequest?: ContactLocateRequest | null
   jumpToMessage?: (bubbleId: string) => void
+  /** C07: the composer's quote draft of this private chat, resolved from a
+   * committed bubble only. Cleared on send and on switching conversations. */
+  quoteDraft?: QuotePreview | null
+  quoteBubble?: (bubbleId: string) => Promise<void>
+  clearQuote?: () => void
+  /** C07: the latest Host-confirmed mark per bubble, shared by every view of
+   * this chat so a cancel on the favorites page reaches the bubble menu too. */
+  bubbleMarkUpdates?: ReadonlyMap<string, ContactBubbleMarkRecord>
+  publishBubbleMark?: (mark: ContactBubbleMarkRecord) => void
 }
 
 export const ContactsContext = createContext<ContactsContextValue | null>(null)

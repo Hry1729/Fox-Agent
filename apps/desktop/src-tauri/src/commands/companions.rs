@@ -114,6 +114,29 @@ pub(crate) struct SetReminderMode {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct BubbleTarget {
+    companion_id: String,
+    bubble_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetBubbleFavorite {
+    companion_id: String,
+    bubble_id: String,
+    favorited: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetBubbleReaction {
+    companion_id: String,
+    bubble_id: String,
+    reaction: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct TemplateDecision {
     companion_id: String,
     expected_hash: String,
@@ -328,6 +351,55 @@ pub(crate) fn companion_set_reminder_mode(
             .database
             .set_companion_reminder_mode(&request.companion_id, &request.mode),
     )
+}
+
+/// C07: the composer's quote draft. Only a committed bubble of this contact's
+/// private chat resolves; a live draft or preview is refused here already.
+#[tauri::command]
+pub(crate) fn companion_quote_preview(
+    state: State<'_, AppState>,
+    request: BubbleTarget,
+) -> ApiResponse<crate::database::ContactQuotePreview> {
+    response(
+        state
+            .database
+            .quote_companion_bubble(&request.companion_id, &request.bubble_id),
+    )
+}
+
+/// C07: the user's own favorite on a user message or a contact reply.
+#[tauri::command]
+pub(crate) fn companion_bubble_favorite(
+    state: State<'_, AppState>,
+    request: SetBubbleFavorite,
+) -> ApiResponse<crate::database::ContactBubbleMarkRecord> {
+    response(state.database.favorite_companion_bubble(
+        &request.companion_id,
+        &request.bubble_id,
+        request.favorited,
+    ))
+}
+
+/// C07: one reaction per bubble — the stored one clears it, another replaces it.
+#[tauri::command]
+pub(crate) fn companion_bubble_reaction(
+    state: State<'_, AppState>,
+    request: SetBubbleReaction,
+) -> ApiResponse<crate::database::ContactBubbleMarkRecord> {
+    response(state.database.react_companion_bubble(
+        &request.companion_id,
+        &request.bubble_id,
+        &request.reaction,
+    ))
+}
+
+/// C07: the contact's favorites (summary + time), newest marked first.
+#[tauri::command]
+pub(crate) fn companion_favorites_list(
+    state: State<'_, AppState>,
+    request: CompanionId,
+) -> ApiResponse<Vec<crate::database::ContactFavoriteEntry>> {
+    response(state.database.companion_favorites(&request.companion_id, 200))
 }
 
 #[tauri::command]

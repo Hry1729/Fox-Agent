@@ -145,6 +145,7 @@ mod kernel_display;
 pub(crate) use kernel_host::KernelHostScope;
 mod companion_notes;
 pub(crate) mod contact_bubbles;
+pub(crate) mod contact_marks;
 mod memory;
 mod observability;
 mod work_events;
@@ -2824,6 +2825,8 @@ impl Database {
             let oldest_ordinal = messages.first().map(|message| message.ordinal).unwrap_or(0);
             contact_bubbles::ensure_window(connection, id, oldest_ordinal, None)?;
             let bubbles = contact_bubbles::query_window(connection, id, oldest_ordinal, None)?;
+            let bubble_marks = contact_marks::marks_window(connection, id, oldest_ordinal, None)?;
+            let message_quotes = contact_marks::quotes_window(connection, id, oldest_ordinal, None)?;
             let runtime_events = query_runtime_events_window(connection, id, oldest_ordinal, None)?;
             let tool_calls = query_tool_calls_window(connection, id, oldest_ordinal, None)?;
             let approvals = query_approvals_window(connection, id, oldest_ordinal, None)?;
@@ -2854,6 +2857,8 @@ impl Database {
                 attachments,
                 artifacts,
                 bubbles,
+                bubble_marks,
+                message_quotes,
                 delivery_checklist,
                 delivery_checklist_truncated,
                 knowledge_bindings,
@@ -3222,6 +3227,10 @@ impl Database {
                 .unwrap_or(before_ordinal);
             contact_bubbles::ensure_window(connection, id, oldest_ordinal, Some(before_ordinal))?;
             let bubbles = contact_bubbles::query_window(connection, id, oldest_ordinal, Some(before_ordinal))?;
+            let bubble_marks =
+                contact_marks::marks_window(connection, id, oldest_ordinal, Some(before_ordinal))?;
+            let message_quotes =
+                contact_marks::quotes_window(connection, id, oldest_ordinal, Some(before_ordinal))?;
             let runtime_events =
                 query_runtime_events_window(connection, id, oldest_ordinal, Some(before_ordinal))?;
             let tool_calls =
@@ -3245,6 +3254,8 @@ impl Database {
                 attachments,
                 artifacts,
                 bubbles,
+                bubble_marks,
+                message_quotes,
                 has_earlier_messages,
             })
         })?;
@@ -5710,6 +5721,20 @@ impl Database {
         text: &str,
         requested_model: Option<&str>,
     ) -> Result<StartRunResult, CreateRunError> {
+        self.create_run_checked_with_quote(conversation_id, text, requested_model, None)
+    }
+
+    /// C07: the send entry for a quote reply. The quote row and the user message
+    /// share one transaction, so a bubble that is not durable (a live draft, a
+    /// replaceable preview, another contact's chat) refuses the whole send and
+    /// writes no Run, no message and no quote.
+    pub fn create_run_checked_with_quote(
+        &self,
+        conversation_id: &str,
+        text: &str,
+        requested_model: Option<&str>,
+        quote_bubble_id: Option<&str>,
+    ) -> Result<StartRunResult, CreateRunError> {
         let clean_text = text.trim();
         if clean_text.is_empty() {
             return Err(CreateRunError::Storage("message text cannot be empty".to_owned()));
@@ -5748,6 +5773,19 @@ impl Database {
                 clean_text,
                 requested_model,
             )?;
+            if let Some(bubble_id) = quote_bubble_id {
+                if let Err(error) = contact_marks::insert_quote_in_transaction(
+                    &transaction,
+                    conversation_id,
+                    &started.user_message.id,
+                    bubble_id,
+                ) {
+                    outcome = Some(CreateRunError::QuoteUnavailable(
+                        error.response().1.to_owned(),
+                    ));
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+            }
             transaction.commit()?;
             Ok(started)
         });
@@ -6297,8 +6335,8 @@ impl Database {
     ) -> Result<Vec<RuntimePromptMessage>, String> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
-                "SELECT role, content FROM (
-                    SELECT role, content, ordinal FROM messages
+                "SELECT role, content, id FROM (
+                    SELECT role, content, id, ordinal FROM messages
                     WHERE conversation_id = ?1
                       AND role IN ('user', 'assistant')
                       AND kind = 'text'
@@ -6306,15 +6344,26 @@ impl Database {
                     ORDER BY ordinal DESC LIMIT ?2
                  ) ORDER BY ordinal ASC",
             )?;
-            let messages = statement
+            let rows = statement
                 .query_map(params![conversation_id, limit as i64], |row| {
-                    Ok(RuntimePromptMessage {
-                        role: row.get(0)?,
-                        content: row.get(1)?,
-                    })
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
                 })?
-                .collect();
-            messages
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            // C07: a turn that quoted a bubble keeps its labelled quote in the
+            // transcript too, so history and the live request agree. It stays
+            // user data and is counted by the same char budget as any text.
+            let mut messages = Vec::with_capacity(rows.len());
+            for (role, content, message_id) in rows {
+                messages.push(RuntimePromptMessage {
+                    role,
+                    content: contact_marks::prompt_content_on(connection, &message_id, &content)?,
+                });
+            }
+            Ok(messages)
         })
     }
 
@@ -6353,8 +6402,8 @@ impl Database {
                 |row| row.get(0),
             )?;
             let mut statement = connection.prepare(
-                "SELECT role, content FROM (
-                    SELECT role, content, ordinal FROM messages
+                "SELECT role, content, id FROM (
+                    SELECT role, content, id, ordinal FROM messages
                     WHERE conversation_id = ?1
                       AND ordinal < ?2
                       AND role IN ('user', 'assistant')
@@ -6363,18 +6412,26 @@ impl Database {
                     ORDER BY ordinal DESC LIMIT ?3
                  ) ORDER BY ordinal ASC",
             )?;
-            let records = statement
+            let rows = statement
                 .query_map(
                     params![conversation_id, target_ordinal, limit as i64],
                     |row| {
-                        Ok(RuntimePromptMessage {
-                            role: row.get(0)?,
-                            content: row.get(1)?,
-                        })
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
                     },
                 )?
-                .collect();
-            records
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut messages = Vec::with_capacity(rows.len());
+            for (role, content, message_id) in rows {
+                messages.push(RuntimePromptMessage {
+                    role,
+                    content: contact_marks::prompt_content_on(connection, &message_id, &content)?,
+                });
+            }
+            Ok(messages)
         })
     }
 
@@ -8258,6 +8315,7 @@ fn create_run_in_transaction(
     )?;
 
     Ok(StartRunResult {
+        quote: None,
         run: RunRecord {
             id: run_id.clone(),
             conversation_id: conversation_id.to_owned(),
@@ -10430,6 +10488,7 @@ fn query_pending_work_mode_dispatch(
                     goal_id: row.get(0)?,
                     runtime_text: row.get(1)?,
                     started: StartRunResult {
+                        quote: None,
                         run: RunRecord {
                             id: run_id.clone(),
                             conversation_id: conversation_id.clone(),

@@ -1104,6 +1104,10 @@ pub struct ConversationDetail {
     pub artifacts: Vec<ArtifactRecord>,
     /// Committed contact bubbles for the loaded window (plan C00/K1).
     pub bubbles: Vec<ContactBubbleRecord>,
+    /// C07: the user's favorites / reactions on the window's bubbles.
+    pub bubble_marks: Vec<ContactBubbleMarkRecord>,
+    /// C07: quotes carried by the window's messages.
+    pub message_quotes: Vec<ContactMessageQuoteRecord>,
     /// Latest Run only. Empty/missing/truncated never means business acceptance.
     pub delivery_checklist: Vec<DeliveryChecklistView>,
     pub delivery_checklist_truncated: bool,
@@ -1236,6 +1240,56 @@ pub struct ContactBubbleRecord {
     pub fingerprint: String,
 }
 
+/// C07: the quote a message was sent with. `summary` is the one-line text the
+/// bubble shows, `excerpt` the bounded original that reaches the model.
+/// `available` is false once the source bubble is gone — the sent summary stays
+/// and the jump is refused instead of landing on a neighbouring message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContactMessageQuoteRecord {
+    pub message_id: String,
+    pub bubble_id: String,
+    pub author: String,
+    pub summary: String,
+    pub excerpt: String,
+    pub delivered_at: i64,
+    pub source_ordinal: i64,
+    pub available: bool,
+}
+
+/// C07: the composer's quote draft, resolved from a durable bubble only.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContactQuotePreview {
+    pub bubble_id: String,
+    pub author: String,
+    pub summary: String,
+    pub delivered_at: i64,
+}
+
+/// C07: the user's own marks on one durable bubble. Both fields are independent
+/// of the contact's notes and of model memory.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContactBubbleMarkRecord {
+    pub bubble_id: String,
+    pub favorited_at: Option<i64>,
+    pub reaction: Option<String>,
+    pub reaction_at: Option<i64>,
+}
+
+/// C07: one row of the contact's favorites list (newest marked first).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContactFavoriteEntry {
+    pub bubble_id: String,
+    pub author: String,
+    pub summary: String,
+    pub delivered_at: i64,
+    pub source_ordinal: i64,
+    pub favorited_at: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContactBubbleSearchHit {
@@ -1279,6 +1333,9 @@ pub struct ConversationHistoryPage {
     pub attachments: Vec<AttachmentRecord>,
     pub artifacts: Vec<ArtifactRecord>,
     pub bubbles: Vec<ContactBubbleRecord>,
+    /// C07: marks and quotes of this page's bubbles / messages.
+    pub bubble_marks: Vec<ContactBubbleMarkRecord>,
+    pub message_quotes: Vec<ContactMessageQuoteRecord>,
     pub has_earlier_messages: bool,
 }
 
@@ -2242,6 +2299,11 @@ pub struct StartRunRequest {
     /// differs from the conversation's frozen backend is refused as misrouted.
     #[serde(default)]
     pub agent_backend: Option<String>,
+    /// C07: the K1 bubble identity this message quotes. Only a durable bubble
+    /// of this private chat is accepted; the quote row is written in the same
+    /// transaction as the message, and its excerpt reaches the model.
+    #[serde(default)]
+    pub quote_bubble_id: Option<String>,
 }
 
 /// A user's explicit run-budget choice. The tier is frozen into the Run's control
@@ -2287,6 +2349,10 @@ pub struct StartRunResult {
     pub run: RunRecord,
     pub user_message: MessageRecord,
     pub attachments: Vec<AttachmentRecord>,
+    /// C07: the quote written with this message, so the sent bubble can show its
+    /// quote area immediately instead of waiting for the next detail load.
+    #[serde(default)]
+    pub quote: Option<ContactMessageQuoteRecord>,
 }
 
 /// Why `Database::create_run_checked` wrote no Run.
@@ -2297,6 +2363,9 @@ pub enum CreateRunError {
     ConversationBusy { status: String },
     /// No such conversation, or it is archived / in the trash.
     ConversationNotFound,
+    /// C07: the quoted bubble is not a durable bubble of this private chat.
+    /// Nothing was written — the quote and the message share one transaction.
+    QuoteUnavailable(String),
     /// Anything else (storage).
     Storage(String),
 }
@@ -2304,13 +2373,14 @@ pub enum CreateRunError {
 impl CreateRunError {
     /// The send refusal for the busy / not-found cases; `None` for storage
     /// errors, which keep the `run.create_failed` path.
-    pub fn refusal(&self) -> Option<(&'static str, &'static str)> {
+    pub fn refusal(&self) -> Option<(&'static str, &str)> {
         match self {
             Self::ConversationBusy { .. } => Some((
                 "run.conversation_busy",
                 "这个对话上一轮还没结束（可能正在停止），请等它结束后再发送",
             )),
             Self::ConversationNotFound => Some(("conversation.not_found", "对话不存在或已归档，无法发送")),
+            Self::QuoteUnavailable(message) => Some(("companion.quote_unavailable", message.as_str())),
             Self::Storage(_) => None,
         }
     }
@@ -2321,6 +2391,7 @@ impl std::fmt::Display for CreateRunError {
         match self {
             Self::ConversationBusy { status } => write!(formatter, "conversation has an unfinished run ({status})"),
             Self::ConversationNotFound => formatter.write_str("conversation not found, archived or trashed"),
+            Self::QuoteUnavailable(message) => formatter.write_str(message),
             Self::Storage(error) => formatter.write_str(error),
         }
     }
@@ -2359,7 +2430,7 @@ pub struct PendingWorkModeDispatch {
     pub started: StartRunResult,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimePromptMessage {
     pub role: String,

@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react'
-import type { ApprovalDecision, ArtifactRecord, AttachmentRecord, ContactBubbleRecord, ConversationDetail, KnowledgeBindingRecord, RunEventRecord, ToolCallRecord } from '../../conversations/model/types'
+import type { ApprovalDecision, ArtifactRecord, AttachmentRecord, ContactBubbleMarkRecord, ContactBubbleRecord, ContactMessageQuoteRecord, ConversationDetail, KnowledgeBindingRecord, RunEventRecord, ToolCallRecord } from '../../conversations/model/types'
 import type { RuntimeSource } from '../timeline/fox-runtime-process-model'
 
 /**
@@ -25,6 +25,12 @@ export interface FoxThreadContextValue {
    * `<runId>:kernel:<checkpoint>:response` identity (K1). The run's persisted
    * assistant row renders them; the preview rows themselves stay empty. */
   contactKernelPreviewsByRun?: Map<string, { id: string; text: string; createdAt: number }[]>
+  /** C07: committed user bubbles of the loaded window (id == message id). */
+  contactUserBubbleIds?: Set<string>
+  /** C07: the user's favorites / reactions by durable bubble id. */
+  contactBubbleMarks?: Map<string, ContactBubbleMarkRecord>
+  /** C07: the quote each loaded message was sent with, by message id. */
+  contactMessageQuotes?: Map<string, ContactMessageQuoteRecord>
   toolCalls?: readonly ToolCallRecord[]
   /** Attachment display names by attachment id (tool rows resolve ids). */
   attachmentNames: ReadonlyMap<string, string>

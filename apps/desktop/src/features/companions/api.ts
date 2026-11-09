@@ -1,5 +1,5 @@
 import { command } from '@/features/conversations/api/desktop-client'
-import type { AgentRecord, ConversationContextReset, MemoryEntityRecord } from '@/features/conversations/model/types'
+import type { AgentRecord, ContactBubbleMarkRecord, ConversationContextReset, MemoryEntityRecord } from '@/features/conversations/model/types'
 
 export interface Companion {
   id: string
@@ -103,6 +103,20 @@ export type CompanionFileEntry = {
 }
 export type CompanionFiles = { provided: CompanionFileEntry[]; generated: CompanionFileEntry[] }
 
+/** C07: the six reactions of the selected component, one choice per message. */
+export const REACTIONS = ['👍', '❤️', '😂', '🎉', '😮', '👀'] as const
+export type Reaction = typeof REACTIONS[number]
+
+export type QuotePreview = { bubbleId: string; author: 'user' | 'companion'; summary: string; deliveredAt: number }
+export type FavoriteEntry = {
+  bubbleId: string
+  author: 'user' | 'companion'
+  summary: string
+  deliveredAt: number
+  sourceOrdinal: number
+  favoritedAt: number
+}
+
 export const direct = <T>(name: string, args?: Record<string, unknown>) => command<T>(name, args, true)
 export const contacts = {
   list: () => command<CompanionsList>('companions_list'),
@@ -119,6 +133,10 @@ export const contacts = {
   markRead: (companionId: string, deliveryOrder: number, observedAt: number) => command<Companion>('companion_mark_read', { companionId, deliveryOrder, observedAt }),
   markUnread: (companionId: string, bubbleId: string) => command<Companion>('companion_mark_unread', { companionId, bubbleId }),
   setReminderMode: (companionId: string, mode: ReminderMode) => command<Companion>('companion_set_reminder_mode', { companionId, mode }),
+  quotePreview: (companionId: string, bubbleId: string) => command<QuotePreview>('companion_quote_preview', { companionId, bubbleId }),
+  favorite: (companionId: string, bubbleId: string, favorited: boolean) => command<ContactBubbleMarkRecord>('companion_bubble_favorite', { companionId, bubbleId, favorited }),
+  react: (companionId: string, bubbleId: string, reaction: string) => command<ContactBubbleMarkRecord>('companion_bubble_reaction', { companionId, bubbleId, reaction }),
+  favorites: (companionId: string) => command<FavoriteEntry[]>('companion_favorites_list', { companionId }),
   archive: (companionId: string) => command<Companion>('companion_archive', { companionId }),
   restore: (companionId: string) => command<Companion>('companion_restore', { companionId }),
   template: (companionId: string) => command<TemplateStatus>('companion_template_status', { companionId }),

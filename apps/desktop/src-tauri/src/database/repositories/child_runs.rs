@@ -297,6 +297,7 @@ pub(super) fn create_child_run_in_transaction(
                 ],
             )?;
     let started = StartRunResult {
+        quote: None,
         run: RunRecord {
             id: child_run_id.clone(),
             conversation_id: child_conversation_id.clone(),
@@ -810,6 +811,7 @@ pub(super) fn query_child_start_result(
         },
     )?;
     Ok(StartRunResult {
+        quote: None,
         run,
         user_message,
         attachments: Vec::new(),
