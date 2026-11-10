@@ -7443,7 +7443,7 @@ impl Database {
     /// Freeze the resolved model for the run's whole lifetime. Write-once:
     /// queueing, retry and restart never replace it with the current global.
     pub fn freeze_run_model_snapshot(&self, run_id: &str, service: &ModelServiceRecord) -> Result<(), String> {
-        let json = serde_json::to_string(service).map_err(|error| error.to_string())?;
+        let json = crate::canonical_json::to_string(service).map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
             connection.execute(
                 "UPDATE runs SET model_snapshot = ?2 WHERE id = ?1 AND model_snapshot IS NULL",
