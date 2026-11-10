@@ -154,7 +154,18 @@ mod tests {
 
     fn make_native(database: &Database, run: &str, conversation: &str, root: Option<&Path>, profile: &str) -> String {
         database.freeze_run_execution_profile(run,profile).unwrap();
-        let permission=FrozenPermission {mode:PermissionMode::Ask,project_root:root.map(|path|path.to_string_lossy().into_owned()),
+        let project_root=match root {
+            Some(path) => {
+                let (authorized,_)=database.conversation_project_access(conversation).unwrap()
+                    .unwrap_or_else(|| panic!("conversation {conversation} has no authorized project folder"));
+                let provided=std::fs::canonicalize(path).unwrap_or_else(|error| panic!("canonicalize provided root {path:?}: {error}"));
+                let stored=std::fs::canonicalize(&authorized).unwrap_or_else(|error| panic!("canonicalize authorized root {authorized}: {error}"));
+                assert_eq!(provided, stored, "fixture root must be the authorized project folder: provided={path:?} authorized={authorized}");
+                Some(authorized)
+            }
+            None => None,
+        };
+        let permission=FrozenPermission {mode:PermissionMode::Ask,project_root,
             grants:Vec::new(),approval_epoch:None};
         database.freeze_run_control(&RunControlBinding {schema_version:fox_engine_protocol::CONTROL_SCHEMA_VERSION,
             run_id:run.into(),conversation_id:conversation.into(),engine_id:"pi".into(),execution_profile_id:profile.into(),
@@ -613,6 +624,10 @@ mod tests {
             let workspace=crate::companion_workspace::repair(database,&fixture.root,&contact.profile.id)
                 .expect("provision the contact workspace");
             make_native(database,&background,&colleague.conversation_id,Some(&workspace),"legacy");
+            let frozen=database.run_control_binding(&background).unwrap().unwrap();
+            let (access,_)=database.conversation_project_access(&colleague.conversation_id).unwrap().unwrap();
+            assert_eq!(frozen.permission.project_root.as_deref(), Some(access.as_str()),
+                "background frozen root must match conversation_project_access");
             let call=format!("background-{decision}");
             let input=fixture.edit_input_in(&background,&call,&workspace);
             let approval_id=approval(database,&background,&call,"edit_file",&input,"tool_execution",decision,false);

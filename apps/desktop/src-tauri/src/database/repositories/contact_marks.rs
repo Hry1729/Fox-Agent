@@ -515,8 +515,12 @@ mod tests {
             self.root.join("fox.db")
         }
 
-        fn finish(&self) {
-            std::fs::remove_dir_all(&self.root).unwrap();
+        fn finish(self) {
+            let Self { root, db, a, b } = self;
+            drop(a);
+            drop(b);
+            drop(db);
+            std::fs::remove_dir_all(&root).unwrap();
         }
     }
 
