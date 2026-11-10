@@ -10240,15 +10240,41 @@ fn execute_host_tool_request(
         )?;
         Some((policy.version, baseline, observed))
     } else { None };
-    let prepared = if let Some((_, baseline, _)) = &file_policy {
-        // `baseline` is the observation the DECLARED precondition selected (or
-        // `missing` for a new file), so binding it here preserves the claim
-        // instead of replacing it with the newest observation.
-        let sessions_dir=legacy_artifact_sessions_dir(app,&input)?;
-        crate::tool_host::prepare_admitted_file_with_artifact_context(tool, &input, &project_root, baseline,database,&sessions_dir,conversation_id)?
-    } else {
-        let sessions_dir=legacy_artifact_sessions_dir(app,&input)?;
-        crate::tool_host::prepare_with_artifact_context(tool, &input, &project_root,database,&sessions_dir,conversation_id)?
+    let prepared = match (|| -> Result<_, String> {
+        if let Some((_, baseline, _)) = &file_policy {
+            // `baseline` is the observation the DECLARED precondition selected (or
+            // `missing` for a new file), so binding it here preserves the claim
+            // instead of replacing it with the newest observation.
+            let sessions_dir=legacy_artifact_sessions_dir(app,&input)?;
+            crate::tool_host::prepare_admitted_file_with_artifact_context(tool, &input, &project_root, baseline,database,&sessions_dir,conversation_id)
+        } else {
+            let sessions_dir=legacy_artifact_sessions_dir(app,&input)?;
+            crate::tool_host::prepare_with_artifact_context(tool, &input, &project_root,database,&sessions_dir,conversation_id)
+        }
+    })() {
+        Ok(prepared) => prepared,
+        Err(error) if matches!(tool, "write_file" | "edit_file") => {
+            // A prepared-file refusal is still a Host-handled call. Persist the
+            // failed ToolCall before returning so a conflict cannot vanish from
+            // the Host ledger while a native/kernel result is already on the wire.
+            match create_fresh_host_tool_call(
+                database,
+                run_id,
+                tool_call_id,
+                tool,
+                &input,
+                if hook_decision.requires_approval { "pending" } else { "running" },
+                hook_decision.requires_approval,
+            )? {
+                HostToolCallExecution::Execute(_) => {}
+                HostToolCallExecution::Replay(response) => return Ok(response),
+            }
+            return finalize_host_tool_execution(
+                database, run_id, tool_call_id, tool, &input,
+                hook_decision.annotations, Err(error),
+            );
+        }
+        Err(error) => return Err(error),
     };
     // A1: one engine decides (block -> protected/outside paths -> mode ->
     // project rules). No conversation-wide grant is read here any more.
