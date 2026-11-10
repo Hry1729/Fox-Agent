@@ -844,6 +844,19 @@ fn create_companion(
     if let Some(expert) = expert {
         activate_expert_binding(tx, &conversation_id, expert, "companion_create")?;
     }
+    // C06/D2: a brand-new private chat has no history (no messages/runs/bubbles
+    // yet), so its K1 backfill is an empty-set completion. Record it inside the
+    // creation transaction so bubble actions work without a restart scan. This
+    // must stay creation-only: restore/legacy chats keep waiting for the real
+    // startup backfill.
+    tx.execute(
+        "INSERT INTO contact_bubble_backfills(conversation_id, completed_at) VALUES (?1, ?2)",
+        params![conversation_id, now],
+    )?;
+    tx.execute(
+        "UPDATE companion_profiles SET last_read_delivery_order=0 WHERE id=?1",
+        params![id],
+    )?;
     profile(tx, &id)
 }
 
@@ -895,6 +908,20 @@ mod tests {
         fn complete_backfill(&self, chat: &str) {
             self.db.with_connection(|c| {
                 c.execute("INSERT OR IGNORE INTO contact_bubble_backfills(conversation_id, completed_at) VALUES (?1, 1)", [chat])?;
+                Ok(())
+            }).unwrap();
+        }
+
+        /// C06/D2 起新建联系人事务即写入完成标记与游标 0；需要“迁移遗留、
+        /// 未完成回填”前提的测试必须显式回退该状态，而不是依赖新建缺陷。
+        fn reset_backfill(&self, chat: &str) {
+            self.db.with_connection(|c| {
+                c.execute("DELETE FROM contact_bubble_backfills WHERE conversation_id=?1", [chat])?;
+                c.execute(
+                    "UPDATE companion_profiles SET last_read_delivery_order=NULL
+                     WHERE id=(SELECT companion_id FROM conversations WHERE id=?1)",
+                    [chat],
+                )?;
                 Ok(())
             }).unwrap();
         }
@@ -956,6 +983,17 @@ mod tests {
         let other = join.join().unwrap();
         assert_eq!(record.profile.id, other.profile.id);
         assert_eq!(record.conversation_id, other.conversation_id);
+        // C06/D2: concurrent adds share one creation transaction outcome —
+        // exactly one backfill marker and one initialized read cursor.
+        let (markers, cursors): (i64, i64) = f.db.with_connection(|c| {
+            c.query_row(
+                "SELECT (SELECT count(*) FROM contact_bubble_backfills WHERE conversation_id=?1),
+                    (SELECT count(*) FROM companion_profiles WHERE id=?2 AND last_read_delivery_order=0)",
+                params![record.conversation_id, record.profile.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        }).unwrap();
+        assert_eq!((markers, cursors), (1, 1));
         let chat =
             f.db.load_conversation(&record.conversation_id)
                 .unwrap()
@@ -1129,6 +1167,7 @@ mod tests {
         let c = f.add("fox-debugger");
         let chat = c.conversation_id.clone();
         let id = c.profile.id.clone();
+        f.reset_backfill(&chat);
         f.bubble(&chat, 2, "companion", 2000, "一");
         // 回填未完成时不能永久标记。
         assert!(matches!(f.db.mark_companion_unread(&id, "bubble-2000"), Err(CompanionError::BackfillPending)));
@@ -1260,6 +1299,9 @@ mod tests {
         let f = Fixture::new();
         let first = f.db.seed_default_companion(&f.root).unwrap();
         let second = f.add("fox-debugger");
+        // 显式构造旧库遗留状态：真实历史未完成回填，新建事务的初始化被回退。
+        f.reset_backfill(&first.conversation_id);
+        f.reset_backfill(&second.conversation_id);
         for (chat, run) in [
             (first.conversation_id.as_str(), "run-a"),
             (second.conversation_id.as_str(), "run-b"),
@@ -1560,6 +1602,231 @@ mod tests {
         assert_eq!(resolved.model_id, "independent-model");
         let plain = f.db.create_conversation("fox-general", Some("普通对话"), None, None).unwrap();
         assert!(f.db.resolve_effective_model(&plain.id).unwrap().is_none(), "无覆盖且无全局时仍是未配置");
+        drop(f.db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    // C06/D2: runtime-created contacts must initialize backfill facts inside
+    // the creation transaction — no restart scan, no manual marker repair.
+
+    fn marker_count(f: &Fixture, chat: &str) -> i64 {
+        f.db.with_connection(|c| {
+            c.query_row(
+                "SELECT count(*) FROM contact_bubble_backfills WHERE conversation_id=?1",
+                [chat],
+                |r| r.get(0),
+            )
+        })
+        .unwrap()
+    }
+
+    fn chat_bubbles(f: &Fixture, chat: &str) -> Vec<crate::database::ContactBubbleRecord> {
+        f.db.with_connection(|c| {
+            super::super::contact_bubbles::query_window(c, chat, 0, None)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn runtime_added_companion_can_use_bubble_actions_without_restart() {
+        let f = Fixture::new();
+        // 启动扫描已结束（此时没有任何私聊），之后的添加不会再被扫描唤醒。
+        assert_eq!(f.db.backfill_contact_bubbles_batch(8).unwrap(), 0);
+        let c = f.add("fox-debugger");
+        let chat = c.conversation_id.clone();
+        let id = c.profile.id.clone();
+        assert_eq!(marker_count(&f, &chat), 1, "新建事务即写入完成标记");
+        assert_eq!(c.profile.last_read_delivery_order, Some(0));
+        // 真实运行事件形成完成回复，不调用 complete_backfill、不手工补标。
+        let started = f.db.create_run(&chat, "你好", None).unwrap();
+        let run = started.run.id.clone();
+        f.db.apply_runtime_event(&run, 1, &serde_json::json!({"type":"run.started"})).unwrap();
+        f.db.apply_runtime_event(&run, 2, &serde_json::json!({"type":"message.started"})).unwrap();
+        f.db.apply_runtime_event(&run, 3, &serde_json::json!({"type":"message.delta","delta":" runtime 回复"})).unwrap();
+        f.db.apply_runtime_event(&run, 4, &serde_json::json!({"type":"message.completed"})).unwrap();
+        f.db.apply_runtime_event(&run, 5, &serde_json::json!({"type":"run.completed"})).unwrap();
+        let reply = format!("{run}:response:3");
+        let marked = f.db.mark_companion_unread(&id, &reply).unwrap();
+        assert!(marked.profile.manual_unread_from_order.is_some());
+        let preview = f.db.quote_companion_bubble(&id, &reply).unwrap();
+        assert!(preview.summary.contains("runtime 回复"));
+        f.db.favorite_companion_bubble(&id, &reply, true).unwrap();
+        f.db.favorite_companion_bubble(&id, &reply, true).unwrap();
+        let favorites = f.db.companion_favorites(&id, 10).unwrap();
+        assert_eq!(favorites.len(), 1);
+        assert_eq!(favorites[0].bubble_id, reply);
+        assert_eq!(marker_count(&f, &chat), 1, "运行投影不新增/覆盖标记");
+        drop(f.db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    #[test]
+    fn new_default_companion_has_empty_history_backfill_completed() {
+        let f = Fixture::new();
+        let default = f.db.seed_default_companion(&f.root).unwrap();
+        let chat = default.conversation_id.clone();
+        assert_eq!(marker_count(&f, &chat), 1);
+        assert_eq!(default.profile.last_read_delivery_order, Some(0));
+        let completed_at: i64 = f.db.with_connection(|c| {
+            c.query_row("SELECT completed_at FROM contact_bubble_backfills WHERE conversation_id=?1", [&chat], |r| r.get(0))
+        }).unwrap();
+        f.bubble(&chat, 1, "companion", 1000, "一");
+        f.db.read_companion_through(&default.profile.id, 1000, 10).unwrap();
+        // 再次 seed 不重建、不改已初始化的阅读事实与标记时间。
+        let again = f.db.seed_default_companion(&f.root).unwrap();
+        assert_eq!(again.profile.id, default.profile.id);
+        assert_eq!(again.profile.last_read_delivery_order, Some(1000));
+        let after: i64 = f.db.with_connection(|c| {
+            c.query_row("SELECT completed_at FROM contact_bubble_backfills WHERE conversation_id=?1", [&chat], |r| r.get(0))
+        }).unwrap();
+        assert_eq!(after, completed_at);
+        assert_eq!(marker_count(&f, &chat), 1);
+        drop(f.db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    #[test]
+    fn restoring_existing_companion_does_not_complete_legacy_backfill() {
+        let f = Fixture::new();
+        let c = f.add("fox-debugger");
+        let chat = c.conversation_id.clone();
+        let id = c.profile.id.clone();
+        // 迁移遗留：旧消息、部分持久气泡、缺完成标记、游标未转换。
+        f.reset_backfill(&chat);
+        f.bubble(&chat, 1, "companion", 1000, "旧回复");
+        f.db.archive_companion(&id).unwrap();
+        let restored = f.add("fox-debugger");
+        assert_eq!(restored.conversation_id, chat, "重复添加走 restore，不是真新建");
+        assert_eq!(marker_count(&f, &chat), 0, "restore 不得补历史完成标记");
+        assert!(matches!(f.db.mark_companion_unread(&id, "bubble-1000"), Err(CompanionError::BackfillPending)));
+        assert!(matches!(f.db.quote_companion_bubble(&id, "bubble-1000"), Err(CompanionError::BackfillPending)));
+        assert!(matches!(f.db.favorite_companion_bubble(&id, "bubble-1000", true), Err(CompanionError::BackfillPending)));
+        // 只有真实启动回填续跑完成后才放行。
+        loop {
+            if f.db.backfill_contact_bubbles_batch(8).unwrap() == 0 {
+                break;
+            }
+        }
+        assert_eq!(marker_count(&f, &chat), 1);
+        assert!(f.db.mark_companion_unread(&id, "bubble-1000").is_ok());
+        assert!(f.db.quote_companion_bubble(&id, "bubble-1000").is_ok());
+        assert!(f.db.favorite_companion_bubble(&id, "bubble-1000", true).is_ok());
+        drop(f.db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    #[test]
+    fn restoring_completed_companion_preserves_read_and_backfill_facts() {
+        let f = Fixture::new();
+        let c = f.add("fox-debugger");
+        let chat = c.conversation_id.clone();
+        let id = c.profile.id.clone();
+        f.bubble(&chat, 1, "companion", 1000, "一");
+        f.bubble(&chat, 2, "companion", 2000, "二");
+        f.db.read_companion_through(&id, 2000, 10).unwrap();
+        f.db.mark_companion_unread(&id, "bubble-1000").unwrap();
+        f.db.favorite_companion_bubble(&id, "bubble-2000", true).unwrap();
+        let completed_at: i64 = f.db.with_connection(|c| {
+            c.query_row("SELECT completed_at FROM contact_bubble_backfills WHERE conversation_id=?1", [&chat], |r| r.get(0))
+        }).unwrap();
+        f.db.archive_companion(&id).unwrap();
+        let restored = f.add("fox-debugger");
+        assert_eq!(restored.conversation_id, chat);
+        assert_eq!(restored.profile.last_read_delivery_order, Some(2000));
+        assert_eq!(restored.profile.manual_unread_from_order, Some(1000));
+        let after: i64 = f.db.with_connection(|c| {
+            c.query_row("SELECT completed_at FROM contact_bubble_backfills WHERE conversation_id=?1", [&chat], |r| r.get(0))
+        }).unwrap();
+        assert_eq!(after, completed_at, "restore 不覆盖原完成时间");
+        assert_eq!(f.db.companion_favorites(&id, 10).unwrap().len(), 1);
+        drop(f.db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    #[test]
+    fn companion_creation_rolls_back_if_backfill_initialization_fails() {
+        let f = Fixture::new();
+        let empty = || {
+            f.db.with_connection(|c| {
+                c.query_row(
+                    "SELECT (SELECT count(*) FROM companion_profiles),
+                        (SELECT count(*) FROM conversations WHERE companion_id IS NOT NULL),
+                        (SELECT count(*) FROM conversation_expert_bindings),
+                        (SELECT count(*) FROM contact_bubble_backfills)",
+                    [],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?)),
+                )
+            }).unwrap()
+        };
+        // 标记 INSERT 失败：整个创建回滚，不返回半成品联系人。
+        f.db.execute_raw_sql(
+            "CREATE TRIGGER fail_marker BEFORE INSERT ON contact_bubble_backfills
+             BEGIN SELECT RAISE(ABORT,'test marker write failed'); END;",
+        ).unwrap();
+        assert!(f.db.add_companion(&f.root, "fox-debugger").is_err());
+        assert_eq!(empty(), (0, 0, 0, 0));
+        f.db.execute_raw_sql("DROP TRIGGER fail_marker").unwrap();
+        // 游标 UPDATE 失败：同样整体回滚。
+        f.db.execute_raw_sql(
+            "CREATE TRIGGER fail_cursor BEFORE UPDATE OF last_read_delivery_order ON companion_profiles
+             WHEN NEW.last_read_delivery_order IS NOT NULL
+             BEGIN SELECT RAISE(ABORT,'test cursor write failed'); END;",
+        ).unwrap();
+        assert!(f.db.add_companion(&f.root, "fox-debugger").is_err());
+        assert_eq!(empty(), (0, 0, 0, 0));
+        f.db.execute_raw_sql("DROP TRIGGER fail_cursor").unwrap();
+        let c = f.add("fox-debugger");
+        assert_eq!(marker_count(&f, &c.conversation_id), 1);
+        drop(f.db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    #[test]
+    fn legacy_partial_backfill_stays_pending_until_projection_completes() {
+        let f = Fixture::new();
+        let c = f.add("fox-debugger");
+        let chat = c.conversation_id.clone();
+        let id = c.profile.id.clone();
+        f.reset_backfill(&chat);
+        // 部分历史已投影（持久气泡），第二段尚未投影；旧游标按 ordinal=1 已读。
+        f.bubble(&chat, 1, "companion", 1000, "第一段");
+        f.db.with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO messages(id,conversation_id,role,kind,content,status,ordinal,created_at,updated_at)
+                 VALUES ('m2',?1,'assistant','text','第二段','completed',2,2,2)",
+                [&chat],
+            )?;
+            Ok(())
+        }).unwrap();
+        f.db.execute_raw_sql(&format!(
+            "UPDATE companion_profiles SET last_read_ordinal=1 WHERE id='{id}'"
+        )).unwrap();
+        f.db.execute_raw_sql(
+            "CREATE TRIGGER fail_second BEFORE INSERT ON contact_bubbles
+             WHEN NEW.source_ordinal = 2
+             BEGIN SELECT RAISE(ABORT,'injected partial backfill failure'); END;",
+        ).unwrap();
+        assert!(f.db.backfill_contact_bubbles_batch(8).is_err());
+        assert_eq!(marker_count(&f, &chat), 0, "部分投影失败不得提前标完成");
+        assert_eq!(chat_bubbles(&f, &chat).len(), 1);
+        assert!(matches!(f.db.mark_companion_unread(&id, "bubble-1000"), Err(CompanionError::BackfillPending)));
+        assert!(matches!(f.db.quote_companion_bubble(&id, "bubble-1000"), Err(CompanionError::BackfillPending)));
+        assert!(matches!(f.db.favorite_companion_bubble(&id, "bubble-1000", true), Err(CompanionError::BackfillPending)));
+        f.db.execute_raw_sql("DROP TRIGGER fail_second").unwrap();
+        // 真实续跑完成后才标完成，且旧 ordinal 游标正确转换为 delivery order。
+        loop {
+            if f.db.backfill_contact_bubbles_batch(8).unwrap() == 0 {
+                break;
+            }
+        }
+        assert_eq!(marker_count(&f, &chat), 1);
+        assert_eq!(chat_bubbles(&f, &chat).len(), 2);
+        let after = f.db.companion_profile(&id).unwrap();
+        assert_eq!(after.profile.last_read_delivery_order, Some(1000));
+        assert_eq!(after.read_delivery_order, 1000);
+        assert!(f.db.mark_companion_unread(&id, "bubble-1000").is_ok());
+        assert!(f.db.quote_companion_bubble(&id, "bubble-1000").is_ok());
+        assert!(f.db.favorite_companion_bubble(&id, "bubble-1000", true).is_ok());
         drop(f.db);
         std::fs::remove_dir_all(f.root).unwrap();
     }

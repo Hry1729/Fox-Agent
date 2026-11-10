@@ -11,6 +11,7 @@ import { ContactWriteCards, WriteCallsContext } from '../src/features/companions
 import { contactReplies } from '../src/features/companions/chat-message-model'
 import { RuntimeApprovalPrompt } from '../src/features/chat/components/RuntimeApprovalPrompt'
 import { runtimeQuestionHistory } from '../src/features/conversations/model/pending-interactions'
+import { withMonotonicInvalidation } from '../src/features/conversations/model/approval-labels'
 import type { ApprovalRecord, ConversationDetail, ConversationMessage, RunEventRecord, ToolCallRecord } from '../src/features/conversations/model/types'
 
 const context: ContactsContextValue = {
@@ -177,6 +178,32 @@ test('聊天审批只呈现实际支持的选择，失败后可重试，历史�
   const reopened = render(withContact(<RuntimeApprovalPrompt approval={{ ...approval, status: 'approved', decision: { approved: true, scope: 'once' } }} onResolve={onResolve} />))
   expect(reopened.container.textContent).toContain('已选择：仅允许这一次')
   expect(reopened.container.querySelectorAll('.fox-contact-choice')).toHaveLength(0)
+})
+
+test('restored_invalidated_approval_shows_reason_and_cannot_be_reapproved', async () => {
+  // D1-6: load an approved+invalidation record from the persistent API shape.
+  const approval: ApprovalRecord = { id: 'ticket', conversationId: 'chat', runId: 'run', toolCallId: 't', toolName: 'call_mcp_tool', status: 'approved',
+    requestedAction: '发送消息', request: { input: { serverId: 'feishu', tool: 'send_message', arguments: {} }, availableDecisions: ['allow_once', 'allow_conversation', 'deny'] },
+    decision: { approved: true, scope: 'conversation', invalidation: { code: 'companion.tool_not_available', message: '联系人已撤销对工具 send_message 的授权', at: 2 } }, requestedAt: 1, resolvedAt: 2 }
+  const assertInvalidated = (container: HTMLElement) => {
+    expect(container.textContent).toContain('本次操作未执行，旧的批准不会恢复')
+    expect(container.textContent).toContain('联系人已撤销对工具 send_message 的授权')
+    expect(container.textContent).toContain('重新授权后请重新发起')
+    expect(container.textContent).not.toContain('用户拒绝')
+    expect(container.querySelectorAll('.fox-contact-choice')).toHaveLength(0)
+    // The original scope survives only as secondary history, not the main state.
+    expect(container.textContent).toContain('原选择（历史）：本次对话内允许')
+  }
+  const view = render(withContact(<RuntimeApprovalPrompt approval={approval} onResolve={async () => true} />))
+  assertInvalidated(view.container)
+  view.unmount()
+  const reopened = render(withContact(<RuntimeApprovalPrompt approval={approval} onResolve={async () => true} />))
+  assertInvalidated(reopened.container)
+  reopened.unmount()
+  // A late approved event without the barrier must not erase the seen reason.
+  const merged = withMonotonicInvalidation(approval, { ...approval, decision: { approved: true, scope: 'conversation' } })
+  const stale = render(withContact(<RuntimeApprovalPrompt approval={merged} onResolve={async () => true} />))
+  assertInvalidated(stale.container)
 })
 
 test('提问选项与自由回答互斥，真实历史事件恢复回答和所选项', async () => {

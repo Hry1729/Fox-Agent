@@ -5,13 +5,22 @@
 //! installed, enabled reality, and a per-run snapshot freezes what the run
 //! started with, so a mid-run grant never widens the current run and a
 //! revocation stops calls that were approved but not yet executed.
-use super::{now_ms, Database};
-use rusqlite::{params, Connection, OptionalExtension};
+use super::{now_ms, register_approval_invalidation_in_tx, ApprovalRefusal, Database};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::Value;
 
 /// The built-in web capability pair. Not an mcp_servers row.
 pub(crate) const WEB_SERVER_ID: &str = "@web";
 pub(crate) const WEB_TOOLS: [&str; 2] = ["web_search", "web_read"];
+
+/// A user-facing grant rejection whose `Display` is exactly the message, so the
+/// command surfaces it verbatim through `with_connection`'s error conversion.
+fn grant_rejection(message: &str) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+        Some(message.to_owned()),
+    )
+}
 
 /// Snapshot identifier: web tools use their own name, connector tools use
 /// `mcp:<serverId>:<tool>`. OpenAPI operations appear under their stable
@@ -48,6 +57,12 @@ fn required_capability(tool: &str, input: Option<&Value>) -> Result<Option<Strin
     }
 }
 
+/// Read-only view of [`required_capability`] for the Host notification refresh,
+/// which re-derives the capability of an already-persisted approval input.
+pub(crate) fn required_capability_for(tool: &str, input: Option<&Value>) -> Result<Option<String>, String> {
+    required_capability(tool, input)
+}
+
 /// K4 execution gate, shared by the preflight/execute ingress
 /// (`companion_workspace::check_run_tool`) and the approved-execution claim
 /// (`claim_approved_tool_call`), including restart recovery. Runs on the
@@ -58,13 +73,44 @@ pub(crate) fn ensure_granted_on(
     tool: &str,
     input: Option<&Value>,
 ) -> Result<(), String> {
+    ensure_granted_inner(connection, run_id, tool, input, false)
+}
+
+/// D1-3/D1-4: the startup/recovery variant. A companion run that depends on a
+/// capability must present its ORIGINAL frozen snapshot; a missing snapshot is
+/// refused with a diagnosable reason instead of falling back to the current
+/// grants, which a later regrant could widen. Base-whitelist tools (no required
+/// capability) and non-companion runs are unaffected, so historical ordinary
+/// Runs keep their compatibility contract.
+pub(crate) fn ensure_granted_strict_on(
+    connection: &Connection,
+    run_id: &str,
+    tool: &str,
+    input: Option<&Value>,
+) -> Result<(), String> {
+    ensure_granted_inner(connection, run_id, tool, input, true)
+}
+
+fn ensure_granted_inner(
+    connection: &Connection,
+    run_id: &str,
+    tool: &str,
+    input: Option<&Value>,
+    strict_snapshot: bool,
+) -> Result<(), String> {
     let Some(scope) = super::companion_ownership::resolve_run_on(connection, run_id)? else {
         return Ok(());
     };
     let companion = scope.companion_id;
     let Some(required) = required_capability(tool, input)? else { return Ok(()) };
     let current = current_capability_ids_on(connection, &companion)?;
-    let snapshot = run_snapshot_on(connection, run_id)?.unwrap_or_else(|| current.clone());
+    let snapshot = match run_snapshot_on(connection, run_id)? {
+        Some(snapshot) => snapshot,
+        None if strict_snapshot => {
+            return Err(format!("工具 {tool} 的本轮能力快照缺失，无法按原授权恢复此批准；请重新发起对话"));
+        }
+        None => current.clone(),
+    };
     let granted_now = if required == "mcp:*" {
         current.iter().any(|id| id.starts_with("mcp:"))
     } else {
@@ -85,6 +131,63 @@ pub(crate) fn ensure_granted_on(
         return Err(format!("工具 {tool} 在本轮开始后才启用，将从下一轮对话开始可用"));
     }
     Ok(())
+}
+
+/// D1-2: register the irreversible invalidation on every unclaimed
+/// `tool_execution` approval whose exact capability was revoked, scoped to
+/// companion-bound conversations (fixed private chat or bound background task,
+/// including archived companions — hence SQL joins, not `resolve_run_on`).
+///
+/// `companion_id` None means a whole-server change (disable/delete) touching
+/// every companion bound to that server; `tool` None matches the server prefix,
+/// Some(t) matches the exact `capability_id`. This only RECORDS the barrier —
+/// the claim/resolve/startup/waiter gates own the D1-1 settlement, so recording
+/// a revocation never depends on an immediate settlement succeeding. Ordinary
+/// (non-companion) MCP approvals are deliberately untouched. Returns the
+/// affected approval ids for the Host to refresh (best-effort notification).
+pub(crate) fn invalidate_companion_capability_in_tx(
+    transaction: &Transaction<'_>,
+    companion_id: Option<&str>,
+    server_id: &str,
+    tool: Option<&str>,
+    refusal: &ApprovalRefusal,
+    now: i64,
+) -> rusqlite::Result<Vec<String>> {
+    let target = tool.map(|tool| capability_id(server_id, tool));
+    let prefix = format!("mcp:{server_id}:");
+    let mut query = transaction.prepare(
+        "SELECT a.id, t.tool_name, t.input_json
+         FROM approvals a
+         JOIN tool_calls t ON t.id = a.tool_call_id
+         JOIN runs r ON r.id = t.run_id
+         WHERE a.category = 'tool_execution' AND a.status IN ('pending','approved') AND a.claimed_at IS NULL
+           AND t.status = 'pending' AND t.requires_approval = 1 AND t.execution_location = 'host'
+           AND r.status = 'running'
+           AND EXISTS (
+               SELECT 1 FROM conversations c WHERE c.id = t.conversation_id AND c.companion_id IS NOT NULL
+                 AND (?1 IS NULL OR c.companion_id = ?1)
+               UNION ALL
+               SELECT 1 FROM digital_colleagues dc WHERE dc.conversation_id = t.conversation_id AND dc.companion_bound = 1
+                 AND (?1 IS NULL OR dc.companion_id = ?1)
+           )",
+    )?;
+    let rows = query.query_map(params![companion_id], |row| Ok((
+        row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+    )))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(query);
+    let mut affected = Vec::new();
+    for (approval_id, tool_name, input_json) in rows {
+        let Ok(input) = serde_json::from_str::<Value>(&input_json) else { continue };
+        let Ok(Some(required)) = required_capability(&tool_name, Some(&input)) else { continue };
+        let matches = match &target {
+            Some(target) => required == *target,
+            None => required.starts_with(&prefix),
+        };
+        if !matches { continue; }
+        register_approval_invalidation_in_tx(transaction, &approval_id, refusal, now)?;
+        affected.push(approval_id);
+    }
+    Ok(affected)
 }
 
 /// Current effective capability ids: grants intersected with the installed,
@@ -127,59 +230,71 @@ impl Database {
         })
     }
 
+    /// C02/K4 (D1-2): grant or revoke one capability. A revocation deletes the
+    /// grant AND records the irreversible invalidation on the matching unclaimed
+    /// approvals in the SAME Immediate transaction, so a regrant can never revive
+    /// an old approval and a crash can never leave the grant deleted without the
+    /// barrier. Returns the affected approval ids (empty for a grant) so the
+    /// command can notify the Host best-effort; the persistent facts, not the
+    /// notification, are authoritative.
     pub fn set_companion_tool_grant(
         &self,
         companion_id: &str,
         server_id: &str,
         tool: &str,
         granted: bool,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<String>, String> {
         let tool = tool.trim();
         if tool.is_empty() || tool.chars().count() > 200 {
             return Err("工具名无效".to_owned());
         }
-        let connection = self.connection.lock().map_err(|_| "database lock is poisoned".to_owned())?;
-        let result = (|| -> rusqlite::Result<()> {
-            let exists: bool = connection.query_row(
+        let now = now_ms();
+        self.with_connection(|connection| {
+            let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let exists: bool = transaction.query_row(
                 "SELECT EXISTS(SELECT 1 FROM companion_profiles WHERE id = ?1 AND deleting_at IS NULL)",
                 [companion_id],
                 |row| row.get(0),
             )?;
             if !exists {
-                return Err(rusqlite::Error::QueryReturnedNoRows);
+                return Err(grant_rejection("联系人或连接器不存在"));
             }
             if server_id == WEB_SERVER_ID {
                 if !WEB_TOOLS.contains(&tool) {
-                    return Err(rusqlite::Error::InvalidQuery);
+                    return Err(grant_rejection("网页能力只支持 web_search 与 web_read"));
                 }
             } else {
-                let server: Option<String> = connection.query_row(
+                let server: Option<String> = transaction.query_row(
                     "SELECT id FROM mcp_servers WHERE id = ?1",
                     [server_id],
                     |row| row.get(0),
                 ).optional()?;
                 if server.is_none() {
-                    return Err(rusqlite::Error::QueryReturnedNoRows);
+                    return Err(grant_rejection("联系人或连接器不存在"));
                 }
             }
+            let mut affected = Vec::new();
             if granted {
-                connection.execute(
+                transaction.execute(
                     "INSERT OR IGNORE INTO companion_tool_grants(companion_id, server_id, tool, created_at)
                      VALUES (?1, ?2, ?3, ?4)",
-                    params![companion_id, server_id, tool, now_ms()],
+                    params![companion_id, server_id, tool, now],
                 )?;
             } else {
-                connection.execute(
+                transaction.execute(
                     "DELETE FROM companion_tool_grants WHERE companion_id = ?1 AND server_id = ?2 AND tool = ?3",
                     params![companion_id, server_id, tool],
                 )?;
+                let refusal = ApprovalRefusal::new(
+                    "companion.tool_not_available",
+                    format!("联系人已撤销对工具 {tool} 的授权；重新授权后请重新发起，旧的批准不会恢复"),
+                );
+                affected = invalidate_companion_capability_in_tx(
+                    &transaction, Some(companion_id), server_id, Some(tool), &refusal, now,
+                )?;
             }
-            Ok(())
-        })();
-        result.map_err(|error| match error {
-            rusqlite::Error::QueryReturnedNoRows => "联系人或连接器不存在".to_owned(),
-            rusqlite::Error::InvalidQuery => "网页能力只支持 web_search 与 web_read".to_owned(),
-            other => other.to_string(),
+            transaction.commit()?;
+            Ok(affected)
         })
     }
 
@@ -363,5 +478,101 @@ mod tests {
         assert!(f.db.companion_tool_grants(&f.companion).unwrap().is_empty());
         drop(f.db);
         std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    fn invalidated(db: &Database, approval_id: &str) -> bool {
+        let record = db.approval_record(approval_id).unwrap();
+        crate::database::approval_invalidation(record.decision.as_ref()).is_some()
+    }
+
+    #[test]
+    fn revocation_registers_a_persistent_barrier_that_survives_regrant_and_restart() {
+        let f = Fixture::new();
+        f.seed_server("feishu", true);
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true).unwrap();
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "read_calendar", true).unwrap();
+        let run = f.running_run();
+        f.db.freeze_run_companion_tools(&run, &f.db.companion_capability_ids(&f.companion).unwrap()).unwrap();
+        let send = json!({"serverId":"feishu","tool":"send_message","arguments":{}});
+        let read = json!({"serverId":"feishu","tool":"read_calendar","arguments":{}});
+        let send_call = f.db.create_host_tool_call(&run, "call-send", "call_mcp_tool", &send, "pending", true).unwrap();
+        let send_approval = f.db.create_approval(&send_call.id, "发送消息", &send).unwrap();
+        let read_call = f.db.create_host_tool_call(&run, "call-read", "call_mcp_tool", &read, "pending", true).unwrap();
+        let read_approval = f.db.create_approval(&read_call.id, "读日历", &read).unwrap();
+
+        let affected = f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", false).unwrap();
+        assert_eq!(affected, vec![send_approval.id.clone()], "只登记精确匹配的工具");
+        assert!(invalidated(&f.db, &send_approval.id));
+        assert_eq!(f.db.approval_record(&send_approval.id).unwrap().status, "pending", "登记失效不立即结算 pending");
+        assert!(!invalidated(&f.db, &read_approval.id), "同 server 的其他工具不受影响");
+
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true).unwrap();
+        assert!(invalidated(&f.db, &send_approval.id), "重新授权不删除失效标记");
+        let error = f.db.resolve_approval(&send_approval.id, ApprovalDecision::AllowOnce).unwrap_err();
+        assert!(error.contains("撤销"), "{error}");
+        let settled = f.db.approval_record(&send_approval.id).unwrap();
+        assert_ne!(settled.status, "denied", "失效结算不是用户主动拒绝");
+        assert_ne!(settled.status, "approved", "失效批准不能被重新授予");
+        assert!(crate::database::approval_invalidation(settled.decision.as_ref()).is_some());
+        assert!(!f.db.claim_approved_tool_call(&run, "call-send").unwrap(), "结算后不能执行");
+
+        f.db.resolve_approval(&read_approval.id, ApprovalDecision::AllowOnce).unwrap();
+        assert!(f.db.claim_approved_tool_call(&run, "call-read").unwrap(), "未撤销的工具照常执行");
+
+        drop(f.db);
+        let db = Database::open(f.root.join("fox.db")).unwrap();
+        assert!(invalidated(&db, &send_approval.id), "重启后失效仍在");
+        drop(db);
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
+
+    #[test]
+    fn server_disable_and_delete_invalidate_only_matching_companion_approvals() {
+        let f = Fixture::new();
+        f.seed_server("feishu", true);
+        f.seed_server("other", true);
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true).unwrap();
+        f.db.set_companion_tool_grant(&f.companion, "other", "ping", true).unwrap();
+        let run = f.running_run();
+        f.db.freeze_run_companion_tools(&run, &f.db.companion_capability_ids(&f.companion).unwrap()).unwrap();
+        let a = json!({"serverId":"feishu","tool":"send_message","arguments":{}});
+        let b = json!({"serverId":"other","tool":"ping","arguments":{}});
+        let ca = f.db.create_host_tool_call(&run, "call-a", "call_mcp_tool", &a, "pending", true).unwrap();
+        let aa = f.db.create_approval(&ca.id, "A", &a).unwrap();
+        let cb = f.db.create_host_tool_call(&run, "call-b", "call_mcp_tool", &b, "pending", true).unwrap();
+        let ab = f.db.create_approval(&cb.id, "B", &b).unwrap();
+
+        f.db.set_mcp_server_enabled("feishu", false).unwrap();
+        assert!(invalidated(&f.db, &aa.id));
+        assert!(!invalidated(&f.db, &ab.id), "其他 server 不受影响");
+        let affected = f.db.invalidated_companion_approvals_for_server("feishu").unwrap();
+        assert_eq!(affected.len(), 1);
+        assert_eq!(affected[0].id, aa.id);
+
+        f.db.set_mcp_server_enabled("feishu", true).unwrap();
+        assert!(invalidated(&f.db, &aa.id), "重新启用不复活旧批准");
+
+        f.db.delete_mcp_server("other").unwrap();
+        assert!(invalidated(&f.db, &ab.id), "删除在同一事务登记失效");
+        drop(f.db);
+        std::fs::remove_dir_all(&f.root).unwrap();
+    }
+
+    #[test]
+    fn create_approval_refuses_to_reuse_an_invalidated_record_after_regrant() {
+        let f = Fixture::new();
+        f.seed_server("feishu", true);
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true).unwrap();
+        let run = f.running_run();
+        f.db.freeze_run_companion_tools(&run, &f.db.companion_capability_ids(&f.companion).unwrap()).unwrap();
+        let input = json!({"serverId":"feishu","tool":"send_message","arguments":{}});
+        let call = f.db.create_host_tool_call(&run, "call-1", "call_mcp_tool", &input, "pending", true).unwrap();
+        f.db.create_approval(&call.id, "发送消息", &input).unwrap();
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", false).unwrap();
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true).unwrap();
+        let error = f.db.create_approval(&call.id, "发送消息", &input).unwrap_err();
+        assert!(error.contains("失效"), "{error}");
+        drop(f.db);
+        std::fs::remove_dir_all(&f.root).unwrap();
     }
 }

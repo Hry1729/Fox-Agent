@@ -574,6 +574,21 @@ mod tests {
         }).unwrap();
     }
 
+    /// C06/D2 起新建联系人事务即写入完成标记；测试要验证“历史仍在整理”的
+    /// 旧库状态时，必须显式回退成迁移遗留（缺标记、游标未转换），而不是
+    /// 依赖新建联系人没有标记。
+    fn reset_backfill(db: &Database, chat: &str) {
+        db.with_connection(|c| {
+            c.execute("DELETE FROM contact_bubble_backfills WHERE conversation_id = ?1", [chat])?;
+            c.execute(
+                "UPDATE companion_profiles SET last_read_delivery_order=NULL
+                 WHERE id=(SELECT companion_id FROM conversations WHERE id=?1)",
+                [chat],
+            )?;
+            Ok(())
+        }).unwrap();
+    }
+
     fn count(db: &Database, sql: &str) -> i64 {
         db.with_connection(|c| c.query_row(sql, [], |r| r.get(0))).unwrap()
     }
@@ -587,6 +602,7 @@ mod tests {
         let f = Fixture::new();
         let (chat, other) = (f.a.conversation_id.clone(), f.b.conversation_id.clone());
         bubble(&f.db, &chat, "run-1:response:2", 1, "companion", 1000, "已经落库的一段回复");
+        reset_backfill(&f.db, &chat);
         // 回填未完成时，任何永久标记都先被挡住。
         assert!(matches!(f.db.quote_companion_bubble(&f.a.profile.id, "run-1:response:2"), Err(CompanionError::BackfillPending)));
         backfill(&f.db, &chat);

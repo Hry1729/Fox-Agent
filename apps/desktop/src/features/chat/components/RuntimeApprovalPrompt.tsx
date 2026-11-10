@@ -24,7 +24,7 @@ import type { GrantScope } from '@/components/assistant-ui/upstream/elements/per
 import { desktopClient } from '@/features/conversations/api/desktop-client'
 import { useContacts } from '@/features/companions/context'
 import { ContactApprovalCard } from '@/features/companions/chat-decision'
-import { approvalStatusLabel } from '@/features/conversations/model/approval-labels'
+import { approvalInvalidation, approvalStatusLabel, APPROVAL_INVALIDATED_HINT, APPROVAL_INVALIDATED_TITLE } from '@/features/conversations/model/approval-labels'
 
 /** A1: the Host's offer to save "always allow in this project" for a command. */
 export function projectRuleOffer(request: Record<string, unknown>): { tool: string; suggestedPrefix: string } | null {
@@ -81,7 +81,9 @@ export function RuntimeApprovalPrompt({
   readOnly?: boolean
 }) {
   const contactMode = useContacts()?.privateChat
-  const active = !readOnly && (!contactMode || approval.status === 'pending')
+  const invalidation = approvalInvalidation(approval.decision)
+  const invalidated = invalidation !== null
+  const active = !readOnly && !invalidated && (!contactMode || approval.status === 'pending')
   const developerUi = useDeveloperUi()
   const request = approval.request
   const presentation = approvalPresentation(approval)
@@ -130,7 +132,7 @@ export function RuntimeApprovalPrompt({
       }
     }
   }
-  if (!contactMode && isReadScopeRequest(approval, presentation)) {
+  if (!invalidated && !contactMode && isReadScopeRequest(approval, presentation)) {
     const decisionScopes: Partial<Record<ApprovalDecision, GrantScope>> = { deny: 'denied', allow_once: 'once', allow_conversation: 'conversation' }
     const scopes = (['deny', 'allow_conversation', 'allow_once'] as const).filter(decision => allowedDecisions.includes(decision)).map(decision => decisionScopes[decision]).filter((scope): scope is GrantScope => Boolean(scope))
     const target = presentation.target
@@ -154,15 +156,19 @@ export function RuntimeApprovalPrompt({
   const operation = presentation.command && presentation.command !== target ? `${target}\n${presentation.command}` : target
   const Card = contactMode ? ContactApprovalCard : ApprovalCard
   const decision = approval.decision as { scope?: string; decision?: string } | null
-  const receipt = approval.status === 'approved'
-    ? decision?.scope === 'conversation' || decision?.decision === 'allow_conversation' ? '已选择：本次对话内允许' : '已选择：仅允许这一次'
-    : approval.status === 'pending' ? '此确认已结束' : approvalStatusLabel(approval.status)
+  const scopeHistory = decision?.scope === 'conversation' || decision?.decision === 'allow_conversation' ? '本次对话内允许' : decision?.scope === 'once' || decision?.decision === 'allow_once' ? '仅允许这一次' : null
+  const receipt = invalidated
+    ? `${APPROVAL_INVALIDATED_TITLE}：${invalidation.message}。${APPROVAL_INVALIDATED_HINT}`
+    : approval.status === 'approved'
+      ? scopeHistory ? `已选择：${scopeHistory}` : '已选择：仅允许这一次'
+      : approval.status === 'pending' ? '此确认已结束' : approvalStatusLabel(approval.status)
   return (
-    <Card state={active ? 'request' : approval.status === 'denied' ? 'denied' : 'done'} statusLabel={receipt} title={title} icon={approvalCardIcon(title, approval.toolName)} subtitle={presentation.command ? '需要确认这条命令' : operationSummary} command={operation} description={repairOverride || replacement || presentation.officeReuse ? briefScope : undefined} busy={submitting} className="aui-approval-card fox-confirmation fox-runtime-confirmation is-compact"
+    <Card state={active ? 'request' : approval.status === 'denied' && !invalidated ? 'denied' : 'done'} invalidated={invalidated} statusLabel={receipt} title={title} icon={approvalCardIcon(title, approval.toolName)} subtitle={presentation.command ? '需要确认这条命令' : operationSummary} command={operation} description={repairOverride || replacement || presentation.officeReuse ? briefScope : undefined} busy={submitting} className="aui-approval-card fox-confirmation fox-runtime-confirmation is-compact"
       onDeny={() => void resolve('deny')}
       onAllowOnce={allowedDecisions.includes('allow_once') ? () => void resolve('allow_once') : undefined}
       onAllowConversation={allowedDecisions.includes('allow_conversation') ? () => void resolve('allow_conversation') : undefined}
       detailsContent={<>
+        {invalidated && scopeHistory && <p className="fox-approval-scope-note">原选择（历史）：{scopeHistory}</p>}
         {/* UI 1104-07：卡片主体只留目录、命令和「拒绝 / 只允许这一次」；Host 说明和「本项目总是允许」收进详情。 */}
         <FoxDisclosure className="fox-approval-details-scroll fox-approval-disclosure" summary={presentation.content !== undefined ? <>查看内容 <span>{presentation.content.split('\n').length} 行</span></> : '查看操作详情'}>
         <div role="region" aria-label="审批详情">

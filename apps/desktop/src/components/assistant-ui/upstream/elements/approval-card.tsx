@@ -1,7 +1,7 @@
 "use client";
 
 import { useId, type ComponentProps, type ReactNode } from "react";
-import { CheckIcon, Loader2Icon, TerminalIcon, XIcon } from "lucide-react";
+import { CheckIcon, InfoIcon, Loader2Icon, TerminalIcon, XIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { field, ghostButton, inkButton, mono, paper } from "./surfaces";
 import { useReceiptFocus } from "./receipt-focus";
@@ -33,6 +33,7 @@ export function ApprovalCard({
   detailsContent,
   busy = false,
   statusLabel,
+  invalidated = false,
   className,
   ...props
 }: Omit<
@@ -53,6 +54,7 @@ export function ApprovalCard({
   | "alwaysAllowLabel"
   | "denyLabel"
   | "statusLabel"
+  | "invalidated"
 > & {
   state: ApprovalState;
   command?: string | undefined;
@@ -72,6 +74,7 @@ export function ApprovalCard({
   alwaysAllowLabel?: string | undefined;
   denyLabel?: string | undefined;
   statusLabel?: string | undefined;
+  invalidated?: boolean | undefined;
 }) {
   const titleId = useId();
   const descriptionId = useId();
@@ -205,7 +208,12 @@ export function ApprovalCard({
             role="status"
             className="fade-in animate-in text-muted-foreground flex items-center gap-2 text-xs duration-300 motion-reduce:animate-none"
           >
-            {state === "running" ? (
+            {invalidated ? (
+              <>
+                <InfoIcon className="text-muted-foreground size-3.5" />
+                {statusLabel}
+              </>
+            ) : state === "running" ? (
               <>
                 <Loader2Icon className="text-muted-foreground size-3.5 animate-spin motion-reduce:animate-none" />
                 {statusLabel ?? receiptText.running}

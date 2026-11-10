@@ -298,7 +298,15 @@ pub(crate) fn companion_capability_set(
     request: SetCompanionCapability,
 ) -> ApiResponse<()> {
     match state.database.set_companion_tool_grant(&request.companion_id, &request.server_id, &request.tool, request.granted) {
-        Ok(()) => ApiResponse::success(()),
+        Ok(affected) => {
+            // D1-2: best-effort Host refresh of the invalidated cards/waiters. The
+            // persistent barrier committed above is authoritative even if this
+            // notification fails.
+            if !affected.is_empty() {
+                state.runtime_host.refresh_invalidated_approvals(&affected);
+            }
+            ApiResponse::success(())
+        }
         Err(error) => ApiResponse::failure("companion.capability_invalid", error, false),
     }
 }

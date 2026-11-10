@@ -78,6 +78,10 @@ mod tests {
         fn new(app: &tauri::App, database: Database) -> Self {
             let parent=std::env::var_os("FOX_TEST_NATIVE_HOST_FIXTURE_ROOT").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
             let root=parent.join(format!("fox-native-approval-scope-{}",uuid::Uuid::new_v4()));
+            Self::with_root(app, database, root)
+        }
+
+        fn with_root(app: &tauri::App, database: Database, root: PathBuf) -> Self {
             for name in ["sessions","attachments","skills","project"] { std::fs::create_dir_all(root.join(name)).unwrap(); }
             let host=RuntimeHost::new(app.handle().clone(),database,root.join("sessions"),root.join("attachments"),
                 root.join("skills"),crate::yuxi::YuxiClient::new().unwrap());
@@ -1050,6 +1054,373 @@ mod tests {
         assert_eq!(report,(String::from("failed"),format!("dc-report-{background}")));
         assert!(fixture.host.state.lock().unwrap().stopping_companions.is_empty());
     }
+
+    /// D3: a Run can be DB-terminal (completed) while its PiNative session still
+    /// holds the run_id owner — `run_released` has not landed yet. The drain must
+    /// wait for that owner to release instead of returning on the empty active
+    /// list, and it must not cancel the already-completed Run. The inert
+    /// stdin-only worker never answers session.close, so this exercises the drain
+    /// wait deterministically without a full archive close.
+    #[test]
+    fn drain_waits_for_a_db_terminal_run_until_the_session_owner_releases() {
+        if isolated("runtime_host::native_approval_scope::tests::drain_waits_for_a_db_terminal_run_until_the_session_owner_releases") { return; }
+        let app=app();
+        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        fixture.manage(&app);
+        let database=fixture.database();
+        let contact=database.add_companion(&fixture.root,"fox-debugger").unwrap();
+        let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {
+            name:"Terminal but owned".into(),expert_id:"fox-debugger".into(),
+            objective:"report the release evidence".into(),project_id:None,project_root:None,
+            knowledge_references:Vec::new(),max_runs_per_day:4,max_tokens_per_day:10_000,
+            max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,
+            companion_id:Some(contact.profile.id.clone())}).unwrap();
+        let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,
+            "d3-terminal",&json!({}),None,"test").unwrap();
+        let background=accepted.prepared.expect("a bound task is admitted").started.run.id;
+        let workspace=crate::companion_workspace::repair(database,&fixture.root,&contact.profile.id).unwrap();
+        let session_id=make_native(database,&background,&colleague.conversation_id,Some(&workspace),"legacy");
+        // The session owns the Run, exactly as a live sidecar would before run_released.
+        fixture.host.state.lock().unwrap().worker.as_mut().unwrap().sessions.start(
+            &colleague.conversation_id,&session_id,1,&background,
+            Some((contact.profile.id.as_str(),true))).unwrap();
+        // DB reaches a terminal state; the active list is empty even though the
+        // in-memory owner has not been released yet.
+        database.apply_runtime_event(&background,1,&json!({"type":"run.completed"})).unwrap();
+        assert!(database.companion_active_run_ids(&contact.profile.id).unwrap().is_empty());
+        assert!(fixture.host.companion_session_owner_present(&contact.profile.id).unwrap());
+
+        let (done,answer)=std::sync::mpsc::channel();
+        let host=fixture.host.clone();
+        let companion=contact.profile.id.clone();
+        let drainer=std::thread::spawn(move||{ let _=done.send(host.drain_companion_runs(&companion)); });
+        // With the owner still present the drain waits; it neither returns on the
+        // empty active list nor cancels the completed Run.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(matches!(answer.try_recv(),Err(std::sync::mpsc::TryRecvError::Empty)),
+            "drain must wait for the session owner even when the DB Run is terminal");
+        let status:String=database.with_connection(|c|c.query_row(
+            "SELECT status FROM runs WHERE id=?1",[&background],|r|r.get(0))).unwrap();
+        assert_eq!(status,"completed","drain must not cancel an already-completed Run");
+
+        // run_released lands: the owner is released and the drain completes.
+        fixture.host.state.lock().unwrap().worker.as_mut().unwrap().sessions.finish(&background);
+        assert!(answer.recv_timeout(Duration::from_secs(5)).unwrap().is_ok());
+        assert!(!fixture.host.companion_session_owner_present(&contact.profile.id).unwrap());
+        drainer.join().unwrap();
+    }
+
+    fn approval_row(database: &Database, approval_id: &str) -> (String, Option<i64>, Option<Value>) {
+        database.with_connection(|connection| connection.query_row(
+            "SELECT status, claimed_at, decision_json FROM approvals WHERE id=?1", [approval_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<String>>(2)?.map(|text| serde_json::from_str::<Value>(&text).unwrap()))),
+        )).unwrap()
+    }
+
+    fn call_facts(database: &Database, run: &str, call: &str) -> (String, Option<Value>, String, Option<Value>) {
+        database.with_connection(|connection| {
+            let host = connection.query_row(
+                "SELECT status, result_json FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id=?2",
+                params![run, call],
+                |row| Ok((row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?.map(|text| serde_json::from_str::<Value>(&text).unwrap()))),
+            ).unwrap();
+            let native = connection.query_row(
+                "SELECT state, result_json FROM kernel_tool_calls WHERE run_id=?1 AND tool_call_id=?2",
+                params![run, call],
+                |row| Ok((row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?.map(|text| serde_json::from_str::<Value>(&text).unwrap()))),
+            ).unwrap();
+            Ok((host.0, host.1, native.0, native.1))
+        }).unwrap()
+    }
+
+    fn run_terminal(database: &Database, run: &str) -> (String, Option<String>) {
+        database.with_connection(|connection| connection.query_row(
+            "SELECT status, error_code FROM runs WHERE id=?1", [run],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )).unwrap()
+    }
+
+    /// P1: the public `run_cancel` chain (`cancel_kernel_owned_run` with the
+    /// Host user-stop closure) must settle a Run a previous process left on a
+    /// restored approval — no live worker/session owner — as a real user stop.
+    /// The archive sweep's `cancel_managed_run` keeps its own semantics: it
+    /// returns false here and leaves the `companion.stopping` settlement to
+    /// `settle_unowned_companion_run` (covered by the archiving test above).
+    #[test]
+    fn run_cancel_user_stop_settles_an_unowned_restored_approval_run() {
+        if isolated("runtime_host::native_approval_scope::tests::run_cancel_user_stop_settles_an_unowned_restored_approval_run") { return; }
+        let app=app();
+        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        fixture.manage(&app);
+        let database=fixture.database();
+        let contact=database.add_companion(&fixture.root,"fox-debugger").unwrap();
+        let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {
+            name:"Unowned user stop".into(),expert_id:"fox-debugger".into(),
+            objective:"report the release evidence".into(),project_id:None,project_root:None,
+            knowledge_references:Vec::new(),max_runs_per_day:4,max_tokens_per_day:10_000,
+            max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,
+            companion_id:Some(contact.profile.id.clone())}).unwrap();
+        let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,
+            "p1-user-stop",&json!({}),None,"test").unwrap();
+        let background=accepted.prepared.expect("a bound task is admitted").started.run.id;
+        let workspace=crate::companion_workspace::repair(database,&fixture.root,&contact.profile.id).unwrap();
+        make_native(database,&background,&colleague.conversation_id,Some(&workspace),"legacy");
+        let approved_input=fixture.edit_input_in(&background,"orphan-approved",&workspace);
+        let approved_id=approval(database,&background,"orphan-approved","edit_file",&approved_input,"tool_execution","approved",false);
+        let pending_input=fixture.edit_input_in(&background,"orphan-pending",&workspace);
+        let pending_id=approval(database,&background,"orphan-pending","edit_file",&pending_input,"tool_execution","pending",false);
+        assert!(fixture.host.state.lock().unwrap().worker.as_ref().unwrap().sessions.is_empty(),
+            "the Run is exactly what a restart leaves behind: no live owner");
+
+        // The archive-sweep entry keeps its own contract: no user-stop settle.
+        assert!(!fixture.host.cancel_managed_run(&background).unwrap());
+        assert_eq!(run_terminal(database,&background).0,"running");
+        assert!(approval_row(database,&approved_id).1.is_none());
+
+        // The exact chain the public command selects after the backend gate.
+        let stopped=crate::commands::cancel_kernel_owned_run(database,&background,
+            ||fixture.host.cancel_managed_run_by_user(&background)).unwrap();
+        assert_eq!(stopped,Some(true),"用户停止必须真正收尾无主恢复 Run");
+        assert_eq!(run_terminal(database,&background),(String::from("interrupted"),Some(String::from("runtime.user_cancelled"))));
+
+        let (status,claimed,decision)=approval_row(database,&approved_id);
+        assert_eq!(status,"approved","approved 保留原决策");
+        assert!(claimed.is_some(),"批准被消费");
+        assert_eq!(decision.as_ref().unwrap()["scope"],json!("once"));
+        assert_eq!(crate::database::approval_invalidation(decision.as_ref()).unwrap().0,"runtime.user_cancelled");
+        let (status,claimed,decision)=approval_row(database,&pending_id);
+        assert_eq!(status,"cancelled","pending 批准读作用户取消，不是超时");
+        assert!(claimed.is_some());
+        assert_eq!(crate::database::approval_invalidation(decision.as_ref()).unwrap().0,"runtime.user_cancelled");
+
+        for call in ["orphan-approved","orphan-pending"] {
+            let (host_status,host_result,native_status,native_result)=call_facts(database,&background,call);
+            assert_eq!(host_status,"failed");
+            assert_eq!(native_status,"failed");
+            assert_eq!(host_result,native_result,"Host 与 native 持有同一份标准错误收据");
+            assert_eq!(native_result.unwrap()["isError"],json!(true));
+        }
+        assert!(fixture.host.state.lock().unwrap().worker.as_ref().unwrap().sessions.is_empty(),
+            "取消不泄漏执行位置");
+
+        // A second user stop is idempotent and never rewrites the outcome.
+        let before=run_terminal(database,&background);
+        let again=crate::commands::cancel_kernel_owned_run(database,&background,
+            ||fixture.host.cancel_managed_run_by_user(&background)).unwrap();
+        assert_eq!(again,Some(false));
+        assert_eq!(run_terminal(database,&background),before);
+    }
+
+    fn unowned_approval_run_facts(database: &Database, run: &str)
+        -> std::collections::BTreeMap<&'static str, Vec<Vec<rusqlite::types::Value>>>
+    {
+        database.with_connection(|connection| {
+            let mut facts = std::collections::BTreeMap::new();
+            for (table, sql) in [
+                ("run", "SELECT * FROM runs WHERE id=?1"),
+                ("approvals", "SELECT a.* FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id WHERE t.run_id=?1 ORDER BY t.runtime_tool_call_id,a.id"),
+                ("host", "SELECT * FROM tool_calls WHERE run_id=?1 ORDER BY runtime_tool_call_id,id"),
+                ("native", "SELECT * FROM kernel_tool_calls WHERE run_id=?1 ORDER BY tool_call_id"),
+                ("binding", "SELECT * FROM run_control_bindings WHERE run_id=?1"),
+                ("mapping", "SELECT s.* FROM runtime_sessions s JOIN runs r ON r.conversation_id=s.conversation_id WHERE r.id=?1 ORDER BY s.id"),
+            ] {
+                let mut query = connection.prepare(sql)?;
+                let columns = query.column_count();
+                let rows = query.query_map([run], |row| {
+                    (0..columns).map(|index| row.get(index)).collect::<rusqlite::Result<Vec<_>>>()
+                })?.collect::<rusqlite::Result<Vec<_>>>()?;
+                facts.insert(table, rows);
+            }
+            Ok(facts)
+        }).unwrap()
+    }
+
+    fn assert_user_stop_rolls_back_on_generation_mismatch(mismatch_status: &str) {
+        const REOPEN: &str = "FOX_TEST_NATIVE_APPROVAL_REOPEN";
+        if let Ok(restart) = std::env::var(REOPEN) {
+            let restart: Value = serde_json::from_str(&restart).unwrap();
+            let root = PathBuf::from(restart["root"].as_str().unwrap());
+            let run = restart["run"].as_str().unwrap();
+            let workspace = Path::new(restart["workspace"].as_str().unwrap());
+            let database = Database::open(root.join("fox.db")).unwrap();
+            let before = unowned_approval_run_facts(&database, run);
+            assert_eq!(format!("{before:?}"), restart["before"].as_str().unwrap(),
+                "reopening the same database preserves every fact");
+            database.repair_interrupted_runs().unwrap();
+            assert_eq!(unowned_approval_run_facts(&database, run), before,
+                "startup repair must not settle an unverifiable approval");
+            let app = app();
+            let fixture = Fixture::with_root(&app, database, root);
+            assert_unowned_user_stop_fails_without_changes(&fixture, run, workspace, &before);
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("fox-cancel-identity-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("fox.db");
+        let (run, workspace, before) = {
+            let app = app();
+            let fixture = Fixture::with_root(&app, Database::open(path.clone()).unwrap(), root.clone());
+            let database = fixture.database();
+            let contact = database.add_companion(&fixture.root, "fox-debugger").unwrap();
+            let colleague = database.create_digital_colleague(&CreateDigitalColleagueInput {
+                name: "Unverifiable user stop".into(), expert_id: "fox-debugger".into(),
+                objective: "report the release evidence".into(), project_id: None, project_root: None,
+                knowledge_references: Vec::new(), max_runs_per_day: 4, max_tokens_per_day: 10_000,
+                max_duration_ms: 60_000, max_output_tokens: 1_024, max_tool_calls: 8,
+                companion_id: Some(contact.profile.id.clone()),
+            }).unwrap();
+            let accepted = database.accept_digital_colleague_trigger(&colleague.id, "manual", None,
+                "unverifiable-user-stop", &json!({}), None, "test").unwrap();
+            let run = accepted.prepared.expect("a bound task is admitted").started.run.id;
+            let workspace = crate::companion_workspace::repair(database, &root, &contact.profile.id).unwrap();
+            let session = make_native(database, &run, &colleague.conversation_id, Some(&workspace), "legacy");
+            let input = fixture.edit_input_in(&run, "a-settleable", &workspace);
+            let settleable = approval(database, &run, "a-settleable", "edit_file", &input, "tool_execution", "pending", false);
+            let input = fixture.edit_input_in(&run, "z-mismatch", &workspace);
+            let mismatch = approval(database, &run, "z-mismatch", "edit_file", &input, "tool_execution", mismatch_status, false);
+            let invalidation = json!({"code": "companion.tool_not_available", "message": "联系人已撤销该工具", "at": 123456});
+            database.with_connection(|connection| {
+                let decision: Option<String> = connection.query_row(
+                    "SELECT decision_json FROM approvals WHERE id=?1", [&mismatch], |row| row.get(0))?;
+                let mut decision = decision.map(|text| serde_json::from_str::<Value>(&text).unwrap()).unwrap_or_else(|| json!({}));
+                decision["invalidation"] = invalidation.clone();
+                connection.execute("UPDATE approvals SET decision_json=?2 WHERE id=?1",
+                    params![mismatch, decision.canonical_string()])?;
+                connection.execute("UPDATE kernel_tool_calls SET context_generation=2 WHERE run_id=?1 AND tool_call_id='z-mismatch'", [&run])?;
+                Ok(())
+            }).unwrap();
+            assert_eq!(run_terminal(database, &run), ("running".into(), None));
+            assert_eq!(approval_row(database, &settleable), ("pending".into(), None, None));
+            let (status, claimed, decision) = approval_row(database, &mismatch);
+            assert_eq!(status, mismatch_status);
+            assert!(claimed.is_none());
+            let decision = decision.unwrap();
+            assert_eq!(decision["invalidation"], invalidation);
+            if mismatch_status == "approved" {
+                assert_eq!(decision["approved"], true);
+                assert_eq!(decision["scope"], "once");
+                assert_eq!(decision["category"], "tool_execution");
+            }
+            let mapping = database.get_runtime_session(&colleague.conversation_id).unwrap().unwrap();
+            assert!(mapping.is_native());
+            assert_eq!(mapping.runtime_session_id, session);
+            assert_eq!(mapping.context_generation, 1);
+            for (call, generation) in [("a-settleable", 1), ("z-mismatch", 2)] {
+                assert_eq!(call_facts(database, &run, call), ("pending".into(), None, "running".into(), None));
+                let native: (i64, Option<i64>) = database.with_connection(|connection| connection.query_row(
+                    "SELECT context_generation,claimed_at FROM kernel_tool_calls WHERE run_id=?1 AND tool_call_id=?2",
+                    params![run, call], |row| Ok((row.get(0)?, row.get(1)?)))).unwrap();
+                assert_eq!(native, (generation, Some(1)));
+            }
+            let before = unowned_approval_run_facts(database, &run);
+            for _ in 0..2 {
+                assert_unowned_user_stop_fails_without_changes(&fixture, &run, &workspace, &before);
+            }
+            (run, workspace, before)
+        };
+
+        // GTK cannot construct a second App in this process after the first is dropped.
+        let test = std::env::var(CHILD).unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([test.as_str(), "--exact", "--nocapture", "--test-threads=1"])
+            .env(REOPEN, json!({"root": root, "run": run, "workspace": workspace,
+                "before": format!("{before:?}")}).canonical_string())
+            .output().unwrap();
+        assert!(output.status.success(), "restart stdout: {}\nrestart stderr: {}",
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn assert_unowned_user_stop_fails_without_changes(
+        fixture: &Fixture,
+        run: &str,
+        workspace: &Path,
+        before: &std::collections::BTreeMap<&'static str, Vec<Vec<rusqlite::types::Value>>>,
+    ) {
+        {
+            let state = fixture.host.state.lock().unwrap();
+            let worker = state.worker.as_ref().unwrap();
+            assert!(worker.sessions.is_empty());
+            assert!(worker.session_leases.is_empty());
+            assert!(state.native_run_leases.is_empty());
+            assert!(state.pending_approvals.lock().unwrap().is_empty());
+        }
+        assert!(fixture.host.child_hosts.lock().unwrap().is_empty());
+        assert!(fixture.host.native_batches.recovering_approval_ids().unwrap().is_empty());
+        let error = crate::commands::cancel_kernel_owned_run(fixture.database(), run,
+            || fixture.host.cancel_managed_run_by_user(run)).unwrap_err();
+        for message in ["runtime.cancel_unverifiable_approval", "结算条件", "本次停止未生效", "已保留原运行和批准状态"] {
+            assert!(error.contains(message), "{error}");
+        }
+        assert_eq!(&unowned_approval_run_facts(fixture.database(), run), before,
+            "all rows, including original decision_json bytes and timestamps, must be unchanged");
+        for call in ["a-settleable", "z-mismatch"] {
+            assert_eq!(std::fs::read_to_string(workspace.join(format!("{call}.txt"))).unwrap(), format!("before-{call}"));
+        }
+        let lease = KernelRunLock::acquire(&fixture.host.sessions_dir, run).expect("failed cancellation releases its Run lease");
+        drop(lease);
+    }
+
+    #[test]
+    fn run_cancel_user_stop_rolls_back_all_approvals_on_generation_mismatch() {
+        if isolated("runtime_host::native_approval_scope::tests::run_cancel_user_stop_rolls_back_all_approvals_on_generation_mismatch") { return; }
+        assert_user_stop_rolls_back_on_generation_mismatch("approved");
+    }
+
+    #[test]
+    fn run_cancel_user_stop_preserves_pending_invalidation_on_generation_mismatch() {
+        if isolated("runtime_host::native_approval_scope::tests::run_cancel_user_stop_preserves_pending_invalidation_on_generation_mismatch") { return; }
+        assert_user_stop_rolls_back_on_generation_mismatch("pending");
+    }
+
+    /// P1: the user stop shares recovery's Run lease. While another owner holds
+    /// it, the public chain reports "not cancellable yet" without preempting,
+    /// deleting the lock or writing any terminal fact; once released it settles.
+    #[test]
+    fn run_cancel_user_stop_does_not_preempt_the_recovery_run_lease() {
+        if isolated("runtime_host::native_approval_scope::tests::run_cancel_user_stop_does_not_preempt_the_recovery_run_lease") { return; }
+        let app=app();
+        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        fixture.manage(&app);
+        let database=fixture.database();
+        let contact=database.add_companion(&fixture.root,"fox-debugger").unwrap();
+        let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {
+            name:"Lease fenced stop".into(),expert_id:"fox-debugger".into(),
+            objective:"report the release evidence".into(),project_id:None,project_root:None,
+            knowledge_references:Vec::new(),max_runs_per_day:4,max_tokens_per_day:10_000,
+            max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,
+            companion_id:Some(contact.profile.id.clone())}).unwrap();
+        let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,
+            "p1-lease",&json!({}),None,"test").unwrap();
+        let background=accepted.prepared.expect("a bound task is admitted").started.run.id;
+        let workspace=crate::companion_workspace::repair(database,&fixture.root,&contact.profile.id).unwrap();
+        make_native(database,&background,&colleague.conversation_id,Some(&workspace),"legacy");
+        let input=fixture.edit_input_in(&background,"fenced",&workspace);
+        let approval_id=approval(database,&background,"fenced","edit_file",&input,"tool_execution","approved",false);
+
+        // The same lease recovery acquires, held by another owner.
+        let lease=KernelRunLock::acquire(&fixture.host.sessions_dir,&background).unwrap();
+        let stopped=crate::commands::cancel_kernel_owned_run(database,&background,
+            ||fixture.host.cancel_managed_run_by_user(&background)).unwrap();
+        assert_eq!(stopped,Some(false),"租约仍被持有时不得抢占取消");
+        assert_eq!(run_terminal(database,&background).0,"running");
+        let (status,claimed,_)=approval_row(database,&approval_id);
+        assert_eq!(status,"approved");
+        assert!(claimed.is_none());
+        let (host_status,_,native_status,native_result)=call_facts(database,&background,"fenced");
+        assert_eq!(host_status,"pending");
+        assert_eq!(native_status,"running");
+        assert!(native_result.is_none(),"租约冲突不写任何终态事实");
+
+        drop(lease);
+        let stopped=crate::commands::cancel_kernel_owned_run(database,&background,
+            ||fixture.host.cancel_managed_run_by_user(&background)).unwrap();
+        assert_eq!(stopped,Some(true),"租约释放后用户停止收尾");
+        assert_eq!(run_terminal(database,&background),(String::from("interrupted"),Some(String::from("runtime.user_cancelled"))));
+    }
 }
 
 impl RuntimeHost {
@@ -1081,6 +1452,17 @@ impl RuntimeHost {
             scoped_host.mcp_server_scope_override = mcp;
         }
         let run_lease = KernelRunLock::acquire(&self.sessions_dir, run)?;
+        // D1-4: re-read Run status and session/generation AFTER taking the Run
+        // lease. A cancel that landed between the pre-lease read (:1060) and the
+        // lease must not be adopted with the stale pre-cancel values.
+        let mapping = self.database.get_runtime_session(&binding.conversation_id)?.ok_or("native recovery session is missing")?;
+        let (status, recorded): (String, Option<String>) = self.database.with_connection(|connection| connection.query_row(
+            "SELECT status,runtime_session_id FROM runs WHERE id=?1", [run], |row| Ok((row.get(0)?,row.get(1)?)),
+        ))?;
+        if status != "running" || !mapping.is_native() || mapping.context_generation < 1
+            || recorded.as_deref() != Some(mapping.runtime_session_id.as_str()) {
+            return Err("native recovery cannot adopt a terminal Run or a retired session".into());
+        }
         let (remove_session, session_lease) = {
             let mut state = self.state.lock().map_err(|_| "runtime state lock is poisoned")?;
             if state.shutting_down || state.native_run_leases.contains_key(run)

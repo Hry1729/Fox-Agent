@@ -2,7 +2,10 @@ use super::*;
 use fox_engine_protocol::{ExecutionAuthority, ExecutorRoute, FrozenPermission, PermissionMode, ResourceExecutor, RunControlBinding, TimeBudgets};
 
 fn fixture(route: Option<ExecutorRoute>) -> (Database, String, String) {
-    let db = Database::open(":memory:".into()).unwrap();
+    fixture_on(Database::open(":memory:".into()).unwrap(), route)
+}
+
+fn fixture_on(db: Database, route: Option<ExecutorRoute>) -> (Database, String, String) {
     let conversation = db.create_conversation("fox-general", None, None, Some("ask")).unwrap();
     let run = db.create_run(&conversation.id, "native route fixture", None).unwrap().run.id;
     let permission = FrozenPermission { mode:PermissionMode::Ask,project_root:None,grants:Vec::new(),approval_epoch:None };
@@ -453,6 +456,275 @@ fn a0_startup_desktop_restart_shows_the_retired_kernel_run_and_continues_on_pi_n
     let next = db.create_run(&conversation, "continue in a new Run", None).unwrap().run.id;
     let binding = db.freeze_default_run_control_for_engine(&next, "legacy", TimeBudgets::continuous(), "pi").unwrap();
     assert_eq!(binding.executor_route, Some(ExecutorRoute::PiNative));
+    drop(db);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// D1-1 fixture: a PiNative Run with a verified current session, a registered
+/// native execution claim and a Host approval intent for the same call. The
+/// approval is left pending or resolved-approved depending on `approved`.
+fn native_refusal_fixture(approved: bool) -> (Database, String, String) {
+    native_refusal_fixture_on(Database::open(":memory:".into()).unwrap(), approved)
+}
+
+fn native_refusal_fixture_on(db: Database, approved: bool) -> (Database, String, String) {
+    let (db, run, conversation) = fixture_on(db, Some(ExecutorRoute::PiNative));
+    ledger(&db, &run, "running", None);
+    db.with_connection(|connection| {
+        connection.execute(
+            "INSERT INTO runtime_sessions(id, conversation_id, runtime_type, runtime_session_id,
+                 status, created_at, updated_at, format_version, context_generation)
+             VALUES('sess', ?1, 'pi', 'sess', 'ready', 1, 1, 2, 1)",
+            params![conversation],
+        )?;
+        connection.execute("UPDATE runs SET runtime_session_id='sess' WHERE id=?1", params![run])?;
+        Ok(())
+    }).unwrap();
+    let tool = db.create_host_tool_call(&run, "call", "read", &input(), "pending", true).unwrap();
+    let approval = db.create_approval(&tool.id, "读取文件", &input()).unwrap();
+    if approved {
+        db.resolve_approval(&approval.id, crate::database::ApprovalDecision::AllowOnce).unwrap();
+    }
+    (db, run, approval.id)
+}
+
+fn refusal() -> ApprovalRefusal {
+    ApprovalRefusal::new("companion.tool_not_available", "联系人已撤销对工具 read 的授权；重新授权后请重新发起，旧的批准不会恢复")
+}
+
+fn approval_facts(db: &Database, approval_id: &str) -> (String, Option<i64>, Option<Value>) {
+    db.with_connection(|connection| connection.query_row(
+        "SELECT status, claimed_at, decision_json FROM approvals WHERE id=?1", [approval_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?,
+            row.get::<_, Option<String>>(2)?.map(|text| serde_json::from_str::<Value>(&text).unwrap()))),
+    )).unwrap()
+}
+
+fn host_facts(db: &Database, run: &str) -> (String, Option<String>, Option<Value>) {
+    db.with_connection(|connection| connection.query_row(
+        "SELECT status, error_message, result_json FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id='call'", [run],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?.map(|text| serde_json::from_str::<Value>(&text).unwrap()))),
+    )).unwrap()
+}
+
+fn native_facts(db: &Database, run: &str) -> (String, Option<i64>, Option<i64>, Option<Value>) {
+    db.with_connection(|connection| connection.query_row(
+        "SELECT state, claimed_at, settled_at, result_json FROM kernel_tool_calls WHERE run_id=?1 AND tool_call_id='call'", [run],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?, row.get::<_, Option<i64>>(2)?,
+            row.get::<_, Option<String>>(3)?.map(|text| serde_json::from_str::<Value>(&text).unwrap()))),
+    )).unwrap()
+}
+
+#[test]
+fn native_refusal_settlement_writes_approval_host_and_native_facts_together() {
+    let (db, run, approval_id) = native_refusal_fixture(true);
+    let outcome = db.settle_approval_refusal(&run, &approval_id, &refusal()).unwrap();
+    let receipt = approval_refusal_receipt(&refusal());
+    assert!(matches!(outcome, ApprovalRefusalSettlement::Settled(ref value) if *value == receipt));
+
+    let (status, claimed, decision) = approval_facts(&db, &approval_id);
+    assert_eq!(status, "approved", "已批准的决定保留原状态/scope，不被改写成拒绝");
+    assert!(claimed.is_some(), "批准被领取消费");
+    assert_eq!(decision.as_ref().unwrap()["approved"], json!(true));
+    assert_eq!(decision.as_ref().unwrap()["scope"], json!("once"));
+    assert!(approval_invalidation(decision.as_ref()).is_some());
+
+    let (host_status, error, host_result) = host_facts(&db, &run);
+    assert_eq!(host_status, "failed");
+    assert_eq!(error.as_deref(), Some(refusal().message.as_str()));
+    assert_eq!(host_result, Some(receipt.clone()));
+
+    let (native_status, native_claim, settled, native_result) = native_facts(&db, &run);
+    assert_eq!(native_status, "failed");
+    assert_eq!(native_claim, Some(1), "保留原 native 领取");
+    assert!(settled.is_some());
+    assert_eq!(native_result, Some(receipt), "native 与 Host 收到字节一致的标准错误结果");
+}
+
+#[test]
+fn native_refusal_settlement_rolls_back_all_three_writes_on_any_fault() {
+    for write_index in 1..=3 {
+        let (db, run, approval_id) = native_refusal_fixture(true);
+        refusal_fault::arm(write_index);
+        let result = db.settle_approval_refusal(&run, &approval_id, &refusal());
+        refusal_fault::disarm();
+        assert!(result.is_err(), "第 {write_index} 个写点注入故障必须整体失败");
+
+        let (status, claimed, decision) = approval_facts(&db, &approval_id);
+        assert_eq!(status, "approved");
+        assert!(claimed.is_none(), "批准未被领取");
+        assert!(approval_invalidation(decision.as_ref()).is_none(), "失效标记未落库");
+        assert_eq!(host_facts(&db, &run).0, "pending", "Host 意图仍 pending");
+        let (native_status, _, settled, native_result) = native_facts(&db, &run);
+        assert_eq!(native_status, "running");
+        assert!(settled.is_none() && native_result.is_none(), "native 收据未被结算");
+    }
+}
+
+#[test]
+fn native_refusal_settlement_is_idempotent_and_replays_the_committed_receipt() {
+    let (db, run, approval_id) = native_refusal_fixture(true);
+    let first = db.settle_approval_refusal(&run, &approval_id, &refusal()).unwrap();
+    let receipt = match first { ApprovalRefusalSettlement::Settled(value) => value, other => panic!("expected Settled, got {other:?}") };
+    let second = db.settle_approval_refusal(&run, &approval_id, &refusal()).unwrap();
+    assert!(matches!(second, ApprovalRefusalSettlement::AlreadySettled(ref value) if *value == receipt),
+        "重复结算重放原收据，不生成第二份结果");
+    assert_eq!(native_facts(&db, &run).3, Some(receipt));
+}
+
+#[test]
+fn native_pending_refusal_expires_without_becoming_a_user_denial() {
+    let (db, run, approval_id) = native_refusal_fixture(false);
+    let outcome = db.settle_approval_refusal(&run, &approval_id, &refusal()).unwrap();
+    assert!(matches!(outcome, ApprovalRefusalSettlement::Settled(_)));
+    let (status, claimed, decision) = approval_facts(&db, &approval_id);
+    assert_eq!(status, "expired", "pending 失效落为 expired");
+    assert_ne!(status, "denied", "不是用户主动拒绝");
+    assert!(claimed.is_some());
+    assert!(approval_invalidation(decision.as_ref()).is_some());
+    assert_eq!(host_facts(&db, &run).0, "failed");
+    assert_eq!(native_facts(&db, &run).0, "failed");
+}
+
+#[test]
+fn native_refusal_with_an_advanced_generation_is_not_eligible_and_writes_nothing() {
+    let (db, run, approval_id) = native_refusal_fixture(true);
+    db.with_connection(|connection| connection.execute(
+        "UPDATE kernel_tool_calls SET context_generation=2 WHERE run_id=?1 AND tool_call_id='call'", params![run],
+    )).unwrap();
+    let outcome = db.settle_approval_refusal(&run, &approval_id, &refusal()).unwrap();
+    assert!(matches!(outcome, ApprovalRefusalSettlement::NotEligible), "session/generation 不再匹配时不得结算");
+    assert!(approval_facts(&db, &approval_id).1.is_none());
+    assert_eq!(host_facts(&db, &run).0, "pending");
+    assert_eq!(native_facts(&db, &run).0, "running");
+}
+
+#[test]
+fn run_cancel_closes_unowned_native_approval_run() {
+    let (db, run, approval_id) = native_refusal_fixture(true);
+    assert!(db.cancel_unowned_native_approval_run(&run).unwrap(), "无主批准 Run 的取消确实完成");
+    assert_eq!(terminal_fact(&db, &run).0, "interrupted");
+    assert_eq!(terminal_fact(&db, &run).1.as_deref(), Some("runtime.user_cancelled"));
+
+    let (status, claimed, decision) = approval_facts(&db, &approval_id);
+    assert_eq!(status, "approved", "approved 保留原决策");
+    assert!(claimed.is_some(), "批准被消费");
+    assert_eq!(decision.as_ref().unwrap()["scope"], json!("once"));
+    assert_eq!(approval_invalidation(decision.as_ref()).unwrap().0, "runtime.user_cancelled");
+
+    let (host_status, _, host_result) = host_facts(&db, &run);
+    assert_eq!(host_status, "failed");
+    let (native_status, native_claim, settled, native_result) = native_facts(&db, &run);
+    assert_eq!(native_status, "failed");
+    assert_eq!(native_claim, Some(1), "保留原 native 领取");
+    assert!(settled.is_some());
+    assert_eq!(host_result, native_result, "Host 与 native 收到同一份标准错误收据");
+    assert_eq!(native_result.unwrap()["isError"], json!(true));
+
+    // A second cancel is idempotent: terminal Run returns false, no rewrite.
+    let before = terminal_fact(&db, &run);
+    assert!(!db.cancel_unowned_native_approval_run(&run).unwrap());
+    assert_eq!(terminal_fact(&db, &run), before);
+}
+
+#[test]
+fn run_cancel_pending_approval_is_cancelled_not_a_timeout() {
+    let (db, run, approval_id) = native_refusal_fixture(false);
+    assert!(db.cancel_unowned_native_approval_run(&run).unwrap());
+    let (status, claimed, decision) = approval_facts(&db, &approval_id);
+    assert_eq!(status, "cancelled", "用户停止把 pending 落为 cancelled");
+    assert_ne!(status, "expired", "不是超时过期");
+    assert_ne!(status, "denied", "不是用户主动拒绝操作本身");
+    assert!(claimed.is_some());
+    assert_eq!(approval_invalidation(decision.as_ref()).unwrap().0, "runtime.user_cancelled");
+    assert_eq!(host_facts(&db, &run).0, "failed");
+    assert_eq!(native_facts(&db, &run).0, "failed");
+}
+
+#[test]
+fn run_cancel_refuses_a_host_running_unknown_outcome() {
+    let (db, run, approval_id) = native_refusal_fixture(true);
+    // An actual Host execution in flight is an unknown outcome, not a provably
+    // unexecuted approval; the cancel must not fabricate a failed result.
+    db.with_connection(|connection| connection.execute(
+        "UPDATE tool_calls SET status='running' WHERE run_id=?1 AND runtime_tool_call_id='call'", params![run],
+    )).unwrap();
+    assert!(!db.cancel_unowned_native_approval_run(&run).unwrap());
+    assert_eq!(status(&db, &run), "running");
+    assert!(approval_facts(&db, &approval_id).1.is_none());
+    assert_eq!(native_facts(&db, &run).0, "running");
+}
+
+#[test]
+fn run_cancel_keeps_a_more_specific_revocation_reason() {
+    let (db, run, approval_id) = native_refusal_fixture(true);
+    db.with_connection(|connection| {
+        let transaction = connection.transaction()?;
+        register_approval_invalidation_in_tx(&transaction, &approval_id, &refusal(), now_ms())?;
+        transaction.commit()
+    }).unwrap();
+    assert!(db.cancel_unowned_native_approval_run(&run).unwrap());
+    let (code, message) = approval_invalidation(approval_facts(&db, &approval_id).2.as_ref()).unwrap();
+    assert_eq!(code, "companion.tool_not_available", "通用取消不能覆盖更具体的撤销原因");
+    assert!(message.contains("撤销"));
+    assert_eq!(host_facts(&db, &run).1.as_deref(), Some(message.as_str()));
+}
+
+/// P2: the approved-execution claim hits a persisted revocation barrier while
+/// the native receipt's generation no longer matches the current mapping. The
+/// unified settlement correctly refuses (NotEligible); the claim must keep the
+/// barrier and refuse execution WITHOUT committing Host-failed/approval-claimed
+/// facts that would strand the running native receipt beyond recovery's reach.
+/// After a restart the three facts stay coherent and the old call still cannot
+/// execute through the claim.
+#[test]
+fn claim_with_an_unverifiable_native_identity_keeps_the_barrier_and_commits_no_terminal_facts() {
+    let root = std::env::temp_dir().join(format!("fox-claim-identity-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("fox.db");
+    let (db, run, approval_id) = native_refusal_fixture_on(Database::open(path.clone()).unwrap(), true);
+    // A revocation barrier already persisted on the approved/unclaimed approval.
+    db.with_connection(|connection| {
+        let transaction = connection.transaction()?;
+        register_approval_invalidation_in_tx(&transaction, &approval_id, &refusal(), now_ms())?;
+        transaction.commit()
+    }).unwrap();
+    // The native receipt's generation no longer matches the current mapping.
+    db.with_connection(|connection| connection.execute(
+        "UPDATE kernel_tool_calls SET context_generation=2 WHERE run_id=?1 AND tool_call_id='call'", params![run],
+    )).unwrap();
+
+    let error = db.claim_approved_tool_call(&run, "call").unwrap_err();
+    assert!(error.contains("撤销"), "身份不可验证时仍拒绝执行并给出原因: {error}");
+    let (approval_status, claimed, decision) = approval_facts(&db, &approval_id);
+    assert_eq!(approval_status, "approved");
+    assert!(claimed.is_none(), "批准不得被领取");
+    assert_eq!(approval_invalidation(decision.as_ref()).unwrap().0, "companion.tool_not_available",
+        "失效屏障保留，不被清理");
+    assert_eq!(host_facts(&db, &run).0, "pending", "Host 不提前 failed");
+    let (native_status, _, settled, native_result) = native_facts(&db, &run);
+    assert_eq!(native_status, "running");
+    assert!(settled.is_none() && native_result.is_none(), "native 不被假结算");
+
+    // Restart: the startup repair keeps the waiting facts intact (the barrier
+    // cannot settle against a foreign generation either), and the claim still
+    // refuses — the old call never executes.
+    drop(db);
+    let db = Database::open(path).unwrap();
+    db.repair_interrupted_runs().unwrap();
+    assert_eq!(status(&db, &run), "running", "重启保护不丢等待事实");
+    let (approval_status, claimed, decision) = approval_facts(&db, &approval_id);
+    assert_eq!(approval_status, "approved");
+    assert!(claimed.is_none());
+    assert!(approval_invalidation(decision.as_ref()).is_some(), "重启后屏障仍在");
+    assert_eq!(host_facts(&db, &run).0, "pending");
+    let (native_status, _, settled, native_result) = native_facts(&db, &run);
+    assert_eq!(native_status, "running");
+    assert!(settled.is_none() && native_result.is_none(), "重启后三份事实一致，无半写");
+    assert!(db.claim_approved_tool_call(&run, "call").is_err(), "重启后旧调用仍被拒绝执行");
+    assert!(approval_facts(&db, &approval_id).1.is_none());
+    assert_eq!(host_facts(&db, &run).0, "pending");
     drop(db);
     let _ = std::fs::remove_dir_all(&root);
 }

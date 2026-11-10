@@ -108,7 +108,7 @@ export function ContactReplyBubble({ contact, reply, initialMark }: {
         <ReactionPicker reaction={mark?.reaction} busy={busy} onReact={react} />
         <BubbleMenu favorited={Boolean(mark?.favoritedAt)} busy={busy}
           onQuote={() => void ctx?.quoteBubble?.(reply.id)} onFavorite={favorite} />
-        {contact && <FoxMarkUnreadButton onMark={() => contacts.markUnread(contact.id, reply.id).then(() => ctx?.refresh()).catch(showContactError)} />}
+        {contact && <FoxMarkUnreadButton onMark={() => contacts.markUnread(contact.id, reply.id).then(() => ctx?.refresh()).catch(error => { showContactError(error); throw error })} />}
       </>}
       <time dateTime={new Date(reply.createdAt).toISOString()}>{formatClockTime(reply.createdAt)}</time>
     </div>

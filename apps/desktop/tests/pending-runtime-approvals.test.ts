@@ -23,3 +23,20 @@ test('a completed parent does not remove a still-running child approval', () => 
 test('valid approvals remain available while their owning work waits', () => {
   expect(pendingRuntimeApprovals(detail('running'))).toEqual([approval])
 })
+
+test('invalidated_approval_does_not_block_composer', () => {
+  // D1-6: even in the registration→settlement window (status still pending, run
+  // and tool still running) a persistent invalidation must not raise the old
+  // interaction or lock the composer.
+  const invalidated = { ...approval, decision: { scope: 'once', invalidation: { code: 'companion.tool_not_available', message: '联系人已撤销对工具的授权', at: 2 } } } as ApprovalRecord
+  const value = detail('running')
+  value.approvals = [invalidated]
+  expect(pendingRuntimeApprovals(value)).toEqual([])
+  // A malformed barrier is not an invalidation; the pending card stays.
+  const corrupt = { ...approval, decision: { invalidation: { code: '', message: '', at: 0 } } } as ApprovalRecord
+  value.approvals = [corrupt]
+  expect(pendingRuntimeApprovals(value)).toEqual([corrupt])
+  // A legitimate pending approval without a barrier still blocks.
+  value.approvals = [approval]
+  expect(pendingRuntimeApprovals(value)).toEqual([approval])
+})

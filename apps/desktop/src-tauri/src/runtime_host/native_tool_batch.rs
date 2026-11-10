@@ -103,6 +103,18 @@ impl SharedBatchRegistry {
         Self { gate: Mutex::new(()), changed: Condvar::new(), recovering_approvals:Mutex::new(HashSet::new()) }
     }
 
+    /// D1-5: a snapshot of the in-flight recovery approval ids, so the unowned
+    /// cancel can prove no detached recovery owns the Run before taking its lease.
+    pub(crate) fn recovering_approval_ids(&self) -> Result<Vec<String>, String> {
+        Ok(self.recovering_approvals.lock().map_err(|_| "native approval recovery lock poisoned".to_owned())?
+            .iter().cloned().collect())
+    }
+
+    /// D1-5: wake native batch waiters after an unowned cancel settles a Run.
+    pub(crate) fn notify_changed(&self) {
+        self.changed.notify_all();
+    }
+
     #[cfg(test)]
     fn register(&self, database: &Database, request: &ToolBatchRegisterRequest) -> Result<ToolBatchRegisterResponse, String> {
         self.register_inner(database, request, None, false)
@@ -435,6 +447,12 @@ pub(super) fn recovering_approval_decision(database: &Database, run_id: &str,
     if context.request.run_id != run_id || context.approval_id != approval_id {
         return Err("native approval recovery cannot consume another approval".into());
     }
+    // D1-4: the recovery shortcut runs before the waiter's own barrier check, so
+    // it must settle a persisted invalidation itself and refuse with the specific
+    // reason instead of returning `approved` and dispatching a revoked call.
+    if let Some(message) = super::invalidated_approval_message(database, run_id, approval_id)? {
+        return Err(message);
+    }
     validate_approval_recovery(database, &context)?;
     Ok(Some(true))
 }
@@ -511,6 +529,10 @@ pub(super) fn recover_native_approval(host: &super::RuntimeHost,
         let error = "The user denied this operation after runtime restart.";
         host.database.complete_host_tool_call(&request.run_id, &request.call_id, None, Some(error))?;
         record_result(&host.database, &request, &failure(error))?;
+    } else if super::invalidated_approval_message(&host.database, &request.run_id, approval_id)?.is_some() {
+        // D1-4: the durable refusal is already settled (approval consumed, Host
+        // intent failed, native error receipt). Never dispatch a revoked call;
+        // fall through to the original Run's interrupted settlement below.
     } else {
         validate_tool(host, &envelope, &request)?;
         let _permit = host.try_acquire_tool_handler().ok_or("runtime.tool_handler_capacity_exceeded")?;
@@ -649,6 +671,37 @@ pub(super) fn prepare_response(database: &Database, envelope: &RuntimeEnvelope, 
     let body = record_result(database, &request, &response)?;
     Ok(HostResponse::for_request(envelope,
         if body["isError"] == true { "tool.execute_failed" } else { "tool.execute_completed" }, body))
+}
+
+/// D1-1/D1-4: the exact native receipt already committed for one (Run, call),
+/// or None when no terminal native result exists yet. A refusal settlement (or a
+/// prior execution) writes this receipt once; every later finalize must replay it
+/// verbatim instead of re-wrapping it into a different envelope, which the
+/// immutable-receipt guard in `record_result` would reject. The committed identity
+/// (tool + claimed canonical input) is re-checked so a foreign call cannot replay
+/// another call's receipt. Normal first execution has no native result at finalize
+/// time, so this is a no-op there.
+pub(super) fn committed_native_receipt(
+    database: &Database,
+    run_id: &str,
+    call_id: &str,
+    tool: &str,
+    input: &Value,
+) -> Result<Option<Value>, String> {
+    database.with_connection(|connection| {
+        let row: Option<(String, String, Option<String>, String)> = connection.query_row(
+            "SELECT tool, canonical_input_json, result_json, state
+             FROM kernel_tool_calls WHERE run_id=?1 AND tool_call_id=?2",
+            params![run_id, call_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).optional()?;
+        let Some((native_tool, native_input, result, state)) = row else { return Ok(None); };
+        if native_tool != tool || native_input != canonical(input)? { return Ok(None); }
+        let Some(result) = result else { return Ok(None); };
+        if !matches!(state.as_str(), "completed" | "failed" | "cancelled") { return Ok(None); }
+        let receipt: Value = serde_json::from_str(&result).map_err(|error| invalid(error.to_string()))?;
+        Ok(Some(receipt))
+    })
 }
 
 pub(super) fn has_committed_response(database: &Database, envelope: &RuntimeEnvelope) -> Result<bool,String> {
