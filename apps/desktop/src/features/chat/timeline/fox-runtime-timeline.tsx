@@ -242,12 +242,31 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
     }
     return queuedAt
   }, [visibleMessages])
+  // SPEC item 5: brief `.is-scrolling` reveal for the legacy scroller's thumb.
+  // Scroll events do not bubble, so listen in the capture phase and match the
+  // library-rendered scroll element by class.
+  const [legacyScrolling, setLegacyScrolling] = useState(false)
+  useEffect(() => {
+    let timer: number | null = null
+    const onScrollCapture = (event: Event) => {
+      const target = event.target
+      if (!(target instanceof Element) || !target.classList.contains('fox-conversation-scroll')) return
+      setLegacyScrolling(true)
+      if (timer !== null) window.clearTimeout(timer)
+      timer = window.setTimeout(() => setLegacyScrolling(false), 800)
+    }
+    document.addEventListener('scroll', onScrollCapture, { capture: true, passive: true })
+    return () => {
+      document.removeEventListener('scroll', onScrollCapture, { capture: true })
+      if (timer !== null) window.clearTimeout(timer)
+    }
+  }, [])
   return (
     <Conversation className="fox-conversation">
       <ConversationAutoScroll scrollKey={latestUserMessageId} />
       <ConversationViewportState />
       <ConversationTurnRail messages={groupedMessages} artifacts={artifacts} />
-      <ConversationContent className="fox-conversation-content" scrollClassName="fox-conversation-scroll">
+      <ConversationContent className="fox-conversation-content" scrollClassName={legacyScrolling ? 'fox-conversation-scroll is-scrolling' : 'fox-conversation-scroll'}>
         {hasEarlierMessages && <div className="fox-history-loader"><Button variant="ghost" size="sm" disabled={loadingEarlierMessages} onClick={onLoadEarlierMessages}>{loadingEarlierMessages && <LoaderCircle className="animate-spin" />}加载更早消息</Button></div>}
         <div className="fox-thread-date"><span>今天</span></div>
         {timelineEntries.map((entry) => {

@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { useState } from 'react'
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import { mockIPC, clearMocks } from '@tauri-apps/api/mocks'
 import AssistantUiChat from '../src/features/chat/thread/fox-assistant-ui-chat'
 import { ContactsContext, type ContactsContextValue } from '../src/features/companions/context'
 import { ContactTopbar } from '../src/features/companions/chat-controls'
-import { formatSearchTime } from '../src/features/companions/chat-search'
+import { formatSearchTime, useContactChatSearch } from '../src/features/companions/chat-search'
 import type { ContactBubbleSearchHit, ConversationDetail, ConversationMessage } from '../src/features/conversations/model/types'
 
 const context: ContactsContextValue = {
@@ -54,7 +55,7 @@ describe('联系人私聊搜索', () => {
   })
   const renderTopbar = (snapshot: ConversationDetail, loader: () => Promise<void> = async () => {}, ctx = context) =>
     render(<ContactsContext.Provider value={ctx}>
-      <ContactTopbar detail={snapshot} onReset={() => {}} loadEarlierMessages={loader} />
+      <ContactTopbar detail={snapshot} loadEarlierMessages={loader} />
       <AssistantUiChat conversation={{ enabled: true, detail: snapshot, streamingText: '' } as any} callbacks={{ onSubmit: () => {} }} />
     </ContactsContext.Provider>)
   const mockSearch = (results: ContactBubbleSearchHit[], calls: Record<string, unknown>[] = []) => {
@@ -128,7 +129,7 @@ describe('联系人私聊搜索', () => {
       loads += 1
       snapshot = detail({ messages: [message('kernel-message:run:2', 'assistant', '上周核对的资料')], bubbles: [bubble('run:response:9', '上周核对的资料', 9)] })
       await act(async () => { view.rerender(<ContactsContext.Provider value={context}>
-        <ContactTopbar detail={snapshot} onReset={() => {}} loadEarlierMessages={async () => { loads += 1 }} />
+        <ContactTopbar detail={snapshot} loadEarlierMessages={async () => { loads += 1 }} />
         <AssistantUiChat conversation={{ enabled: true, detail: snapshot, streamingText: '' } as any} callbacks={{ onSubmit: () => {} }} />
       </ContactsContext.Provider>) })
     })
@@ -150,7 +151,7 @@ describe('联系人私聊搜索', () => {
 
     const nextContext = { ...context, current: { ...context.current!, id: 'other', conversationId: 'other-chat' } }
     view.rerender(<ContactsContext.Provider value={nextContext}>
-      <ContactTopbar detail={detail({ conversation: { ...detail().conversation, id: 'other-chat' } })} onReset={() => {}} loadEarlierMessages={async () => {}} />
+      <ContactTopbar detail={detail({ conversation: { ...detail().conversation, id: 'other-chat' } })} loadEarlierMessages={async () => {}} />
     </ContactsContext.Provider>)
     await waitFor(() => expect(view.getByRole('button', { name: '搜索私聊' })).toBeDefined())
     expect(view.container.querySelector('.is-search-hit')).toBeNull()
@@ -161,6 +162,44 @@ describe('联系人私聊搜索', () => {
     mockSearch([])
     fireEvent.change(view.getByRole('textbox', { name: '搜索私聊' }), { target: { value: '不存在的词' } })
     await waitFor(() => expect(view.getByText('没有找到相关消息')).toBeDefined())
+  })
+
+  test('顶栏收到外部实例时不再自建：外部定位与关键词搜索都只跑一份', async () => {
+    // fox-thread owns one useContactChatSearch and hands it to both the card and
+    // the topbar. A second instance inside ContactTopbar would page the history
+    // twice and leave two highlights/chips behind.
+    const unpaged = detail({ hasEarlierMessages: true })
+    const paged = detail({
+      messages: [message('kernel-message:run:2', 'assistant', '上周核对的资料')],
+      bubbles: [bubble('run:response:9', '上周核对的资料', 9)],
+    })
+    const calls = mockSearch([hit('run:response:9', 'companion', '上周核对的资料', 2, 4)])
+    let loads = 0
+    let setPaged: (value: boolean) => void = () => {}
+    const loader = async () => { loads += 1; await Promise.resolve(); act(() => { setPaged(true) }) }
+
+    function ContactSideCard() {
+      const [pagedNow, updatePaged] = useState(false)
+      setPaged = updatePaged
+      const snapshot = pagedNow ? paged : unpaged
+      const search = useContactChatSearch({ conversationId: 'chat', detail: snapshot, loadEarlierMessages: loader, locateRequest: { id: 'run:response:9', key: 1 } })
+      return <ContactsContext.Provider value={{ ...context, locateRequest: { id: 'run:response:9', key: 1 } }}>
+        <ContactTopbar detail={snapshot} loadEarlierMessages={loader} search={search} />
+        {pagedNow && <div data-contact-message-id="run:response:9">上周核对的资料</div>}
+      </ContactsContext.Provider>
+    }
+    const view = render(<ContactSideCard />)
+    // The bubble only renders after the history page resolves, so the ring lands
+    // on it once and the topbar returns to its normal heading (no search chip).
+    await waitFor(() => expect(view.container.querySelector('[data-contact-message-id="run:response:9"]')?.classList.contains('is-search-hit')).toBe(true))
+    expect(loads).toBe(1)
+    expect(view.container.querySelector('.fox-contact-search-chip')).toBeNull()
+
+    fireEvent.click(view.getByRole('button', { name: '搜索私聊' }))
+    fireEvent.change(view.getByRole('textbox', { name: '搜索私聊' }), { target: { value: '核对' } })
+    await waitFor(() => expect(view.getByText('1 条消息')).toBeDefined())
+    expect(calls).toHaveLength(1)
+    expect(loads).toBe(1)
   })
 
   test('Esc 关闭面板并保留聊天记录原样', async () => {

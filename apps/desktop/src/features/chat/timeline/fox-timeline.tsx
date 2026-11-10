@@ -24,6 +24,30 @@ function turnViewport(target: HTMLElement): HTMLElement | null {
   return null
 }
 
+export type TurnSpan = { id: string; top: number; bottom: number };
+
+/**
+ * SPEC item 8：回合导航的选中逻辑。滚动到底时强制选中最后一轮；否则选中「整轮
+ * （用户消息 + 该轮全部助手消息）范围覆盖视口中线」的那一轮；没有覆盖中线的
+ * （停在两轮之间的空隙）取距离中线最近的一轮，距离相同取靠前的一轮。
+ * 不再用「最接近视口顶部的用户消息」当锚点——那样长回复会把选中项钉在屏外。
+ */
+export function computeActiveTurnId(spans: TurnSpan[], viewport: { top: number; bottom: number }, atBottom: boolean): string | null {
+  if (!spans.length) return null
+  if (atBottom) return spans.at(-1)!.id
+  const mid = (viewport.top + viewport.bottom) / 2
+  let best: string | null = null
+  let bestDistance = Infinity
+  for (const span of spans) {
+    const distance = mid < span.top ? span.top - mid : mid > span.bottom ? mid - span.bottom : 0
+    if (distance < bestDistance) {
+      bestDistance = distance
+      best = span.id
+    }
+  }
+  return best
+}
+
 export function ConversationTurnRail({ messages, artifacts }: { messages: ConversationMessage[]; artifacts: ArtifactRecord[] }) {
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [activeId, setActiveId] = useState<string | null>(null)
@@ -58,31 +82,57 @@ export function ConversationTurnRail({ messages, artifacts }: { messages: Conver
       setActiveId(null)
       return
     }
+    // 新一轮开始时先落在最后一轮，随后的量测再按视口中线校正。
     setActiveId((current) => current && turns.some((turn) => turn.user.id === current) ? current : turns.at(-1)!.user.id)
     const scope = railRef.current?.closest('.fox-thread, .fox-conversation')
     if (!scope) return
-    const anchors = turns.flatMap((turn) => {
+    let viewportRoot: HTMLElement | null = null
+    for (const turn of turns) {
       const target = turnTarget(scope, turn.user.id)
-      return target ? [{ target, id: turn.user.id }] : []
-    })
-    if (!anchors.length) return
-    const root = turnViewport(anchors[0].target)
-    const ids = new Map(anchors.map(anchor => [anchor.target, anchor.id]))
-    const visible = new Map<string, number>()
-    const observer = new IntersectionObserver((entries) => {
-      entries.forEach((entry) => {
-        const id = ids.get(entry.target as HTMLElement)
-        if (!id) return
-        if (entry.isIntersecting) visible.set(id, entry.intersectionRatio)
-        else visible.delete(id)
-      })
-      const top = (root?.getBoundingClientRect().top ?? 0) + 12
-      const positions = new Map(anchors.map(({ id, target }) => [id, Math.abs(target.getBoundingClientRect().top - top)]))
-      const current = [...visible.keys()].sort((left, right) => (positions.get(left) ?? Infinity) - (positions.get(right) ?? Infinity))[0]
-      if (current) setActiveId(current)
-    }, { root, threshold: [0.05, 0.25, 0.5, 0.8] })
-    anchors.forEach(({ target }) => observer.observe(target))
-    return () => observer.disconnect()
+      if (target) {
+        viewportRoot = turnViewport(target)
+        break
+      }
+    }
+    if (!viewportRoot) return
+    const root = viewportRoot
+    let frame = 0
+    const update = () => {
+      frame = 0
+      const spans: TurnSpan[] = []
+      for (const turn of turns) {
+        let top = Infinity
+        let bottom = -Infinity
+        for (const id of [turn.user.id, ...turn.assistants.map((assistant) => assistant.id)]) {
+          const target = turnTarget(scope, id)
+          if (!target) continue
+          const rect = target.getBoundingClientRect()
+          top = Math.min(top, rect.top)
+          bottom = Math.max(bottom, rect.bottom)
+        }
+        if (top !== Infinity) spans.push({ id: turn.user.id, top, bottom })
+      }
+      if (!spans.length) return
+      const viewport = root.getBoundingClientRect()
+      const atBottom = root.scrollHeight - root.scrollTop - root.clientHeight <= 8
+      const next = computeActiveTurnId(spans, { top: viewport.top, bottom: viewport.bottom }, atBottom)
+      if (next) setActiveId((current) => current === next ? current : next)
+    }
+    const schedule = () => {
+      if (!frame) frame = window.requestAnimationFrame(update)
+    }
+    schedule()
+    root.addEventListener('scroll', schedule, { passive: true })
+    window.addEventListener('resize', schedule)
+    // 流式回复在消息数组身份不变时也会撑高内容，用 ResizeObserver 跟踪。
+    const resizeObserver = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(schedule) : null
+    if (resizeObserver) for (const child of Array.from(root.children)) resizeObserver.observe(child)
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame)
+      root.removeEventListener('scroll', schedule)
+      window.removeEventListener('resize', schedule)
+      resizeObserver?.disconnect()
+    }
   }, [turns])
 
   // 只有一轮时左侧短横线会像误放的字符，至少两轮才显示回合导航。

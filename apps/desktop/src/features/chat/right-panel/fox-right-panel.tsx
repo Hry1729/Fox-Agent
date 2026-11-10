@@ -1,5 +1,3 @@
-import { useContacts } from '@/features/companions/context'
-import { ContactProfile } from '@/features/companions/profile'
 import { type ActivityDetailPanelProps } from '../components/ActivityDetailPanel'
 import { FOX_ASSISTANT_AVATAR } from '../components/FoxAssistantAvatar'
 import { safeDiagnosticText, toolFailurePresentation } from '../run-status-facts'
@@ -774,14 +772,12 @@ const baseRightItems: Array<[RightMode, string, ReactNode]> = [
 /** The right-hand sidebar: opened pages (including one tab per open file), the
  *  `＋` page menu, and the page body. Exported so its DOM can be driven directly by
  *  the acceptance tests without mounting the whole Workbench. */
-export function RightPanel({ mode, tabs, detail, activity, width, compact = false, maximized = false, fileTabs, activeFileTabId, activeChildAgent, onMode, onCloseMode, onOpenFile, onActivateFile, onCloseFile, onOpenChildAgent, onBackChildAgent, onOpenEvidence, onToggleMaximized, onCollapse }: { mode: RightMode | null; tabs: RightMode[]; detail: ConversationDetail | null; activity: Omit<ActivityDetailPanelProps, 'detail'>; width: number; compact?: boolean; maximized?: boolean; fileTabs: OpenFileTab[]; activeFileTabId: string | null; activeChildAgent: ChildAgentSelection | null; onMode: (mode: RightMode) => void; onCloseMode: (mode: RightMode) => void; onOpenFile: (path: string, artifactId: string | null) => void; onActivateFile: (tabId: string) => void; onCloseFile: (tabId: string) => void; onOpenChildAgent: (run: ChildRunRecord, avatarIndex: number) => void; onBackChildAgent: () => void; onOpenEvidence?: (evidence: TaskEvidenceRecord) => void; onToggleMaximized: () => void; onCollapse: () => void }) {
+export function RightPanel({ mode, tabs, detail, activity, width, maximized = false, fileTabs, activeFileTabId, activeChildAgent, onMode, onCloseMode, onOpenFile, onActivateFile, onCloseFile, onOpenChildAgent, onBackChildAgent, onOpenEvidence, onToggleMaximized, onCollapse }: { mode: RightMode | null; tabs: RightMode[]; detail: ConversationDetail | null; activity: Omit<ActivityDetailPanelProps, 'detail'>; width: number; maximized?: boolean; fileTabs: OpenFileTab[]; activeFileTabId: string | null; activeChildAgent: ChildAgentSelection | null; onMode: (mode: RightMode) => void; onCloseMode: (mode: RightMode) => void; onOpenFile: (path: string, artifactId: string | null) => void; onActivateFile: (tabId: string) => void; onCloseFile: (tabId: string) => void; onOpenChildAgent: (run: ChildRunRecord, avatarIndex: number) => void; onBackChildAgent: () => void; onOpenEvidence?: (evidence: TaskEvidenceRecord) => void; onToggleMaximized: () => void; onCollapse: () => void }) {
   const activeChildAgentRun = activeChildAgent
     ? detail?.childRuns.find((run) => run.childRunId === activeChildAgent.run.childRunId) ?? activeChildAgent.run
     : null
-  const companion = useContacts()
-  const rightItems: typeof baseRightItems = companion?.privateChat ? [['companion','联系人资料',<Bot size={16} />],...baseRightItems] : baseRightItems
+  const rightItems = baseRightItems
   const homeItemCounts: Record<RightMode, number> = {
-    companion: 0,
     knowledge: detail?.knowledgeBindings.filter((binding) => binding.enabled !== false).length ?? 0,
     files: detail?.artifacts.length ?? 0,
     changes: detail?.toolCalls.filter((item) => isChangeOrCommandTool(item.toolName)).length ?? 0,
@@ -790,7 +786,7 @@ export function RightPanel({ mode, tabs, detail, activity, width, compact = fals
     agents: detail?.childRuns.length ?? 0,
   }
   return (
-    <aside className={`fox-context-panel ${mode === 'files' ? 'is-files' : ''} ${compact ? 'is-compact' : ''} ${maximized ? 'is-maximized' : ''}`} style={compact || maximized ? undefined : { width }}>
+    <aside className={`fox-context-panel ${mode === 'files' ? 'is-files' : ''} ${maximized ? 'is-maximized' : ''}`} style={maximized ? undefined : { width }}>
       <div className="fox-context-tabbar">
         <div className="fox-context-tabs" role="tablist" aria-label="已打开的侧边栏页面">
           {tabs.map((tabMode) => {
@@ -825,7 +821,7 @@ export function RightPanel({ mode, tabs, detail, activity, width, compact = fals
           <button type="button" className="is-sidebar-open" aria-label="关闭面板" title="关闭面板" onClick={onCollapse}><PanelRight size={14} /></button>
         </div>
       </div>
-      {mode === 'companion' && companion?.current ? <ContactProfile key={companion.current.id} contact={companion.current} /> : mode === 'agents' && activeChildAgent && activeChildAgentRun
+      {mode === 'agents' && activeChildAgent && activeChildAgentRun
         ? <ChildAgentConversationPanel key={activeChildAgentRun.childRunId} run={activeChildAgentRun} avatarIndex={activeChildAgent.avatarIndex} onBack={onBackChildAgent} />
         : mode
         ? <ContextContent mode={mode} detail={detail} activity={activity} fileTabs={fileTabs} activeFileTabId={activeFileTabId} onOpenFile={onOpenFile} onOpenEvidence={onOpenEvidence} onOpenChildAgent={onOpenChildAgent} />

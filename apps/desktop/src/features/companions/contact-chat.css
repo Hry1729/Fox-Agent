@@ -18,24 +18,34 @@
   mask-image: linear-gradient(to bottom, transparent 0, #000 20px);
   -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 20px);
 }
-
-/* --- Rakazo-style contact bubbles (plan C00) -----------------------------
-   One committed reply is one bubble. The avatar marks the speaker; the action
-   row and time appear beside the bubble on hover/focus and never shift the
-   text. */
-.fox-contact-run {
-  flex-direction: row;
-  gap: 10px;
-  align-items: flex-start;
+/* Fox private-chat topbar: no bottom border. A ~42px reversed composer-style
+   fade below the bar dissolves scrolling the pill/search controls. */
+.fox-chat-topbar.fox-contact-topbar { border-bottom: 0; }
+.fox-chat-topbar.fox-contact-topbar::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  height: 42px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--fox-canvas) 90%, transparent), transparent);
 }
-.fox-contact-run > .fox-contact-avatar {
-  width: 28px;
-  height: 28px;
-  flex: none;
-  margin-top: 2px;
-  border-radius: 50%;
-  object-fit: cover;
-  font-size: 12px;
+
+/* --- Rakazo-style contact bubbles (plan C00 + SPEC item 9) -----------------
+   One committed reply is one bubble; the action row and time appear beside the
+   bubble on hover/focus and never shift the text. The per-run avatar is gone
+   (the topbar pill carries it), so the assistant run is a plain column that
+   stretches to the chat column and limits the bubble inside. Bubbles, approval
+   and question cards share one width token: 80% of the conversation column,
+   capped at 35rem — never 80% of an already-narrowed parent. */
+.is-contact-chat {
+  --fox-bubble-pct: 80%;
+  --fox-bubble-max: 35rem;
+  --fox-bubble-width: min(var(--fox-bubble-max), var(--fox-bubble-pct), 100%);
+}
+.fox-contact-run {
+  min-width: 0;
 }
 .fox-contact-run-body {
   display: flex;
@@ -43,10 +53,12 @@
   align-items: flex-start;
   gap: 4px;
   min-width: 0;
-  max-width: 80%;
+  width: 100%;
 }
-.fox-contact-message { position: relative; max-width: 100%; min-width: 0; }
+.fox-contact-message { position: relative; max-width: var(--fox-bubble-width); min-width: 0; }
 .fox-contact-bubble {
+  width: fit-content;
+  max-width: 100%;
   padding: 10px 16px;
   border-radius: 18px;
   background: var(--muted);
@@ -58,13 +70,19 @@
 }
 .fox-contact-bubble .fox-answer-response { min-width: 0; }
 .fox-contact-bubble pre { max-width: 100%; overflow-x: auto; }
+/* SPEC item 10：操作行统一度量——行盒 26px、间距 2px，时间和按钮共用同一行盒；
+   复制/标未读按钮改成 grid，两枚图标（grid-area 1/1）真正叠在一起切换；
+   整行相对气泡下沿垂直居中（bottom: 0 + translateY(50%)），不再目测 bottom: 4px。
+   菜单开在 portal 里时焦点离开气泡 DOM，用 data-menu-open 保持操作行可见。 */
 .fox-contact-message-meta {
   position: absolute;
   left: 100%;
-  bottom: 4px;
-  display: flex;
+  bottom: 0;
+  transform: translateY(50%);
+  display: inline-flex;
   align-items: center;
-  gap: 0;
+  gap: 2px;
+  height: 26px;
   padding-left: 6px;
   opacity: 0;
   white-space: nowrap;
@@ -72,14 +90,46 @@
   font-size: 12px;
   transition: opacity var(--fox-duration-fast) var(--fox-ease-out);
 }
-.fox-contact-message-meta time { padding: 0 6px; font-variant-numeric: tabular-nums; }
-.fox-contact-message:is(:hover, :focus-within) .fox-contact-message-meta { opacity: 1; }
+.fox-contact-message-meta time {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 4px;
+  line-height: 26px;
+  font-variant-numeric: tabular-nums;
+}
+.fox-contact-message-meta > button:not(.fox-contact-reaction-chip) {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--fox-radius-control);
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+.fox-contact-message-meta > button:not(.fox-contact-reaction-chip):hover {
+  background: var(--muted);
+  color: var(--foreground);
+}
+.fox-contact-message-meta > button > svg {
+  grid-area: 1 / 1;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.fox-contact-message:is(:hover, :focus-within) .fox-contact-message-meta,
+.fox-contact-message[data-menu-open="true"] .fox-contact-message-meta { opacity: 1; }
 
 /* The user bubble is the strong one in a private chat. */
 .is-contact-chat .fox-thread-msg.is-user { align-items: flex-end; }
 /* The row hugs the bubble, so the action gap sits beside it rather than at the
-   far edge of the chat column. */
-.fox-contact-user-row { position: relative; display: flex; justify-content: flex-end; max-width: 76%; margin-left: auto; }
+   far edge of the chat column. Width comes from the shared bubble token. */
+.fox-contact-user-row { position: relative; display: flex; justify-content: flex-end; max-width: var(--fox-bubble-width); margin-left: auto; }
 .fox-contact-user-row .fox-user-bubble {
   max-width: 100%;
   padding: 10px 16px !important;
@@ -92,26 +142,59 @@
 .is-contact-chat .fox-contact-user-row .fox-user-meta {
   position: absolute;
   right: 100%;
-  bottom: 4px;
+  bottom: 0;
+  transform: translateY(50%);
   margin: 0;
   padding-right: 6px;
+  display: inline-flex;
+  align-items: center;
   justify-content: flex-end;
+  gap: 2px;
+  height: 26px;
   opacity: 0;
   white-space: nowrap;
   transition: opacity var(--fox-duration-fast) var(--fox-ease-out);
 }
-.is-contact-chat .fox-contact-user-row .fox-user-meta .fox-message-time { order: -1; }
-.is-contact-chat .fox-contact-user-row:is(:hover, :focus-within) .fox-user-meta { opacity: 1; }
+.is-contact-chat .fox-contact-user-row .fox-user-meta .fox-message-time {
+  order: -1;
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  line-height: 26px;
+  font-variant-numeric: tabular-nums;
+}
+.is-contact-chat .fox-contact-user-row .fox-user-meta > button:not(.fox-contact-reaction-chip) {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  padding: 0;
+}
+.is-contact-chat .fox-contact-user-row .fox-user-meta > button > svg {
+  grid-area: 1 / 1;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.is-contact-chat .fox-contact-user-row:is(:hover, :focus-within) .fox-user-meta,
+.is-contact-chat .fox-contact-user-row .fox-user-meta[data-menu-open="true"] { opacity: 1; }
 .fox-contact-ended { color: var(--muted-foreground); font-size: var(--fox-type-caption); }
 
-.fox-contact-decision-entry { width: min(100%, 480px); }
+/* SPEC item 9：审批卡 / 问句卡与气泡共用同一宽度 token（80% 列宽，上限 35rem），
+   不再是各自为政的固定 480px；卡片在 entry 内铺满，不再叠加内层收窄。 */
+.fox-contact-decision-entry { width: var(--fox-bubble-width); min-width: 0; }
+.is-contact-chat .fox-contact-decision-entry > * { max-width: 100%; }
+/* approval-card 自带 Tailwind max-w-sm（24rem）：在私聊列里跟 token 走。 */
+.is-contact-chat .fox-contact-decision-entry [data-slot="approval-card"] { max-width: 100%; width: 100%; }
 .fox-contact-decision {
   display: flex;
   flex-direction: column;
   align-items: stretch;
   gap: var(--fox-space-m);
   min-width: 0;
-  width: min(100%, 480px);
+  width: 100%;
   margin: var(--fox-space-xs) 0;
   padding: var(--fox-space-xl);
   border-radius: var(--fox-radius-large);
@@ -122,6 +205,8 @@
 }
 .fox-contact-decision header { display: grid; gap: var(--fox-space-xs); }
 .fox-contact-decision header strong { font-weight: 600; }
+/* 直接挂在 run-body / thread 消息下的写入确认组也走同一 token（百分比只作用一层）。 */
+.fox-contact-write-results { max-width: var(--fox-bubble-width); min-width: 0; }
 .fox-contact-decision header p,
 .fox-contact-decision-note,
 .fox-contact-question > small { color: var(--muted-foreground); font-size: var(--fox-type-caption); }
@@ -182,10 +267,6 @@
 }
 ::highlight(fox-contact-search) { background: color-mix(in oklch, var(--brand) 26%, transparent); }
 
-@media (max-width: 600px) {
-  .fox-contact-run-body { max-width: 86%; }
-  .fox-contact-user-row { max-width: 84%; }
-}
 @media (hover: none) {
   .fox-contact-message-meta,
   .is-contact-chat .fox-contact-user-row .fox-user-meta { opacity: 1; }
@@ -196,49 +277,37 @@
   .fox-contact-user-row .fox-user-meta { transition: none; }
 }
 
-/* C07: 引用回复、收藏与表情。悬停操作沿用气泡旁的小图标，选中的表情贴在气泡右下角。 */
-.fox-contact-reactions,
-.fox-contact-bubble-more { position: relative; display: inline-flex; }
-.fox-contact-reactions > summary,
-.fox-contact-bubble-more > summary { list-style: none; cursor: pointer; display: inline-flex; align-items: center; }
-.fox-contact-reactions > summary::-webkit-details-marker,
-.fox-contact-bubble-more > summary::-webkit-details-marker { display: none; }
-.fox-contact-reaction-panel,
-.fox-contact-bubble-menu {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  right: 0;
-  z-index: 20;
+/* C07 + SPEC item 11：引用回复、收藏与表情。触发器是真实 button（.fox-thread-action-button，
+   26×26，自动与同排按钮对齐）；浮层是 Radix DropdownMenu，渲染在 portal 里，外部指针 /
+   Escape / 选中都会关闭。这里只装饰菜单内容。选中的表情芯片仍贴在气泡右下角。 */
+.fox-contact-reaction-menu {
+  display: flex;
+  gap: 2px;
   padding: 4px;
-  border-radius: 10px;
-  background: var(--popover);
-  box-shadow: 0 0 0 1px var(--border), var(--shadow-md);
 }
-.fox-contact-reaction-panel { display: flex; gap: 2px; }
-.fox-contact-reaction-panel > button {
+.fox-contact-reaction-menu .fox-contact-reaction-item {
   width: 28px;
   height: 28px;
+  min-height: 28px;
+  padding: 0;
+  justify-content: center;
   border-radius: 7px;
   font-size: 16px;
   line-height: 1;
 }
-.fox-contact-reaction-panel > button:hover { background: var(--accent); }
-.fox-contact-reaction-panel > button.is-chosen { background: var(--accent); box-shadow: 0 0 0 1px var(--ring); }
-.fox-contact-reaction-panel > button:disabled { opacity: .5; }
-.fox-contact-bubble-menu { min-width: 148px; }
-.fox-contact-bubble-menu > button {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  width: 100%;
-  padding: 6px 9px;
-  border-radius: 7px;
-  font-size: 13px;
-  text-align: left;
+.fox-contact-reaction-menu .fox-contact-reaction-item.is-chosen {
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--ring);
 }
-.fox-contact-bubble-menu > button:hover { background: var(--accent); }
-.fox-contact-bubble-menu > button:disabled { opacity: .5; }
-.fox-contact-bubble-menu > button[aria-pressed="true"] { color: var(--foreground); }
+.fox-contact-reaction-menu .fox-contact-reaction-item[data-disabled] { opacity: .5; }
+.fox-contact-bubble-menu { min-width: 148px; }
+.fox-contact-bubble-menu .fox-contact-bubble-menu-item {
+  gap: 7px;
+  padding: 6px 9px;
+  font-size: 13px;
+}
+.fox-contact-bubble-menu .fox-contact-bubble-menu-item[data-disabled] { opacity: .5; }
+.fox-contact-bubble-menu .fox-contact-bubble-menu-item[data-favorited="true"] { color: var(--foreground); }
 .fox-contact-reaction-chip {
   position: absolute;
   right: 6px;
@@ -256,8 +325,9 @@
 /* 用户气泡的操作行在左侧，表情芯片跟着那一行走，不盖住正文。 */
 .fox-contact-user-row .fox-contact-reaction-chip { position: static; box-shadow: none; background: var(--muted); }
 
-/* 发出的消息上方的引用区：点一下回到原气泡。 */
-.fox-contact-user-turn { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; max-width: 76%; margin-left: auto; min-width: 0; }
+/* 发出的消息上方的引用区：点一下回到原气泡。宽度用共享 token（SPEC item 9），
+   内部 user-row 只到 100%，不再套一层百分比。 */
+.fox-contact-user-turn { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; max-width: var(--fox-bubble-width); margin-left: auto; min-width: 0; }
 .fox-contact-user-turn .fox-contact-user-row { max-width: 100%; margin-left: 0; }
 .fox-contact-qref {
   display: flex;
@@ -304,7 +374,3 @@
 .fox-contact-favorite-body p { margin: 0; font-size: 13px; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .fox-contact-favorite-body time { color: var(--muted-foreground); font-size: 11px; }
 .fox-contact-favorite .fox-contact-actions { flex: none; gap: 2px; }
-
-@media (max-width: 600px) {
-  .fox-contact-user-turn { max-width: 84%; }
-}

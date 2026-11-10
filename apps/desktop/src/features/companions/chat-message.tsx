@@ -9,7 +9,6 @@ import { notify as toast } from '@/features/notifications'
 import { ContactWriteCards } from './chat-cards'
 import { ContactDecisionCards } from './chat-decisions'
 import { contactReplies } from './chat-message-model'
-import { ContactAvatar } from './chat-controls'
 import { ContactReplyBubble } from './marks'
 import { useContacts } from './context'
 import './contact-chat.css'
@@ -61,7 +60,7 @@ export function ContactAssistantMessage() {
       if (artifact) fox.onOpenArtifact?.(artifact)
       else toast.error('文件记录尚未找到')
     }}>
-      {contact && <ContactAvatar contact={contact} />}
+      {/* SPEC item 9：不再渲染每条回复旁的模型头像——顶部胶囊已经有头像。 */}
       <div className="fox-contact-run-body">
         {replies.map(reply => <ContactReplyBubble key={reply.id} contact={contact} reply={reply}
           initialMark={fox.contactBubbleMarks?.get(reply.id)} />)}

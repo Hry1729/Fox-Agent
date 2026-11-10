@@ -13,7 +13,9 @@ import { ContactDelete } from './delete'
 import { ContactModelSelect } from './model-select'
 import { ContactNotes } from './notes'
 
-function TemplateChanges({ template }: { template: TemplateStatus }) {
+/** Exported so the private-chat side card's settings subview can show the exact
+ *  same field-by-field template diff instead of a second wording. */
+export function TemplateChanges({ template }: { template: TemplateStatus }) {
   const before = template.boundSnapshot ?? {}
   const after = template.latestSnapshot ?? {}
   const rows = [

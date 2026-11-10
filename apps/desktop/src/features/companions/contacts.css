@@ -11,37 +11,37 @@
   border-radius: 18px;
   background: var(--popover);
   box-shadow: 0 0 0 1px var(--border), var(--shadow-sm);
+  transition: background 150ms ease;
+}
+.fox-contact-topbar .fox-contact-heading:hover,
+.fox-contact-topbar .fox-contact-heading:focus-visible {
+  background: color-mix(in oklch, var(--fox-accent) 8%, var(--popover));
 }
 .fox-contact-topbar .fox-contact-heading .fox-contact-avatar { width: 26px; height: 26px; border-radius: 50%; }
 .fox-contact-topbar .fox-contact-heading strong { font-size: 14px; font-weight: 600; white-space: nowrap; }
+/* Chevron grows from 0 to its 14px slot on hover/focus; only width/margin/opacity
+   animate so the pill itself never changes geometry. */
+.fox-contact-topbar .fox-contact-heading-chevron {
+  width: 0;
+  margin-left: -2px;
+  opacity: 0;
+  overflow: hidden;
+  flex: none;
+  color: var(--muted-foreground);
+  transition: width 150ms ease, margin-left 150ms ease, opacity 150ms ease;
+}
+.fox-contact-topbar .fox-contact-heading:hover .fox-contact-heading-chevron,
+.fox-contact-topbar .fox-contact-heading:focus-visible .fox-contact-heading-chevron {
+  width: 14px;
+  margin-left: 0;
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .fox-contact-topbar .fox-contact-heading,
+  .fox-contact-topbar .fox-contact-heading-chevron { transition: none; }
+}
 .fox-contact-topbar-side { display: flex; align-items: center; gap: 2px; min-width: 0; }
 .fox-contact-topbar-side.is-end { justify-self: end; }
-.fox-contact-more { position: relative; }
-.fox-contact-more > summary { list-style: none; cursor: pointer; }
-.fox-contact-more > summary::-webkit-details-marker { display: none; }
-.fox-contact-more-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 20;
-  min-width: 168px;
-  padding: 4px;
-  border-radius: 10px;
-  background: var(--popover);
-  box-shadow: 0 0 0 1px var(--border), var(--shadow-md);
-}
-.fox-contact-more-menu > button,
-.fox-contact-more-empty {
-  display: flex;
-  width: 100%;
-  padding: 6px 9px;
-  border-radius: 7px;
-  font-size: 13px;
-  text-align: left;
-}
-.fox-contact-more-menu > button:hover { background: var(--accent); }
-.fox-contact-more-menu > button:disabled { opacity: .5; }
-.fox-contact-more-empty { color: var(--muted-foreground); }
 .fox-contact-link { flex:1; }
 .fox-contact-link > span:not(.fox-contact-avatar) { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
 .fox-contact-link small { margin-left:auto; font-size:11px; color:var(--muted-foreground); }
@@ -56,10 +56,8 @@
 .fox-contact-section label { display:grid; gap:3px; }
 .fox-contact-panel input:not([type="checkbox"]),.fox-contact-panel textarea,.fox-contact-panel select { background:var(--background); border:1px solid var(--border); border-radius:var(--fox-radius-control,6px); padding:5px 8px; width:100%; min-width:0; }
 .fox-contact-panel textarea { min-height:64px; resize:vertical; }
-.fox-contact-actions,.fox-contact-banner,.fox-contact-footer { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+.fox-contact-actions,.fox-contact-banner { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
 .fox-contact-banner { padding:8px 16px; border-bottom:1px solid var(--border); font-size:13px; }
-.fox-contact-footer .fox-contact-avatar { width:16px; height:16px; }
-.fox-contact-footer button { color:var(--muted-foreground); font-size:12px; padding:2px 6px; }
 .fox-contact-panel details { padding:10px 0; }
 .fox-contact-panel summary { cursor:pointer; }
 .fox-contact-entry { padding:8px 0; border-bottom:1px solid var(--border); }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { CornerDownLeft, MoreHorizontal, Quote, Reply, SmilePlus, Star, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { copyMessageResponse } from '@/components/assistant-ui/elements/message-actions'
 import { FoxCopyMessageButton, FoxMarkUnreadButton } from '@/features/chat/thread/fox-message-actions'
 import { StreamingText } from '@/features/chat/components/StreamingText'
@@ -35,39 +36,50 @@ function useBubbleMark(bubbleId: string, initial: ContactBubbleMarkRecord | unde
   return { mark, busy, run }
 }
 
-/** The six reactions. Clicking the stored one clears it, another replaces it. */
-function ReactionPicker({ reaction, busy, onReact }: {
+/** The six reactions（SPEC item 11：Radix DropdownMenu 取代原生 details——外部指针、
+ * Escape、选中都会关闭；open 状态由气泡持有，两个菜单天然互斥）。
+ * Clicking the stored one clears it, another replaces it. */
+function ReactionPicker({ reaction, busy, onReact, open, onOpenChange }: {
   reaction: string | null | undefined
   busy: boolean
   onReact: (reaction: string) => void
+  open: boolean
+  onOpenChange: (open: boolean) => void
 }) {
-  return <details className="fox-contact-reactions">
-    <summary className="fox-thread-action-button" aria-label="表情反馈" title="表情反馈"><SmilePlus size={13} /></summary>
-    <div className="fox-contact-reaction-panel" role="menu" aria-label="选择一个表情">
-      {REACTIONS.map(item => <button key={item} type="button" role="menuitemradio" aria-checked={reaction === item}
+  return <DropdownMenu open={open} onOpenChange={onOpenChange}>
+    <DropdownMenuTrigger asChild>
+      <button type="button" className="fox-thread-action-button" aria-label="表情反馈" title="表情反馈"><SmilePlus size={13} /></button>
+    </DropdownMenuTrigger>
+    <DropdownMenuContent side="top" align="end" aria-label="选择一个表情"
+      className="fox-contact-reaction-menu w-auto min-w-0 max-h-none overflow-visible">
+      {REACTIONS.map(item => <DropdownMenuItem key={item}
+        className={reaction === item ? 'fox-contact-reaction-item is-chosen' : 'fox-contact-reaction-item'}
+        disabled={busy}
         aria-label={reaction === item ? `取消 ${item}` : `回应 ${item}`} title={reaction === item ? '取消这个表情' : item}
-        disabled={busy} className={reaction === item ? 'is-chosen' : undefined}
-        onClick={event => { onReact(item); event.currentTarget.closest('details')?.removeAttribute('open') }}>{item}</button>)}
-    </div>
-  </details>
+        onSelect={() => onReact(item)}>{item}</DropdownMenuItem>)}
+    </DropdownMenuContent>
+  </DropdownMenu>
 }
 
 /** 引用回复与收藏。只有已落库的气泡才有这个菜单。 */
-function BubbleMenu({ favorited, busy, onQuote, onFavorite }: {
+function BubbleMenu({ favorited, busy, onQuote, onFavorite, open, onOpenChange }: {
   favorited: boolean
   busy: boolean
   onQuote: () => void
   onFavorite: () => void
+  open: boolean
+  onOpenChange: (open: boolean) => void
 }) {
-  const close = (event: React.MouseEvent<HTMLElement>) => event.currentTarget.closest('details')?.removeAttribute('open')
-  return <details className="fox-contact-bubble-more">
-    <summary className="fox-thread-action-button" aria-label="更多消息操作" title="更多"><MoreHorizontal size={13} /></summary>
-    <div className="fox-contact-bubble-menu" role="menu">
-      <button type="button" role="menuitem" onClick={event => { onQuote(); close(event) }}><Reply size={13} />引用回复</button>
-      <button type="button" role="menuitem" disabled={busy} aria-pressed={favorited}
-        onClick={event => { onFavorite(); close(event) }}><Star size={13} fill={favorited ? 'currentColor' : 'none'} />{favorited ? '取消收藏' : '收藏'}</button>
-    </div>
-  </details>
+  return <DropdownMenu open={open} onOpenChange={onOpenChange}>
+    <DropdownMenuTrigger asChild>
+      <button type="button" className="fox-thread-action-button" aria-label="更多消息操作" title="更多"><MoreHorizontal size={13} /></button>
+    </DropdownMenuTrigger>
+    <DropdownMenuContent side="top" align="end" className="fox-contact-bubble-menu w-auto">
+      <DropdownMenuItem className="fox-contact-bubble-menu-item" onSelect={() => onQuote()}><Reply size={13} />引用回复</DropdownMenuItem>
+      <DropdownMenuItem className="fox-contact-bubble-menu-item" disabled={busy} data-favorited={favorited ? 'true' : undefined}
+        onSelect={() => onFavorite()}><Star size={13} fill={favorited ? 'currentColor' : 'none'} />{favorited ? '取消收藏' : '收藏'}</DropdownMenuItem>
+    </DropdownMenuContent>
+  </DropdownMenu>
 }
 
 /** The chosen emoji, beside the bubble. No counts: it is only the user's own. */
@@ -95,9 +107,13 @@ export function ContactReplyBubble({ contact, reply, initialMark }: {
   const ctx = useContacts()
   const durable = reply.deliveryOrder != null && Boolean(contact)
   const { mark, busy, run } = useBubbleMark(reply.id, durable ? initialMark : undefined)
+  // 一个气泡同时只开一层菜单（SPEC item 11 的互斥）；菜单开在 portal 里，
+  // 焦点离开了气泡 DOM，用 data-menu-open 让操作行保持可见。
+  const [openMenu, setOpenMenu] = useState<'reaction' | 'more' | null>(null)
   const favorite = () => contact && run(() => contacts.favorite(contact.id, reply.id, !mark?.favoritedAt))
   const react = (reaction: string) => contact && run(() => contacts.react(contact.id, reply.id, reaction))
   return <section className="fox-contact-message" data-contact-message-id={reply.id}
+    data-menu-open={openMenu ? 'true' : undefined}
     data-bubble-id={durable ? reply.id : undefined}
     data-delivery-order={durable ? reply.deliveryOrder : undefined}>
     <div className="fox-contact-bubble"><StreamingText text={reply.text} streaming={false} className="fox-answer-response" /></div>
@@ -105,9 +121,11 @@ export function ContactReplyBubble({ contact, reply, initialMark }: {
     <div className="fox-contact-message-meta">
       <FoxCopyMessageButton onCopy={() => copyMessageResponse(reply.text)} />
       {durable && <>
-        <ReactionPicker reaction={mark?.reaction} busy={busy} onReact={react} />
+        <ReactionPicker reaction={mark?.reaction} busy={busy} onReact={react}
+          open={openMenu === 'reaction'} onOpenChange={next => setOpenMenu(next ? 'reaction' : null)} />
         <BubbleMenu favorited={Boolean(mark?.favoritedAt)} busy={busy}
-          onQuote={() => void ctx?.quoteBubble?.(reply.id)} onFavorite={favorite} />
+          onQuote={() => void ctx?.quoteBubble?.(reply.id)} onFavorite={favorite}
+          open={openMenu === 'more'} onOpenChange={next => setOpenMenu(next ? 'more' : null)} />
         {contact && <FoxMarkUnreadButton onMark={() => contacts.markUnread(contact.id, reply.id).then(() => ctx?.refresh()).catch(error => { showContactError(error); throw error })} />}
       </>}
       <time dateTime={new Date(reply.createdAt).toISOString()}>{formatClockTime(reply.createdAt)}</time>
@@ -125,15 +143,18 @@ export function ContactUserMarks({ contact, messageId, getText, createdAt, initi
 }) {
   const ctx = useContacts()
   const { mark, busy, run } = useBubbleMark(messageId, initialMark)
+  const [openMenu, setOpenMenu] = useState<'reaction' | 'more' | null>(null)
   const favorite = () => run(() => contacts.favorite(contact.id, messageId, !mark?.favoritedAt))
   const react = (reaction: string) => run(() => contacts.react(contact.id, messageId, reaction))
-  return <div className="fox-user-meta">
+  return <div className="fox-user-meta" data-menu-open={openMenu ? 'true' : undefined}>
     {mark?.reaction && <ReactionChip reaction={mark.reaction} busy={busy} onClear={() => react(mark.reaction!)} />}
     <time className="fox-message-time" dateTime={createdAt.toISOString()}>{formatClockTime(createdAt.getTime())}</time>
     <FoxCopyMessageButton onCopy={() => copyMessageResponse(getText())} />
-    <ReactionPicker reaction={mark?.reaction} busy={busy} onReact={react} />
+    <ReactionPicker reaction={mark?.reaction} busy={busy} onReact={react}
+      open={openMenu === 'reaction'} onOpenChange={next => setOpenMenu(next ? 'reaction' : null)} />
     <BubbleMenu favorited={Boolean(mark?.favoritedAt)} busy={busy}
-      onQuote={() => void ctx?.quoteBubble?.(messageId)} onFavorite={favorite} />
+      onQuote={() => void ctx?.quoteBubble?.(messageId)} onFavorite={favorite}
+      open={openMenu === 'more'} onOpenChange={next => setOpenMenu(next ? 'more' : null)} />
   </div>
 }
 

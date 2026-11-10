@@ -1,4 +1,3 @@
-import { ContactComposerFooter } from '@/features/companions/chat-controls'
 import { ContactQuoteDraft } from '@/features/companions/marks'
 import { useContacts } from '@/features/companions/context'
 import { ExpertBindingChip } from '../components/ExpertBindingChip'
@@ -885,7 +884,6 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
         </PromptInputFooter>
         </PromptInput>
         </ComposerBorderBeam>}
-        {!decisionPending && companion?.privateChat && <ContactComposerFooter />}
         {!decisionPending && !companion?.privateChat && newConversation && runtimeControlled && <div className="fox-composer-draft-footer">
           {entry.onSelectProject && entry.onAddProject && <ComposerProjectBar projectRoot={projectRoot} projects={entry.projects} onSelect={entry.onSelectProject} onAdd={entry.onAddProject} locked={entryFrozen} />}
           {entryFrozen
