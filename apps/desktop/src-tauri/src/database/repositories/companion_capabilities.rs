@@ -191,7 +191,7 @@ impl Database {
     /// Freeze the run's capability snapshot. Write-once, like the model
     /// snapshot: queueing, retry and restart never re-resolve it.
     pub fn freeze_run_companion_tools(&self, run_id: &str, ids: &[String]) -> Result<(), String> {
-        let json = serde_json::to_string(ids).map_err(|error| error.to_string())?;
+        let json = crate::canonical_json::to_string(ids).map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
             connection.execute(
                 "UPDATE runs SET companion_tools_snapshot = ?2 WHERE id = ?1 AND companion_tools_snapshot IS NULL",

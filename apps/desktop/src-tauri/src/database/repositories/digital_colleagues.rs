@@ -3076,7 +3076,7 @@ mod tests {
         let due_at = now - 10_000;
         let key = format!("schedule:{}:{due_at}", schedule.id);
         let trigger_id = Uuid::new_v4().to_string();
-        let payload_json = serde_json::to_string(&json!({
+        let payload_json = crate::canonical_json::to_string(&json!({
             "scheduleId": schedule.id, "scheduledFor": due_at
         }))
         .expect("serialize claim payload");

@@ -70,11 +70,12 @@ fn write_wrapper(root: &Path) -> PathBuf {
         resolved.to_str().expect("FOX_TEST_NATIVE_SIDECAR_BIN must be a Unicode path").to_owned()
     });
     let script=root.join("native-runtime-relay.mjs");
-    let constants=format!("const runtime = {};\nconst root = {};\nconst sidecarBinary = {};\nconst raceVersion = {};\n",
+    let constants=format!("const runtime = {};\nconst root = {};\nconst sidecarBinary = {};\nconst raceVersion = {};\nconst seqVersion = {};\n",
         crate::canonical_json::to_string(&runtime.to_string_lossy()).unwrap(),
         crate::canonical_json::to_string(&root.to_string_lossy()).unwrap(),
         crate::canonical_json::to_string(&sidecar_binary).unwrap(),
-        crate::canonical_json::to_string(&crate::tool_host::file_version(b"before-native-race")).unwrap());
+        crate::canonical_json::to_string(&crate::tool_host::file_version(b"before-native-race")).unwrap(),
+        crate::canonical_json::to_string(&crate::tool_host::file_version(b"before-native-seq")).unwrap());
     let relay=r#"
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
@@ -96,7 +97,7 @@ const release=()=>{
   for(let index=held.length-1;index>=0;index--){
     if(existsSync(join(root,held[index].gate))){ child.stdin.write(JSON.stringify(held[index].frame)+'\n');held.splice(index,1) }
   }
-  if(existsSync(join(root,'replay-race-failure'))){
+  if(existsSync(join(root,'replay-race-failure'))||existsSync(join(root,'replay-seq-failure'))){
     for(const replay of replays.splice(0)){
       replayCalls.set(replay.frame.id,replay.call)
       log('runtime-replay',replay.frame)
@@ -110,7 +111,7 @@ createInterface({input:child.stdout}).on('line',line=>{
   if(frame.kind==='request'&&frame.type==='tool_call.execute'){
     calls.set(frame.id,frame.payload.callId)
     executions.set(frame.id,frame)
-    if(frame.payload.callId.startsWith('race-')||frame.payload.callId.startsWith('pure-read-'))writeFileSync(join(root,`execute-request-${frame.payload.callId}.json`),JSON.stringify(frame))
+    if(frame.payload.callId.startsWith('race-')||frame.payload.callId.startsWith('pure-read-')||frame.payload.callId.startsWith('seq-'))writeFileSync(join(root,`execute-request-${frame.payload.callId}.json`),JSON.stringify(frame))
   }
   log('runtime',frame)
   process.stdout.write(line+'\n')
@@ -137,6 +138,13 @@ createInterface({input:process.stdin}).on('line',line=>{
         {content:[{type:'toolCall',id:`race-write-${suffix}`,name:'edit_file',arguments:{path:'shared.txt',oldText:'before-native-race',newText:`winner-${suffix}`,expectedVersion:raceVersion}}],stopReason:'toolUse'},
         `native file race ${suffix} complete`]
     }
+    else if(text==='native-file-seq-a'||text==='native-file-seq-b'){
+      const suffix=text.endsWith('-a')?'a':'b'
+      service.fauxResponses=[
+        {content:[{type:'toolCall',id:`seq-read-${suffix}`,name:'read',arguments:{path:'shared.txt'}}],stopReason:'toolUse'},
+        {content:[{type:'toolCall',id:`seq-write-${suffix}`,name:'edit_file',arguments:{path:'shared.txt',oldText:'before-native-seq',newText:`seq-winner-${suffix}`,expectedVersion:seqVersion}}],stopReason:'toolUse'},
+        `native file seq ${suffix} complete`]
+    }
     else if(text.includes('cancel-target')){service.fauxTokensPerSecond=3;service.fauxResponses=['cancel target '+('waiting '.repeat(1000))]}
     else if(text.includes('survivor-next'))service.fauxResponses=[{content:[{type:'toolCall',id:'survivor-next-read',name:'read',arguments:{path:'note.txt'}}],stopReason:'toolUse'},'survivor next Run complete']
     else if(text.includes('survivor'))service.fauxResponses=[{content:[{type:'toolCall',id:'survivor-read',name:'read',arguments:{path:'note.txt'}}],stopReason:'toolUse'},'survivor complete']
@@ -150,13 +158,13 @@ createInterface({input:process.stdin}).on('line',line=>{
     return
   }
   const call=calls.get(frame.requestId)
-  if(call&&(call.startsWith('mix-')||call==='survivor-read'||call.startsWith('race-')||call.startsWith('pure-read-'))){
+  if(call&&(call.startsWith('mix-')||call==='survivor-read'||call.startsWith('race-')||call.startsWith('pure-read-')||call.startsWith('seq-'))){
     writeFileSync(join(root,`receipt-${call}.json`),JSON.stringify(frame))
-    const gate=call.startsWith('pure-read-')?'release-pure-reads':call.startsWith('mix-')?'release-mixed':call==='survivor-read'?'release-survivor':call.startsWith('race-read-')?'release-race-reads':'release-race-writes'
+    const gate=call.startsWith('pure-read-')?'release-pure-reads':call.startsWith('mix-')?'release-mixed':call==='survivor-read'?'release-survivor':call.startsWith('race-read-')?'release-race-reads':call.startsWith('race-write-')?'release-race-writes':call==='seq-read-a'?'release-seq-winner-read':call==='seq-read-b'?'release-seq-loser-read':call==='seq-write-a'?'release-seq-winner-write':'release-seq-loser-write'
     held.push({frame,gate})
-    if(call.startsWith('race-write-')&&frame.payload?.isError===true){
+    if((call.startsWith('race-write-')||call.startsWith('seq-write-'))&&frame.payload?.isError===true){
       const original=executions.get(frame.requestId)
-      if(!original)throw new Error('race failure has no original execution request')
+      if(!original)throw new Error('write failure has no original execution request')
       replays.push({call,frame:{...original,id:`${original.id}:native-race-replay`}})
     }
     release()
@@ -451,9 +459,20 @@ fn native_host_shared_file_conflict_preserves_the_failed_receipt() {
     let winning_content=format!("winner-{winner}");
     assert_eq!(std::fs::read_to_string(&target).unwrap(),winning_content);
     let original_modified=std::fs::metadata(&target).unwrap().modified().unwrap();
-    let original_host=serde_json::to_value(database.get_runtime_tool_call(&loser.run.id,failed_call).unwrap().unwrap()).unwrap();
+    let original_host_record=match database.get_runtime_tool_call(&loser.run.id,failed_call).unwrap() {
+        Some(record) => record,
+        None => panic!(
+            "missing Host ToolCall after conflict: run={} call={} committed={} expectedVersion={} host_record=None",
+            loser.run.id, failed_call, failed_body, version
+        ),
+    };
+    assert_eq!(original_host_record.status,"failed","prepare-stage or admitted conflict must persist a failed Host ToolCall");
+    let original_host=serde_json::to_value(&original_host_record).unwrap();
     let dispatch=fox_engine_protocol::encode_dispatch_id(&loser.run.id,failed_call).unwrap();
-    let original_execution=serde_json::to_value(database.execution_receipt(&loser.run.id,&dispatch).unwrap()).unwrap();
+    let original_execution=database.execution_receipt(&loser.run.id,&dispatch).unwrap();
+    if original_execution.is_none() {
+        assert_eq!(original_host_record.status,"failed","prepare-stage conflict still records a failed Host ToolCall");
+    }
     assert!(!root.join("release-race-writes").exists());
     std::fs::write(root.join("replay-race-failure"),"replay only the exact original failed call over the wire").unwrap();
     wait_for("failed call is replayed by the actual Host ingress",||root.join(format!("replay-receipt-{failed_call}.json")).is_file());
@@ -461,7 +480,7 @@ fn native_host_shared_file_conflict_preserves_the_failed_receipt() {
     assert_eq!(&replay["payload"],failed_body,"replay returns the exact original committed failure");
     assert_eq!(&native_result(&database,&loser.run.id,failed_call),failed_body);
     assert_eq!(serde_json::to_value(database.get_runtime_tool_call(&loser.run.id,failed_call).unwrap().unwrap()).unwrap(),original_host);
-    assert_eq!(serde_json::to_value(database.execution_receipt(&loser.run.id,&dispatch).unwrap()).unwrap(),original_execution);
+    assert_eq!(database.execution_receipt(&loser.run.id,&dispatch).unwrap(),original_execution);
     assert_eq!(std::fs::read_to_string(&target).unwrap(),winning_content);
     assert_eq!(std::fs::metadata(&target).unwrap().modified().unwrap(),original_modified);
     assert_eq!(host.state.lock().unwrap().worker.as_ref().unwrap().child.lock().unwrap().id(),pid);
@@ -488,6 +507,152 @@ fn native_host_shared_file_conflict_preserves_the_failed_receipt() {
     assert_eq!(host.state.lock().unwrap().worker.as_ref().unwrap().child.lock().unwrap().id(),pid);
     host.shutdown().unwrap();
     println!("native shared-file Host evidence retained at {}",root.display());
+}
+
+
+#[test]
+fn native_host_sequential_stale_write_records_prepare_stage_conflict() {
+    const TEST: &str = "runtime_host::native_host_integration_tests::native_host_sequential_stale_write_records_prepare_stage_conflict";
+    if std::env::var_os(CHILD).is_none() {
+        let mut child=Command::new(std::env::current_exe().unwrap())
+            .args([TEST,"--exact","--nocapture","--test-threads=1"])
+            .env(CHILD,"1").env_remove("FOX_RUNTIME_EXECUTABLE").env_remove("FOX_RUNTIME_SCRIPT").env_remove("FOX_RUNTIME_MODE")
+            .env("FOX_KERNEL_MODE","authoritative")
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let deadline=Instant::now()+Duration::from_secs(150);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now()>=deadline {let _=child.kill();let _=child.wait();panic!("native sequential prepare-conflict integration exceeded 150 seconds");}
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let output=child.wait_with_output().unwrap();
+        assert!(output.status.success(),"child stdout: {}\nchild stderr: {}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    let fixture_parent=std::env::var_os("FOX_TEST_NATIVE_HOST_FIXTURE_ROOT").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let root=fixture_parent.join(format!("fox-native-file-seq-{}",uuid::Uuid::new_v4()));
+    println!("native sequential prepare-conflict Host fixture: {}",root.display());
+    for name in ["sessions","attachments","skills","project"] {std::fs::create_dir_all(root.join(name)).unwrap();}
+    std::env::set_var("FOX_RUNTIME_SCRIPT",write_wrapper(&root));
+    let target=root.join("project/shared.txt");
+    std::fs::write(&target,"before-native-seq").unwrap();
+    let database=Database::open(root.join("facts.db")).unwrap();
+    configure_model(&database);
+    let a=database.create_conversation(database.default_agent_id(),Some("sequential file A"),root.join("project").to_str(),Some("allow")).unwrap();
+    let b=database.create_conversation(database.default_agent_id(),Some("sequential file B"),root.join("project").to_str(),Some("allow")).unwrap();
+    let mut context=tauri::generate_context!();
+    for window in &mut context.config_mut().app.windows {window.create=false;}
+    let app=tauri::Builder::default().any_thread().build(context).unwrap();
+    let client=crate::yuxi::YuxiClient::new().unwrap();
+    let host=RuntimeHost::new(app.handle().clone(),database.clone(),root.join("sessions"),root.join("attachments"),root.join("skills"),client.clone());
+    let _cleanup=HostCleanup(host.clone());
+    app.manage(crate::app_state::AppState::new(database.clone(),host.clone(),client.clone(),
+        crate::yuxi::runtime::YuxiRuntimeHost::new(app.handle().clone(),database.clone(),client),
+        crate::model_service::ModelServiceClient::new().unwrap(),
+        crate::local_knowledge::LocalKnowledgeStore::open_for_startup_root(&crate::local_knowledge_storage::resolve_startup_root(&root,None),None),root.clone(),root.join("skills")));
+    let run_a=native_run(&database,&a.id,"native-file-seq-a");
+    let run_b=native_run(&database,&b.id,"native-file-seq-b");
+    start_native(&host,&run_a,"native-file-seq-a",&root);
+    start_native(&host,&run_b,"native-file-seq-b",&root);
+    wait_for("both sessions read the original file before either write",||["a","b"].iter().all(|suffix|root.join(format!("receipt-seq-read-{suffix}.json")).is_file()));
+    let read_json=|name:&str|serde_json::from_slice::<Value>(&std::fs::read(root.join(name)).unwrap()).unwrap();
+    let session_a=database.get_runtime_session(&a.id).unwrap().unwrap();
+    let session_b=database.get_runtime_session(&b.id).unwrap().unwrap();
+    assert_ne!(session_a.runtime_session_id,session_b.runtime_session_id);
+    let pid=host.state.lock().unwrap().worker.as_ref().unwrap().child.lock().unwrap().id();
+    let version=crate::tool_host::file_version(b"before-native-seq");
+    for (suffix,started,conversation,session) in [("a",&run_a,&a,&session_a),("b",&run_b,&b,&session_b)] {
+        let call=format!("seq-read-{suffix}");
+        let frame=read_json(&format!("receipt-{call}.json"));
+        let committed=native_result(&database,&started.run.id,&call);
+        assert_eq!(frame["payload"],committed);
+        assert_eq!(committed["isError"],false,"{call}: {committed}");
+        assert_eq!(committed["result"]["content"][0]["text"],"before-native-seq");
+        assert_eq!(committed["result"]["details"]["readVersion"],version);
+        let request=read_json(&format!("execute-request-{call}.json"));
+        assert_eq!(request["runId"],started.run.id);
+        assert_eq!(request["conversationId"],conversation.id);
+        assert_eq!(request["runtimeSessionId"],session.runtime_session_id);
+        assert_eq!(request["payload"]["input"]["path"],"shared.txt");
+        assert_eq!(run_status(&database,&started.run.id),"running");
+    }
+    assert_eq!(std::fs::read_to_string(&target).unwrap(),"before-native-seq");
+    std::fs::write(root.join("release-seq-winner-read"),"let A proceed from its original observation to the write").unwrap();
+    wait_for("A's write settles on the original version before B is released",||root.join("receipt-seq-write-a.json").is_file());
+    let winner_receipt=read_json("receipt-seq-write-a.json");
+    let winner_committed=native_result(&database,&run_a.run.id,"seq-write-a");
+    assert_eq!(winner_receipt["payload"],winner_committed);
+    assert_eq!(winner_committed["isError"],false,"winner write must commit: {winner_committed}");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(),"seq-winner-a");
+    let winner_request=read_json("execute-request-seq-write-a.json");
+    assert_eq!(winner_request["payload"]["input"]["expectedVersion"],version);
+    let winner_host=database.get_runtime_tool_call(&run_a.run.id,"seq-write-a").unwrap()
+        .unwrap_or_else(|| panic!("missing Host ToolCall for successful sequential write: run={}", run_a.run.id));
+    assert_eq!(winner_host.status,"completed");
+    let original_modified=std::fs::metadata(&target).unwrap().modified().unwrap();
+    std::fs::write(root.join("release-seq-loser-read"),"release B's stale observation only after A committed").unwrap();
+    wait_for("B's stale write settles as a prepare-stage conflict",||root.join("receipt-seq-write-b.json").is_file());
+    let failed_call="seq-write-b";
+    let failed_body=native_result(&database,&run_b.run.id,failed_call);
+    let failed_receipt=read_json("receipt-seq-write-b.json");
+    assert_eq!(failed_receipt["payload"],failed_body,"the real response must already be committed");
+    assert_eq!(failed_body["isError"],true,"stale sequential write must fail: {failed_body}");
+    assert!(crate::canonical_json::to_string(&failed_body).unwrap().contains("tool.file_conflict"),"{failed_body}");
+    let loser_request=read_json("execute-request-seq-write-b.json");
+    assert_eq!(loser_request["runId"],run_b.run.id);
+    assert_eq!(loser_request["conversationId"],b.id);
+    assert_eq!(loser_request["runtimeSessionId"],session_b.runtime_session_id);
+    assert_eq!(loser_request["payload"]["input"]["expectedVersion"],version,"stale expectedVersion must be preserved on the request");
+    assert_eq!(loser_request["payload"]["input"]["oldText"],"before-native-seq");
+    assert_eq!(loser_request["payload"]["input"]["newText"],"seq-winner-b");
+    let original_host_record=match database.get_runtime_tool_call(&run_b.run.id,failed_call).unwrap() {
+        Some(record) => record,
+        None => panic!(
+            "missing Host ToolCall after sequential prepare-stage conflict: run={} call={} committed={} expectedVersion={} host_record=None",
+            run_b.run.id, failed_call, failed_body, version
+        ),
+    };
+    assert_eq!(original_host_record.status,"failed");
+    assert_eq!(original_host_record.execution_location,"host");
+    assert_eq!(original_host_record.tool_name,"edit_file");
+    assert_eq!(original_host_record.input["expectedVersion"],version,"failed call must keep the stale expectedVersion");
+    assert_eq!(original_host_record.input["oldText"],"before-native-seq");
+    let original_host=serde_json::to_value(&original_host_record).unwrap();
+    let dispatch=fox_engine_protocol::encode_dispatch_id(&run_b.run.id,failed_call).unwrap();
+    let original_execution=database.execution_receipt(&run_b.run.id,&dispatch).unwrap();
+    assert!(original_execution.is_none(),"prepare-stage conflict must not invent an execution receipt");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(),"seq-winner-a");
+    assert_eq!(std::fs::metadata(&target).unwrap().modified().unwrap(),original_modified,"conflict must not touch the winner file");
+    std::fs::write(root.join("replay-seq-failure"),"replay only the exact original failed call over the wire").unwrap();
+    wait_for("failed sequential call is replayed by the actual Host ingress",||root.join(format!("replay-receipt-{failed_call}.json")).is_file());
+    let replay=read_json(&format!("replay-receipt-{failed_call}.json"));
+    assert_eq!(&replay["payload"],&failed_body,"replay returns the exact original committed failure");
+    assert_eq!(&native_result(&database,&run_b.run.id,failed_call),&failed_body);
+    assert_eq!(serde_json::to_value(database.get_runtime_tool_call(&run_b.run.id,failed_call).unwrap().unwrap()).unwrap(),original_host);
+    assert_eq!(database.execution_receipt(&run_b.run.id,&dispatch).unwrap(),original_execution);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(),"seq-winner-a");
+    assert_eq!(std::fs::metadata(&target).unwrap().modified().unwrap(),original_modified);
+    assert_eq!(host.state.lock().unwrap().worker.as_ref().unwrap().child.lock().unwrap().id(),pid);
+    std::fs::write(root.join("release-seq-winner-write"),"deliver A's committed write").unwrap();
+    std::fs::write(root.join("release-seq-loser-write"),"deliver B's committed conflict").unwrap();
+    wait_for("both sequential Runs complete and release",||[&run_a.run.id,&run_b.run.id].iter().all(|run|
+        run_status(&database,run)=="completed"&&host.state.lock().unwrap().worker.as_ref().unwrap().sessions.by_run(run).is_none()));
+    for (suffix,started,conversation,session) in [("a",&run_a,&a,&session_a),("b",&run_b,&b,&session_b)] {
+        let results=pi_results(&session.native_path().unwrap());
+        let read_call=format!("seq-read-{suffix}");
+        let write_call=format!("seq-write-{suffix}");
+        assert_eq!(results.iter().filter_map(|message|message["toolCallId"].as_str()).collect::<Vec<_>>(),vec![read_call.as_str(),write_call.as_str()]);
+        assert_eq!(results[1]["isError"],native_result(&database,&started.run.id,&write_call)["isError"]);
+        let mapping=database.get_runtime_session(&conversation.id).unwrap().unwrap();
+        assert_eq!(mapping.runtime_session_id,session.runtime_session_id);
+        let other=if suffix=="a" {"b"} else {"a"};
+        let foreign:usize=database.with_connection(|connection|connection.query_row(
+            "SELECT COUNT(*) FROM kernel_tool_calls WHERE run_id=?1 AND tool_call_id IN (?2,?3)",
+            params![started.run.id,format!("seq-read-{other}"),format!("seq-write-{other}")],|row|row.get(0))).unwrap();
+        assert_eq!(foreign,0,"a native session cannot adopt the other Run's calls");
+    }
+    assert_eq!(std::fs::read_to_string(&target).unwrap(),"seq-winner-a");
+    host.shutdown().unwrap();
+    println!("native sequential prepare-conflict Host evidence retained at {}",root.display());
 }
 
 #[test]
