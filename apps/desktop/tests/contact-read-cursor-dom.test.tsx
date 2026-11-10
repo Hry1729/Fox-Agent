@@ -143,4 +143,29 @@ describe('K6 阅读游标视口进入', () => {
     expect(markRead.mock.calls.length).toBe(1)
     expect(markRead.mock.calls[0][1]).toBe(5000)
   })
+
+  test('C06 新建联系人游标已初始化为 0：当前会话回复正常推进，手动未读位置保持', async () => {
+    document.hasFocus = () => true
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    // D2 起真新建事务把 last_read_delivery_order 初始化为 0（不是遗留 NULL）。
+    const fresh = contact({ lastReadDeliveryOrder: 0, readDeliveryOrder: 0 })
+    const snapshot = detail([1000, 2000])
+    const view = render(<Harness contact={fresh} detail={snapshot} visible />)
+    await intersect(view.container, [1000, 2000], true)
+    expect(markRead.mock.calls.length).toBe(1)
+    expect(markRead.mock.calls[0]).toEqual(['contact', 2000, expect.any(Number)])
+
+    // 当前会话内标未读：气泡仍在视口里，重发交叉也不立即抵消这个手动未读位置。
+    const unread = contact({ lastReadDeliveryOrder: 0, readDeliveryOrder: 2000, manualUnreadFromOrder: 2000, manualUnreadAt: 5 })
+    view.rerender(<Harness contact={unread} detail={snapshot} visible />)
+    await intersect(view.container, [1000, 2000], true)
+    expect(markRead.mock.calls.length).toBe(1)
+
+    // 离开再重开同一聊天才算一次新的视口进入，重新看到才清除手动未读。
+    view.rerender(<Harness contact={unread} detail={snapshot} visible={false} />)
+    view.rerender(<Harness contact={unread} detail={snapshot} visible />)
+    await intersect(view.container, [1000, 2000], true)
+    expect(markRead.mock.calls.length).toBe(2)
+    expect(markRead.mock.calls[1][1]).toBe(2000)
+  })
 })

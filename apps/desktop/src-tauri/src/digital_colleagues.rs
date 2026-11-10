@@ -363,7 +363,7 @@ pub fn digital_colleague_revoke(
             .find(|trigger| matches!(trigger.status.as_str(), "queued" | "running"))
             .and_then(|trigger| trigger.run_id)
         {
-            let _ = state.runtime_host.cancel_managed_run(&active_run);
+            let _ = state.runtime_host.cancel_managed_run_by_user(&active_run);
         }
         Ok(record)
     })())

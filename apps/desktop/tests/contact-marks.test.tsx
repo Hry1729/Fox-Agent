@@ -10,10 +10,10 @@ import { useState } from 'react'
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import { mockIPC, clearMocks } from '@tauri-apps/api/mocks'
 import AssistantUiChat from '../src/features/chat/thread/fox-assistant-ui-chat'
-import { ContactsContext, type ContactLocateRequest, type ContactsContextValue } from '../src/features/companions/context'
+import { ContactsContext, showContactError, type ContactLocateRequest, type ContactsContextValue } from '../src/features/companions/context'
 import { ContactTopbar } from '../src/features/companions/chat-controls'
 import { ContactFavorites, ContactQuoteDraft } from '../src/features/companions/marks'
-import type { Companion, QuotePreview } from '../src/features/companions/api'
+import { contacts, type Companion, type QuotePreview } from '../src/features/companions/api'
 import type { ContactBubbleMarkRecord, ContactBubbleRecord, ContactMessageQuoteRecord, ConversationDetail, ConversationMessage } from '../src/features/conversations/model/types'
 
 const contact: Companion = {
@@ -68,6 +68,19 @@ mock.module('@tauri-apps/api/core', () => ({
     : (tauriCoreAsFound.invoke as (c: string, a: unknown) => Promise<unknown>)(command, args),
 }))
 afterAll(() => { answer = null; mock.module('@tauri-apps/api/core', () => tauriCoreAsFound) })
+
+// C06：永久标记失败时 showContactError 走 notify.error。这里接管它，断言原始
+// Host 错误确实展示出来，而不是被前端吞掉冒充成功。
+const actualNotifications = await import('../src/features/notifications')
+const toasts: string[] = []
+mock.module('../src/features/notifications', () => ({
+  ...actualNotifications,
+  notify: Object.assign(
+    (message: unknown, options?: unknown) => actualNotifications.notify(message, options as never),
+    { ...actualNotifications.notify, error: (message: unknown) => { toasts.push(String(message)); return 'toast' } },
+  ),
+}))
+afterAll(() => { mock.module('../src/features/notifications', () => actualNotifications) })
 
 type Call = { command: string; request: Record<string, unknown> }
 let calls: Call[] = []
@@ -139,7 +152,7 @@ const openReactions = (container: HTMLElement, bubbleId: string) => {
   return section
 }
 
-afterEach(() => { cleanup(); clearMocks() })
+afterEach(() => { cleanup(); clearMocks(); toasts.length = 0 })
 
 describe('C07 永久标记只接受已落库气泡', () => {
   test('直播预览与乐观用户消息没有引用、收藏、表情入口，已落库气泡才有', async () => {
@@ -390,5 +403,98 @@ describe('C07 引用目标在分页后仍可定位', () => {
     await waitFor(() => expect(view.container.querySelector('[data-contact-message-id="run:response:2"]')?.classList.contains('is-search-hit')).toBe(true))
     // 定位用的是 K1 身份，不是位置：翻页后同一条气泡被圈住，阅读序号不变。
     expect(view.container.querySelector('[data-contact-message-id="run:response:2"]')?.getAttribute('data-delivery-order')).toBe('2')
+  })
+})
+
+describe('C06 新建联系人当前会话三操作（无需重启）', () => {
+  test('新建联系人完成回复后，标未读/引用/收藏直接成功，引用目标正确，未读位置由 Host 事实保持', async () => {
+    host()
+    const quoted: string[] = []
+    let refreshed = 0
+    // 新建联系人：阅读游标已在创建事务内初始化为 0，当前会话回复已落库。
+    const fresh: Companion = { ...contact, lastReadDeliveryOrder: 0, readDeliveryOrder: 0 }
+    const ctx = context({
+      current: fresh, list: { companions: [fresh], pendingDeletions: [] },
+      quoteBubble: async id => { quoted.push(id) }, refresh: async () => { refreshed += 1 },
+    })
+    const view = renderChat(detail(), ctx)
+    await waitFor(() => expect(view.container.querySelector('[data-bubble-id="run:response:2"]')).toBeTruthy())
+
+    // 标未读：发到 Host 的是 K1 气泡身份；成功后刷新，未读位置由 Host 持久事实决定。
+    fireEvent.click(view.container.querySelector('.fox-thread-unread-button')!)
+    await waitFor(() => expect(calls.some(call => call.command === 'companion_mark_unread')).toBe(true))
+    expect(calls.find(call => call.command === 'companion_mark_unread')?.request)
+      .toEqual({ companionId: 'contact', bubbleId: 'run:response:2' })
+    await waitFor(() => expect(refreshed).toBeGreaterThan(0))
+    expect(toasts).toHaveLength(0)
+
+    // 引用：目标是同一条已落库气泡，不是位置相近的另一条。
+    let section = openMenu(view.container, 'run:response:2')
+    fireEvent.click(section.querySelector('.fox-contact-bubble-menu > button')!)
+    expect(quoted).toEqual(['run:response:2'])
+
+    // 收藏：Host 确认一次收藏事实，菜单同步为「取消收藏」，没有错误通知。
+    section = openMenu(view.container, 'run:response:2')
+    fireEvent.click([...section.querySelectorAll('.fox-contact-bubble-menu > button')].find(node => node.textContent?.includes('收藏'))!)
+    await waitFor(() => expect(calls.some(call => call.command === 'companion_bubble_favorite')).toBe(true))
+    expect(calls.at(-1)).toEqual({ command: 'companion_bubble_favorite', request: { companionId: 'contact', bubbleId: 'run:response:2', favorited: true } })
+    await act(async () => {})
+    expect(openMenu(view.container, 'run:response:2').textContent).toContain('取消收藏')
+    expect(marks['run:response:2']?.favoritedAt).toBeTruthy()
+    expect(toasts).toHaveLength(0)
+  })
+
+  test('后端历史仍在整理时三操作展示原始 BackfillPending 错误，不吞错冒充成功', async () => {
+    const backfillMessage = '这个联系人的历史还在整理，稍后再标记'
+    const handler = (command: string, args: unknown) => {
+      const request = ((args as { request?: Record<string, unknown> } | undefined)?.request ?? {}) as Record<string, unknown>
+      calls.push({ command, request })
+      if (command === 'companion_mark_unread' || command === 'companion_bubble_favorite' || command === 'companion_quote_preview') {
+        return { ok: false, error: { code: 'companion.backfill_pending', message: backfillMessage, retryable: true } }
+      }
+      if (command === 'companion_favorites_list') return { ok: true, data: [] }
+      throw new Error('Unexpected command: ' + command)
+    }
+    calls = []; marks = {}; favorites = []; toasts.length = 0
+    answer = handler
+    mockIPC(handler)
+
+    // quoteBubble 按 workbench 真实契约：失败展示错误且不设置引用草稿。
+    const ctx = context({
+      quoteBubble: async id => { try { await contacts.quotePreview('contact', id) } catch (error) { showContactError(error) } },
+    })
+    const view = render(
+      <ContactsContext.Provider value={ctx}>
+        <AssistantUiChat conversation={{ enabled: true, detail: detail(), streamingText: '' } as never} callbacks={{ onSubmit: () => {} }} />
+        <ContactQuoteDraft />
+      </ContactsContext.Provider>)
+    await waitFor(() => expect(view.container.querySelector('[data-bubble-id="run:response:2"]')).toBeTruthy())
+
+    // 收藏被拒：菜单仍是「收藏」，没有收藏事实，原始错误展示出来。
+    let section = openMenu(view.container, 'run:response:2')
+    fireEvent.click([...section.querySelectorAll('.fox-contact-bubble-menu > button')].find(node => node.textContent?.includes('收藏'))!)
+    await waitFor(() => expect(toasts).toContain(backfillMessage))
+    await act(async () => {})
+    expect(openMenu(view.container, 'run:response:2').textContent).toContain('收藏')
+    expect(openMenu(view.container, 'run:response:2').textContent).not.toContain('取消收藏')
+    expect(marks['run:response:2']).toBeUndefined()
+
+    // 标未读被拒：按钮不翻成「已标为未读」（不吞错冒充成功），原始错误展示出来。
+    const unreadButton = view.container.querySelector('.fox-thread-unread-button') as HTMLElement
+    fireEvent.click(unreadButton)
+    await act(async () => {})
+    await waitFor(() => expect(calls.some(call => call.command === 'companion_mark_unread')).toBe(true))
+    expect(unreadButton.classList.contains('is-marked')).toBe(false)
+    expect(unreadButton.getAttribute('aria-label')).toBe('标为未读')
+
+    // 引用被拒：不产生引用草稿，原始错误展示出来。
+    section = openMenu(view.container, 'run:response:2')
+    fireEvent.click(section.querySelector('.fox-contact-bubble-menu > button')!)
+    await waitFor(() => expect(calls.some(call => call.command === 'companion_quote_preview')).toBe(true))
+    await act(async () => {})
+    expect(view.container.querySelector('.fox-contact-quote-draft')).toBeNull()
+
+    // 三个操作各自展示了 Host 的原始句子，而不是被前端改成「成功」。
+    expect(toasts.filter(message => message === backfillMessage).length).toBe(3)
   })
 })

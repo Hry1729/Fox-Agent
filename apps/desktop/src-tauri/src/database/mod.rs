@@ -18,12 +18,18 @@ pub(crate) use repositories::{AcceptanceBinding, AcceptanceRow, AcceptanceWrite}
 pub(crate) use repositories::kernel_execution_admission;
 pub(crate) use repositories::permission_rules::{ConversationAccess, PermissionAuditRecord, PermissionRuleRecord};
 pub(crate) use repositories::companions;
-pub(crate) use repositories::companion_capabilities::{capability_id, ensure_granted_on, WEB_SERVER_ID, WEB_TOOLS};
+pub(crate) use repositories::companion_capabilities::{
+    capability_id, ensure_granted_on, invalidate_companion_capability_in_tx,
+    WEB_SERVER_ID, WEB_TOOLS,
+};
 pub(crate) use repositories::companion_files::{CompanionFile, CompanionFileEntry};
 pub(crate) use repositories::contact_marks::prompt_block as contact_quote_prompt_block;
 pub(crate) use repositories::companion_ownership::OWNERSHIP_MISSING;
 pub(crate) use repositories::RunBackendIdentity;
 pub(crate) use repositories::{EXECUTOR_ROUTE_RETIRED, EXECUTOR_ROUTE_RETIRED_MESSAGE, EXECUTOR_ROUTE_UNKNOWN};
+pub(crate) use repositories::ApprovalRefusal;
+#[cfg(test)]
+pub(crate) use repositories::approval_invalidation;
 pub(crate) use repositories::kernel_reconciliation::*;
 pub(crate) use repositories::{BudgetTier, ContinuableRun, ContinuationRequest, GrantRegistration, GrantScopeKind, GrantSkipReason};
 pub(crate) use repositories::{JobSnapshot, JobStartOutcome, JobStartRequest, JobState};

@@ -1,7 +1,8 @@
 use super::{projection_violation, run_control};
+use crate::canonical_json::CanonicalJson;
 use fox_engine_protocol::{ExecutionAuthority, ExecutorRoute};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum WriterRoute { Legacy, Kernel, PiNative }
@@ -106,6 +107,352 @@ fn waiting_approval(connection: &Connection, run_id: &str) -> rusqlite::Result<b
     Ok(waiting)
 }
 
+/// D1-1: a typed, Host-written execution refusal for one unclaimed approval.
+/// The code travels in the standard error receipt; the message is what both the
+/// user's card and the model read. Only the Host constructs this — never tool
+/// input.
+pub(crate) struct ApprovalRefusal {
+    pub code: String,
+    pub message: String,
+}
+
+impl ApprovalRefusal {
+    pub(crate) fn new(code: &str, message: impl Into<String>) -> Self {
+        Self { code: code.to_owned(), message: message.into() }
+    }
+}
+
+/// The single native error receipt every approval refusal settles to. It matches
+/// the Host's `failure()` + `refusal_receipt` contract (`isError`/`error`/
+/// `errorDetails`) so a live waiter, a detached recovery and the startup repair
+/// all answer with byte-identical facts and the immutable-receipt guard cannot
+/// see a re-wrapped second result.
+pub(crate) fn approval_refusal_receipt(refusal: &ApprovalRefusal) -> Value {
+    json!({
+        "isError": true,
+        "error": refusal.message,
+        "errorDetails": { "code": refusal.code, "retryable": false },
+    })
+}
+
+/// Read a persisted Host invalidation from an approval decision. The field is an
+/// irreversible execution barrier: it is validated at this unknown boundary
+/// (object with a non-empty code/message and a positive timestamp) so a corrupt
+/// or foreign value can never masquerade as one.
+pub(crate) fn approval_invalidation(decision: Option<&Value>) -> Option<(String, String)> {
+    let invalidation = decision?.get("invalidation")?;
+    let code = invalidation.get("code")?.as_str()?.trim();
+    let message = invalidation.get("message")?.as_str()?.trim();
+    let at = invalidation.get("at")?.as_i64()?;
+    if code.is_empty() || message.is_empty() || at <= 0 {
+        return None;
+    }
+    Some((code.to_owned(), message.to_owned()))
+}
+
+/// Merge the Host's invalidation into the user's original decision, preserving
+/// `approved`/`scope`/`category`/`resolved_at`. The first invalidation wins: a
+/// later generic reason can never overwrite a specific revocation, and a
+/// regrant never clears it.
+fn merge_approval_invalidation(decision: Option<Value>, refusal: &ApprovalRefusal, now: i64) -> Value {
+    let mut decision = decision.filter(Value::is_object).unwrap_or_else(|| json!({}));
+    if approval_invalidation(Some(&decision)).is_some() {
+        return decision;
+    }
+    decision["invalidation"] = json!({ "code": refusal.code, "message": refusal.message, "at": now });
+    decision
+}
+
+/// The outcome of one refusal settlement attempt, carrying the persisted receipt
+/// so a retry replays the original value instead of fabricating a second one.
+#[derive(Debug)]
+pub(crate) enum ApprovalRefusalSettlement {
+    /// This call consumed the approval, closed the Host intent and (for
+    /// PiNative) settled the native receipt in one transaction.
+    Settled(Value),
+    /// A previous settlement already committed the same barrier; the persisted
+    /// receipt is replayed verbatim.
+    AlreadySettled(Value),
+    /// Not an unclaimed, identity-verified refusal target (claimed, foreign
+    /// category/route, terminal, or unverifiable native intent). The caller
+    /// must still persist the invalidation barrier; nothing was written here.
+    NotEligible,
+}
+
+/// D1-2: register the irreversible invalidation on one unclaimed approval
+/// (pending or approved) without settling it. Idempotent — the first reason
+/// wins. The claim/resolve/startup/waiter gates perform the D1-1 settlement, so
+/// the setter never needs an immediate settlement to succeed to record the
+/// revocation. Returns whether this call wrote the barrier.
+pub(crate) fn register_approval_invalidation_in_tx(
+    transaction: &Transaction<'_>,
+    approval_id: &str,
+    refusal: &ApprovalRefusal,
+    now: i64,
+) -> rusqlite::Result<bool> {
+    // The outer Option is row existence; the inner is decision_json, which is
+    // legitimately NULL on a pending approval. A pending row must still receive
+    // the barrier (merged into an empty decision), so only a missing row exits.
+    let row: Option<Option<String>> = transaction.query_row(
+        "SELECT decision_json FROM approvals
+         WHERE id = ?1 AND status IN ('pending','approved') AND claimed_at IS NULL AND category = 'tool_execution'",
+        [approval_id], |row| row.get::<_, Option<String>>(0),
+    ).optional()?;
+    let Some(decision_json) = row else { return Ok(false); };
+    let decision = decision_json.and_then(|json| serde_json::from_str::<Value>(&json).ok());
+    if approval_invalidation(decision.as_ref()).is_some() {
+        return Ok(false);
+    }
+    let merged = merge_approval_invalidation(decision, refusal, now).canonical_string();
+    let changed = transaction.execute(
+        "UPDATE approvals SET decision_json = ?2
+         WHERE id = ?1 AND status IN ('pending','approved') AND claimed_at IS NULL AND category = 'tool_execution'",
+        params![approval_id, merged],
+    )?;
+    Ok(changed == 1)
+}
+
+/// D1-1: the unified, transaction-level refusal settlement shared by the
+/// approved-execution claim, the resolve barrier, the live waiter, the detached
+/// recovery and the startup pre-validation.
+///
+/// It re-verifies the frozen binding/route, the run/conversation ownership, the
+/// exact approval↔Host↔native association (tool, canonical input, category,
+/// decision/scope) and — for PiNative — the current session/generation and the
+/// native receipt's running/claimed/no-result/no-close-reason state. Only then
+/// does it consume the approval, close the Host intent and settle the native
+/// receipt with one standard error result, each write guarded by a CAS row
+/// count. Any mismatch rolls the whole transaction back; a retry replays the
+/// persisted receipt (`AlreadySettled`). A Legacy/Host-only record is settled by
+/// its own writer contract — no native record is fabricated for it, and the
+/// retired Kernel and the task-repair override keep their separate contracts.
+pub(crate) fn settle_unclaimed_approval_refusal_in_tx(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    approval_id: &str,
+    refusal: &ApprovalRefusal,
+    now: i64,
+) -> rusqlite::Result<ApprovalRefusalSettlement> {
+    // An unverifiable binding was already interrupted by the startup sweep; a
+    // retired Kernel Run keeps its own retirement. Neither is written here.
+    let Some(route) = sweep_writer_route(transaction, run_id)? else {
+        return Ok(ApprovalRefusalSettlement::NotEligible);
+    };
+    if route == WriterRoute::Kernel {
+        return Ok(ApprovalRefusalSettlement::NotEligible);
+    }
+
+    let row = transaction.query_row(
+        "SELECT a.status, a.category, a.decision_json, a.claimed_at,
+                t.runtime_tool_call_id, t.tool_name, t.input_json, t.conversation_id,
+                t.status, t.execution_location, t.requires_approval, t.result_json,
+                r.status, r.conversation_id, r.runtime_session_id
+         FROM approvals a
+         JOIN tool_calls t ON t.id = a.tool_call_id
+         JOIN runs r ON r.id = t.run_id
+         WHERE a.id = ?1 AND t.run_id = ?2",
+        params![approval_id, run_id],
+        |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, Option<i64>>(3)?,
+            row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_, String>(7)?,
+            row.get::<_, String>(8)?, row.get::<_, String>(9)?, row.get::<_, i64>(10)?, row.get::<_, Option<String>>(11)?,
+            row.get::<_, String>(12)?, row.get::<_, String>(13)?, row.get::<_, Option<String>>(14)?,
+        )),
+    ).optional()?;
+    let Some((approval_status, category, decision_json, approval_claimed,
+        call_id, tool_name, input_json, host_conversation, host_status, execution_location,
+        requires_approval, host_result, run_status, run_conversation, run_session)) = row
+    else { return Ok(ApprovalRefusalSettlement::NotEligible); };
+
+    if category != "tool_execution" || execution_location != "host" || requires_approval != 1
+        || host_conversation != run_conversation
+    {
+        return Ok(ApprovalRefusalSettlement::NotEligible);
+    }
+    let decision = decision_json.as_deref().and_then(|text| serde_json::from_str::<Value>(text).ok());
+    let persisted = approval_invalidation(decision.as_ref());
+    // The first persisted invalidation wins over any caller-supplied reason.
+    let effective = match &persisted {
+        Some((code, message)) => ApprovalRefusal { code: code.clone(), message: message.clone() },
+        None => ApprovalRefusal { code: refusal.code.clone(), message: refusal.message.clone() },
+    };
+    let host_input = serde_json::from_str::<Value>(&input_json).ok();
+
+    // The native receipt is a third execution fact for PiNative. Its committed
+    // identity (tool + claimed canonical input) must match the Host intent.
+    let native = if route == WriterRoute::PiNative {
+        let native = transaction.query_row(
+            "SELECT state, claimed_at, result_json, close_reason, tool, canonical_input_json, context_generation
+             FROM kernel_tool_calls WHERE run_id = ?1 AND tool_call_id = ?2",
+            params![run_id, call_id],
+            |row| Ok((
+                row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?, row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<String>>(5)?,
+                row.get::<_, i64>(6)?,
+            )),
+        ).optional()?;
+        let Some(native) = native else { return Ok(ApprovalRefusalSettlement::NotEligible); };
+        let native_input = native.5.as_deref().and_then(|text| serde_json::from_str::<Value>(text).ok());
+        if native.4 != tool_name || host_input.is_none() || native_input != host_input {
+            return Ok(ApprovalRefusalSettlement::NotEligible);
+        }
+        Some(native)
+    } else {
+        None
+    };
+
+    let host_pending = host_status == "pending";
+    let unclaimed = approval_claimed.is_none();
+
+    // Already settled by a previous refusal: replay the exact persisted receipt.
+    // The current session generation may have advanced since the commit, so the
+    // replay trusts the receipt's own committed identity, not a re-validation.
+    if !host_pending && host_status == "failed" && persisted.is_some()
+        && (approval_claimed.is_some() || approval_status == "expired")
+    {
+        let receipt = match route {
+            WriterRoute::PiNative => {
+                let native = native.as_ref().expect("PiNative native row verified above");
+                if native.0 != "failed" { return Ok(ApprovalRefusalSettlement::NotEligible); }
+                native.2.as_deref().and_then(|text| serde_json::from_str::<Value>(text).ok())
+            }
+            _ => host_result.as_deref().and_then(|text| serde_json::from_str::<Value>(text).ok()),
+        };
+        return match receipt {
+            Some(receipt) => Ok(ApprovalRefusalSettlement::AlreadySettled(receipt)),
+            None => Ok(ApprovalRefusalSettlement::NotEligible),
+        };
+    }
+
+    // A fresh settlement needs a still-pending Host intent, an unclaimed
+    // approval, a running Run and (for approved) the original decision intact.
+    if !host_pending || !unclaimed || run_status != "running"
+        || !matches!(approval_status.as_str(), "pending" | "approved")
+    {
+        return Ok(ApprovalRefusalSettlement::NotEligible);
+    }
+    if approval_status == "approved" {
+        let approved = decision.as_ref().and_then(|d| d.get("approved"))
+            .is_some_and(|value| value == &json!(true) || value == &json!(1));
+        let scope = decision.as_ref().and_then(|d| d.get("scope")).and_then(Value::as_str);
+        let decision_category = decision.as_ref().and_then(|d| d.get("category")).and_then(Value::as_str);
+        if !approved || !matches!(scope, Some("once") | Some("conversation")) || decision_category != Some("tool_execution") {
+            return Ok(ApprovalRefusalSettlement::NotEligible);
+        }
+    }
+    if route == WriterRoute::PiNative {
+        let native = native.as_ref().expect("PiNative native row verified above");
+        // This recovery stage's running/claimed receipt, no result, no close.
+        if native.0 != "running" || native.1.is_none() || native.2.is_some() || native.3.is_some() {
+            return Ok(ApprovalRefusalSettlement::NotEligible);
+        }
+        let session = transaction.query_row(
+            "SELECT runtime_session_id, context_generation, format_version FROM runtime_sessions
+             WHERE conversation_id = ?1 AND runtime_type = 'pi'",
+            [&run_conversation],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+        ).optional()?;
+        let Some((session_id, generation, format)) = session else {
+            return Ok(ApprovalRefusalSettlement::NotEligible);
+        };
+        if format < 2 || generation < 1 || native.6 != generation
+            || run_session.as_deref().is_some_and(|recorded| recorded != session_id)
+        {
+            return Ok(ApprovalRefusalSettlement::NotEligible);
+        }
+    }
+
+    let receipt = approval_refusal_receipt(&effective);
+    let receipt_json = receipt.canonical_string();
+    let merged_json = merge_approval_invalidation(decision, &effective, now).canonical_string();
+
+    // 1) Consume the approval. An approved decision keeps its status/scope and
+    //    resolved_at; a pending one expires (never becomes a user denial).
+    #[cfg(test)]
+    refusal_fault::checkpoint()?;
+    let approval_changed = if approval_status == "approved" {
+        transaction.execute(
+            "UPDATE approvals SET decision_json = ?2, claimed_at = ?3, claimed_by_run_id = ?4
+             WHERE id = ?1 AND status = 'approved' AND claimed_at IS NULL AND category = 'tool_execution'",
+            params![approval_id, merged_json, now, run_id],
+        )?
+    } else {
+        transaction.execute(
+            "UPDATE approvals SET status = 'expired', decision_json = ?2, resolved_at = ?3,
+                    claimed_at = ?3, claimed_by_run_id = ?4
+             WHERE id = ?1 AND status = 'pending' AND claimed_at IS NULL AND category = 'tool_execution'",
+            params![approval_id, merged_json, now, run_id],
+        )?
+    };
+    if approval_changed != 1 {
+        return Err(projection_violation("approval refusal settlement lost its unclaimed approval".into()));
+    }
+
+    // 2) Close the Host intent with the standard error result, preserving input.
+    #[cfg(test)]
+    refusal_fault::checkpoint()?;
+    let host_changed = transaction.execute(
+        "UPDATE tool_calls SET status = 'failed', error_message = ?3, result_json = ?4,
+                completed_at = ?5, updated_at = ?5, result_blob_sha256 = NULL
+         WHERE run_id = ?1 AND runtime_tool_call_id = ?2 AND execution_location = 'host'
+           AND status = 'pending' AND requires_approval = 1
+           AND EXISTS(SELECT 1 FROM runs WHERE runs.id = tool_calls.run_id AND runs.status = 'running')",
+        params![run_id, call_id, effective.message, receipt_json, now],
+    )?;
+    if host_changed != 1 {
+        return Err(projection_violation("approval refusal settlement lost its pending Host intent".into()));
+    }
+
+    // 3) Settle the native receipt with the SAME standard error result, keeping
+    //    the original native claim. Legacy/Host-only records have no native fact.
+    if route == WriterRoute::PiNative {
+        #[cfg(test)]
+        refusal_fault::checkpoint()?;
+        let native_changed = transaction.execute(
+            "UPDATE kernel_tool_calls SET state = 'failed', result_json = ?3, settled_at = ?4
+             WHERE run_id = ?1 AND tool_call_id = ?2 AND state = 'running'
+               AND claimed_at IS NOT NULL AND result_json IS NULL AND close_reason IS NULL",
+            params![run_id, call_id, receipt_json, now],
+        )?;
+        if native_changed != 1 {
+            return Err(projection_violation("approval refusal settlement lost its native execution claim".into()));
+        }
+    }
+
+    Ok(ApprovalRefusalSettlement::Settled(receipt))
+}
+
+/// Test-only fault injection for the refusal settlement's three write points.
+/// Arming write index N makes the Nth write fail so the test can prove the whole
+/// transaction rolls back (no half-settled approval/Host/native fact survives).
+#[cfg(test)]
+pub(crate) mod refusal_fault {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FAIL_AT: Cell<Option<usize>> = const { Cell::new(None) };
+        static WRITES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn arm(write_index: usize) {
+        FAIL_AT.with(|fail| fail.set(Some(write_index)));
+        WRITES.with(|writes| writes.set(0));
+    }
+
+    pub(crate) fn disarm() {
+        FAIL_AT.with(|fail| fail.set(None));
+        WRITES.with(|writes| writes.set(0));
+    }
+
+    pub(crate) fn checkpoint() -> rusqlite::Result<()> {
+        let next = WRITES.with(|writes| { let value = writes.get() + 1; writes.set(value); value });
+        if FAIL_AT.with(|fail| fail.get()) == Some(next) {
+            return Err(super::projection_violation("injected approval refusal settlement fault".into()));
+        }
+        Ok(())
+    }
+}
+
 impl super::Database {
     /// B1: settle one historical Kernel Run exactly like the startup
     /// retirement. Used when something tries to start or cancel a frozen Kernel
@@ -131,6 +478,119 @@ impl super::Database {
         self.with_connection(|connection| {
             if writer_route(connection,run_id)? != WriterRoute::PiNative { return Ok(false); }
             waiting_approval(connection,run_id)
+        })
+    }
+
+    /// D1-1: settle one approval refusal in its own Immediate transaction. The
+    /// live waiter, the resolve barrier and the revocation follow-up call this;
+    /// the startup repair uses the tx helper inside its larger transaction.
+    pub(crate) fn settle_approval_refusal(
+        &self,
+        run_id: &str,
+        approval_id: &str,
+        refusal: &ApprovalRefusal,
+    ) -> Result<ApprovalRefusalSettlement, String> {
+        self.with_connection(|connection| {
+            let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let outcome = settle_unclaimed_approval_refusal_in_tx(&transaction, run_id, approval_id, refusal, super::now_ms())?;
+            transaction.commit()?;
+            Ok(outcome)
+        })
+    }
+
+    /// The persisted invalidation message of one approval, if any. Read-only;
+    /// the live waiter uses it to detect the barrier before settling.
+    pub(crate) fn approval_invalidation_message(&self, approval_id: &str) -> Result<Option<String>, String> {
+        self.with_connection(|connection| {
+            let decision_json: Option<String> = connection.query_row(
+                "SELECT decision_json FROM approvals WHERE id = ?1", [approval_id], |row| row.get::<_, Option<String>>(0),
+            ).optional()?.flatten();
+            let decision = decision_json.as_deref().and_then(|text| serde_json::from_str::<Value>(text).ok());
+            Ok(approval_invalidation(decision.as_ref()).map(|(_, message)| message))
+        })
+    }
+
+    /// D1-5: the durable, atomic core of safely cancelling an UNOWNED PiNative
+    /// approval Run. The Host caller has already proven there is no live owner
+    /// (route, queued/reserved, worker session, leases, waiters, recovery
+    /// registration) and holds the same Run lease recovery uses; this method
+    /// re-reads the Run state inside one Immediate transaction and settles the
+    /// unexecuted intent without fabricating an execution result:
+    ///   * each unclaimed approved/pending tool-execution approval is settled
+    ///     through the same D1-1 refusal settlement (standard isError receipt,
+    ///     Host intent failed, native claim settled), with a user-stop reason. A
+    ///     more specific persisted revocation reason wins over the generic stop.
+    ///   * a pending approval becomes `cancelled` (user reason), never a timeout;
+    ///     an approved one keeps its original decision plus the stop/invalidation.
+    ///   * the Run is terminated `interrupted` with `runtime.user_cancelled` and
+    ///     the full existing projection (messages/trace/child/colleague/task/
+    ///     contact bubbles) in the SAME transaction.
+    /// Returns false (without rewriting anything) for a non-PiNative or already
+    /// terminal Run, so a second cancel is idempotent and a late cancel cannot
+    /// replace a real outcome. Any ineligible candidate rolls back the entire cancellation and returns an error.
+    pub(crate) fn cancel_unowned_native_approval_run(&self, run_id: &str) -> Result<bool, String> {
+        self.with_connection(|connection| {
+            let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if sweep_writer_route(&transaction, run_id)? != Some(WriterRoute::PiNative) {
+                return Ok(false);
+            }
+            let status: String = transaction.query_row(
+                "SELECT status FROM runs WHERE id = ?1", [run_id], |row| row.get(0),
+            )?;
+            if matches!(status.as_str(), "completed" | "failed" | "cancelled" | "interrupted") {
+                return Ok(false);
+            }
+            // D1-5 #4: a Host intent already `running` is an actual execution with
+            // an unknown outcome, not a provably unexecuted approval. Leave it to
+            // the existing reconciliation diagnostics instead of fabricating a
+            // failed/interrupted result.
+            let host_running: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tool_calls WHERE run_id = ?1 AND status = 'running' AND execution_location = 'host')",
+                [run_id], |row| row.get(0),
+            )?;
+            if host_running {
+                return Ok(false);
+            }
+            let now = super::now_ms();
+            let refusal = ApprovalRefusal::new("runtime.user_cancelled", "用户已停止本次操作，旧的批准不会恢复");
+            let approval_ids: Vec<String> = {
+                let mut query = transaction.prepare(
+                    "SELECT a.id FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id
+                     WHERE t.run_id = ?1 AND a.category = 'tool_execution'
+                       AND a.status IN ('pending','approved') AND a.claimed_at IS NULL
+                       AND t.status = 'pending' AND t.requires_approval = 1 AND t.execution_location = 'host'
+                     ORDER BY t.runtime_tool_call_id, a.id",
+                )?;
+                let ids = query.query_map([run_id], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                ids
+            };
+            for approval_id in &approval_ids {
+                match settle_unclaimed_approval_refusal_in_tx(&transaction, run_id, approval_id, &refusal, now)? {
+                    ApprovalRefusalSettlement::Settled(_) | ApprovalRefusalSettlement::AlreadySettled(_) => {}
+                    ApprovalRefusalSettlement::NotEligible => {
+                        transaction.rollback()?;
+                        return Err(projection_violation(
+                            "runtime.cancel_unverifiable_approval: 无法验证待处理批准的结算条件，本次停止未生效，已保留原运行和批准状态".into(),
+                        ));
+                    }
+                }
+            }
+            // The refusal settlement expires a pending approval; an explicit user
+            // stop must read as cancelled, not a timeout. Only the generic stop
+            // barrier is converted — a specific revocation reason is untouched.
+            transaction.execute(
+                "UPDATE approvals SET status = 'cancelled'
+                 WHERE status = 'expired'
+                   AND json_extract(decision_json, '$.invalidation.code') = 'runtime.user_cancelled'
+                   AND tool_call_id IN (SELECT id FROM tool_calls WHERE run_id = ?1)",
+                [run_id],
+            )?;
+            super::mark_run_interrupted_in_tx(
+                &transaction, run_id, "runtime.user_cancelled", "用户已停止本次操作", now,
+            )?;
+            transaction.commit()?;
+            Ok(true)
         })
     }
 }
@@ -186,6 +646,60 @@ fn retire_delivery_review_kernel_runs(transaction: &Transaction<'_>, now: i64) -
             "UPDATE runs SET finished_at=COALESCE(finished_at, ?2), error_code=?3, error_message=?4
              WHERE id=?1 AND status='interrupted'",
             params![run_id, now, run_control::EXECUTOR_ROUTE_RETIRED, run_control::EXECUTOR_ROUTE_RETIRED_MESSAGE])?;
+    }
+    Ok(())
+}
+
+/// D1-3: startup pre-validation, run BEFORE `protect_restart_owners`. For every
+/// unclaimed companion tool-execution approval on a still-running PiNative Run,
+/// settle the ones that are provably invalid — a persisted Host invalidation, or
+/// a failure of the strict original-snapshot grant gate — through the same D1-1
+/// settlement the claim/waiter use. A settled refusal no longer counts as a
+/// `waiting_approval` protection reason, so the Run is not kept alive for a dead
+/// approval. Valid approved/unclaimed intents keep their original identity and
+/// frozen facts and stay protected for native recovery; valid pending approvals
+/// stay decidable. This is DB-only: no MCP/sidecar/working-directory gate runs
+/// here, and a missing/corrupt companion snapshot is refused with a diagnosable
+/// reason rather than falling back to the current grants. Base-whitelist tools
+/// and non-companion Runs are untouched, and one invalid call never settles the
+/// other legitimate approvals on the same Run.
+pub(super) fn settle_invalid_restart_approvals(transaction: &Transaction<'_>, now: i64) -> rusqlite::Result<()> {
+    let mut query = transaction.prepare(
+        "SELECT a.id, t.run_id, t.tool_name, t.input_json, a.decision_json
+         FROM approvals a
+         JOIN tool_calls t ON t.id = a.tool_call_id
+         JOIN runs r ON r.id = t.run_id
+         WHERE a.category = 'tool_execution' AND a.status IN ('pending','approved') AND a.claimed_at IS NULL
+           AND t.status = 'pending' AND t.requires_approval = 1 AND t.execution_location = 'host'
+           AND r.status = 'running'
+           AND EXISTS (
+               SELECT 1 FROM conversations c WHERE c.id = t.conversation_id AND c.companion_id IS NOT NULL
+               UNION ALL
+               SELECT 1 FROM digital_colleagues dc WHERE dc.conversation_id = t.conversation_id AND dc.companion_bound = 1
+           )",
+    )?;
+    let rows = query.query_map([], |row| Ok((
+        row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+        row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?,
+    )))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(query);
+    for (approval_id, run_id, tool, input_json, decision_json) in rows {
+        if sweep_writer_route(transaction, &run_id)? != Some(WriterRoute::PiNative) { continue; }
+        // An archived/deleting companion (or a non-companion Run) is not this
+        // gate's job; the generic restart repair and recovery own those.
+        if !matches!(super::companion_ownership::resolve_run_on(transaction, &run_id), Ok(Some(_))) { continue; }
+        let decision = decision_json.as_deref().and_then(|text| serde_json::from_str::<Value>(text).ok());
+        let input = serde_json::from_str::<Value>(&input_json).ok();
+        let refusal = match approval_invalidation(decision.as_ref()) {
+            Some((code, message)) => Some(ApprovalRefusal::new(&code, message)),
+            None => match super::companion_capabilities::ensure_granted_strict_on(transaction, &run_id, &tool, input.as_ref()) {
+                Ok(()) => None,
+                Err(message) => Some(ApprovalRefusal::new("companion.tool_not_available", message)),
+            },
+        };
+        let Some(refusal) = refusal else { continue };
+        register_approval_invalidation_in_tx(transaction, &approval_id, &refusal, now)?;
+        let _ = settle_unclaimed_approval_refusal_in_tx(transaction, &run_id, &approval_id, &refusal, now)?;
     }
     Ok(())
 }

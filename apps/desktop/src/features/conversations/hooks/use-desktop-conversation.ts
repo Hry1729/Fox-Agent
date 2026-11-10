@@ -35,6 +35,7 @@ import {
   type ConversationRunIndicator,
   type ConversationRunOverlay,
 } from '@/features/chat/conversation-run-indicator'
+import { approvalInvalidation, withMonotonicInvalidation } from '@/features/conversations/model/approval-labels'
 import type {
   ConversationDetail,
   ChildRunNotification,
@@ -987,13 +988,22 @@ export function useDesktopConversation(): DesktopConversationState {
     return () => { disposed = true; window.removeEventListener(AGENT_BACKEND_PREFERENCES_EVENT, onChanged) }
   }, [ready, applyAgentBackendPreferences])
 
+  const seenApprovalsRef = useRef(new Map<string, ApprovalRecord>())
   useEffect(() => {
     if (!desktopRuntimeAvailable) return
     let disposed = false
     const stops: Array<() => void> = []
     const updateApproval = (approval: ApprovalRecord) => {
       if (disposed) return
-      setRunOverlay((current) => applyApprovalToOverlay(current, approval, Date.now()))
+      // D1-6: overlay and detail share ONE monotonic merge, so a late pending
+      // event without the barrier cannot re-raise the waiting indicator of an
+      // approval already seen invalidated, even in the registration→settlement
+      // window while its status is still pending.
+      const previous = seenApprovalsRef.current.get(approval.id)
+      const merged = previous ? withMonotonicInvalidation(previous, approval) : approval
+      seenApprovalsRef.current.set(approval.id, merged)
+      const overlayApproval = approvalInvalidation(merged.decision) ? { ...merged, status: 'expired' } : merged
+      setRunOverlay((current) => applyApprovalToOverlay(current, overlayApproval, Date.now()))
       setDetail((current) => {
         if (!current) return current
         const belongsToActiveConversation = approval.conversationId === activeConversationIdRef.current
@@ -1004,8 +1014,8 @@ export function useDesktopConversation(): DesktopConversationState {
         return {
           ...current,
           approvals: exists
-            ? current.approvals.map((item) => item.id === approval.id ? approval : item)
-            : [...current.approvals, approval],
+            ? current.approvals.map((item) => item.id === approval.id ? withMonotonicInvalidation(item, merged) : item)
+            : [...current.approvals, merged],
         }
       })
     }

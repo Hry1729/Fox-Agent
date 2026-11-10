@@ -1,5 +1,6 @@
 import type { ApprovalRecord, ConversationDetail, RunEventRecord } from './types'
 import { snapshotForRun } from './kernel-snapshot'
+import { approvalInvalidation } from './approval-labels'
 
 const terminalOwners = new Set(['completed', 'failed', 'cancelled', 'interrupted', 'budget_exhausted', 'approval_expired'])
 const terminalTools = new Set(['completed', 'failed', 'cancelled', 'interrupted', 'denied', 'expired'])
@@ -12,6 +13,7 @@ export function pendingRuntimeApprovals(detail: ConversationDetail | null): Appr
   if (detail.lastRun) runs.set(detail.lastRun.id, snapshotForRun(detail)?.state ?? detail.lastRun.status)
   const tools = new Map(detail.toolCalls.map(tool => [tool.id, tool]))
   return detail.approvals.filter(approval => approval.status === 'pending'
+    && approvalInvalidation(approval.decision) === null
     && !terminalOwners.has(runs.get(approval.runId) ?? '')
     && !terminalTools.has(tools.get(approval.toolCallId)?.status ?? ''))
 }

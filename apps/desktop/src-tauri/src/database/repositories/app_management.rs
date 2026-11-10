@@ -1373,12 +1373,27 @@ mod tests {
         let contact = database.seed_default_companion(&root).unwrap();
         let chat = contact.conversation_id.clone();
         let id = contact.profile.id.clone();
+        // C06/D2：真正首次创建已在事务内初始化回填完成标记与游标 0。
+        database.with_connection(|c| {
+            let completed: i64 = c.query_row(
+                "SELECT completed_at FROM contact_bubble_backfills WHERE conversation_id=?1",
+                [&chat],
+                |r| r.get(0),
+            )?;
+            assert!(completed > 0);
+            let cursor: Option<i64> = c.query_row(
+                "SELECT last_read_delivery_order FROM companion_profiles WHERE id=?1",
+                [&id],
+                |r| r.get(0),
+            )?;
+            assert_eq!(cursor, Some(0));
+            Ok(())
+        }).unwrap();
         database.with_connection(|c| {
             c.execute("INSERT INTO messages(id,conversation_id,role,kind,content,status,ordinal,created_at,updated_at)
                 VALUES ('m1',?1,'assistant','text','你好','completed',1,1,1)", [&chat])?;
             c.execute("INSERT INTO contact_bubbles(bubble_id,conversation_id,run_id,source_message_id,source_ordinal,author,projection,segment_start,segment_end,delivery_order,delivered_at,content,fingerprint,created_at)
                 VALUES ('b1',?1,NULL,'m1',1,'companion','message',NULL,NULL,1000,1,'你好','fp',1)", [&chat])?;
-            c.execute("INSERT INTO contact_bubble_backfills(conversation_id,completed_at) VALUES (?1,1)", [&chat])?;
             Ok(())
         }).unwrap();
         // follow_global keeps today's global behaviour: no new-message reminder.

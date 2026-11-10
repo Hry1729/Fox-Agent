@@ -1267,6 +1267,14 @@ pub fn mcp_server_set_enabled(
         Ok(Some(mut server)) => {
             crate::mcp::invalidate_connection(&server.id);
             server.credential_configured = crate::mcp::environment_configured(&server.id);
+            // D1-2: disabling a connector invalidates the matching companion
+            // approvals in the same transaction; refresh their cards best-effort.
+            if !request.enabled {
+                if let Ok(affected) = state.database.invalidated_companion_approvals_for_server(&server.id) {
+                    let ids: Vec<String> = affected.into_iter().map(|approval| approval.id).collect();
+                    state.runtime_host.refresh_invalidated_approvals(&ids);
+                }
+            }
             ApiResponse::success(server)
         }
         Ok(None) => ApiResponse::failure("mcp.not_found", "MCP Server 不存在", false),
@@ -1282,7 +1290,18 @@ pub fn mcp_server_delete(
     let _ = crate::mcp::clear_environment(&request.server_id);
     crate::mcp::invalidate_connection(&request.server_id);
     match state.database.delete_mcp_server(&request.server_id) {
-        Ok(deleted) => ApiResponse::success(deleted),
+        Ok(deleted) => {
+            // D1-2: the barrier was registered before the row disappeared; the
+            // approval inputs still carry the serverId, so the refresh can find
+            // them. Best-effort — the persistent facts are authoritative.
+            if deleted {
+                if let Ok(affected) = state.database.invalidated_companion_approvals_for_server(&request.server_id) {
+                    let ids: Vec<String> = affected.into_iter().map(|approval| approval.id).collect();
+                    state.runtime_host.refresh_invalidated_approvals(&ids);
+                }
+            }
+            ApiResponse::success(deleted)
+        }
         Err(error) => storage_error(error),
     }
 }
@@ -3453,7 +3472,9 @@ pub async fn run_cancel(
         Err(failure) => return Ok(failure),
     }
     // Frozen authority must be selected before touching Legacy read models.
-    match cancel_kernel_owned_run(&state.database, &request.run_id, || state.runtime_host.cancel_managed_run(&request.run_id)) {
+    // This is a user stop, not the archive sweep: an unowned restored PiNative
+    // approval Run must reach the lease-guarded `runtime.user_cancelled` cancel.
+    match cancel_kernel_owned_run(&state.database, &request.run_id, || state.runtime_host.cancel_managed_run_by_user(&request.run_id)) {
         Ok(Some(cancelled)) => return Ok(ApiResponse::success(cancelled)),
         Ok(None) => {},
         Err(error) => return Ok(ApiResponse::failure("runtime.cancel_failed", error, true)),
@@ -3502,7 +3523,7 @@ pub async fn run_cancel(
     }
 }
 
-fn cancel_kernel_owned_run(
+pub(crate) fn cancel_kernel_owned_run(
     database: &crate::database::Database,
     run_id: &str,
     cancel: impl FnOnce() -> Result<bool, String>,
@@ -3561,7 +3582,7 @@ pub fn child_run_cancel_by_user(
         Ok(None) => {}
         Err(error) => return storage_error(error),
     }
-    match state.runtime_host.cancel_managed_run(&request.child_run_id) {
+    match state.runtime_host.cancel_managed_run_by_user(&request.child_run_id) {
         Ok(cancelled) => ApiResponse::success(cancelled),
         Err(error) => ApiResponse::failure("child_run.cancel_failed", error, true),
     }
@@ -4559,7 +4580,7 @@ pub async fn goal_running_set(
         let _ = app.emit("fox://work-event", event);
     }
     if let Some(run_id) = active_run_id {
-        let kernel_cancelled = match cancel_kernel_owned_run(&state.database, &run_id, || state.runtime_host.cancel_managed_run(&run_id)) {
+        let kernel_cancelled = match cancel_kernel_owned_run(&state.database, &run_id, || state.runtime_host.cancel_managed_run_by_user(&run_id)) {
             Ok(result) => result.is_some(),
             Err(error) => return Ok(ApiResponse::failure("runtime.cancel_failed", error, true)),
         };

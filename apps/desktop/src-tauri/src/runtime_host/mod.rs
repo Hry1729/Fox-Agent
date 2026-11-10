@@ -73,7 +73,8 @@ use crate::kernel::CancellationPort;
 use crate::{
     app_state::AppState,
     database::{
-        AgentRecord, ApprovalDecision, ApprovalRecord, AttachmentRecord, ChildRunBudget,
+        AgentRecord, ApprovalDecision, ApprovalRecord, ApprovalRefusal,
+        AttachmentRecord, ChildRunBudget,
         ChildRunRecord, Database, EvaluationRunSummary, HostToolCallDisposition,
         KnowledgeReference, MemoryProposalInput, PreparedDigitalColleagueTrigger,
         SkillActivationRecord, StartRunResult, ToolCallRecord,
@@ -2394,9 +2395,6 @@ impl RuntimeHost {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let active = self.database.companion_active_run_ids(companion_id)?;
-            if active.is_empty() {
-                return Ok(());
-            }
             for run_id in &active {
                 // Ok(false) means no live owner in this process. A previous
                 // process leaves such a Run non-terminal on purpose: restart
@@ -2407,11 +2405,37 @@ impl RuntimeHost {
                     self.settle_unowned_companion_run(run_id)?;
                 }
             }
-            if Instant::now() >= deadline {
+            // D3: a DB-terminal Run still has its PiNative owner until
+            // `run_released` lands (after the terminal projection). Wait for the
+            // contact's own sessions to drop their run_id owner — never re-cancel,
+            // finish or bypass the close active guard. No state/DB/transition lock
+            // is held while waiting, so release processing can advance.
+            let owner_present = self.companion_session_owner_present(companion_id)?;
+            if active.is_empty() && !owner_present {
+                return Ok(());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 return Err("companion.stopping: 联系人的执行没有按时停止，请稍后重试".into());
             }
-            thread::sleep(Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(100).min(remaining));
         }
+    }
+
+    /// D3: whether any of this contact's sessions (fixed private chat + bound
+    /// background conversations) still holds a run_id owner. Reads the actual
+    /// `session.run_id`, not `occupied()`/`holds_companion()`: a background
+    /// approval can release the execution position yet keep the session owner.
+    fn companion_session_owner_present(&self, companion_id: &str) -> Result<bool, String> {
+        let conversations = self.database.companion_session_conversations(companion_id)?;
+        if conversations.is_empty() {
+            return Ok(false);
+        }
+        let state = self.state.lock().map_err(|_| "runtime state lock is poisoned".to_owned())?;
+        let Some(worker) = state.worker.as_ref() else { return Ok(false); };
+        Ok(conversations.iter().any(|conversation| {
+            worker.sessions.by_conversation(conversation).is_some_and(|session| session.run_id.is_some())
+        }))
     }
 
     fn settle_unowned_companion_run(&self, run_id: &str) -> Result<(), String> {
@@ -3354,7 +3378,22 @@ impl RuntimeHost {
         Ok(accepted)
     }
 
+    /// The archive/delete stop sweep's cancel: it settles an unowned Run itself
+    /// with `companion.stopping` (settle_unowned_companion_run), so it must not
+    /// inherit the user-stop `runtime.user_cancelled` settlement.
     pub(crate) fn cancel_managed_run(&self, run_id: &str) -> Result<bool, String> {
+        self.cancel_managed_run_inner(run_id, false)
+    }
+
+    /// A user stop (public `run_cancel`, goal pause, child cancel). Managed
+    /// children keep their dedicated child cancel; a provably unowned PiNative
+    /// approval Run reaches the same lease-guarded unowned cancel recovery uses
+    /// and settles as `runtime.user_cancelled`.
+    pub(crate) fn cancel_managed_run_by_user(&self, run_id: &str) -> Result<bool, String> {
+        self.cancel_managed_run_inner(run_id, true)
+    }
+
+    fn cancel_managed_run_inner(&self, run_id: &str, settle_unowned: bool) -> Result<bool, String> {
         let is_managed = self
             .child_hosts
             .lock()
@@ -3364,7 +3403,7 @@ impl RuntimeHost {
         if is_managed || is_child {
             self.cancel_child_runtime(run_id)
         } else {
-            self.cancel_run(run_id)
+            self.cancel_run_inner(run_id, settle_unowned)
         }
     }
 
@@ -3386,6 +3425,13 @@ impl RuntimeHost {
     }
 
     pub fn cancel_run(&self, run_id: &str) -> Result<bool, String> {
+        self.cancel_run_inner(run_id, true)
+    }
+
+    /// `settle_unowned` is true for a user stop: a provably unowned PiNative
+    /// approval Run is settled as `runtime.user_cancelled`. The archive stop
+    /// sweep passes false and settles orphans itself with `companion.stopping`.
+    fn cancel_run_inner(&self, run_id: &str, settle_unowned: bool) -> Result<bool, String> {
         if kernel_authority::is_retired_kernel(self.database.run_control_binding(run_id)?.as_ref()) {
             // B1: no Kernel loop owns this Run any more. Settle it like the
             // startup retirement; there is nothing left to signal.
@@ -3411,11 +3457,20 @@ impl RuntimeHost {
                 .state
                 .lock()
                 .map_err(|_| "runtime state lock is poisoned".to_owned())?;
-            let Some(worker) = state.worker.as_ref() else {
-                return Ok(false);
-            };
-            let Some(session) = worker.sessions.by_run(run_id) else { return Ok(false); };
-            (Some(session.conversation_id.clone()), Some(session.runtime_session_id.clone()))
+            let session = state.worker.as_ref().and_then(|worker| worker.sessions.by_run(run_id));
+            match session {
+                Some(session) => (Some(session.conversation_id.clone()), Some(session.runtime_session_id.clone())),
+                None => {
+                    // D1-5: no worker session owns this Run. A PiNative approval
+                    // Run left unowned (e.g. after a restart) is settled through
+                    // the narrow proven-unowned cancel, not a bare Ok(false).
+                    drop(state);
+                    if !settle_unowned {
+                        return Ok(false);
+                    }
+                    return self.cancel_unowned_native_approval_run(run_id);
+                }
+            }
         };
 
         self.state.lock().map_err(|_| "runtime state lock is poisoned")?
@@ -3430,6 +3485,59 @@ impl RuntimeHost {
         self.cancel_pending_approvals_for_run(run_id);
         let response = self.send_request(request, RESPONSE_TIMEOUT)?;
         Ok(response.r#type == "request_succeeded")
+    }
+
+    /// D1-5: safely close an UNOWNED PiNative approval Run from `cancel_run`'s
+    /// no-worker/no-session branch. The caller holds `run_transition`. This proves
+    /// there is no live owner (route, native lease, worker session, managed child
+    /// host, pending waiter, recovery registration), takes the SAME Run lease
+    /// recovery uses, and only then settles the unexecuted intent atomically via
+    /// the repository core (which re-reads the Run state after the lease). A lease
+    /// conflict or any owner signal returns false ("still owned / not cancellable
+    /// yet") — never a forced UPDATE, never deleting a lock file, never preempting
+    /// by timeout. A terminal Run returns false without rewriting its outcome.
+    fn cancel_unowned_native_approval_run(&self, run_id: &str) -> Result<bool, String> {
+        let binding = match self.database.run_control_binding(run_id)? {
+            Some(binding) => binding,
+            None => return Ok(false),
+        };
+        if !matches!(kernel_authority::resolve_run_route(Some(&binding)), kernel_authority::RunRoute::PiNative) {
+            return Ok(false);
+        }
+        {
+            let state = self.state.lock().map_err(|_| "runtime state lock is poisoned".to_owned())?;
+            if state.native_run_leases.contains_key(run_id) {
+                return Ok(false);
+            }
+            if state.pending_approvals.lock().map_err(|_| "approval map is poisoned".to_owned())?
+                .values().any(|pending| pending.run_id == run_id)
+            {
+                return Ok(false);
+            }
+            if state.worker.as_ref().is_some_and(|worker| worker.sessions.by_run(run_id).is_some()) {
+                return Ok(false);
+            }
+        }
+        if self.child_hosts.lock().map_err(|_| "managed runtime map is poisoned".to_owned())?.contains_key(run_id) {
+            return Ok(false);
+        }
+        let recovering = self.native_batches.recovering_approval_ids()?;
+        for approval_id in recovering {
+            if self.database.approval_run_id(&approval_id)?.as_deref() == Some(run_id) {
+                return Ok(false);
+            }
+        }
+        // The same Run lease recovery acquires. A conflict means another owner
+        // still holds it; report "not cancellable yet" rather than preempting.
+        let _run_lease = match kernel_run_lock::KernelRunLock::acquire(&self.sessions_dir, run_id) {
+            Ok(lease) => lease,
+            Err(_) => return Ok(false),
+        };
+        let cancelled = self.database.cancel_unowned_native_approval_run(run_id)?;
+        if cancelled {
+            self.native_batches.notify_changed();
+        }
+        Ok(cancelled)
     }
 
     /// A1: "always allow in this project". Saves an allow rule for the edited
@@ -3513,8 +3621,31 @@ impl RuntimeHost {
                 .worker.as_ref().ok_or("runtime worker is not running")?.stdin.clone();
             native_tool_batch::recover_native_approval(self, &stdin, approval_id)?;
         }
-        let _ = emit_approval_event(&self.app, &self.database, "fox://approval-resolved", &approval);
+        // D1-6: recovery above may have consumed/invalidated this approval; emit
+        // the re-read durable record so a stale pre-recovery `approved` cannot
+        // overwrite the irreversible reason on the client.
+        let latest = self.database.approval_record(approval_id).unwrap_or(approval);
+        let _ = emit_approval_event(&self.app, &self.database, "fox://approval-resolved", &latest);
         Ok(true)
+    }
+
+    /// D1-2: after a capability revocation or a server disable/delete commits,
+    /// settle the affected approvals' durable refusal and refresh their cards.
+    /// The persistent facts are authoritative; this notification is best-effort
+    /// and a failure here never revives an approval (the claim/resolve/startup/
+    /// waiter gates all re-check the barrier). The live waiter independently
+    /// observes the barrier within its poll interval and returns the specific
+    /// refusal, so we never send a denial on its channel.
+    pub fn refresh_invalidated_approvals(&self, approval_ids: &[String]) {
+        for approval_id in approval_ids {
+            let Ok(Some(run_id)) = self.database.approval_run_id(approval_id) else { continue };
+            let Some(message) = self.database.approval_invalidation_message(approval_id).ok().flatten() else { continue };
+            let refusal = ApprovalRefusal::new("companion.tool_not_available", message);
+            let _ = self.database.settle_approval_refusal(&run_id, approval_id, &refusal);
+            if let Ok(approval) = self.database.approval_record(approval_id) {
+                let _ = emit_approval_event(&self.app, &self.database, "fox://approval-resolved", &approval);
+            }
+        }
     }
 
     fn cancel_pending_approvals_for_run(&self, run_id: &str) {
@@ -7106,15 +7237,43 @@ fn receive_run_approval(
     if let Some(approved) = native_tool_batch::recovering_approval_decision(database, run_id, approval_id)? {
         return Ok(approved);
     }
+    // D1-2: a revocation registered while this waiter was parked is an execution
+    // refusal with its own reason, not a user denial. Check the persisted barrier
+    // before the first wait and on every timeout so the waiter never blocks
+    // forever on a sender that will never come. The durable receipt is settled
+    // first; the caller propagates the specific message (never "user denied").
+    if let Some(message) = invalidated_approval_message(database, run_id, approval_id)? {
+        return Err(message);
+    }
     loop {
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(approved) => return Ok(approved),
             Err(mpsc::RecvTimeoutError::Disconnected) => return Err("Approval request was interrupted".into()),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if native_tool_batch::cancelled_native_approval(database, run_id, approval_id)? { return Ok(false); }
+                if let Some(message) = invalidated_approval_message(database, run_id, approval_id)? {
+                    return Err(message);
+                }
             }
         }
     }
+}
+
+/// Settle a persisted approval invalidation (D1-1) and return its reason. The
+/// settlement is idempotent: a live waiter and a detached recovery that both
+/// observe the barrier replay the same committed receipt instead of dispatching
+/// twice. `None` when no barrier is recorded.
+pub(super) fn invalidated_approval_message(
+    database: &Database,
+    run_id: &str,
+    approval_id: &str,
+) -> Result<Option<String>, String> {
+    let Some(message) = database.approval_invalidation_message(approval_id)? else {
+        return Ok(None);
+    };
+    let refusal = ApprovalRefusal::new("companion.tool_not_available", message.clone());
+    let _ = database.settle_approval_refusal(run_id, approval_id, &refusal);
+    Ok(Some(database.approval_invalidation_message(approval_id)?.unwrap_or(message)))
 }
 
 #[cfg(test)]
@@ -7723,6 +7882,16 @@ fn finalize_host_tool_execution(
 ) -> Result<Value, String> {
     #[cfg(test)]
     native_crash_integration_tests::checkpoint("resource_returned", run_id, tool_call_id);
+    // D1-1/D1-4: if a native receipt is already committed for this exact call
+    // (a refusal settlement, or a prior execution whose duplicate delivery raced
+    // us here), replay it verbatim. Re-wrapping it into the settled envelope would
+    // change its bytes and trip the immutable-receipt guard in `record_result`,
+    // crashing the worker; the committed receipt is the single source of truth.
+    if let Some(receipt) =
+        native_tool_batch::committed_native_receipt(database, run_id, tool_call_id, tool, input)?
+    {
+        return Ok(receipt);
+    }
     match outcome {
         Ok(result) => {
             // A01/A02 (EX-v1): an executor may report a completed attempt that

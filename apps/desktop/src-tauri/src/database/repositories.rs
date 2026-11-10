@@ -66,6 +66,14 @@ pub(crate) use kernel_jobs::{JobSnapshot, JobStartOutcome, JobStartRequest, JobS
 mod run_control;
 pub(crate) use run_control::{EXECUTOR_ROUTE_RETIRED, EXECUTOR_ROUTE_RETIRED_MESSAGE, EXECUTOR_ROUTE_UNKNOWN};
 mod native_route;
+pub(crate) use native_route::{
+    approval_invalidation, register_approval_invalidation_in_tx,
+    settle_unclaimed_approval_refusal_in_tx, ApprovalRefusal, ApprovalRefusalSettlement,
+};
+#[cfg(test)]
+pub(crate) use native_route::approval_refusal_receipt;
+#[cfg(test)]
+pub(crate) use native_route::refusal_fault;
 #[cfg(test)]
 mod native_route_tests;
 #[cfg(test)]
@@ -1444,6 +1452,9 @@ impl Database {
             // Run is interrupted with a stable code and never continued.
             native_route::interrupt_unverifiable_runs(&transaction, now)?;
             let retired = native_route::retire_unrouted_kernel_runs(&transaction, now)?;
+            // D1-3: settle provably-invalid companion approvals before deciding
+            // which Runs to protect, so a dead approval cannot keep a Run alive.
+            native_route::settle_invalid_restart_approvals(&transaction, now)?;
             native_route::protect_restart_owners(&transaction, now, &retired)?;
             child_runs::reconcile_terminal_graph_children_in_transaction(&transaction, now)?;
             transaction.execute(
@@ -2903,6 +2914,13 @@ impl Database {
     /// lists, so its pending approval card loads in the contact's fixed report
     /// chat instead. The card keeps the original Run, tool_call and approval
     /// identities; answering it settles the original call.
+    ///
+    /// D1-6: besides pending approvals, also load the persistent invalidated
+    /// history (terminal records carrying a decision.invalidation barrier) for
+    /// the SAME bound report chats, so switching conversations or a hard restart
+    /// still shows the refusal card with its reason. These terminal records only
+    /// feed history — the pending-interaction queue excludes them. The LIKE is a
+    /// cheap candidate filter; the authoritative check is the parsed barrier.
     pub(crate) fn background_pending_approvals_for_report_chat(
         &self,
         report_conversation_id: &str,
@@ -2915,16 +2933,19 @@ impl Database {
                         a.claimed_by_run_id
                  FROM approvals a
                  JOIN tool_calls t ON t.id = a.tool_call_id
-                 WHERE a.status = 'pending'
-                   AND t.conversation_id IN (
+                 WHERE t.conversation_id IN (
                        SELECT dc.conversation_id FROM digital_colleagues dc
                        WHERE dc.report_conversation_id = ?1 AND dc.companion_bound = 1)
+                   AND (a.status = 'pending' OR a.decision_json LIKE '%\"invalidation\"%')
                  ORDER BY a.requested_at ASC, a.id ASC",
             )?;
             let records = statement
                 .query_map([report_conversation_id], map_approval)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|record| record.status == "pending" || approval_invalidation(record.decision.as_ref()).is_some())
                 .collect();
-            records
+            Ok(records)
         })
     }
 
@@ -4564,11 +4585,26 @@ impl Database {
     ) -> Result<Option<super::McpServerRecord>, String> {
         let now = now_ms();
         let changed = self.with_connection(|connection| {
-            connection.execute(
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let changed = transaction.execute(
                 "UPDATE mcp_servers SET enabled = ?2, status = CASE WHEN ?2 = 1 THEN 'unknown' ELSE 'disabled' END,
                          last_error = NULL, updated_at = ?3 WHERE id = ?1",
                 params![id, enabled, now],
-            )
+            )?;
+            // D1-2: disabling a connector changes the effective grant set, so the
+            // matching unclaimed companion approvals get the irreversible barrier
+            // in the SAME transaction. Re-enabling keeps the old invalidation — a
+            // regrant/re-enable can never revive an old approval. A transient
+            // network/health failure is NOT this path and never invalidates.
+            if changed > 0 && !enabled {
+                let refusal = ApprovalRefusal::new(
+                    "mcp.server_disabled",
+                    "连接器已停用，相关工具的本轮授权已失效；重新启用并重新授权后请重新发起，旧的批准不会恢复",
+                );
+                super::invalidate_companion_capability_in_tx(&transaction, None, id, None, &refusal, now)?;
+            }
+            transaction.commit()?;
+            Ok(changed)
         })?;
         if changed == 0 {
             return Ok(None);
@@ -4580,8 +4616,59 @@ impl Database {
         if id == crate::office::SERVER_ID {
             return Err("Office 文档为随 Fox 安装的连接器，可以停用。".to_owned());
         }
+        let now = now_ms();
         self.with_connection(|connection| {
-            Ok(connection.execute("DELETE FROM mcp_servers WHERE id = ?1", [id])? > 0)
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // D1-2: register the barrier before the row disappears. The grant's
+            // server_id has no delete cascade guarantee, so the invalidation — not
+            // the server row — is what keeps a later rebuild from reviving it.
+            let refusal = ApprovalRefusal::new(
+                "mcp.server_deleted",
+                "连接器已删除，相关工具的本轮授权已失效；重新安装并重新授权后请重新发起，旧的批准不会恢复",
+            );
+            super::invalidate_companion_capability_in_tx(&transaction, None, id, None, &refusal, now)?;
+            let deleted = transaction.execute("DELETE FROM mcp_servers WHERE id = ?1", [id])? > 0;
+            transaction.commit()?;
+            Ok(deleted)
+        })
+    }
+
+    /// D1-2/D1-6: companion-bound approvals that now carry a persisted Host
+    /// invalidation matching one server's capability prefix, for the Host to
+    /// re-emit after a server disable/delete (best-effort notification). Read-only;
+    /// the persistent facts, not this refresh, are authoritative.
+    pub fn invalidated_companion_approvals_for_server(
+        &self,
+        server_id: &str,
+    ) -> Result<Vec<super::ApprovalRecord>, String> {
+        let prefix = format!("mcp:{server_id}:");
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT a.id
+                 FROM approvals a
+                 JOIN tool_calls t ON t.id = a.tool_call_id
+                 WHERE a.category = 'tool_execution' AND t.execution_location = 'host'
+                   AND EXISTS (
+                       SELECT 1 FROM conversations c WHERE c.id = t.conversation_id AND c.companion_id IS NOT NULL
+                       UNION ALL
+                       SELECT 1 FROM digital_colleagues dc WHERE dc.conversation_id = t.conversation_id AND dc.companion_bound = 1
+                   )",
+            )?;
+            let ids = statement.query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(statement);
+            let mut records = Vec::new();
+            for id in ids {
+                let approval = query_approval(connection, &id)?;
+                let Some((_, _)) = approval_invalidation(approval.decision.as_ref()) else { continue };
+                let Ok(Some(required)) = companion_capabilities::required_capability_for(
+                    &approval.tool_name, Some(&approval.request),
+                ) else { continue };
+                if required.starts_with(&prefix) {
+                    records.push(approval);
+                }
+            }
+            Ok(records)
         })
     }
 
@@ -5265,6 +5352,21 @@ impl Database {
         let approval = self.with_connection(|connection| {
             let run_id: String = connection.query_row("SELECT run_id FROM tool_calls WHERE id=?1", [tool_call_id], |row| row.get(0))?;
             require_legacy_run_writer(connection, &run_id)?;
+            // D1-2: a fresh tool-execution approval must still pass the current
+            // grant/frozen-snapshot gate. The task-repair override keeps its own
+            // specialized contract and is not a companion capability.
+            if category == TOOL_EXECUTION_APPROVAL_CATEGORY {
+                let tool: Option<(String, String)> = connection.query_row(
+                    "SELECT tool_name, input_json FROM tool_calls WHERE id=?1",
+                    [tool_call_id], |row| Ok((row.get(0)?, row.get(1)?)),
+                ).optional()?;
+                if let Some((tool_name, input_json)) = tool {
+                    let input = serde_json::from_str::<Value>(&input_json).unwrap_or_default();
+                    super::ensure_granted_on(connection, &run_id, &tool_name, Some(&input)).map_err(|error| {
+                        rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR), Some(error))
+                    })?;
+                }
+            }
             connection.execute(
                 "INSERT INTO approvals(
                     id, tool_call_id, status, requested_action, request_json, requested_at,
@@ -5302,6 +5404,11 @@ impl Database {
                 "approval for ToolCall '{tool_call_id}' conflicts with immutable category '{}'; requested '{category}'",
                 approval.category
             ));
+        }
+        // D1-2: never reuse an invalidated original record. A regrant can revive
+        // the grant but not this approval; the caller must raise a fresh request.
+        if let Some((_, message)) = approval_invalidation(approval.decision.as_ref()) {
+            return Err(format!("此批准已失效，旧的批准不会恢复：{message}"));
         }
         Ok(approval)
     }
@@ -5369,6 +5476,32 @@ impl Database {
         }
         self.with_connection(|connection| {
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // D1-2: a pending approval carrying a persisted Host invalidation can
+            // never be granted again. Settle the refusal with its original reason
+            // in this same transaction instead of letting an Allow — or a late
+            // Deny — overwrite the barrier. The refusal is not a user denial and
+            // must not be recorded as one.
+            let barrier_json: Option<String> = transaction
+                .query_row(
+                    "SELECT decision_json FROM approvals WHERE id = ?1 AND status = 'pending'",
+                    [approval_id], |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten();
+            let barrier = approval_invalidation(
+                barrier_json.as_deref().and_then(|text| serde_json::from_str::<Value>(text).ok()).as_ref(),
+            );
+            if let Some((code, message)) = barrier {
+                let refusal = ApprovalRefusal::new(&code, &message);
+                settle_unclaimed_approval_refusal_in_tx(
+                    &transaction, &existing.run_id, approval_id, &refusal, now_ms(),
+                )?;
+                transaction.commit()?;
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                    Some(message),
+                ));
+            }
             // Legacy denial only removes authority and must stay available when
             // its binding is damaged. Every grant and authoritative owner still
             // goes through the complete frozen-identity check.
@@ -5505,11 +5638,17 @@ impl Database {
             let Some(approval_id) = approval_id else {
                 return Ok(false);
             };
-            // K4: an approval given before a revocation must not execute. Every
-            // approved execution — live approval or restart recovery — claims
-            // through here, so the companion's current grants and the run's
-            // frozen snapshot are re-checked at this exact point. A revoked
-            // call fails with its reason on the card instead of running.
+            // K4 / D1-2: an approval given before a revocation must not execute.
+            // Every approved execution — live approval or restart recovery —
+            // claims through here. The persisted Host invalidation barrier wins
+            // over the current grants, so a regrant between the revocation and
+            // this claim can never revive the old approval; only a fresh call
+            // with a new approval can. A revoked call fails with its reason on
+            // the card instead of running.
+            let decision_json: Option<String> = transaction
+                .query_row("SELECT decision_json FROM approvals WHERE id = ?1", [&approval_id], |row| row.get::<_, Option<String>>(0))?;
+            let decision = decision_json.as_deref().and_then(|text| serde_json::from_str::<Value>(text).ok());
+            let barrier = approval_invalidation(decision.as_ref());
             let call: Option<(String, String)> = transaction
                 .query_row(
                     "SELECT tool_name, input_json FROM tool_calls
@@ -5518,35 +5657,36 @@ impl Database {
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
-            if let Some((tool, input_json)) = call {
-                let input: serde_json::Value = serde_json::from_str(&input_json).unwrap_or_default();
-                if let Err(error) = super::ensure_granted_on(&transaction, run_id, &tool, Some(&input)) {
-                    let tool_failed = transaction.execute(
-                        "UPDATE tool_calls
-                         SET status = 'failed', error_message = ?3,
-                             completed_at = ?4, updated_at = ?4
-                         WHERE run_id = ?1 AND runtime_tool_call_id = ?2
-                           AND execution_location = 'host' AND status = 'pending'",
-                        params![run_id, runtime_tool_call_id, error, now],
-                    )?;
-                    let approval_claimed = transaction.execute(
-                        "UPDATE approvals
-                         SET claimed_at = ?2, claimed_by_run_id = ?3
-                         WHERE id = ?1 AND status = 'approved' AND claimed_at IS NULL
-                           AND category = 'tool_execution'",
-                        params![approval_id, now, run_id],
-                    )?;
-                    if tool_failed != 1 || approval_claimed != 1 {
-                        return Err(projection_violation(
-                            "revoked companion grant lost its terminal CAS".to_owned(),
-                        ));
-                    }
-                    transaction.commit()?;
-                    return Err(rusqlite::Error::SqliteFailure(
-                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
-                        Some(error),
-                    ));
+            let refusal = match barrier {
+                Some((code, message)) => Some(ApprovalRefusal::new(&code, message)),
+                None => call.and_then(|(tool, input_json)| {
+                    let input: serde_json::Value = serde_json::from_str(&input_json).unwrap_or_default();
+                    super::ensure_granted_on(&transaction, run_id, &tool, Some(&input))
+                        .err()
+                        .map(|error| ApprovalRefusal::new("companion.tool_not_available", error))
+                }),
+            };
+            if let Some(refusal) = refusal {
+                let message = refusal.message.clone();
+                let outcome = settle_unclaimed_approval_refusal_in_tx(
+                    &transaction, run_id, &approval_id, &refusal, now,
+                )?;
+                // NotEligible means the intent's identity can no longer be
+                // verified (e.g. the native session generation moved past the
+                // receipt). Keep the durable barrier and refuse execution, but
+                // commit no terminal facts: failing the Host call or claiming
+                // the approval without the matching native receipt would
+                // strand it forever — recovery requires an unclaimed approval
+                // and a pending Host intent. Cleanup of an identity anomaly
+                // needs its own reconciliation contract, not a partial settle.
+                if matches!(outcome, ApprovalRefusalSettlement::NotEligible) {
+                    register_approval_invalidation_in_tx(&transaction, &approval_id, &refusal, now)?;
                 }
+                transaction.commit()?;
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                    Some(message),
+                ));
             }
             if let Err(error) = validate_managed_tool_acquisition(&transaction, run_id, now, false)
             {
@@ -7104,84 +7244,7 @@ impl Database {
         let now = now_ms();
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
-            require_legacy_run_writer(&transaction, run_id)?;
-            let (status, existing_code, existing_message): (
-                String,
-                Option<String>,
-                Option<String>,
-            ) = transaction.query_row(
-                "SELECT status, error_code, error_message FROM runs WHERE id = ?1",
-                [run_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?;
-            if status == "interrupted"
-                && existing_code.as_deref() == Some(code)
-                && existing_message.as_deref() == Some(message)
-            {
-                transaction.commit()?;
-                return Ok(());
-            }
-            if matches!(
-                status.as_str(),
-                "completed" | "failed" | "cancelled" | "interrupted"
-            ) {
-                return Err(projection_violation(format!(
-                    "late Host interruption cannot replace terminal Run '{run_id}' outcome '{status}'"
-                )));
-            }
-            let changed = transaction.execute(
-                "UPDATE runs SET status = 'interrupted', finished_at = ?2,
-                                 error_code = ?3, error_message = ?4
-                 WHERE id = ?1 AND status IN ('queued', 'running', 'cancelling')",
-                params![run_id, now, code, message],
-            )?;
-            if changed != 1 {
-                return Err(projection_violation(format!(
-                    "Run '{run_id}' is not eligible for Host interruption transition"
-                )));
-            }
-            transaction.execute(
-                "UPDATE messages SET status = 'interrupted', updated_at = ?2
-                 WHERE run_id = ?1 AND status = 'streaming'",
-                params![run_id, now],
-            )?;
-            transaction.execute(
-                "UPDATE tool_calls
-                 SET status = 'interrupted', error_message = ?2, completed_at = ?3, updated_at = ?3
-                 WHERE run_id = ?1 AND status IN ('pending', 'running')",
-                params![run_id, message, now],
-            )?;
-            end_pending_approvals_for_interrupted_run(&transaction, run_id, Some(code), now)?;
-            observability::close_run_trace_in_transaction(
-                &transaction,
-                run_id,
-                now,
-                "error",
-                Some(code),
-                Some(message),
-            )?;
-            child_runs::project_child_run_event(
-                &transaction,
-                run_id,
-                "run.interrupted",
-                &json!({ "type": "run.interrupted", "code": code, "message": message }),
-                now,
-            )?;
-            digital_colleagues::project_digital_colleague_event(
-                &transaction,
-                run_id,
-                "run.interrupted",
-                &json!({ "type": "run.interrupted", "code": code, "message": message }),
-                now,
-            )?;
-            interrupt_tasks_owned_by_run(
-                &transaction,
-                run_id,
-                &now.to_string(),
-                "failed",
-                message,
-            )?;
-            contact_bubbles::project_run_in_transaction(&transaction, run_id)?;
+            mark_run_interrupted_in_tx(&transaction, run_id, code, message, now)?;
             transaction.commit()?;
             Ok(())
         })
@@ -8372,8 +8435,76 @@ pub(crate) fn approval_cancel_reason_for_interruption(code: Option<&str>) -> Opt
     match code? {
         "agent_backend_session_closed" => Some("conversation_closed"),
         "agent_backend_host_restarted" | "runtime.application_exit" => Some("app_restarted"),
+        // D1-5: an explicit user stop of an unowned native approval Run cancels
+        // its pending approvals with a user reason, never a timeout/expiry.
+        "runtime.user_cancelled" => Some("user_cancelled"),
         _ => None,
     }
+}
+
+/// D1-5: the transaction-level body of [`Database::mark_run_interrupted`], so a
+/// native refusal settlement and the Run terminal projection can commit in ONE
+/// transaction. The caller owns the transaction and commits.
+fn mark_run_interrupted_in_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    run_id: &str,
+    code: &str,
+    message: &str,
+    now: i64,
+) -> rusqlite::Result<()> {
+    require_legacy_run_writer(transaction, run_id)?;
+    let (status, existing_code, existing_message): (String, Option<String>, Option<String>) =
+        transaction.query_row(
+            "SELECT status, error_code, error_message FROM runs WHERE id = ?1",
+            [run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+    if status == "interrupted"
+        && existing_code.as_deref() == Some(code)
+        && existing_message.as_deref() == Some(message)
+    {
+        return Ok(());
+    }
+    if matches!(status.as_str(), "completed" | "failed" | "cancelled" | "interrupted") {
+        return Err(projection_violation(format!(
+            "late Host interruption cannot replace terminal Run '{run_id}' outcome '{status}'"
+        )));
+    }
+    let changed = transaction.execute(
+        "UPDATE runs SET status = 'interrupted', finished_at = ?2,
+                         error_code = ?3, error_message = ?4
+         WHERE id = ?1 AND status IN ('queued', 'running', 'cancelling')",
+        params![run_id, now, code, message],
+    )?;
+    if changed != 1 {
+        return Err(projection_violation(format!(
+            "Run '{run_id}' is not eligible for Host interruption transition"
+        )));
+    }
+    transaction.execute(
+        "UPDATE messages SET status = 'interrupted', updated_at = ?2
+         WHERE run_id = ?1 AND status = 'streaming'",
+        params![run_id, now],
+    )?;
+    transaction.execute(
+        "UPDATE tool_calls
+         SET status = 'interrupted', error_message = ?2, completed_at = ?3, updated_at = ?3
+         WHERE run_id = ?1 AND status IN ('pending', 'running')",
+        params![run_id, message, now],
+    )?;
+    end_pending_approvals_for_interrupted_run(transaction, run_id, Some(code), now)?;
+    observability::close_run_trace_in_transaction(transaction, run_id, now, "error", Some(code), Some(message))?;
+    child_runs::project_child_run_event(
+        transaction, run_id, "run.interrupted",
+        &json!({ "type": "run.interrupted", "code": code, "message": message }), now,
+    )?;
+    digital_colleagues::project_digital_colleague_event(
+        transaction, run_id, "run.interrupted",
+        &json!({ "type": "run.interrupted", "code": code, "message": message }), now,
+    )?;
+    interrupt_tasks_owned_by_run(transaction, run_id, &now.to_string(), "failed", message)?;
+    contact_bubbles::project_run_in_transaction(transaction, run_id)?;
+    Ok(())
 }
 
 fn end_pending_approvals_for_interrupted_run(

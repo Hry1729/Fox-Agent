@@ -339,4 +339,21 @@ impl Database {
             active_run_ids_on(connection, companion_id).map_err(rusqlite::Error::InvalidParameterName)
         })
     }
+
+    /// D3: every conversation whose in-memory session owner the archive drain
+    /// must wait for — the contact's fixed private chat plus all of its bound
+    /// background execution conversations. Other contacts' sessions are excluded
+    /// so a still-running colleague does not block this archive.
+    pub(crate) fn companion_session_conversations(&self, companion_id: &str) -> Result<Vec<String>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id FROM conversations WHERE companion_id = ?1
+                 UNION
+                 SELECT conversation_id FROM digital_colleagues
+                 WHERE companion_id = ?1 AND companion_bound = 1",
+            )?;
+            let rows = statement.query_map([companion_id], |row| row.get::<_, String>(0))?;
+            rows.collect()
+        })
+    }
 }
