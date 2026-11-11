@@ -392,7 +392,7 @@ mod missing_agent_row_tests {
         db.bind_conversation_expert(&bound.id, "fox-reviewer", "test").unwrap();
         drop(db);
         let db = startup_open(&root).unwrap();
-        assert_eq!(db.current_conversation_expert_binding(&bound.id).unwrap().unwrap().expert_id, "fox-reviewer");
+        assert_eq!(db.current_conversation_expert_binding(&bound.id).unwrap().unwrap().expert_id.as_deref(), Some("fox-reviewer"));
         drop(db);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -419,8 +419,8 @@ mod missing_agent_row_tests {
             1
         );
         assert_eq!(
-            db.current_conversation_expert_binding(&conversation.id).unwrap().unwrap().expert_id,
-            "fox-reviewer",
+            db.current_conversation_expert_binding(&conversation.id).unwrap().unwrap().expert_id.as_deref(),
+            Some("fox-reviewer"),
             "a binding to a re-seeded expert stays active"
         );
         assert_eq!(agent_fk_violations(&db), 0);

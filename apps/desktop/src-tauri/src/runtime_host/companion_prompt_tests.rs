@@ -147,8 +147,8 @@ fn companion_template_adoption_and_installed_skills_reach_the_composed_runtime_p
     check_stage(&db, &root, chat, "before-adoption", "v1", &SKILLS[..2]);
     db.set_agent_skill_enabled(EXPERT, SKILLS[1], false)
         .unwrap();
-    check_stage(&db, &root, chat, "disable-s2", "v1", &SKILLS[..1]);
-    assert!(!conversation_enabled_skill_ids(&db, chat)
+    check_stage(&db, &root, chat, "disable-s2-source-stays-frozen", "v1", &SKILLS[..2]);
+    assert!(conversation_enabled_skill_ids(&db, &root.join("skills"), chat)
         .unwrap()
         .contains(&SKILLS[1].to_owned()));
     let status = db.companion_template_status(id).unwrap();

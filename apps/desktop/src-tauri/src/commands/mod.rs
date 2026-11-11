@@ -1044,11 +1044,6 @@ pub fn agent_copy(
 
 #[tauri::command]
 pub fn agent_delete(state: State<'_, AppState>, request: AgentIdRequest) -> ApiResponse<bool> {
-    match state.database.companion_name_for_template(&request.agent_id) {
-        Ok(Some(name)) => return ApiResponse::failure("companion.template_in_use", format!("请先删除联系人「{name}」。"), false),
-        Ok(None) => {}
-        Err(error) => return storage_error(error),
-    }
     state
         .database
         .delete_agent(&request.agent_id)

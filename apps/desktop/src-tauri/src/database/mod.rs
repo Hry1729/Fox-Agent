@@ -13,7 +13,8 @@ mod migration_copy_tests;
 /// v111 adds the background ownership chain and the task report ledger (C03b/K2).
 /// v112 adds contact reminder preferences and bubble-level read/unread state (C06/K6).
 /// v113 adds message quotes and the user's own bubble marks (C07).
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 113;
+/// v114 makes companion source experts optional and freezes binding skills.
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 114;
 pub(crate) use repositories::{AcceptanceBinding, AcceptanceRow, AcceptanceWrite};
 pub(crate) use repositories::kernel_execution_admission;
 pub(crate) use repositories::permission_rules::{ConversationAccess, PermissionAuditRecord, PermissionRuleRecord};

@@ -206,7 +206,7 @@ pub(crate) fn start_team(
     database.start_expert_team(&StartExpertTeamInput {
         conversation_id: conversation_id.to_owned(),
         expert_binding_id: binding.id,
-        expert_id: binding.expert_id,
+        expert_id: binding.expert_id.ok_or_else(|| "team.expert_source_missing".to_owned())?,
         package_hash: binding.package_hash,
         team_id: team.id.clone(),
         team_version: team.version.clone(),

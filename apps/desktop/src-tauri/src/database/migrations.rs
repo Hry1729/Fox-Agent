@@ -7071,6 +7071,8 @@ enum MigrationTarget {
     V105,
     #[cfg(test)]
     V106,
+    #[cfg(test)]
+    V113,
 }
 
 fn run_with_target(connection: &mut Connection, now: i64, target: MigrationTarget) -> Result<()> {
@@ -7587,6 +7589,26 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     // Additive and empty on upgrade: no history gains a quote, a favorite or a
     // reaction the user never chose.
     apply_migration(&transaction, CONTACT_MESSAGE_MARKS_SCHEMA_VERSION, MIGRATION_113_CONTACT_MESSAGE_MARKS, now)?;
+    #[cfg(test)]
+    if matches!(_target, MigrationTarget::V113) {
+        return finish_transaction(transaction);
+    }
+    // v114: companions keep their copied identity when a source expert disappears.
+    let companion_identity_pending = !transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
+        [COMPANION_IDENTITY_SCHEMA_VERSION],
+        |row| row.get::<_, bool>(0),
+    )?;
+    // Other tables' triggers refer to these identities during the table rebuild.
+    let legacy_alter_table = transaction.pragma_query_value(None, "legacy_alter_table", |row| row.get::<_, bool>(0))?;
+    transaction.pragma_update(None, "legacy_alter_table", true)?;
+    let identity_result = apply_migration(&transaction, COMPANION_IDENTITY_SCHEMA_VERSION, MIGRATION_114_COMPANION_IDENTITY, now);
+    let restore_result = transaction.pragma_update(None, "legacy_alter_table", legacy_alter_table);
+    identity_result?;
+    restore_result?;
+    if companion_identity_pending {
+        materialize_companion_binding_skills(&transaction)?;
+    }
     super::repositories::companions::convert_pending_read_cursors(&transaction)?;
     finish_transaction(transaction)
 }
@@ -9155,7 +9177,7 @@ mod stage_two_runtime_session_migration_tests {
         // 99 only adds the retired-generation ledger; the v98 mapping itself is
         // unchanged. This test still pins the mapping's version and the
         // database's current version, so a version bump is never silent.
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::CONTACT_MESSAGE_MARKS_SCHEMA_VERSION);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::COMPANION_IDENTITY_SCHEMA_VERSION);
 
         let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
         let columns: Vec<String> = database
@@ -9204,7 +9226,7 @@ mod runtime_session_generation_migration_tests {
             assert!(!upper.contains(forbidden), "the migration must not contain {forbidden}");
         }
         assert_eq!(RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION, 99);
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::CONTACT_MESSAGE_MARKS_SCHEMA_VERSION);
+        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::COMPANION_IDENTITY_SCHEMA_VERSION);
     }
 
     /// A v98 database keeps its single live mapping at generation 1 and gains an
@@ -16868,7 +16890,7 @@ mod delivery_acceptance_migration_tests {
         assert_eq!(COMPANION_BACKGROUND_SCHEMA_VERSION, 111);
         assert_eq!(COMPANION_REMINDERS_SCHEMA_VERSION, 112);
         assert_eq!(CONTACT_MESSAGE_MARKS_SCHEMA_VERSION, 113);
-        assert_eq!(DATABASE_SCHEMA_VERSION, CONTACT_MESSAGE_MARKS_SCHEMA_VERSION);
+        assert_eq!(DATABASE_SCHEMA_VERSION, COMPANION_IDENTITY_SCHEMA_VERSION);
 
         // The old rows are untouched.
         let title: String = connection
@@ -17328,3 +17350,153 @@ CREATE TABLE contact_bubble_marks (
 CREATE INDEX idx_contact_bubble_marks_favorites
     ON contact_bubble_marks(conversation_id, favorited_at DESC);
 "#;
+
+pub(crate) const COMPANION_IDENTITY_SCHEMA_VERSION: i64 = 114;
+const _: () = assert!(DATABASE_SCHEMA_VERSION >= COMPANION_IDENTITY_SCHEMA_VERSION);
+
+const MIGRATION_114_COMPANION_IDENTITY: &str = r#"
+CREATE TABLE companion_profiles_v114 (
+    id TEXT PRIMARY KEY CHECK (substr(id, 1, 4) = 'cmp_' AND length(id) > 4),
+    template_agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+    display_name TEXT NOT NULL CHECK (length(trim(display_name)) BETWEEN 1 AND 40),
+    avatar_ref TEXT NOT NULL DEFAULT '',
+    duty TEXT NOT NULL DEFAULT '',
+    persona_override TEXT,
+    workspace_dir TEXT NOT NULL,
+    notes_dir TEXT NOT NULL,
+    workspace_state TEXT NOT NULL DEFAULT 'pending'
+        CHECK (workspace_state IN ('pending', 'ready', 'failed', 'missing')),
+    workspace_error TEXT,
+    is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+    pinned_at INTEGER,
+    last_read_ordinal INTEGER NOT NULL DEFAULT 0 CHECK (last_read_ordinal >= 0),
+    template_notice_dismissed_hash TEXT,
+    model_provider_id TEXT,
+    model_ref TEXT,
+    reminder_mode TEXT NOT NULL DEFAULT 'follow_global'
+        CHECK (reminder_mode IN ('follow_global', 'all', 'action_only', 'muted')),
+    last_read_delivery_order INTEGER CHECK (last_read_delivery_order IS NULL OR last_read_delivery_order >= 0),
+    manual_unread_from_order INTEGER CHECK (manual_unread_from_order IS NULL OR manual_unread_from_order >= 0),
+    manual_unread_at INTEGER,
+    archived_at INTEGER,
+    deleting_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+INSERT INTO companion_profiles_v114(
+    id, template_agent_id, display_name, avatar_ref, duty, persona_override,
+    workspace_dir, notes_dir, workspace_state, workspace_error, is_default, pinned_at,
+    last_read_ordinal, template_notice_dismissed_hash, model_provider_id, model_ref,
+    reminder_mode, last_read_delivery_order, manual_unread_from_order, manual_unread_at,
+    archived_at, deleting_at, created_at, updated_at
+)
+SELECT id, template_agent_id, display_name, avatar_ref, duty, persona_override,
+    workspace_dir, notes_dir, workspace_state, workspace_error, is_default, pinned_at,
+    last_read_ordinal, template_notice_dismissed_hash, model_provider_id, model_ref,
+    reminder_mode, last_read_delivery_order, manual_unread_from_order, manual_unread_at,
+    archived_at, deleting_at, created_at, updated_at
+FROM companion_profiles;
+DROP TABLE companion_profiles;
+ALTER TABLE companion_profiles_v114 RENAME TO companion_profiles;
+CREATE UNIQUE INDEX idx_companion_profiles_active_name
+    ON companion_profiles(lower(trim(display_name)))
+    WHERE archived_at IS NULL AND deleting_at IS NULL;
+CREATE UNIQUE INDEX idx_companion_profiles_single_default
+    ON companion_profiles(is_default) WHERE is_default = 1;
+CREATE INDEX idx_companion_profiles_sidebar
+    ON companion_profiles(archived_at, pinned_at DESC, updated_at DESC);
+CREATE TRIGGER companion_profiles_delete_guard
+BEFORE DELETE ON companion_profiles
+WHEN OLD.is_default = 1
+  OR NOT EXISTS (SELECT 1 FROM companion_deletions d
+                 WHERE d.companion_id = OLD.id AND d.state = 'deleting'
+                   AND d.files_collected_at IS NOT NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'companion_delete_requires_flow');
+END;
+CREATE TRIGGER companion_profiles_default_flag_immutable
+BEFORE UPDATE OF is_default ON companion_profiles
+WHEN NEW.is_default IS NOT OLD.is_default
+BEGIN
+    SELECT RAISE(ABORT, 'companion_default_flag_immutable');
+END;
+
+CREATE TABLE conversation_expert_bindings_v114 (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    expert_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+    state TEXT NOT NULL CHECK(state IN ('active', 'replaced', 'removed')),
+    activation_source TEXT NOT NULL,
+    expert_version TEXT NOT NULL,
+    package_hash TEXT NOT NULL,
+    package_snapshot_json TEXT NOT NULL DEFAULT '{}',
+    display_snapshot_json TEXT NOT NULL,
+    activated_at INTEGER NOT NULL,
+    deactivated_at INTEGER
+);
+INSERT INTO conversation_expert_bindings_v114(
+    id, conversation_id, expert_id, state, activation_source, expert_version,
+    package_hash, package_snapshot_json, display_snapshot_json, activated_at, deactivated_at
+)
+SELECT id, conversation_id, expert_id, state, activation_source, expert_version,
+    package_hash, package_snapshot_json, display_snapshot_json, activated_at, deactivated_at
+FROM conversation_expert_bindings;
+DROP TABLE conversation_expert_bindings;
+ALTER TABLE conversation_expert_bindings_v114 RENAME TO conversation_expert_bindings;
+CREATE INDEX idx_conversation_expert_bindings_history
+    ON conversation_expert_bindings(conversation_id, activated_at, id);
+CREATE UNIQUE INDEX idx_conversation_expert_bindings_single_active
+    ON conversation_expert_bindings(conversation_id) WHERE state = 'active';
+
+CREATE TABLE conversation_companion_note_refs (
+    conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+    companion_id TEXT NOT NULL REFERENCES companion_profiles(id) ON DELETE CASCADE,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX idx_conversation_companion_note_refs_companion
+    ON conversation_companion_note_refs(companion_id, conversation_id);
+"#;
+
+fn materialize_companion_binding_skills(transaction: &rusqlite::Transaction<'_>) -> Result<()> {
+    let bindings = {
+        let mut statement = transaction.prepare(
+            "SELECT b.id, b.expert_id, b.package_snapshot_json
+             FROM conversation_expert_bindings b
+             JOIN conversations c ON c.id = b.conversation_id
+             WHERE b.state = 'active' AND c.companion_id IS NOT NULL",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>>>()?
+    };
+    for (binding_id, expert_id, snapshot_json) in bindings {
+        let Some(expert_id) = expert_id else { continue };
+        let enabled_json = transaction
+            .query_row(
+                "SELECT value_json FROM agent_runtime_config
+                 WHERE agent_id = ?1 AND scope_type = 'agent' AND scope_id = ?1
+                   AND config_key = 'skills.enabled'",
+                [&expert_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let enabled_skills = enabled_json
+            .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+            .unwrap_or_default();
+        let mut snapshot: serde_json::Value = serde_json::from_str(&snapshot_json)
+            .map_err(|error| schema_version_error(format!("database.invalid_binding_snapshot: {error}")))?;
+        snapshot["enabledSkills"] = json!(enabled_skills);
+        let package_hash = package_snapshot_hash(&snapshot);
+        transaction.execute(
+            "UPDATE conversation_expert_bindings
+             SET package_snapshot_json = ?2, package_hash = ?3 WHERE id = ?1",
+            rusqlite::params![binding_id, snapshot.canonical_string(), package_hash],
+        )?;
+    }
+    Ok(())
+}

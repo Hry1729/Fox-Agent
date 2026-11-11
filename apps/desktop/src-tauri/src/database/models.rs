@@ -5,7 +5,7 @@ use serde_json::Value;
 #[serde(rename_all = "camelCase")]
 pub struct CompanionProfile {
     pub id: String,
-    pub template_agent_id: String,
+    pub template_agent_id: Option<String>,
     pub display_name: String,
     pub avatar_ref: String,
     pub duty: String,
@@ -1149,7 +1149,7 @@ pub struct DeliveryChecklistView {
 pub struct ConversationExpertBinding {
     pub id: String,
     pub conversation_id: String,
-    pub expert_id: String,
+    pub expert_id: Option<String>,
     pub state: String,
     pub activation_source: String,
     pub expert_version: String,

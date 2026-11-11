@@ -21,7 +21,7 @@ export interface ExpertErrorPresentation {
 
 export interface ExpertBindingTimelineSource {
   id: string
-  expertId: string
+  expertId: string | null
   state: ExpertBindingState
   activatedAt: string | number
 }

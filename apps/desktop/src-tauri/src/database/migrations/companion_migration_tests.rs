@@ -82,11 +82,8 @@ fn identity_chat_shape_and_grants_are_enforced() {
     let db = database();
     denied(&db, "INSERT INTO agents(id,name,description,runtime_type,system_prompt,default_model,created_at,updated_at)
                  VALUES ('cmp_expert','C','','local','','',1,1)", "agent_id_reserved_prefix");
-    denied(
-        &db,
-        "UPDATE companion_profiles SET template_agent_id='tpl-c' WHERE id='cmp_b'",
-        "companion_template_immutable",
-    );
+    db.execute_batch("UPDATE companion_profiles SET template_agent_id='tpl-c' WHERE id='cmp_b'")
+        .unwrap();
     denied(
         &db,
         "UPDATE companion_profiles SET is_default=0 WHERE id='cmp_a'",
@@ -97,8 +94,8 @@ fn identity_chat_shape_and_grants_are_enforced() {
         "UPDATE companion_profiles SET display_name=' FOX ' WHERE id='cmp_b'",
         "UNIQUE",
     );
-    denied(&db, "INSERT INTO companion_profiles(id,template_agent_id,display_name,workspace_dir,notes_dir,created_at,updated_at)
-                 VALUES ('cmp_c','tpl-a','Third','w','n',1,1)", "UNIQUE");
+    db.execute_batch("INSERT INTO companion_profiles(id,template_agent_id,display_name,workspace_dir,notes_dir,created_at,updated_at)
+                 VALUES ('cmp_c','tpl-a','Third','w','n',1,1)").unwrap();
     denied(&db, "INSERT INTO companion_profiles(id,template_agent_id,display_name,workspace_dir,notes_dir,is_default,created_at,updated_at)
                  VALUES ('cmp_c','tpl-c','Third','w','n',1,1,1)", "UNIQUE");
     denied(
@@ -501,7 +498,7 @@ fn v113_message_marks_are_additive_and_bound_to_durable_bubbles() {
     // 升级只加空表：历史消息不会凭空多出引用、收藏或表情。
     assert_eq!(number(&db, "SELECT count(*) FROM contact_message_quotes"), 0);
     assert_eq!(number(&db, "SELECT count(*) FROM contact_bubble_marks"), 0);
-    assert_eq!(number(&db, "SELECT max(version) FROM schema_migrations"), 113);
+    assert_eq!(number(&db, "SELECT max(version) FROM schema_migrations"), DATABASE_SCHEMA_VERSION);
     db.execute_batch("
         INSERT INTO messages(id,conversation_id,role,kind,content,status,ordinal,created_at,updated_at)
         VALUES ('m1','private-a','assistant','text','一','completed',1,1,1),
@@ -529,4 +526,113 @@ fn v113_message_marks_are_additive_and_bound_to_durable_bubbles() {
     run(&mut db, 2).unwrap();
     assert_eq!(number(&db, "SELECT count(*) FROM contact_message_quotes"), 1);
     check_foreign_keys_after_migration(&db).unwrap();
+}
+
+
+#[test]
+fn a02_v113_upgrade_preserves_identity_and_materializes_companion_skills() {
+    let mut db = Connection::open_in_memory().unwrap();
+    run_with_target(&mut db, 1, MigrationTarget::V113).unwrap();
+    db.execute_batch(AGENTS).unwrap();
+    db.execute_batch(PROFILES).unwrap();
+    db.execute_batch(
+        r#"UPDATE companion_profiles SET duty='keep-duty',persona_override='keep-persona',
+            model_provider_id='keep-provider',model_ref='keep-model' WHERE id='cmp_b';
+         INSERT INTO agent_runtime_config(agent_id,scope_type,scope_id,config_key,value_json,source,created_at,updated_at)
+            VALUES ('tpl-b','agent','tpl-b','skills.enabled','["skill-b"]','user',1,1);
+         INSERT INTO conversation_expert_bindings(id,conversation_id,expert_id,state,activation_source,
+            expert_version,package_hash,package_snapshot_json,display_snapshot_json,activated_at)
+            VALUES ('binding-b','private-b','tpl-b','active','companion_create','7.2.1','old-hash',
+            '{"id":"tpl-b","name":"B","systemPrompt":"keep-prompt","resources":{"keep":true}}',
+            '{"id":"tpl-b","name":"B"}',1);
+         INSERT INTO conversation_expert_bindings(id,conversation_id,expert_id,state,activation_source,
+            expert_version,package_hash,package_snapshot_json,display_snapshot_json,activated_at)
+            VALUES ('binding-old','private-b','tpl-b','replaced','companion_create','7.0.0','historical-hash',
+            '{"id":"tpl-b","name":"Before"}','{"id":"tpl-b"}',0);"#,
+    ).unwrap();
+    run(&mut db, 2).unwrap();
+    assert_eq!(number(&db, "SELECT max(version) FROM schema_migrations"), 114);
+    let (duty, persona, provider, model): (String, String, String, String) = db.query_row(
+        "SELECT duty,persona_override,model_provider_id,model_ref FROM companion_profiles WHERE id='cmp_b'",
+        [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+    ).unwrap();
+    assert_eq!((duty.as_str(),persona.as_str(),provider.as_str(),model.as_str()),
+        ("keep-duty","keep-persona","keep-provider","keep-model"));
+    let (snapshot, hash, version): (String,String,String) = db.query_row(
+        "SELECT package_snapshot_json,package_hash,expert_version FROM conversation_expert_bindings WHERE id='binding-b'",
+        [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).unwrap();
+    let snapshot: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    assert_eq!(snapshot["enabledSkills"], serde_json::json!(["skill-b"]));
+    assert_eq!(snapshot["systemPrompt"], "keep-prompt");
+    assert_eq!(snapshot["resources"], serde_json::json!({"keep":true}));
+    assert_eq!(version, "7.2.1");
+    assert_eq!(hash, package_snapshot_hash(&snapshot));
+    let historical: String = db.query_row(
+        "SELECT package_hash FROM conversation_expert_bindings WHERE id='binding-old'",[],|row|row.get(0),
+    ).unwrap();
+    assert_eq!(historical, "historical-hash");
+    db.execute_batch("UPDATE agent_runtime_config SET value_json='[\"changed-skill\"]' WHERE agent_id='tpl-b' AND config_key='skills.enabled'")
+        .unwrap();
+    run(&mut db, 3).unwrap();
+    let reopened_snapshot: String = db.query_row(
+        "SELECT package_snapshot_json FROM conversation_expert_bindings WHERE id='binding-b'", [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&reopened_snapshot).unwrap()["enabledSkills"], serde_json::json!(["skill-b"]));
+    check_foreign_keys_after_migration(&db).unwrap();
+}
+
+#[test]
+fn a03_sources_are_repeatable_nullable_and_deletable_without_losing_snapshots() {
+    let db = database();
+    db.execute_batch(
+        r#"INSERT INTO companion_profiles(id,template_agent_id,display_name,workspace_dir,notes_dir,created_at,updated_at)
+            VALUES ('cmp_c','tpl-b','Bear 2','wc','nc',1,1);
+         INSERT INTO companion_profiles(id,template_agent_id,display_name,workspace_dir,notes_dir,created_at,updated_at)
+            VALUES ('cmp_blank',NULL,'Blank','wd','nd',1,1);
+         INSERT INTO conversation_expert_bindings(id,conversation_id,expert_id,state,activation_source,
+            expert_version,package_hash,package_snapshot_json,display_snapshot_json,activated_at)
+            VALUES ('binding-b','private-b','tpl-b','active','companion_create','1.2.3','hash',
+            '{"id":"tpl-b","name":"B","enabledSkills":["frozen"]}',
+            '{"id":"tpl-b","name":"B"}',1);"#,
+    ).unwrap();
+    // Real fixed chats execute through the base assistant, not the source expert.
+    db.execute("UPDATE conversations SET agent_id='tpl-a' WHERE id='private-b'", []).unwrap();
+    db.execute_batch("DELETE FROM agents WHERE id='tpl-b'").unwrap();
+    assert_eq!(number(&db,"SELECT count(*) FROM companion_profiles WHERE id IN ('cmp_b','cmp_c') AND template_agent_id IS NULL"),2);
+    let binding: (Option<String>,String,String) = db.query_row(
+        "SELECT expert_id,expert_version,package_snapshot_json FROM conversation_expert_bindings WHERE id='binding-b'",
+        [],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).unwrap();
+    assert_eq!(binding.0,None);
+    assert_eq!(binding.1,"1.2.3");
+    assert!(binding.2.contains("frozen"));
+    check_foreign_keys_after_migration(&db).unwrap();
+}
+
+#[test]
+fn v114_rebuild_preserves_external_triggers_and_restores_sqlite_mode() {
+    for legacy_alter_table in [false, true] {
+        let mut db = Connection::open_in_memory().unwrap();
+        run_with_target(&mut db, 1, MigrationTarget::V113).unwrap();
+        db.execute_batch(AGENTS).unwrap();
+        db.execute_batch(PROFILES).unwrap();
+        let trigger_before: String = db.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='companion_deletions_default_guard'",
+            [], |row| row.get(0),
+        ).unwrap();
+        db.pragma_update(None, "legacy_alter_table", legacy_alter_table).unwrap();
+        run(&mut db, 2).unwrap();
+        assert_eq!(db.pragma_query_value(None, "legacy_alter_table", |row| row.get::<_, bool>(0)).unwrap(), legacy_alter_table);
+        assert!(db.pragma_query_value(None, "foreign_keys", |row| row.get::<_, bool>(0)).unwrap());
+        let trigger_after: String = db.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='companion_deletions_default_guard'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(trigger_after, trigger_before);
+        denied(&db, "INSERT INTO companion_deletions(companion_id,template_agent_id,display_name,plan_json,plan_hash,state,started_at) VALUES('cmp_a','tpl-a','Fox','{}','hash','deleting',2)", "companion_default_not_deletable");
+        assert_eq!(number(&db, "SELECT count(*) FROM companion_profiles"), 2);
+        assert_eq!(number(&db, "SELECT count(*) FROM conversations WHERE companion_id IS NOT NULL"), 2);
+        check_foreign_keys_after_migration(&db).unwrap();
+    }
 }

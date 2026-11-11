@@ -663,7 +663,7 @@ fn two_resets_record_three_generations_and_keep_the_chat_intact() {
         .unwrap()
         .expect("the expert binding survives a reset");
     assert_eq!(live_expert.id, expert.id);
-    assert_eq!(live_expert.expert_id, "fox-debugger");
+    assert_eq!(live_expert.expert_id.as_deref(), Some("fox-debugger"));
     let knowledge = fixture
         .database
         .conversation_knowledge_bindings(&fixture.conversation_id)

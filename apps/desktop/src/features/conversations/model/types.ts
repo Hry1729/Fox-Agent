@@ -506,7 +506,7 @@ export type ExpertPackageSnapshot = Record<string, unknown>
 export interface ConversationExpertBinding {
   id: string
   conversationId: string
-  expertId: string
+  expertId: string | null
   state: 'active' | 'replaced' | 'removed'
   activationSource: string
   expertVersion?: string

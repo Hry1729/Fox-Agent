@@ -319,6 +319,46 @@ const AGENT_RECORD_COLUMNS: &str =
      system_prompt, icon, category, opening_suggestions_json, is_builtin, package_version, \
      package_manifest_json, package_source, package_id, package_hash";
 
+fn builtin_agent_manifest(system_prompt: &str) -> Value {
+    json!({
+        "version": "1.0.0",
+        "prompt": system_prompt,
+        "skills": [],
+        "knowledge": [],
+        "mcpServers": [],
+        "allowedTools": ["read", "ls", "find", "grep", "read_attachment", "attachment_compute", "compute_job_start", "compute_job_status", "compute_job_cancel", "compute_job_result", "read_tool_result", "skill_load", "present_files", "write_file", "edit_file", "run_command", "web_search", "web_read", "http_request", "system_info", "sqlite_read", "structured_data", "git_read", "test_run", "code_check", "format_code", "tabular_data", "child_agent_list", "child_run_start", "child_run_collect", "child_run_cancel", "memory_search", "memory_propose", "list_knowledge_bases", "search_knowledge", "read_knowledge_document", "query_knowledge_graph", "list_mcp_tools", "call_mcp_tool", "work_snapshot_get", "goal_propose", "goal_complete", "task_create_many", "task_update", "task_attempt_start", "task_attempt_finish", "task_repair_start", "task_repair_escalate_start", "task_evidence_add", "task_evidence_validate", "plan_revision_create", "review_finding_add", "review_finding_resolve", "acceptance_submit", "workflow_snapshot_get", "workflow_start", "workflow_stage_start", "workflow_stage_complete", "workflow_stage_fail", "workflow_cancel"]
+    })
+}
+
+fn shipped_default_assistant() -> AgentRecord {
+    let (_, name, description, system_prompt) = BUILTIN_AGENTS[0];
+    AgentRecord {
+        id: DEFAULT_AGENT_ID.to_owned(),
+        name: name.to_owned(),
+        description: description.to_owned(),
+        runtime_type: "pi".to_owned(),
+        agent_kind: "assistant".to_owned(),
+        invocation_mode: "primary".to_owned(),
+        visibility: "chat_selector".to_owned(),
+        default_model: "configured-model".to_owned(),
+        icon: None,
+        category: "general".to_owned(),
+        opening_suggestions: Vec::new(),
+        system_prompt: system_prompt.to_owned(),
+        is_builtin: true,
+        package_version: "1.0.0".to_owned(),
+        package_source: "builtin".to_owned(),
+        package_id: None,
+        package_hash: None,
+        package_manifest: builtin_agent_manifest(system_prompt),
+        capabilities: json!(["files", "tools", "reasoning"]),
+        resources: builtin_pi_resources(),
+        configurable_items: json!({}),
+        is_default: true,
+        available: true,
+    }
+}
+
 #[derive(Clone)]
 pub struct Database {
     connection: Arc<Mutex<Connection>>,
@@ -652,6 +692,47 @@ impl Database {
 
     pub fn default_agent_id(&self) -> &'static str {
         DEFAULT_AGENT_ID
+    }
+
+    pub(crate) fn conversation_runtime_assistant(
+        &self,
+        conversation_id: &str,
+    ) -> Result<AgentRecord, String> {
+        if self.conversation_uses_shipped_default_assistant(conversation_id)? {
+            return Ok(shipped_default_assistant());
+        }
+        let agent_id = self.conversation_agent_id(conversation_id)?;
+        self.get_agent(&agent_id)?
+            .ok_or_else(|| "conversation assistant was not found".to_owned())
+    }
+
+    pub(crate) fn conversation_runtime_assistant_skills(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<String>, String> {
+        if self.conversation_uses_shipped_default_assistant(conversation_id)? {
+            return Ok(Vec::new());
+        }
+        let agent_id = self.conversation_agent_id(conversation_id)?;
+        self.enabled_agent_skills(&agent_id)
+    }
+
+    fn conversation_uses_shipped_default_assistant(
+        &self,
+        conversation_id: &str,
+    ) -> Result<bool, String> {
+        let Some(scope) = self.conversation_companion_scope(conversation_id)? else {
+            return Ok(false);
+        };
+        let blank = self.with_connection(|connection| {
+            connection.query_row(
+                "SELECT NOT is_default AND template_agent_id IS NULL
+                 FROM companion_profiles WHERE id = ?1",
+                [&scope.companion_id],
+                |row| row.get(0),
+            )
+        })?;
+        Ok(blank && self.runtime_conversation_expert_binding(conversation_id)?.is_none())
     }
 
     pub fn backup_to(&self, path: &std::path::Path) -> Result<(), String> {
@@ -1391,14 +1472,7 @@ impl Database {
                     "fox-architect" => "planning",
                     _ => "general",
                 };
-                let manifest = json!({
-                    "version": "1.0.0",
-                    "prompt": system_prompt,
-                    "skills": [],
-                    "knowledge": [],
-                    "mcpServers": [],
-                    "allowedTools": ["read", "ls", "find", "grep", "read_attachment", "attachment_compute", "compute_job_start", "compute_job_status", "compute_job_cancel", "compute_job_result", "read_tool_result", "skill_load", "present_files", "write_file", "edit_file", "run_command", "web_search", "web_read", "http_request", "system_info", "sqlite_read", "structured_data", "git_read", "test_run", "code_check", "format_code", "tabular_data", "child_agent_list", "child_run_start", "child_run_collect", "child_run_cancel", "memory_search", "memory_propose", "list_knowledge_bases", "search_knowledge", "read_knowledge_document", "query_knowledge_graph", "list_mcp_tools", "call_mcp_tool", "work_snapshot_get", "goal_propose", "goal_complete", "task_create_many", "task_update", "task_attempt_start", "task_attempt_finish", "task_repair_start", "task_repair_escalate_start", "task_evidence_add", "task_evidence_validate", "plan_revision_create", "review_finding_add", "review_finding_resolve", "acceptance_submit", "workflow_snapshot_get", "workflow_start", "workflow_stage_start", "workflow_stage_complete", "workflow_stage_fail", "workflow_cancel"]
-                });
+                let manifest = builtin_agent_manifest(system_prompt);
                 let (agent_kind, invocation_mode, visibility) = if *id == DEFAULT_AGENT_ID {
                     ("assistant", "primary", "chat_selector")
                 } else {
@@ -2162,15 +2236,6 @@ impl Database {
         })
     }
 
-    pub(crate) fn companion_name_for_template(&self, agent_id: &str) -> Result<Option<String>, String> {
-        self.with_connection(|connection| {
-            connection.query_row(
-                "SELECT display_name FROM companion_profiles WHERE template_agent_id = ?1",
-                [agent_id], |row| row.get(0),
-            ).optional()
-        })
-    }
-
     pub fn list_conversations(&self) -> Result<Vec<ConversationSummary>, String> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(&format!(
@@ -2660,9 +2725,56 @@ impl Database {
         conversation_id: &str,
     ) -> Result<Option<ConversationExpertBinding>, String> {
         self.with_connection(|connection| {
-            query_conversation_expert_binding_by_state(connection, conversation_id, "active")
-                .optional()
+            let binding = query_conversation_expert_binding_by_state(connection, conversation_id, "active")
+                .optional()?;
+            let Some(mut binding) = binding else {
+                return Ok(None);
+            };
+            let companion_chat = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM conversations WHERE id = ?1 AND companion_id IS NOT NULL)",
+                [conversation_id],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if binding.package_snapshot.get("enabledSkills").is_none() && !companion_chat {
+                if let Some(expert_id) = binding.expert_id.as_deref() {
+                    let enabled_skills = connection
+                        .query_row(
+                            "SELECT value_json FROM agent_runtime_config
+                             WHERE agent_id = ?1 AND scope_type = 'agent' AND scope_id = ?1
+                               AND config_key = 'skills.enabled'",
+                            [expert_id],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()?
+                        .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+                        .unwrap_or_default();
+                    binding.package_snapshot["enabledSkills"] = json!(enabled_skills);
+                    binding.package_hash = package_snapshot_hash(&binding.package_snapshot);
+                    connection.execute(
+                        "UPDATE conversation_expert_bindings
+                         SET package_snapshot_json = ?2, package_hash = ?3
+                         WHERE id = ?1 AND state = 'active'",
+                        params![
+                            binding.id,
+                            binding.package_snapshot.canonical_string(),
+                            binding.package_hash
+                        ],
+                    )?;
+                }
+            }
+            Ok(Some(binding))
         })
+    }
+
+    pub(crate) fn runtime_conversation_expert_binding(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<ConversationExpertBinding>, String> {
+        let binding_conversation_id = self
+            .conversation_companion_scope(conversation_id)?
+            .and_then(|scope| scope.report_conversation_id)
+            .unwrap_or_else(|| conversation_id.to_owned());
+        self.current_conversation_expert_binding(&binding_conversation_id)
     }
 
     pub fn bind_conversation_expert(
@@ -8712,6 +8824,29 @@ pub(crate) fn query_agent_record(
         .optional()
 }
 
+fn builtin_pi_resources() -> AgentResourcesRecord {
+    AgentResourcesRecord {
+        tools: vec![
+            AgentResourceRecord {
+                id: "files".to_owned(),
+                name: "文件读写".to_owned(),
+                description: "读取和处理已授权项目文件".to_owned(),
+            },
+            AgentResourceRecord {
+                id: "tools".to_owned(),
+                name: "本地工具".to_owned(),
+                description: "调用 Fox Runtime 提供的本地工具".to_owned(),
+            },
+            AgentResourceRecord {
+                id: "reasoning".to_owned(),
+                name: "任务推理".to_owned(),
+                description: "规划并执行多步骤任务".to_owned(),
+            },
+        ],
+        ..AgentResourcesRecord::default()
+    }
+}
+
 fn agent_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRecord> {
     let id: String = row.get(0)?;
     let runtime_type: String = row.get(3)?;
@@ -8761,30 +8896,7 @@ fn agent_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRecor
             .cloned()
             .and_then(|value| serde_json::from_value(value).ok())
             .unwrap_or_else(|| {
-                if runtime_type == "pi" {
-                    AgentResourcesRecord {
-                        tools: vec![
-                            AgentResourceRecord {
-                                id: "files".to_owned(),
-                                name: "文件读写".to_owned(),
-                                description: "读取和处理已授权项目文件".to_owned(),
-                            },
-                            AgentResourceRecord {
-                                id: "tools".to_owned(),
-                                name: "本地工具".to_owned(),
-                                description: "调用 Fox Runtime 提供的本地工具".to_owned(),
-                            },
-                            AgentResourceRecord {
-                                id: "reasoning".to_owned(),
-                                name: "任务推理".to_owned(),
-                                description: "规划并执行多步骤任务".to_owned(),
-                            },
-                        ],
-                        ..AgentResourcesRecord::default()
-                    }
-                } else {
-                    AgentResourcesRecord::default()
-                }
+                if runtime_type == "pi" { builtin_pi_resources() } else { AgentResourcesRecord::default() }
             }),
         configurable_items: metadata
             .get("configurableItems")
@@ -8828,6 +8940,26 @@ pub(crate) fn agent_package_snapshot(agent: &AgentRecord) -> Value {
     })
 }
 
+pub(crate) fn agent_package_snapshot_with_connection(
+    connection: &Connection,
+    agent: &AgentRecord,
+) -> rusqlite::Result<Value> {
+    let enabled_skills = connection
+        .query_row(
+            "SELECT value_json FROM agent_runtime_config
+             WHERE agent_id = ?1 AND scope_type = 'agent' AND scope_id = ?1
+               AND config_key = 'skills.enabled'",
+            [&agent.id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+        .unwrap_or_default();
+    let mut snapshot = agent_package_snapshot(agent);
+    snapshot["enabledSkills"] = json!(enabled_skills);
+    Ok(snapshot)
+}
+
 pub(crate) fn package_snapshot_hash(package_snapshot: &Value) -> String {
     hex::encode(Sha256::digest(package_snapshot.canonical_string().as_bytes()))
 }
@@ -8846,7 +8978,7 @@ fn activate_expert_binding(
         params![conversation_id, now],
     )?;
     let id = Uuid::new_v4().to_string();
-    let package_snapshot = agent_package_snapshot(expert);
+    let package_snapshot = agent_package_snapshot_with_connection(connection, expert)?;
     let package_hash = package_snapshot_hash(&package_snapshot);
     let display_snapshot_json = json!({
         "id": expert.id,
@@ -11235,7 +11367,7 @@ mod tests {
         let binding = database
             .bind_conversation_expert(&conversation.id, "fox-debugger", "test")
             .expect("bind debugger expert");
-        assert_eq!(binding.expert_id, "fox-debugger");
+        assert_eq!(binding.expert_id.as_deref(), Some("fox-debugger"));
 
         drop(database);
         let reopened = Database::open(path.clone()).expect("reopen expert database");
@@ -11532,7 +11664,7 @@ mod tests {
     }
 
     #[test]
-    fn replaces_recovers_removes_and_cascades_expert_bindings() {
+    fn a20_ordinary_binding_select_switch_remove_and_cascade_are_unchanged() {
         let (database, path) = test_database();
         let conversation = database
             .create_conversation(DEFAULT_AGENT_ID, None, None, None)
@@ -11546,10 +11678,29 @@ mod tests {
         assert!(first.package_snapshot["systemPrompt"].is_string());
         assert!(first.package_snapshot["packageManifest"].is_object());
         assert!(first.package_snapshot["resources"].is_object());
+        assert_eq!(first.package_snapshot["enabledSkills"], json!([]));
         assert_eq!(
             first.package_hash,
             package_snapshot_hash(&first.package_snapshot)
         );
+        let legacy_snapshot = first.package_snapshot.clone();
+        let mut legacy_without_skills = legacy_snapshot.clone();
+        legacy_without_skills.as_object_mut().unwrap().remove("enabledSkills");
+        database.with_connection(|connection| {
+            connection.execute(
+                "UPDATE conversation_expert_bindings SET package_snapshot_json = ?2, package_hash = 'legacy-hash' WHERE id = ?1",
+                params![first.id, legacy_without_skills.canonical_string()],
+            )?;
+            Ok(())
+        }).unwrap();
+        database.set_agent_skill_enabled("fox-debugger", "legacy-skill", true).unwrap();
+        let materialized = database.current_conversation_expert_binding(&conversation.id)
+            .unwrap().unwrap();
+        assert_eq!(materialized.package_snapshot["enabledSkills"], json!(["legacy-skill"]));
+        assert_eq!(materialized.package_snapshot["systemPrompt"], legacy_snapshot["systemPrompt"]);
+        assert_eq!(materialized.package_snapshot["resources"], legacy_snapshot["resources"]);
+        assert_eq!(materialized.package_hash, package_snapshot_hash(&materialized.package_snapshot));
+
         let second = database
             .bind_conversation_expert(&conversation.id, "fox-reviewer", "manual")
             .expect("replace expert");
@@ -11560,7 +11711,7 @@ mod tests {
                 .expect("load current binding")
                 .expect("active binding")
                 .expert_id,
-            "fox-reviewer"
+            Some("fox-reviewer".to_owned())
         );
 
         drop(database);
@@ -11579,7 +11730,7 @@ mod tests {
         assert_eq!(detail.expert_bindings[0].state, "replaced");
         assert!(detail.expert_bindings[0].deactivated_at.is_some());
         assert_eq!(detail.expert_bindings[1].state, "active");
-        assert_eq!(detail.expert_bindings[1].expert_id, "fox-reviewer");
+        assert_eq!(detail.expert_bindings[1].expert_id.as_deref(), Some("fox-reviewer"));
 
         let removed = reopened
             .remove_conversation_expert(&conversation.id)
@@ -11773,7 +11924,7 @@ mod tests {
             let replacement = database
                 .bind_conversation_expert(&dialog.id, "fox-reviewer", "manual")
                 .expect("idle conversation can replace its expert after messages");
-            assert_eq!(replacement.expert_id, "fox-reviewer");
+            assert_eq!(replacement.expert_id.as_deref(), Some("fox-reviewer"));
             let history = database.list_conversation_expert_bindings(&dialog.id).unwrap();
             assert_eq!(history.len(), 2);
             assert_eq!(history[0].state, "replaced");

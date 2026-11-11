@@ -3534,6 +3534,17 @@ mod tests {
             .expect("background scope");
         assert!(before_dispatch.background);
         assert_eq!(before_dispatch.companion_id, contact.profile.id);
+        let fixed_binding = database.current_conversation_expert_binding(&contact.conversation_id)
+            .unwrap().unwrap();
+        let task_binding = database.current_conversation_expert_binding(&colleague.conversation_id)
+            .unwrap().unwrap();
+        assert_ne!(fixed_binding.id, task_binding.id);
+        assert_eq!(
+            database.runtime_conversation_expert_binding(&colleague.conversation_id)
+                .unwrap().unwrap().id,
+            fixed_binding.id,
+            "a background run uses the fixed private chat snapshot, not its own task binding"
+        );
 
         let accepted = database
             .accept_digital_colleague_trigger(

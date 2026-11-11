@@ -312,7 +312,7 @@ fn start(
     database.start_expert_workflow(&StartExpertWorkflowInput {
         conversation_id: conversation_id.to_owned(),
         expert_binding_id: binding.id,
-        expert_id: binding.expert_id,
+        expert_id: binding.expert_id.ok_or_else(|| "workflow.expert_source_missing".to_owned())?,
         package_hash: binding.package_hash,
         workflow_id: workflow.id.clone(),
         workflow_version: workflow.version.clone(),

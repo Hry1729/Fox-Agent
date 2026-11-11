@@ -444,6 +444,7 @@ pub fn run() {
             commands::companion_notes::companion_grants_list,
             commands::companion_notes::companion_grant_project,
             commands::companion_notes::companion_revoke_project,
+            commands::companion_notes::companion_project_note_reference_set,
             commands::memories_list,
             commands::memory_create,
             commands::memory_confirm,

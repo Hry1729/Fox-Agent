@@ -4,7 +4,7 @@ import type { AgentRecord, ContactBubbleMarkRecord, ConversationContextReset, Me
 export interface Companion {
   id: string
   conversationId: string
-  templateAgentId: string
+  templateAgentId: string | null
   displayName: string
   avatarRef: string
   duty: string
@@ -152,4 +152,5 @@ export const contacts = {
   notes: (companionId: string) => direct<CompanionNotes>('companion_notes_get', { companionId }),
   grants: (companionId: string) => direct<CompanionGrant[]>('companion_grants_list', { companionId }),
   setGrant: (companionId: string, projectId: string, grant: boolean) => direct(grant ? 'companion_grant_project' : 'companion_revoke_project', { companionId, projectId }),
+  setProjectNoteReference: (conversationId: string, companionId: string | null) => direct<void>('companion_project_note_reference_set', { conversationId, companionId }),
 }
