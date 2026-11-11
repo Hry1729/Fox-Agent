@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { FolderOpen, FolderPlus, FolderSearch, RotateCcw, Search, Settings2, X } from 'lucide-react'
+import { ArrowLeft, Bell, BookOpen, ChevronRight, Cpu, FileOutput, FolderOpen, FolderPlus, FolderSearch, NotebookPen, Plug, RotateCcw, Search, Settings2, ShieldCheck, Star, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { notify as toast } from '@/features/notifications'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
@@ -21,7 +21,7 @@ import './contact-side-card.css'
 export const CONTACT_SIDE_CARD_WIDTH = 320
 
 export type ContactSideCardTab = 'details' | 'files' | 'workspace'
-const TAB_LABELS: Array<[ContactSideCardTab, string]> = [['details', '详情'], ['files', '文件与成果'], ['workspace', '工作目录']]
+const TAB_LABELS: Array<[ContactSideCardTab, string]> = [['details', '详情'], ['files', '资料库'], ['workspace', '工作目录']]
 const REMINDER_OPTIONS: Array<[ReminderMode, string]> = [
   ['follow_global', '跟随全局设置'],
   ['all', '所有消息'],
@@ -109,14 +109,15 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
   const heading = view === 'capabilities' ? '可用能力' : view === 'favorites' ? '收藏' : view === 'notes' ? '笔记' : view === 'settings' ? '联系人设置' : '联系人资料'
   const resetBlocked = Boolean(detail?.contextResetBlockedReason || contact.activeRunStatus)
   return <aside className="fox-contact-side-card" role="complementary" aria-label={`${contact.displayName} 资料卡`}>
-    <header className="fox-contact-side-card-head">
+    <header className={`fox-contact-side-card-head${view === 'main' ? ' is-main' : ''}`}>
+      {view !== 'main' && <button type="button" className="fox-contact-side-card-control" aria-label="返回详情" title="返回详情" onClick={() => setView('main')}><ArrowLeft size={16} /></button>}
       <h2>{heading}</h2>
-      <button type="button" className="fox-contact-side-card-close" aria-label="关闭联系人资料卡" title="关闭" onClick={onClose}><X size={14} /></button>
+      {view === 'main' && <button type="button" className="fox-contact-side-card-control" aria-label="设置" title="设置" onClick={() => setView('settings')}><Settings2 size={16} /></button>}
+      <button type="button" className="fox-contact-side-card-control" aria-label="关闭联系人资料卡" title="关闭" onClick={onClose}><X size={16} /></button>
     </header>
     <div className="fox-contact-side-card-body">
       {view !== 'main'
         ? <div className="fox-contact-side-view">
-            <div className="fox-contact-side-back"><Button size="sm" variant="ghost" onClick={() => setView('main')}>返回详情</Button></div>
             {view === 'capabilities' && <ContactCapabilities key={contact.id} contact={contact} />}
             {view === 'favorites' && <ContactFavorites key={contact.id} contact={contact} />}
             {view === 'notes' && <ContactNotes key={contact.id} contact={contact} />}
@@ -157,43 +158,50 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
               {TAB_LABELS.map(([value, label]) => <button key={value} type="button" role="tab" aria-selected={tab === value}
                 className={tab === value ? 'is-selected' : undefined} onClick={() => setTab(value)}>{label}</button>)}
             </div>
-            {tab === 'details' && <div className="fox-contact-panel fox-contact-side-panel">
-              <div className="fox-contact-section">
-                <label><span>模型</span><ContactModelSelect key={contact.id} contact={contact} /></label>
-                {detail?.contextReset?.supported && <div className="fox-contact-side-row">
-                  <Button size="sm" variant="outline" disabled={resetBlocked} title={detail.contextResetBlockedReason ?? undefined} onClick={onResetContext}>
-                    <RotateCcw size={13} />重置上下文
-                  </Button>
-                  <small>{detail.contextResetBlockedReason ?? '清除模型记忆，但保留聊天记录、工作文件和项目授权'}</small>
-                </div>}
-                {search && <Button size="sm" variant="outline" onClick={search.open}><Search size={13} />在对话中查找</Button>}
+            {tab === 'details' && <div className="fox-contact-side-details">
+              <div className="fox-contact-side-model">
+                <span className="fox-contact-side-label"><Cpu size={16} aria-hidden="true" />模型</span>
+                <ContactModelSelect key={contact.id} contact={contact} />
               </div>
-              <div className="fox-contact-section">
-                <label><span>提醒</span>
+              {(search || detail?.contextReset?.supported) && <section className="fox-contact-side-group" aria-label="这个对话">
+                <h3>这个对话</h3>
+                {search && <button type="button" className="fox-contact-side-action" onClick={search.open}>
+                  <Search size={16} aria-hidden="true" /><span>在对话中查找</span><ChevronRight size={14} aria-hidden="true" />
+                </button>}
+                {detail?.contextReset?.supported && <div className="fox-contact-side-reset">
+                  <button type="button" className="fox-contact-side-action" disabled={resetBlocked} title={detail.contextResetBlockedReason ?? undefined} onClick={onResetContext}>
+                    <RotateCcw size={16} aria-hidden="true" /><span>重置上下文</span>
+                  </button>
+                  <p>{detail.contextResetBlockedReason ?? '清除模型记忆，但保留聊天记录、工作文件和项目授权'}</p>
+                </div>}
+              </section>}
+              <section className="fox-contact-side-group" aria-label="偏好">
+                <h3>偏好</h3>
+                <label className="fox-contact-side-preference"><span className="fox-contact-side-label"><Bell size={16} aria-hidden="true" />提醒</span>
                   <select value={contact.reminderMode} aria-label="提醒" disabled={busy}
                     onChange={event => void run(async () => { await contacts.setReminderMode(contact.id, event.target.value as ReminderMode) }, '提醒设置已保存')}>
                     {REMINDER_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                   </select></label>
-                <label><span>权限</span>
+                <label className="fox-contact-side-preference"><span className="fox-contact-side-label"><ShieldCheck size={16} aria-hidden="true" />权限</span>
                   <select value={ctx?.permission ?? 'ask'} aria-label="权限" disabled={busy}
                     onChange={event => ctx?.setPermission(event.target.value as ProjectRecord['permissionMode'])}>
                     {PERMISSION_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                   </select></label>
-                <Button size="sm" variant="outline" onClick={ctx?.openSharedMemory}>共享记忆</Button>
-              </div>
-              <div className="fox-contact-section">
-                <Button size="sm" variant="outline" onClick={() => setView('capabilities')}>可用能力</Button>
-                <Button size="sm" variant="outline" onClick={() => setView('favorites')}>收藏</Button>
-                <Button size="sm" variant="outline" onClick={() => setView('notes')}>笔记</Button>
-                <Button size="sm" variant="outline" onClick={() => setView('settings')}><Settings2 size={13} />设置</Button>
-              </div>
+              </section>
+              <section className="fox-contact-side-group" aria-label="资料与能力">
+                <h3>资料与能力</h3>
+                <button type="button" className="fox-contact-side-action" onClick={ctx?.openSharedMemory}><BookOpen size={16} aria-hidden="true" /><span>共享记忆</span><ChevronRight size={14} aria-hidden="true" /></button>
+                <button type="button" className="fox-contact-side-action" onClick={() => setView('capabilities')}><Plug size={16} aria-hidden="true" /><span>可用能力</span><ChevronRight size={14} aria-hidden="true" /></button>
+                <button type="button" className="fox-contact-side-action" onClick={() => setView('favorites')}><Star size={16} aria-hidden="true" /><span>收藏</span><ChevronRight size={14} aria-hidden="true" /></button>
+                <button type="button" className="fox-contact-side-action" onClick={() => setView('notes')}><NotebookPen size={16} aria-hidden="true" /><span>笔记</span><ChevronRight size={14} aria-hidden="true" /></button>
+              </section>
             </div>}
             {tab === 'files' && <div className="fox-contact-side-view"><ContactFiles key={contact.id} contact={contact} /></div>}
             {tab === 'workspace' && <div className="fox-contact-panel fox-contact-side-panel">
               <div className="fox-contact-section">
                 <code>{contact.workspaceDir}</code>
                 {contact.workspaceError && <p role="alert">{contact.workspaceError}</p>}
-                <div className="fox-contact-actions">
+                <div className="fox-contact-actions fox-contact-side-workspace-actions">
                   <Button size="sm" variant="outline" disabled={busy}
                     onClick={() => void run(() => desktopClient.openProjectFolder(contact.conversationId))}><FolderOpen size={13} />打开文件夹</Button>
                   {contact.workspaceState !== 'ready' && <Button size="sm" variant="outline" disabled={busy}
@@ -205,7 +213,7 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
                       toast.success('已复制 ' + paths.length + ' 个文件')
                       if (filesOpen) await loadFiles()
                     })}><FolderPlus size={13} />添加文件…</Button>
-                  <Button size="sm" variant="outline" disabled={busy} onClick={() => void loadFiles()}><FolderOpen size={13} />导出文件…</Button>
+                  <Button size="sm" variant="outline" disabled={busy} onClick={() => void loadFiles()}><FileOutput size={13} />导出文件…</Button>
                 </div>
                 {filesOpen && (files.length
                   ? <div className="fox-contact-side-export-list">{files.map(file => <button key={file.path} type="button"

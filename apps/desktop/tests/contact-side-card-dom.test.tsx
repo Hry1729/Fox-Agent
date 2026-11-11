@@ -94,6 +94,8 @@ function host() {
     // direct() 传扁平参数，command() 传 { request }；两种形状都记录下来。
     const request = ((args as { request?: Record<string, unknown> })?.request ?? args) as Record<string, unknown>
     calls.push({ command, request })
+    if (command === 'model_providers_list') return ok([])
+    if (command === 'companion_set_reminder_mode') return ok(contact({ reminderMode: request.mode as Companion['reminderMode'] }))
     if (command === 'project_folder_open') return ok(true)
     if (command === 'project_files_list') return ok([
       { path: 'notes/报价.md', name: '报价.md', isDirectory: false },
@@ -151,6 +153,21 @@ describe('联系人资料卡的 API 合同（缺口 D）', () => {
     expect(permissionChoices).toEqual(['allow'])
   })
 
+  test('提醒行保留全部模式，保存后刷新联系人并显示反馈', async () => {
+    host()
+    let refreshed = 0
+    const view = renderCard(contextValue({ refresh: async () => { refreshed += 1 } }))
+    const select = view.getByLabelText('提醒') as HTMLSelectElement
+    expect(Array.from(select.options).map(option => option.value)).toEqual(['follow_global', 'all', 'action_only', 'muted'])
+    fireEvent.change(select, { target: { value: 'action_only' } })
+    expect(select.disabled).toBe(true)
+    await waitFor(() => expect(commandNames()).toContain('companion_set_reminder_mode'))
+    expect(requestOf('companion_set_reminder_mode')).toEqual({ companionId: 'cmp_one', mode: 'action_only' })
+    await waitFor(() => expect(select.disabled).toBe(false))
+    expect(refreshed).toBe(1)
+    expect(toasted('success', '提醒设置已保存')).toBe(true)
+  })
+
   test('打开文件夹传会话 id；导出先列工作目录文件，再按单个文件相对路径另存', async () => {
     host()
     const view = renderCard()
@@ -204,6 +221,48 @@ describe('联系人资料卡的 API 合同（缺口 D）', () => {
 })
 
 describe('旧资料页的功能仍然可达（缺口 E）', () => {
+  test('顶部设置入口与返回保留当前分页，关闭仍调用原有回调', async () => {
+    host()
+    let closed = 0
+    const view = render(<ContactsContext.Provider value={contextValue()}>
+      <ContactSideCard contact={contact()} detail={detail} onClose={() => { closed += 1 }} onResetContext={() => undefined} search={searchStub} />
+    </ContactsContext.Provider>)
+    await waitFor(() => expect((view.getByLabelText('联系人模型') as HTMLSelectElement).disabled).toBe(false))
+    expect(view.getByRole('button', { name: '设置' }).closest('header')).not.toBeNull()
+    openTab(view, '工作目录')
+    openSettings(view)
+    await waitFor(() => expect(view.getByText('专家模板有新版')).toBeDefined())
+    expect(view.queryByRole('button', { name: '设置' })).toBeNull()
+    expect(view.getByRole('button', { name: '返回详情' }).closest('header')).not.toBeNull()
+    fireEvent.click(view.getByRole('button', { name: '返回详情' }))
+    expect(view.getByRole('tab', { name: '工作目录' }).getAttribute('aria-selected')).toBe('true')
+    expect(view.getByRole('button', { name: '打开文件夹' })).toBeDefined()
+    fireEvent.click(view.getByRole('button', { name: '关闭联系人资料卡' }))
+    expect(closed).toBe(1)
+  })
+
+  test('无边框重置行仍遵守运行中、Host 阻止和不支持的限制', async () => {
+    host()
+    let resets = 0
+    const card = (current: Companion, currentDetail: ConversationDetail) => <ContactsContext.Provider value={contextValue()}>
+      <ContactSideCard contact={current} detail={currentDetail} onClose={() => undefined} onResetContext={() => { resets += 1 }} search={searchStub} />
+    </ContactsContext.Provider>
+    const view = render(card(contact(), detail))
+    await waitFor(() => expect((view.getByLabelText('联系人模型') as HTMLSelectElement).disabled).toBe(false))
+    fireEvent.click(view.getByRole('button', { name: '重置上下文' }))
+    expect(resets).toBe(1)
+    view.rerender(card(contact({ activeRunStatus: 'running' }), detail))
+    expect((view.getByRole('button', { name: '重置上下文' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(view.getByRole('button', { name: '重置上下文' }))
+    expect(resets).toBe(1)
+    view.rerender(card(contact(), { ...detail, contextResetBlockedReason: '请先处理待确认操作' }))
+    expect((view.getByRole('button', { name: '重置上下文' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(view.getByText('请先处理待确认操作')).toBeDefined()
+    view.rerender(card(contact(), { ...detail, contextReset: { supported: false, reason: null, code: null } }))
+    expect(view.queryByRole('button', { name: '重置上下文' })).toBeNull()
+    expect(view.getByRole('button', { name: '在对话中查找' })).toBeDefined()
+  })
+
   test('设置子视图：头像 / 职责 / 自定义人设可编辑并保存', async () => {
     host()
     const view = renderCard()
@@ -291,7 +350,7 @@ describe('旧资料页的功能仍然可达（缺口 E）', () => {
     const view = renderCard()
     expect(view.getByText('资料伙伴')).toBeDefined()
     expect(view.getByRole('tab', { name: '详情' })).toBeDefined()
-    expect(view.getByRole('tab', { name: '文件与成果' })).toBeDefined()
+    expect(view.getByRole('tab', { name: '资料库' })).toBeDefined()
     expect(view.getByRole('tab', { name: '工作目录' })).toBeDefined()
     expect(view.getByText('模型')).toBeDefined()
     expect((view.getByLabelText('提醒') as HTMLSelectElement).value).toBe('all')

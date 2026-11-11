@@ -84,7 +84,7 @@ export function ContactProfile({ contact }: { contact: Companion }) {
         <SettingsRow title="权限"><select aria-label="私聊权限" value={ctx?.permission ?? 'ask'} onChange={e => ctx?.setPermission(e.target.value as 'read_only' | 'ask' | 'allow')}><option value="read_only">只读</option><option value="ask">询问</option><option value="allow">自动</option></select></SettingsRow>
         <SettingsRow title="共享记忆"><Button size="sm" variant="ghost" onClick={ctx?.openSharedMemory}>查看共享记忆</Button></SettingsRow>
         <SettingsRow title="可用能力" description="网页搜索、读取网页和连接器工具"><Button size="sm" variant="ghost" onClick={() => { setCapabilitiesOpen(true); setLibraryOpen(false); setFavoritesOpen(false) }}>查看和设置</Button></SettingsRow>
-        <SettingsRow title="文件与成果" description="我提供的文件和联系人生成的结果"><Button size="sm" variant="ghost" onClick={() => { setLibraryOpen(true); setCapabilitiesOpen(false); setFavoritesOpen(false) }}>查看</Button></SettingsRow>
+        <SettingsRow title="资料库" description="我提供的文件和联系人生成的结果"><Button size="sm" variant="ghost" onClick={() => { setLibraryOpen(true); setCapabilitiesOpen(false); setFavoritesOpen(false) }}>查看</Button></SettingsRow>
         <SettingsRow title="收藏" description="只是你自己的标记，不会写进它的笔记"><Button size="sm" variant="ghost" onClick={() => { setFavoritesOpen(true); setCapabilitiesOpen(false); setLibraryOpen(false) }}>查看收藏</Button></SettingsRow></SettingsGroup>
       <section className="fox-contact-section"><h3>工作目录</h3><code>{contact.workspaceDir}</code>
         {contact.workspaceError && <p role="alert">{contact.workspaceError}</p>}

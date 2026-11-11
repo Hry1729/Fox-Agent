@@ -86,14 +86,88 @@
 .fox-contact-capability-tool input { flex:none; }
 .fox-contact-capability-boundary { padding:6px 10px; border-radius:8px; background:var(--muted); font-size:12px; color:var(--muted-foreground); }
 .fox-contact-capability-foot { font-size:12px; color:var(--muted-foreground); }
-.fox-contact-files { display:grid; gap:4px; min-width:0; padding:4px 0; }
-.fox-contact-file { display:grid; gap:6px; padding:10px 0; min-width:0; overflow-wrap:anywhere; }
-.fox-contact-file + .fox-contact-file { border-top:1px solid var(--border); }
-.fox-contact-file-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
-.fox-contact-file-head b { min-width:0; overflow-wrap:anywhere; }
-.fox-contact-file-head time { flex:none; font-size:12px; color:var(--muted-foreground); }
-.fox-contact-file-source { margin:0; font-size:12px; color:var(--muted-foreground); }
-.fox-contact-file-missing { color:var(--destructive); }
+/* 资料库: filter pills, time-group cards and a floating preview per row. */
+.fox-library { --fox-type-ui: 13px; display:grid; gap:4px; min-width:0; padding:4px 0; font-size:13px; }
+.fox-library-filters { display:flex; gap:6px; margin:2px 0 10px; }
+.fox-library-filters button {
+  height:30px; padding:0 14px; border:0; border-radius:999px;
+  background:color-mix(in srgb, var(--foreground) 6%, transparent);
+  color:var(--foreground); font-size:13px; font-weight:500; cursor:pointer;
+  transition:background 150ms ease;
+}
+.fox-library-filters button:hover { background:color-mix(in srgb, var(--foreground) 10%, transparent); }
+.fox-library-filters button.is-selected { background:var(--foreground); color:var(--fox-canvas); }
+.fox-library-group { min-width:0; }
+.fox-library-group + .fox-library-group { margin-top:14px; }
+.fox-library-group h3 { margin:0 4px 8px; color:var(--muted-foreground); font-size:13px; font-weight:500; line-height:20px; }
+.fox-library-card { display:grid; gap:2px; padding:6px; border-radius:16px; background:color-mix(in srgb, var(--foreground) 4%, transparent); }
+.fox-library-row {
+  position:relative; display:flex; align-items:center; gap:10px;
+  min-width:0; min-height:40px; padding:6px 8px; border-radius:10px;
+  transition:background 150ms ease;
+}
+.fox-library-row:hover,.fox-library-row:focus-within { background:color-mix(in srgb, var(--foreground) 6%, transparent); z-index:6; }
+.fox-library-row:has(.fox-library-menu[open]) { z-index:7; }
+.fox-library-glyph { flex:none; width:26px; height:26px; }
+.fox-library-glyph.is-doc { display:block; }
+.fox-library-page { fill:var(--popover); stroke:color-mix(in srgb, var(--foreground) 22%, transparent); stroke-width:1; }
+.fox-library-fold { fill:none; stroke:color-mix(in srgb, var(--foreground) 22%, transparent); stroke-width:1; }
+.fox-library-line { fill:none; stroke:color-mix(in srgb, var(--foreground) 30%, transparent); stroke-width:1.2; stroke-linecap:round; }
+.fox-library-glyph.is-missing { opacity:.45; }
+.fox-library-glyph.is-media { display:grid; place-items:center; border-radius:8px; }
+.fox-library-glyph.is-image { background:color-mix(in srgb, #8e4ec6 14%, transparent); color:#8e4ec6; }
+.fox-library-glyph.is-video { background:color-mix(in srgb, #3e63dd 14%, transparent); color:#3e63dd; }
+.fox-library-glyph.is-audio { background:color-mix(in srgb, #e93d82 14%, transparent); color:#e93d82; }
+.fox-library-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
+.fox-library-time { flex:none; font-size:12px; color:var(--muted-foreground); opacity:0; transition:opacity 150ms ease; font-variant-numeric:tabular-nums; }
+.fox-library-row:hover .fox-library-time,.fox-library-row:focus-within .fox-library-time { opacity:1; }
+.fox-library-missing { flex:none; font-size:12px; color:var(--destructive); }
+.fox-library-menu { flex:none; position:relative; }
+.fox-contact-panel details.fox-library-menu { border-top:0; padding:0; }
+.fox-library-menu summary {
+  display:grid; place-items:center; width:26px; height:26px; border-radius:8px;
+  color:var(--muted-foreground); cursor:pointer; opacity:0; list-style:none;
+  transition:opacity 150ms ease, background 150ms ease;
+}
+.fox-library-menu summary::-webkit-details-marker { display:none; }
+.fox-library-row:hover .fox-library-menu summary,
+.fox-library-row:focus-within .fox-library-menu summary,
+.fox-library-menu[open] summary { opacity:1; }
+.fox-library-menu summary:hover { background:color-mix(in srgb, var(--foreground) 8%, transparent); color:var(--foreground); }
+.fox-library-menu-pop {
+  position:absolute; right:0; top:calc(100% + 6px); z-index:40;
+  display:grid; gap:2px; width:210px; padding:6px; border-radius:12px;
+  background:var(--popover); box-shadow:0 0 0 1px var(--border), var(--shadow-lg);
+}
+.fox-library-menu-pop.is-up { top:auto; bottom:calc(100% + 6px); }
+.fox-library-menu-head { margin:0 0 2px; padding:4px 8px; font-size:12px; line-height:1.5; color:var(--muted-foreground); overflow-wrap:anywhere; }
+.fox-library-menu-pop button { padding:7px 8px; border:0; border-radius:8px; background:transparent; color:var(--foreground); text-align:left; font-size:13px; cursor:pointer; }
+.fox-library-menu-pop button:hover:not(:disabled) { background:color-mix(in srgb, var(--foreground) 6%, transparent); }
+.fox-library-menu-pop button:disabled { cursor:not-allowed; opacity:.5; }
+.fox-library-more { justify-self:center; margin:2px 0 4px; padding:4px 10px; border:0; border-radius:8px; background:transparent; color:var(--muted-foreground); font-size:12px; cursor:pointer; }
+.fox-library-more:hover { background:color-mix(in srgb, var(--foreground) 6%, transparent); color:var(--foreground); }
+.fox-library-hover {
+  position:absolute; left:0; right:0; bottom:calc(100% + 6px); z-index:30;
+  display:grid; gap:3px; padding:10px 12px; border-radius:12px;
+  background:var(--popover); box-shadow:0 0 0 1px var(--border), var(--shadow-lg);
+  opacity:0; visibility:hidden; pointer-events:none; transition:opacity 120ms ease;
+}
+.fox-library-hover.is-below { bottom:auto; top:calc(100% + 6px); }
+.fox-library-row:hover .fox-library-hover,.fox-library-row:focus-within .fox-library-hover { opacity:1; visibility:visible; }
+.fox-library-row:has(.fox-library-menu[open]) .fox-library-hover { opacity:0; visibility:hidden; }
+.fox-library-hover-group,.fox-library-hover-kind { font-size:12px; color:var(--muted-foreground); }
+.fox-library-hover-kind em { font-style:normal; color:var(--destructive); }
+.fox-library-hover-name { font-size:13px; font-weight:600; line-height:1.45; overflow-wrap:anywhere; }
+.fox-library-hover-source { display:flex; align-items:center; gap:6px; margin-top:2px; font-size:12px; color:var(--muted-foreground); }
+.fox-library-hover-source .fox-contact-avatar { width:16px; height:16px; border-radius:50%; font-size:9px; }
+.fox-library-hover-source > span { min-width:0; overflow-wrap:anywhere; }
+.fox-library-hint { margin:6px 4px 0; font-size:12px; line-height:1.6; color:var(--muted-foreground); }
+.fox-library-empty,.fox-library-loading { margin:8px 4px; font-size:13px; color:var(--muted-foreground); }
+.fox-library-foot { margin-top:8px; }
+@media (prefers-reduced-motion: reduce) {
+  .fox-library-filters button,.fox-library-row,.fox-library-time,
+  .fox-library-menu summary,.fox-library-hover { transition:none; }
+}
 
 .fox-contact-search-bar,.fox-contact-search-chip {
   justify-self: center;
