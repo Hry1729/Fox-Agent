@@ -29,6 +29,10 @@ const detail = {
   conversation: { id: 'chat', permissionMode: 'ask' },
   contextReset: { supported: true, reason: null, code: null },
   contextResetBlockedReason: null,
+  // The card derives its managed-files refresh key from these counters and pairs
+  // library rows with versions through attachments/artifacts, so the fixture has
+  // to be a full ConversationDetail, not a partial one.
+  messages: [], toolCalls: [], approvals: [], attachments: [], artifacts: [],
 } as unknown as ConversationDetail
 
 const permissionChoices: string[] = []
@@ -97,6 +101,8 @@ function host() {
     if (command === 'model_providers_list') return ok([])
     if (command === 'companion_set_reminder_mode') return ok(contact({ reminderMode: request.mode as Companion['reminderMode'] }))
     if (command === 'project_folder_open') return ok(true)
+    // 资料卡挂载时会订阅共享的文件版本仓库（与右侧边栏同一 store）。
+    if (command === 'managed_file_versions_list') return ok([])
     if (command === 'project_files_list') return ok([
       { path: 'notes/报价.md', name: '报价.md', isDirectory: false },
       { path: 'notes', name: 'notes', isDirectory: true },

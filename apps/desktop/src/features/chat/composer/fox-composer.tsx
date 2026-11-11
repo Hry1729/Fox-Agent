@@ -6,7 +6,6 @@ import { ComposerAgentPicker } from './composer-agent-picker'
 import { ComposerEntryContext } from './composer-entry-context'
 import { ComposerModelPicker } from './composer-model-picker'
 import { GoalProgress } from '../components/GoalProgress'
-import { ManagedFilesPanel } from '../components/ManagedFilesPanel'
 import { RunSteeringStrip } from '../components/RunSteeringStrip'
 import { type ExpertToolAvailability } from '../components/expert-binding-ui'
 import { steeringComposerView, steeringSubmitMode } from '../components/steering-presentation'
@@ -728,7 +727,6 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
             {steeringView.retainedNotice}
           </p>
         )}
-        {runtimeControlled && <ManagedFilesPanel conversationId={steeringConversationId} refreshKey={chatState} />}
         <PromptInput
           accept={supportsImageInput ? 'image/*,.pdf,.txt,.md,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.tsv' : '.pdf,.txt,.md,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.tsv'}
           multiple

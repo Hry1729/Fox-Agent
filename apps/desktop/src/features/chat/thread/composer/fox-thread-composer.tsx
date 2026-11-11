@@ -1,7 +1,6 @@
 import { ComposerPrimitive, useAui, useAuiState } from '@assistant-ui/react'
 import { ExpertBindingChip } from '../../components/ExpertBindingChip'
 import { type ExpertToolAvailability } from '../../components/expert-binding-ui'
-import { ManagedFilesPanel } from '../../components/ManagedFilesPanel'
 import { RunSteeringStrip } from '../../components/RunSteeringStrip'
 import { steeringComposerView, steeringSubmitMode } from '../../components/steering-presentation'
 import { useRunSteering } from '../../hooks/use-run-steering'
@@ -379,7 +378,6 @@ export function FoxThreadComposer({ runtimeControlled, runtimeInitializing = fal
         pushedTextRef.current = next
         void aui.composer.setText(next)
       }} />}
-      {runtimeControlled && <ManagedFilesPanel conversationId={steeringConversationId} refreshKey={isRunning} />}
       {commandOpen && <Command loop className={`fox-slash-menu ${commandView === 'knowledge' ? 'is-knowledge' : ''}`}>
         <CommandList>
           {commandView === 'commands' ? <>

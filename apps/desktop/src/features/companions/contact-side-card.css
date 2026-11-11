@@ -119,12 +119,13 @@
   justify-content: center;
   gap: 2px;
   width: fit-content;
-  margin: 0 auto 24px;
+  margin: 0 auto 20px;
   padding: 3px;
   border-radius: 999px;
   background: color-mix(in oklch, var(--foreground) 5%, transparent);
 }
 .fox-contact-side-tabs button {
+  position: relative;
   height: 28px;
   padding: 0 12px;
   border-radius: 999px;
@@ -139,26 +140,65 @@
   font-weight: 500;
 }
 
-.fox-contact-side-details { --fox-type-ui: 14px; display: grid; gap: 24px; min-width: 0; font-size: 14px; }
-.fox-contact-side-label { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
-.fox-contact-side-label svg,
-.fox-contact-side-action svg { flex: none; color: var(--muted-foreground); }
-.fox-contact-side-model {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: 6px 12px;
-  min-width: 0;
-  padding: 0 4px;
+/* tabs3：详情/工作目录小节 = 13px 灰色标题 + radius-16 浅色卡片 + 40px 无边框行。 */
+.fox-contact-side-details { --fox-type-ui: 13px; display: grid; gap: 14px; min-width: 0; font-size: 13px; }
+.fox-contact-side-group { min-width: 0; }
+.fox-contact-side-group > h3 {
+  margin: 0 4px 8px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
 }
-.fox-contact-side-model .fox-contact-model-select { display: contents; }
-.fox-contact-side-model .fox-contact-model-select select,
-.fox-contact-side-preference select {
-  --fox-type-ui: 12px;
+.fox-contact-side-group > .fox-library-card { gap: 2px; padding: 6px; }
+.fox-contact-side-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   width: 100%;
+  min-height: 40px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  text-align: left;
+  line-height: 22px;
+  cursor: pointer;
+  transition: background 150ms ease;
+}
+.fox-contact-side-item > svg { flex: none; color: var(--muted-foreground); }
+.fox-contact-side-lab { flex: 1; min-width: 0; }
+.fox-contact-side-chev { flex: none; }
+.fox-contact-side-item:disabled { cursor: not-allowed; }
+button.fox-contact-side-item:hover:not(:disabled),
+label.fox-contact-side-item:hover { background: color-mix(in srgb, var(--foreground) 5%, transparent); }
+.fox-contact-side-sub {
+  margin: 2px 8px 6px 34px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.fox-contact-side-group .fox-library-card > p[role="alert"] { margin: 0 8px 6px; }
+.fox-contact-side-item.is-path { align-items: flex-start; cursor: default; padding-block: 10px; }
+.fox-contact-side-item.is-path code {
+  min-width: 0;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+.fox-contact-side-item.is-model { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 6px 10px; cursor: default; }
+.fox-contact-side-item.is-model .fox-contact-model-select { display: contents; }
+.fox-contact-side-item.is-model select {
+  --fox-type-ui: 12px;
+  grid-column: 2;
   min-width: 0;
   max-width: none;
-  min-height: 36px;
+  min-height: 32px;
   padding: 4px 0 4px 4px;
   border: 0;
   border-radius: 6px;
@@ -170,9 +210,7 @@
   text-overflow: ellipsis;
   cursor: pointer;
 }
-.fox-contact-side-model option,
-.fox-contact-side-preference option { background: var(--fox-canvas); color: var(--foreground); }
-.fox-contact-side-model .fox-contact-model-select small {
+.fox-contact-side-item.is-model .fox-contact-model-select small {
   grid-column: 1 / -1;
   max-width: none;
   padding-left: 26px;
@@ -181,49 +219,24 @@
   text-align: left;
   overflow-wrap: anywhere;
 }
-.fox-contact-side-group { min-width: 0; }
-.fox-contact-side-group h3 {
-  margin: 0 4px 8px;
-  color: var(--muted-foreground);
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 20px;
-}
-.fox-contact-side-action {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  min-height: 42px;
-  padding: 9px 4px;
+.fox-contact-side-select {
+  --fox-type-ui: 12px;
+  min-width: 0;
+  max-width: 60%;
+  min-height: 32px;
   border: 0;
-  border-radius: 8px;
+  border-radius: 6px;
   background: transparent;
-  color: var(--foreground);
-  text-align: left;
-  line-height: 22px;
-  cursor: pointer;
-  transition: background 150ms ease;
-}
-.fox-contact-side-action span { flex: 1; min-width: 0; }
-.fox-contact-side-action:hover:not(:disabled),
-.fox-contact-side-preference select:hover:not(:disabled),
-.fox-contact-side-model select:hover:not(:disabled) { background: color-mix(in srgb, var(--foreground) 5%, transparent); }
-.fox-contact-side-reset p {
-  margin: -2px 4px 0 30px;
   color: var(--muted-foreground);
   font-size: 12px;
-  line-height: 1.6;
-  overflow-wrap: anywhere;
+  text-align: right;
+  text-align-last: right;
+  cursor: pointer;
 }
-.fox-contact-side-preference {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: 10px;
-  min-height: 42px;
-  padding: 0 4px;
-}
+.fox-contact-side-item.is-model select:hover:not(:disabled),
+.fox-contact-side-select:hover:not(:disabled) { background: color-mix(in srgb, var(--foreground) 5%, transparent); }
+.fox-contact-side-item option,
+.fox-contact-side-select option { background: var(--fox-canvas); color: var(--foreground); }
 .fox-contact-side-card :is(button, select):disabled { cursor: not-allowed; opacity: .5; }
 .fox-contact-side-card :is(button, select, input, textarea, summary):focus-visible {
   outline: 2px solid var(--ring);
@@ -231,22 +244,25 @@
 }
 .fox-contact-side-card .fox-contact-panel { padding: 0; }
 .fox-contact-side-view { display: grid; gap: 8px; min-width: 0; padding-top: 8px; }
-.fox-contact-side-workspace-actions { --fox-type-ui: 14px; display: grid; gap: 2px; }
+/* 工作目录「操作」：按钮维持无边框条目语言，只是被包进浅色卡片。 */
+.fox-contact-side-workspace-actions { --fox-type-ui: 13px; display: grid; gap: 2px; }
 .fox-contact-side-workspace-actions > button {
   justify-content: flex-start;
-  min-height: 42px;
-  padding: 9px 4px;
+  min-height: 40px;
+  padding: 6px 8px;
   border: 0;
-  border-radius: 8px;
+  border-radius: 10px;
   background: transparent;
   box-shadow: none;
-  font-size: 14px;
+  font-size: 13px;
+  transition: background 150ms ease;
 }
 .fox-contact-side-workspace-actions > button svg { width: 16px; height: 16px; color: var(--muted-foreground); }
 .fox-contact-side-workspace-actions > button:hover:not(:disabled) { background: color-mix(in srgb, var(--foreground) 5%, transparent); }
 @media (prefers-reduced-motion: reduce) {
   .fox-contact-side-card-control,
-  .fox-contact-side-action { transition: none; }
+  .fox-contact-side-item,
+  .fox-contact-side-workspace-actions > button { transition: none; }
 }
 
 /* Settings subview: the old profile page's blocks in a 320px column. */

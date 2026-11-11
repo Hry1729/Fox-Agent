@@ -1,78 +1,59 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { FileAudio, FileVideo, FolderOpen, Image as ImageIcon, MoreHorizontal } from 'lucide-react'
+import { FolderOpen, MoreHorizontal } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { desktopClient, desktopErrorDetails } from '@/features/conversations/api/desktop-client'
 import { contacts, type Companion, type CompanionFileEntry, type CompanionFiles } from './api'
 import { ContactAvatar } from './chat-controls'
 import { formatSearchTime } from './chat-search'
 import { showContactError, useContacts } from './context'
+import {
+  LIBRARY_GROUPS,
+  LibraryGlyph,
+  formatLibraryRelative,
+  libraryGroupLabel,
+  libraryMediaKind,
+  libraryTimeGroup,
+  type LibraryTimeGroup,
+} from './library-shared'
+import { managedFileGroupAt, managedFileKey, type ManagedFileGroup } from '@/features/chat/components/managed-files/model'
+import {
+  ManagedFileRow,
+  ManagedFilesFootnote,
+  VersionDriftWarn,
+  VersionRows,
+  VersionToggle,
+} from '@/features/chat/components/managed-files/ManagedFileVersions'
+import type { ManagedFilesController } from '@/features/chat/components/managed-files/use-managed-files'
 import './contacts.css'
+
+// The row helpers (media kind, time bands, relative time) live in
+// `library-shared.tsx` so the chat surfaces can reuse them without re-entering
+// this module; re-exported here because callers and tests address them here.
+export { formatLibraryRelative, libraryMediaKind, libraryTimeGroup } from './library-shared'
+export type { LibraryTimeGroup } from './library-shared'
 
 export const FILES_WORKDIR_HINT = '手工放入工作目录、没有消息记录的文件，请用「打开工作目录」查看。'
 
 const COLLAPSED_ROWS = 5
 type LibraryFilter = 'all' | 'media' | 'files'
 const FILTERS: Array<[LibraryFilter, string]> = [['all', '全部'], ['media', '媒体'], ['files', '文件']]
-export type LibraryTimeGroup = 'today' | 'week' | 'earlier'
-const GROUPS: Array<[LibraryTimeGroup, string]> = [['today', '今天'], ['week', '本周'], ['earlier', '更早']]
 
-export function libraryMediaKind(entry: CompanionFileEntry): 'image' | 'video' | 'audio' | null {
-  const mime = entry.mediaType ?? ''
-  if (mime.startsWith('image/')) return 'image'
-  if (mime.startsWith('video/')) return 'video'
-  if (mime.startsWith('audio/')) return 'audio'
-  const ext = entry.name.includes('.') ? entry.name.split('.').pop()!.toLowerCase() : ''
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'avif'].includes(ext)) return 'image'
-  if (['mp4', 'mov', 'webm', 'mkv', 'avi'].includes(ext)) return 'video'
-  if (['mp3', 'wav', 'ogg', 'm4a', 'flac'].includes(ext)) return 'audio'
-  return null
+/** One card row: a message-recorded file, optionally carrying its managed
+ *  version group, or a managed-only file with no message record (orphan). */
+type LibraryRow = {
+  key: string
+  at: number
+  entry: CompanionFileEntry | null
+  group: ManagedFileGroup | null
 }
 
-export function libraryTimeGroup(at: number, now: number): LibraryTimeGroup {
-  const date = new Date(at)
-  const current = new Date(now)
-  if (date.toDateString() === current.toDateString()) return 'today'
-  const weekStart = new Date(current)
-  weekStart.setHours(0, 0, 0, 0)
-  weekStart.setDate(current.getDate() - ((current.getDay() + 6) % 7))
-  return at >= weekStart.getTime() ? 'week' : 'earlier'
-}
-
-export function formatLibraryRelative(at: number, now = Date.now()): string {
-  const minutes = Math.floor(Math.max(0, now - at) / 60_000)
-  if (minutes < 1) return '刚刚'
-  if (minutes < 60) return `${minutes} 分钟`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours} 小时`
-  const days = Math.floor(hours / 24)
-  if (days < 7) return `${days} 天`
-  return formatSearchTime(at, now)
-}
-
-const BAND_COLORS: Record<string, string> = {
-  pdf: '#e5484d', doc: '#3e63dd', docx: '#3e63dd', xls: '#30a46c', xlsx: '#30a46c', csv: '#30a46c',
-  ppt: '#f76b15', pptx: '#f76b15', zip: '#f5a524', rar: '#f5a524', '7z': '#f5a524',
-}
-
-function FileGlyph({ entry }: { entry: CompanionFileEntry }) {
-  const media = libraryMediaKind(entry)
-  const missing = entry.missing ? ' is-missing' : ''
-  if (media) {
-    const Icon = media === 'image' ? ImageIcon : media === 'video' ? FileVideo : FileAudio
-    return <span className={`fox-library-glyph is-media is-${media}${missing}`} aria-hidden="true"><Icon size={15} /></span>
-  }
-  const ext = entry.name.includes('.') ? entry.name.split('.').pop()!.toLowerCase() : ''
-  const band = BAND_COLORS[ext]
-  return <svg className={`fox-library-glyph is-doc${missing}`} viewBox="0 0 20 20" aria-hidden="true">
-    <path className="fox-library-page" d="M4.5 1.5h7.5l3.5 3.5v13.5h-11z" />
-    <path className="fox-library-fold" d="M12 1.5V5h3.5" />
-    {band
-      ? <rect x="2.5" y="10.5" width="15" height="4.5" rx="1.5" fill={band} />
-      : <path className="fox-library-line" d="M7 8.5h6M7 11.5h6M7 14.5h4" />}
-  </svg>
-}
-
-function FileRow({ contact, entry, group, now }: { contact: Companion; entry: CompanionFileEntry; group: LibraryTimeGroup; now: number }) {
+function FileRow({ contact, entry, group: timeGroup, now, versions }: {
+  contact: Companion
+  entry: CompanionFileEntry
+  group: LibraryTimeGroup
+  now: number
+  versions: { group: ManagedFileGroup; controller: ManagedFilesController } | null
+}) {
   const ctx = useContacts()
   const [busy, setBusy] = useState(false)
   const [hoverSide, setHoverSide] = useState<'above' | 'below'>('above')
@@ -107,31 +88,49 @@ function FileRow({ contact, entry, group, now }: { contact: Companion; entry: Co
   const provenance = entry.kind === 'attachment' ? '我提供的文件' : '联系人生成的结果'
   const sourceLine = `${entry.origin === 'task' ? `定时任务「${entry.taskName ?? '未命名'}」 · ` : ''}${entry.source ? `来源消息 · ${formatSearchTime(entry.source.at, now)}` : '暂无来源消息'}`
   const hoverSource = `${entry.origin === 'task' ? `定时任务「${entry.taskName ?? '未命名'}」 · ` : ''}${entry.source ? formatSearchTime(entry.source.at, now) : '暂无来源消息'}`
-  return <div className="fox-library-row" ref={rowRef} aria-label={entry.name} onMouseEnter={place} onFocus={place}>
-    <FileGlyph entry={entry} />
-    <span className="fox-library-name">{entry.name}</span>
-    {entry.missing
-      ? <span className="fox-library-missing" role="status">文件缺失</span>
-      : <time className="fox-library-time" dateTime={new Date(entry.updatedAt).toISOString()}>{formatLibraryRelative(entry.updatedAt, now)}</time>}
-    <details className="fox-library-menu" ref={menuRef} onToggle={place}>
-      <summary aria-label={`${entry.name} 的操作`} title="更多操作"><MoreHorizontal size={16} aria-hidden="true" /></summary>
-      <div className={`fox-library-menu-pop${menuUp ? ' is-up' : ''}`}>
-        <p className="fox-library-menu-head">{provenance} · {sourceLine}</p>
-        <button type="button" disabled={busy || entry.missing} onClick={() => { closeMenu(); void act(() => contacts.openFile(contact.id, entry.kind, entry.id)) }}>打开</button>
-        <button type="button" disabled={busy || entry.missing} onClick={() => { closeMenu(); void act(() => contacts.saveFile(contact.id, entry.kind, entry.id)) }}>另存为</button>
-        <button type="button" disabled={busy || !entry.source} onClick={() => { closeMenu(); if (entry.source) ctx?.jumpToMessage?.(entry.source.bubbleId) }}>回到消息</button>
+  const open = versions ? Boolean(versions.controller.expanded[versions.group.storagePath]) : false
+  return <>
+    <div className={`fox-library-row${open ? ' is-open' : ''}`} ref={rowRef} aria-label={entry.name} onMouseEnter={place} onFocus={place}>
+      <LibraryGlyph entry={entry} />
+      <span className="fox-library-meta">
+        <span className="fox-library-name">{entry.name}</span>
+        {versions && <VersionDriftWarn group={versions.group} />}
+      </span>
+      {versions && <VersionToggle
+        count={versions.group.versions.length}
+        open={open}
+        onToggle={() => versions.controller.toggleExpanded(versions.group.storagePath)}
+      />}
+      {entry.missing
+        ? <span className="fox-library-missing" role="status">文件缺失</span>
+        : <time className="fox-library-time" dateTime={new Date(entry.updatedAt).toISOString()}>{formatLibraryRelative(entry.updatedAt, now)}</time>}
+      <details className="fox-library-menu" ref={menuRef} onToggle={place}>
+        <summary aria-label={`${entry.name} 的操作`} title="更多操作"><MoreHorizontal size={16} aria-hidden="true" /></summary>
+        <div className={`fox-library-menu-pop${menuUp ? ' is-up' : ''}`}>
+          <p className="fox-library-menu-head">{provenance} · {sourceLine}</p>
+          <button type="button" disabled={busy || entry.missing} onClick={() => { closeMenu(); void act(() => contacts.openFile(contact.id, entry.kind, entry.id)) }}>打开</button>
+          <button type="button" disabled={busy || entry.missing} onClick={() => { closeMenu(); void act(() => contacts.saveFile(contact.id, entry.kind, entry.id)) }}>另存为</button>
+          <button type="button" disabled={busy || !entry.source} onClick={() => { closeMenu(); if (entry.source) ctx?.jumpToMessage?.(entry.source.bubbleId) }}>回到消息</button>
+        </div>
+      </details>
+      <div className={`fox-library-hover is-${hoverSide}`} aria-hidden="true">
+        <span className="fox-library-hover-group">{libraryGroupLabel(timeGroup)}</span>
+        <span className="fox-library-hover-kind">{provenance}{entry.missing && <em> · 文件缺失</em>}</span>
+        <b className="fox-library-hover-name">{entry.name}</b>
+        <span className="fox-library-hover-source"><ContactAvatar contact={contact} /><span>{contact.displayName} · {hoverSource}</span></span>
       </div>
-    </details>
-    <div className={`fox-library-hover is-${hoverSide}`} aria-hidden="true">
-      <span className="fox-library-hover-group">{GROUPS.find(([value]) => value === group)![1]}</span>
-      <span className="fox-library-hover-kind">{provenance}{entry.missing && <em> · 文件缺失</em>}</span>
-      <b className="fox-library-hover-name">{entry.name}</b>
-      <span className="fox-library-hover-source"><ContactAvatar contact={contact} /><span>{contact.displayName} · {hoverSource}</span></span>
     </div>
-  </div>
+    {versions && open && <VersionRows group={versions.group} controller={versions.controller} />}
+  </>
 }
 
-export function ContactFiles({ contact, onBack }: { contact: Companion; onBack?: () => void }) {
+export function ContactFiles({ contact, onBack, managed }: {
+  contact: Companion
+  onBack?: () => void
+  /** Versions of Host-managed files for this conversation, owned by the parent
+   *  surface (it also drives the unseen dot). Absent = no version UI. */
+  managed?: ManagedFilesController | null
+}) {
   const [data, setData] = useState<CompanionFiles | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -146,15 +145,39 @@ export function ContactFiles({ contact, onBack }: { contact: Companion; onBack?:
     try { await desktopClient.openProjectFolder(contact.conversationId) } catch (e) { showContactError(e) } finally { setBusy(false) }
   }
   const now = Date.now()
+  const managedGroups = managed && managed.state.status === 'ready' ? managed.state.groups : []
+  const hasVersions = managedGroups.length > 0
   const groups = useMemo(() => {
     if (!data) return []
-    const entries = [...data.provided, ...data.generated]
-      .filter(entry => filter === 'all' || (filter === 'media') === Boolean(libraryMediaKind(entry)))
-      .sort((a, b) => b.updatedAt - a.updatedAt)
-    return GROUPS
-      .map(([value, label]) => ({ value, label, entries: entries.filter(entry => libraryTimeGroup(entry.updatedAt, now) === value) }))
-      .filter(group => group.entries.length > 0)
-  }, [data, filter, now])
+    // Message entries and managed groups can only meet on the file name: the
+    // registry stores a storage path, the library an id. A matched pair renders
+    // as ONE row (versions toggled inside it); unmatched groups join the same
+    // time bands as extra rows so no version loses its entry point.
+    const groupByKey = new Map<string, ManagedFileGroup>()
+    for (const group of managedGroups) {
+      const key = managedFileKey(group.displayName)
+      if (!groupByKey.has(key)) groupByKey.set(key, group)
+    }
+    const rows: LibraryRow[] = []
+    const matched = new Set<string>()
+    for (const entry of [...data.provided, ...data.generated]) {
+      if (filter !== 'all' && (filter === 'media') !== Boolean(libraryMediaKind(entry))) continue
+      const key = managedFileKey(entry.name)
+      const group = groupByKey.get(key) ?? null
+      if (group) matched.add(key)
+      rows.push({ key: `${entry.kind}:${entry.id}`, at: entry.updatedAt, entry, group })
+    }
+    for (const [key, group] of groupByKey) {
+      if (matched.has(key)) continue
+      if (filter !== 'all' && (filter === 'media') !== Boolean(libraryMediaKind({ name: group.displayName }))) continue
+      rows.push({ key: `managed:${group.storagePath}`, at: managedFileGroupAt(group), entry: null, group })
+    }
+    rows.sort((a, b) => b.at - a.at)
+    return LIBRARY_GROUPS
+      .map(([value, label]) => ({ value, label, rows: rows.filter(row => libraryTimeGroup(row.at, now) === value) }))
+      .filter(group => group.rows.length > 0)
+  }, [data, filter, now, managedGroups])
+  const managedState = managed?.state
   return <div className="fox-library" aria-busy={busy}>
     {onBack && <div className="fox-contact-capabilities-head"><h3>资料库</h3>
       <Button size="sm" variant="ghost" onClick={onBack}>返回资料</Button></div>}
@@ -167,17 +190,25 @@ export function ContactFiles({ contact, onBack }: { contact: Companion; onBack?:
       {groups.map(group => <section className="fox-library-group" key={group.value} aria-label={group.label}>
         <h3>{group.label}</h3>
         <div className="fox-library-card">
-          {(expanded[group.value] ? group.entries : group.entries.slice(0, COLLAPSED_ROWS)).map(entry =>
-            <FileRow key={entry.id} contact={contact} entry={entry} group={group.value} now={now} />)}
-          {group.entries.length > COLLAPSED_ROWS && <button type="button" className="fox-library-more" aria-expanded={expanded[group.value]}
+          {(expanded[group.value] ? group.rows : group.rows.slice(0, COLLAPSED_ROWS)).map(row => row.entry
+            ? <FileRow key={row.key} contact={contact} entry={row.entry} group={group.value} now={now}
+                versions={row.group && managed ? { group: row.group, controller: managed } : null} />
+            : row.group && managed
+              ? <ManagedFileRow key={row.key} group={row.group} controller={managed} />
+              : null)}
+          {group.rows.length > COLLAPSED_ROWS && <button type="button" className="fox-library-more" aria-expanded={expanded[group.value]}
             onClick={() => setExpanded(previous => ({ ...previous, [group.value]: !previous[group.value] }))}>{expanded[group.value] ? '收起' : '展开'}</button>}
         </div>
       </section>)}
       {!groups.length && <p className="fox-library-empty">{filter === 'all' ? '资料库还没有文件。' : '当前筛选下没有文件。'}</p>}
       {!data.provided.length && <p className="fox-library-hint">还没有通过消息提供过文件。</p>}
       {!data.generated.length && <p className="fox-library-hint">还没有生成过文件。</p>}
+      {hasVersions && managed && <ManagedFilesFootnote controller={managed} />}
+      {managedState && managedState.status === 'error' && <p className="fox-version-state is-error" role="status">{managedState.message} <button type="button" onClick={managed?.refresh}>重试</button></p>}
       <p className="fox-library-hint">{FILES_WORKDIR_HINT}</p>
-      <div className="fox-library-foot"><Button size="sm" variant="outline" disabled={busy} onClick={() => void openWorkspace()}><FolderOpen size={14} />打开工作目录</Button></div>
+      <div className="fox-library-foot"><div className="fox-library-card"><button type="button" className="fox-library-action" disabled={busy} onClick={() => void openWorkspace()}>
+        <FolderOpen size={16} aria-hidden="true" /><span>打开工作目录</span>
+      </button></div></div>
     </>}
   </div>
 }

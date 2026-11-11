@@ -1,17 +1,17 @@
 // Real-DOM interaction acceptance for the two user decision surfaces that carry
 // a request / approval identity:
 //
-//   1. `ManagedFilesPanel` — the restore button ("恢复" / "强制恢复") and the
-//      restore request identity the panel hands to the Host.
+//   1. The managed-file version surfaces (`useManagedFiles` + `VersionRows`) —
+//      the restore action ("恢复" / "覆盖恢复" / "强制恢复（先备份当前内容）")
+//      and the restore request identity the shared store hands to the Host.
 //   2. `RuntimeApprovalPrompt` — the whole-file replacement approval and the
 //      approval identity it submits on confirm / deny.
 //
-// SCOPE (honest): the component under test, its event handlers, its presentation
-// rules and the request-identity module are the REAL ones, mounted with React DOM
-// into a REAL happy-dom document, driven by real DOM click events. Only the Tauri
-// IPC boundary (`desktopClient`) and the in-app notification side effect are
-// mocked, because neither can exist in this process. `apps/desktop/tests/`
-// already mocks that same boundary in `managed-files-panel-restore.test.tsx`.
+// SCOPE (honest): the components under test, their event handlers, the store and
+// the request-identity module are the REAL ones, mounted with React DOM into a
+// REAL happy-dom document, driven by real DOM click events. Only the Tauri IPC
+// boundary (`desktopClient`) and the in-app notification side effect are mocked,
+// because neither can exist in this process.
 //
 // A click-through of the packaged Tauri desktop app is still a separate manual
 // acceptance item; nothing here claims to be that.
@@ -41,7 +41,7 @@ let restoreImpl: (call: RestoreCall) => Promise<unknown> = async () => ({
 
 // The Host's own dedup contract: a repeated delivery of the SAME request identity
 // reads the recorded result instead of mutating the file again. Reproduced at the
-// boundary so the panel is held to it, without inventing Host behaviour.
+// boundary so the surface is held to it, without inventing Host behaviour.
 const settledByRequestId = new Map<string, unknown>()
 const dedupAtBoundary = (call: RestoreCall) => {
   if (call.requestId && settledByRequestId.has(call.requestId)) {
@@ -144,8 +144,11 @@ const React = await import('react')
 const { cleanup, fireEvent, render, screen, waitFor } = await import(
   '@testing-library/react'
 )
-const { ManagedFilesPanel } = await import(
-  '../src/features/chat/components/ManagedFilesPanel'
+const { useManagedFiles } = await import(
+  '../src/features/chat/components/managed-files/use-managed-files'
+)
+const { ManagedFileVersions } = await import(
+  '../src/features/chat/components/managed-files/ManagedFileVersions'
 )
 const { RuntimeApprovalPrompt } = await import(
   '../src/features/chat/components/RuntimeApprovalPrompt'
@@ -174,77 +177,104 @@ afterEach(() => {
   confirmTitles.length = 0
 })
 
-/** Mount the real panel and expand its real header button. */
-async function mountPanel() {
-  confirmAnswer = true
-  render(React.createElement(ManagedFilesPanel, { conversationId: 'conv-1' }))
-  const header = await screen.findByRole('button', { name: /文件版本/ })
-  fireEvent.click(header)
-  return header
+/** The store caches one source per conversation id for the whole process, so
+ *  each test mounts under its own id instead of inheriting another test's rows. */
+let convSeq = 0
+const nextConvId = () => `conv-dom-${(convSeq += 1)}`
+
+/** The right-sidebar 文件 page shape: the controller plus the version list. */
+function Harness({ conversationId, refreshKey }: { conversationId: string; refreshKey?: string }) {
+  const managed = useManagedFiles(conversationId, refreshKey)
+  return <div>{managed ? <ManagedFileVersions controller={managed} /> : <span data-testid="no-surface" />}</div>
 }
 
-const restoreButton = () => screen.getByRole('button', { name: '恢复版本' })
+/** Mount the list and expand the one file group so the version rows appear.
+ *  Returns the conversation id the surface was mounted under. */
+async function mountRows(): Promise<string> {
+  confirmAnswer = true
+  const conversationId = nextConvId()
+  render(<Harness conversationId={conversationId} />)
+  const toggle = await screen.findByRole('button', { name: '2 个版本' })
+  fireEvent.click(toggle)
+  return conversationId
+}
 
-describe('ManagedFilesPanel render contract', () => {
-  test('a completed run reveals its first captured file without switching conversations', async () => {
+const restoreButton = () => screen.getByRole('button', { name: '恢复' })
+
+describe('版本列表渲染契约（ManagedFileVersions）', () => {
+  test('首次挂载读取一次，refreshKey 变化只补充一次静默检查', async () => {
     versions = []
-    const view = render(<ManagedFilesPanel conversationId="conv-1" refreshKey="running" />)
+    const conversationId = nextConvId()
+    const view = render(<Harness conversationId={conversationId} refreshKey="running" />)
     await waitFor(() => expect(listCalls).toBe(1))
-    expect(screen.queryByRole('button', { name: /文件版本/ })).toBeNull()
+    expect(document.querySelector('.fox-file-versions')).toBeNull()
     versions = [versionRow({ id: 'v1', versionNo: 1, createdAt: 1 })]
-    view.rerender(<ManagedFilesPanel conversationId="conv-1" refreshKey="idle" />)
-    await screen.findByRole('button', { name: /文件版本/ })
+    view.rerender(<Harness conversationId={conversationId} refreshKey="idle" />)
+    await screen.findByRole('button', { name: '1 个版本' })
     expect(listCalls).toBe(2)
   })
 
-  test('a failed version lookup leaves a visible retry entry', async () => {
+  test('首次读取失败留下可见的重试入口，重试成功后错误消失', async () => {
     listError = new Error('文件版本暂时无法读取')
-    render(<ManagedFilesPanel conversationId="conv-1" />)
-    fireEvent.click(await screen.findByRole('button', { name: /文件版本/ }))
-    expect(screen.getByText('文件版本暂时无法读取')).toBeDefined()
+    render(<Harness conversationId={nextConvId()} />)
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('文件版本暂时无法读取')
     listError = null
-    fireEvent.click(screen.getByTitle('重新检查'))
-    await waitFor(() => expect(screen.queryByText('文件版本暂时无法读取')).toBeNull())
+    fireEvent.click(screen.getByRole('button', { name: '重试' }))
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
+    await screen.findByRole('button', { name: '2 个版本' })
   })
+
+  test('没有记录时列表整体不渲染，也不留空壳', async () => {
+    versions = []
+    render(<Harness conversationId={nextConvId()} />)
+    await waitFor(() => expect(listCalls).toBe(1))
+    expect(document.querySelector('.fox-file-versions')).toBeNull()
+  })
+
   // Server rendering never runs `useEffect`, so the version list is still empty
-  // and the panel takes its documented early return. This covers the "no
+  // and the surface takes its documented early return. This covers the "no
   // interactive surface until the Host has answered" rule only; the affordances
   // themselves are covered by the real-DOM clicks below.
-  test('the panel renders no surface before the Host has answered', async () => {
+  test('Host 未回答前不渲染任何可操作面', async () => {
     const { renderToStaticMarkup } = await import('react-dom/server')
-    const html = renderToStaticMarkup(
-      React.createElement(ManagedFilesPanel, { conversationId: 'conv-1' }),
-    )
-    expect(html).toBe('')
+    const html = renderToStaticMarkup(<Harness conversationId={nextConvId()} />)
+    expect(html).not.toContain('button')
+  })
+
+  test('最新行是当前内容，只有旧版提供恢复', async () => {
+    await mountRows()
+    expect(screen.getByText('当前')).toBeDefined()
+    expect(restoreButton()).toBeDefined()
   })
 })
 
-describe('ManagedFilesPanel restore button (real DOM clicks)', () => {
-  test('a fast double click produces exactly one restore request', async () => {
+describe('版本行恢复按钮（真实 DOM 点击）', () => {
+  test('连点两次只产生一个恢复请求', async () => {
     // Undetermined on purpose: the first request is still in flight.
     restoreImpl = () => new Promise(() => {})
-    await mountPanel()
+    const conversationId = await mountRows()
 
     const button = restoreButton()
     fireEvent.click(button)
-    // The panel disabled the action while it is undetermined; a second click in
+    // The row disabled the action while it is undetermined; a second click in
     // the same double click must not become a second execution request.
     fireEvent.click(button)
 
     expect(restoreCalls).toHaveLength(1)
-    expect(restoreCalls[0].conversationId).toBe('conv-1')
+    expect(restoreCalls[0].conversationId).toBe(conversationId)
     expect(restoreCalls[0].versionId).toBe('v1')
     expect(restoreCalls[0].force).toBe(false)
     expect(typeof restoreCalls[0].requestId).toBe('string')
     expect(restoreCalls[0].requestId).not.toBe('')
   })
 
-  test('a resend after a timed-out request keeps the same logical identity', async () => {
+  test('超时未决后的重发保持同一逻辑标识', async () => {
     // 1. A drift rejection turns the row's action into its force form.
     restoreImpl = async () => {
       throw new Error('a.txt changed outside the recorded task history')
     }
-    await mountPanel()
+    await mountRows()
     fireEvent.click(restoreButton())
     const forceButton = await screen.findByRole('button', { name: /强制恢复/ })
 
@@ -272,8 +302,8 @@ describe('ManagedFilesPanel restore button (real DOM clicks)', () => {
     expect(new Set(restoreCalls.map((call) => call.requestId)).size).toBe(2)
   })
 
-  test('a new action after a definite success mints a new identity', async () => {
-    await mountPanel()
+  test('确定成功后的新一次确认使用新标识', async () => {
+    await mountRows()
     fireEvent.click(restoreButton())
     await waitFor(() => expect(restoreCalls).toHaveLength(1))
 
@@ -287,11 +317,11 @@ describe('ManagedFilesPanel restore button (real DOM clicks)', () => {
     expect(restoreCalls.every((call) => call.force === false)).toBe(true)
   })
 
-  test('a cancelled force confirmation sends no request', async () => {
+  test('取消强制确认不发出任何请求', async () => {
     restoreImpl = async () => {
       throw new Error('a.txt changed outside the recorded task history')
     }
-    await mountPanel()
+    await mountRows()
     fireEvent.click(restoreButton())
     await waitFor(() => expect(restoreCalls).toHaveLength(1))
     const forceButton = await screen.findByRole('button', { name: /强制恢复/ })
@@ -305,20 +335,20 @@ describe('ManagedFilesPanel restore button (real DOM clicks)', () => {
     expect(screen.getByRole('button', { name: /强制恢复/ }).hasAttribute('disabled')).toBe(false)
   })
 
-  test('turning a normal restore into a forced one never reuses the identity', async () => {
+  test('普通恢复转强制恢复绝不复用标识', async () => {
     restoreImpl = async () => {
       throw new Error('a.txt changed outside the recorded task history')
     }
-    await mountPanel()
+    await mountRows()
     fireEvent.click(restoreButton())
     await waitFor(() => expect(restoreCalls).toHaveLength(1))
 
     // The rejection is shown and the force affordance appears.
     const forceButton = await screen.findByRole('button', { name: /强制恢复/ })
-    expect(document.querySelector('.fox-managed-error')?.textContent).toContain(
+    expect(document.querySelector('.fox-version-state.is-error')?.textContent).toContain(
       'changed outside the recorded task history',
     )
-    expect(document.querySelector('.fox-managed-force-hint')?.textContent).toContain(
+    expect(document.querySelector('.fox-version-note.is-force')?.textContent).toContain(
       'changed outside the recorded task history',
     )
 

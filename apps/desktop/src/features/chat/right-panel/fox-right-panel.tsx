@@ -22,6 +22,9 @@ import { type ChildAgentSelection, MarkdownResponse, type OpenFileTab, type Righ
 import { compactValue, runtimeProcess } from '../timeline/fox-runtime-process-model'
 import { Workbench } from '../workbench'
 import { userFacingCause } from '@/features/chat/send-failure-notice'
+import { managedFilesFingerprintOf, useManagedFiles, type ManagedFilesController } from '../components/managed-files/use-managed-files'
+import { useManagedFileUnseen } from '../components/managed-files/use-managed-file-unseen'
+import { ManagedFileVersions } from '../components/managed-files/ManagedFileVersions'
 
 const ActivityDetailPanel = lazy(() => import('../components/ActivityDetailPanel').then((module) => ({ default: module.ActivityDetailPanel })))
 const HtmlFilePreview = lazy(() => import('../html-file-preview').then((module) => ({ default: module.HtmlFilePreview })))
@@ -665,7 +668,7 @@ function ChildAgentConversationPanel({ run, avatarIndex, onBack }: { run: ChildR
   )
 }
 
-function ContextContent({ mode, detail, fileTabs, activeFileTabId, activity, onOpenFile, onOpenEvidence, onOpenChildAgent }: { mode: RightMode; detail: ConversationDetail | null; fileTabs: OpenFileTab[]; activeFileTabId: string | null; activity: Omit<ActivityDetailPanelProps, "detail">; onOpenFile: (path: string, artifactId: string | null) => void; onOpenEvidence?: (evidence: TaskEvidenceRecord) => void; onOpenChildAgent: (run: ChildRunRecord, avatarIndex: number) => void }) {
+function ContextContent({ mode, detail, fileTabs, activeFileTabId, activity, managed, onOpenFile, onOpenEvidence, onOpenChildAgent }: { mode: RightMode; detail: ConversationDetail | null; fileTabs: OpenFileTab[]; activeFileTabId: string | null; activity: Omit<ActivityDetailPanelProps, "detail">; managed: ManagedFilesController | null; onOpenFile: (path: string, artifactId: string | null) => void; onOpenEvidence?: (evidence: TaskEvidenceRecord) => void; onOpenChildAgent: (run: ChildRunRecord, avatarIndex: number) => void }) {
   const conversationId = detail?.conversation.id ?? null
   const [selectedChange, setSelectedChange] = useState('')
   const [fileSearch, setFileSearch] = useState('')
@@ -700,6 +703,9 @@ function ContextContent({ mode, detail, fileTabs, activeFileTabId, activity, onO
     }
     const openedFilePath = activeFileTab?.path ?? ''
     const openedFileDisplayPath = openedFilePath ? projectDisplayPath(openedFilePath, detail.conversation.projectRoot) : ''
+    // The list hides itself when the registry is empty, so the separating
+    // border must know that too.
+    const hasVersionContent = managed !== null && !(managed.state.status === 'ready' && managed.state.groups.length === 0)
     return (
       <div className={`fox-file-panel ${openedFilePath ? 'is-file-open' : 'is-tree-only'}`}>
         {openedFilePath
@@ -709,7 +715,10 @@ function ContextContent({ mode, detail, fileTabs, activeFileTabId, activity, onO
           : <div className="fox-file-tree-pane">
               <div className="fox-panel-search"><Search size={14} /><input value={fileSearch} onChange={(event) => setFileSearch(event.target.value)} placeholder="搜索文件" />{fileSearch && <button type="button" aria-label="清除搜索" onClick={() => setFileSearch('')}><X size={12} /></button>}</div>
               <ScrollArea className="fox-file-tree">
-                {fileLoading ? <div className="fox-panel-loading"><LoaderCircle className="animate-spin" />正在读取项目文件</div> : normalizedSearch ? <div className="fox-file-search-results">{visibleFiles.map((item) => <button type="button" key={item.path} onClick={() => selectFile(item.path)}><FileText size={14} /><span><strong>{item.name}</strong><small>{item.parent || detail.conversation.projectRoot}</small></span></button>)}{visibleFiles.length === 0 && <p>没有匹配的文件</p>}</div> : <ProjectFileTree entries={projectFiles} workspaceName={detail.conversation.projectRoot.split(/[\\/]/).at(-1) || detail.conversation.projectRoot} selectedFile="" onSelect={selectFile} />}
+                {fileLoading ? <div className="fox-panel-loading"><LoaderCircle className="animate-spin" />正在读取项目文件</div> : normalizedSearch ? <div className="fox-file-search-results">{visibleFiles.map((item) => <button type="button" key={item.path} onClick={() => selectFile(item.path)}><FileText size={14} /><span><strong>{item.name}</strong><small>{item.parent || detail.conversation.projectRoot}</small></span></button>)}{visibleFiles.length === 0 && <p>没有匹配的文件</p>}</div> : <>
+                  {hasVersionContent && <ManagedFileVersions controller={managed} />}
+                  <div className={hasVersionContent ? 'fox-file-tree-sep' : undefined}><ProjectFileTree entries={projectFiles} workspaceName={detail.conversation.projectRoot.split(/[\\/]/).at(-1) || detail.conversation.projectRoot} selectedFile="" onSelect={selectFile} /></div>
+                </>}
               </ScrollArea>
               {fileError && <p className="fox-file-tree-error"><AlertTriangle size={14} />{fileError}</p>}
             </div>}
@@ -777,6 +786,17 @@ export function RightPanel({ mode, tabs, detail, activity, width, maximized = fa
     ? detail?.childRuns.find((run) => run.childRunId === activeChildAgent.run.childRunId) ?? activeChildAgent.run
     : null
   const rightItems = baseRightItems
+  // Versions share the store with the contact card 资料库: one source per
+  // conversation, no duplicated IPC, and the runtime counters are the only
+  // signal that tells the registry it may have grown.
+  const managedRefreshKey = `${detail?.messages.length ?? 0}:${detail?.artifacts.length ?? 0}:${detail?.toolCalls.length ?? 0}`
+  const managed = useManagedFiles(detail?.conversation.id ?? null, managedRefreshKey)
+  const [versionsUnseen] = useManagedFileUnseen({
+    surface: 'files',
+    conversationId: detail?.conversation.id ?? null,
+    fingerprint: managedFilesFingerprintOf(managed),
+    viewing: mode === 'files' && activeFileTabId === null,
+  })
   const homeItemCounts: Record<RightMode, number> = {
     knowledge: detail?.knowledgeBindings.filter((binding) => binding.enabled !== false).length ?? 0,
     files: detail?.artifacts.length ?? 0,
@@ -800,6 +820,7 @@ export function RightPanel({ mode, tabs, detail, activity, width, maximized = fa
             return <div key={tabMode} className={`fox-context-tab ${active ? 'is-active' : ''}`}>
               <button type="button" role="tab" aria-selected={active} title={item[1]} onClick={() => onMode(tabMode)}>{item[2]}<span>{item[1]}</span></button>
               <button type="button" className="fox-context-tab-close" aria-label={`关闭${item[1]}页面`} onClick={() => onCloseMode(tabMode)}><X size={12} /></button>
+              {tabMode === 'files' && versionsUnseen && <span className="fox-tab-dot" aria-hidden="true" />}
             </div>
           })}
           {fileTabs.map((tab) => {
@@ -814,7 +835,7 @@ export function RightPanel({ mode, tabs, detail, activity, width, maximized = fa
           <DropdownMenu>
             <DropdownMenuTrigger asChild><button type="button" aria-label="打开页面" title="打开页面"><Plus size={14} /></button></DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="fox-context-add-menu">
-              {rightItems.map(([id, label, icon]) => <DropdownMenuItem key={id} onSelect={() => onMode(id)}>{icon}<span>{label}</span></DropdownMenuItem>)}
+              {rightItems.map(([id, label, icon]) => <DropdownMenuItem key={id} onSelect={() => onMode(id)}>{icon}<span>{label}</span>{id === 'files' && versionsUnseen && <span className="fox-tab-dot is-inline" aria-hidden="true" />}</DropdownMenuItem>)}
             </DropdownMenuContent>
           </DropdownMenu>
           <button type="button" aria-label={maximized ? '还原右侧边栏' : '全屏显示右侧边栏'} title={maximized ? '还原' : '全屏'} onClick={onToggleMaximized}>{maximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</button>
@@ -824,10 +845,10 @@ export function RightPanel({ mode, tabs, detail, activity, width, maximized = fa
       {mode === 'agents' && activeChildAgent && activeChildAgentRun
         ? <ChildAgentConversationPanel key={activeChildAgentRun.childRunId} run={activeChildAgentRun} avatarIndex={activeChildAgent.avatarIndex} onBack={onBackChildAgent} />
         : mode
-        ? <ContextContent mode={mode} detail={detail} activity={activity} fileTabs={fileTabs} activeFileTabId={activeFileTabId} onOpenFile={onOpenFile} onOpenEvidence={onOpenEvidence} onOpenChildAgent={onOpenChildAgent} />
+        ? <ContextContent mode={mode} detail={detail} activity={activity} fileTabs={fileTabs} activeFileTabId={activeFileTabId} managed={managed} onOpenFile={onOpenFile} onOpenEvidence={onOpenEvidence} onOpenChildAgent={onOpenChildAgent} />
         : <div className="fox-context-home"><nav aria-label="侧边栏功能">{rightItems.map(([id, label, icon]) => {
             const count = homeItemCounts[id]
-            return <button type="button" key={id} onClick={() => onMode(id)}>{icon}<span>{label}</span>{count > 0 && <small>{count}</small>}</button>
+            return <button type="button" key={id} onClick={() => onMode(id)}>{icon}<span>{label}</span>{count > 0 && <small>{count}</small>}{id === 'files' && versionsUnseen && <span className="fox-tab-dot is-inline" aria-hidden="true" />}</button>
           })}</nav></div>}
     </aside>
   )

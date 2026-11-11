@@ -44,7 +44,7 @@ describe('联系人桌面组件', () => {
     expect(render(<ContactRepairBanner detail={{ ...detail, contextRepair: { available: true } }} />)).toContain('修复后继续')
   })
   test('主动重置只在 Host 开放时显示，运行期间禁用（已移入联系人资料卡）', () => {
-    const detail = { contextReset: { supported: true, reason: null, code: null } } as ConversationDetail
+    const detail = { contextReset: { supported: true, reason: null, code: null }, messages: [], artifacts: [], toolCalls: [], attachments: [], approvals: [] } as ConversationDetail
     const card = (value: ConversationDetail | null) => render(<ContactSideCard contact={contact} detail={value} onClose={noop} onResetContext={noop} />)
     expect(card(null)).not.toContain('重置上下文')
     expect(card(detail)).toContain('重置上下文')

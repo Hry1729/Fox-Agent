@@ -107,7 +107,7 @@ describe('no native confirm box in app code', () => {
       ['features/settings/lifecycle-hooks-section.tsx', ['删除 Hook']],
       ['features/agents/agent-pages.tsx', ['删除专家', '恢复专家版本']],
       ['features/agents/digital-colleague-manager.tsx', ['撤销数字同事']],
-      ['features/chat/components/ManagedFilesPanel.tsx', ['强制恢复文件']],
+      ['features/chat/components/managed-files/store.ts', ['强制恢复文件']],
       ['features/local-knowledge/local-knowledge-pages.tsx', ['放弃修改', '放弃修改']],
     ]
     let total = 0
