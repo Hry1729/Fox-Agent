@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { FolderLock, FolderOpen, MoreHorizontal, PanelRight, Pin, Plus, Search, UserRound } from 'lucide-react'
+import { ChevronRight, FolderOpen, MoreHorizontal, Pin, Plus, Search, UserRound } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { notify as toast } from '@/features/notifications'
@@ -7,7 +7,7 @@ import type { AgentRecord, ConversationDetail } from '@/features/conversations/m
 import { contacts, type Companion } from './api'
 import { useContacts, showContactError } from './context'
 import { ContactDelete } from './delete'
-import { ContactSearchBar, ContactSearchChip, ContactSearchPanel, useContactChatSearch } from './chat-search'
+import { ContactSearchBar, ContactSearchChip, ContactSearchPanel, type ContactChatSearch, useContactChatSearch } from './chat-search'
 import './contacts.css'
 
 export function ContactAvatar({ contact }: { contact: Companion }) {
@@ -28,10 +28,10 @@ export function ContactSidebar({ activeId, collapsed = false }: { activeId?: str
   const archive = async (contact: Companion) => {
     try { await contacts.archive(contact.id); ctx.leave(contact); await refresh() } catch (error) { showContactError(error) }
   }
-  if (collapsed) return <DropdownMenu><DropdownMenuTrigger asChild><button type="button" className="fox-sidebar-command" aria-label="联系人"><UserRound size={18} /></button></DropdownMenuTrigger>
+  if (collapsed) return <DropdownMenu><DropdownMenuTrigger asChild><button type="button" className="fox-sidebar-command" aria-label="Fox"><UserRound size={18} /></button></DropdownMenuTrigger>
     <DropdownMenuContent side="right">{list.companions.filter(item => !item.archivedAt && !item.deletingAt).map(item => <DropdownMenuItem key={item.id} onSelect={() => void open(item)}><ContactAvatar contact={item} />{item.displayName}</DropdownMenuItem>)}<DropdownMenuItem onSelect={ctx.add}>添加联系人</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
-  return <section className="fox-contact-sidebar" aria-label="联系人">
-    <div className="fox-section-head fox-sidebar-group-head"><span>联系人</span><button type="button" className="fox-icon-button" aria-label="添加联系人" onClick={ctx.add}><Plus size={14} /></button></div>
+  return <section className="fox-contact-sidebar" aria-label="Fox">
+    <div className="fox-section-head fox-sidebar-group-head"><span>Fox</span><button type="button" className="fox-icon-button" aria-label="添加联系人" onClick={ctx.add}><Plus size={14} /></button></div>
     {ctx.error && <button type="button" title={ctx.error} onClick={() => void refresh()}>重新加载联系人</button>}
     {list.companions.filter(item => !item.archivedAt && !item.deletingAt).map(item => <div className={'fox-contact-row' + (activeId === item.conversationId ? ' is-active' : '')} key={item.id}>
       <button type="button" className="fox-contact-link" onClick={() => void open(item)} aria-current={activeId === item.conversationId ? 'page' : undefined}><ContactAvatar contact={item} /><span>{item.displayName}</span>{item.pinnedAt && <Pin size={11} aria-label="已置顶" />}{item.pendingActionCount > 0 && <small className="fox-contact-flag is-action" aria-label="需要你确认">需要你确认</small>}{item.activeRunStatus && <small className="fox-contact-flag is-working">正在工作</small>}{item.unreadCount > 0 && <small className="fox-contact-flag is-unread" aria-label={item.unreadCount + ' 条新消息'}>{item.unreadCount}</small>}</button>
@@ -61,18 +61,25 @@ export function AddContactAction({ agent, onOpened }: { agent: AgentRecord; onOp
   return <Button variant="outline" disabled={busy || Boolean(existing?.deletingAt)} onClick={() => void add()}>{existing?.deletingAt ? '正在删除' : existing?.archivedAt ? '恢复并打开' : existing ? '打开私聊' : '加为联系人'}</Button>
 }
 
-export function ContactComposerFooter() {
+/**
+ * The private-chat topbar. `search` lets the caller share ONE search instance with
+ * the contact side card (SPEC item 3): when it is provided this component renders
+ * the search UI but owns no search state, so the conversation can never end up with
+ * two effects reacting to the same keyword or locate request. Without it the topbar
+ * creates and owns its own instance.
+ */
+export function ContactTopbar(props: {
+  detail: ConversationDetail | null
+  loadEarlierMessages?: () => Promise<void>
+  search?: ContactChatSearch
+}) {
   const ctx = useContacts()
-  if (!ctx?.privateChat) return null
-  return <div className="fox-composer-draft-footer fox-contact-footer">
-    <button type="button" className="fox-composer-project-trigger" title={ctx.current?.workspaceDir} onClick={ctx.showProfile}><FolderLock size={13}/><span>工作目录</span></button>
-    <button type="button" className="fox-composer-project-trigger" onClick={ctx.showProfile}>{ctx.current && <ContactAvatar contact={ctx.current}/>}<span>{ctx.current?.displayName ?? '联系人'}</span></button>
-  </div>
+  if (props.search) return <ContactTopbarView search={props.search} contactName={ctx?.current?.displayName ?? '联系人'} />
+  return <ContactTopbarOwningSearch detail={props.detail} loadEarlierMessages={props.loadEarlierMessages} />
 }
 
-export function ContactTopbar({ detail, onReset, loadEarlierMessages }: {
+function ContactTopbarOwningSearch({ detail, loadEarlierMessages }: {
   detail: ConversationDetail | null
-  onReset: () => void
   loadEarlierMessages?: () => Promise<void>
 }) {
   const ctx = useContacts()
@@ -82,32 +89,22 @@ export function ContactTopbar({ detail, onReset, loadEarlierMessages }: {
     loadEarlierMessages: loadEarlierMessages ?? (async () => {}),
     locateRequest: ctx?.locateRequest,
   })
+  return <ContactTopbarView search={search} contactName={ctx?.current?.displayName ?? '联系人'} />
+}
+
+function ContactTopbarView({ search, contactName }: { search: ContactChatSearch; contactName: string }) {
+  const ctx = useContacts()
   const searching = search.mode !== 'closed'
-  const contactName = ctx?.current?.displayName ?? '联系人'
   return <header className="fox-chat-topbar fox-contact-topbar"><span className="fox-contact-topbar-side" />
     {search.mode === 'panel'
       ? <ContactSearchBar search={search} />
       : search.mode === 'locating' || search.mode === 'chip'
         ? <ContactSearchChip search={search} />
         : <button type="button" className="fox-contact-heading" onClick={ctx?.showProfile}>
-            {ctx?.current ? <ContactAvatar contact={ctx.current} /> : <UserRound size={17} />}<strong>{contactName}</strong>
+            {ctx?.current ? <ContactAvatar contact={ctx.current} /> : <UserRound size={17} />}<strong>{contactName}</strong><ChevronRight size={14} className="fox-contact-heading-chevron" aria-hidden="true" />
           </button>}
     <div className="fox-contact-topbar-side is-end">
       {!searching && <button type="button" className="fox-icon-button" title="搜索私聊" aria-label="搜索私聊" onClick={search.open}><Search size={16} /></button>}
-      {!searching && <details className="fox-contact-more">
-        <summary className="fox-icon-button" aria-label="更多联系人操作" title="更多"><MoreHorizontal size={16} /></summary>
-        <div className="fox-contact-more-menu" role="menu">
-          {detail?.contextReset?.supported
-            ? <button type="button" role="menuitem" disabled={Boolean(detail.contextResetBlockedReason || ctx?.current?.activeRunStatus)}
-                title={detail.contextResetBlockedReason ?? undefined}
-                onClick={event => {
-                  onReset()
-                  event.currentTarget.closest('details')?.removeAttribute('open')
-                }}>重置上下文</button>
-            : <span className="fox-contact-more-empty">暂无更多操作</span>}
-        </div>
-      </details>}
-      <button type="button" className="fox-icon-button" title="联系人资料" aria-label="联系人资料" onClick={ctx?.showProfile}><PanelRight size={16} /></button>
     </div>
     {search.mode === 'panel' && <ContactSearchPanel search={search} contact={ctx?.current} contactName={contactName} />}
   </header>

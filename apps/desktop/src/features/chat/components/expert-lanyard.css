@@ -105,7 +105,6 @@
 }
 /* Compact panels occupy the same content card as a drawer. Keep the badge
    beneath that drawer and remove its hidden button from keyboard navigation. */
-.fox-content-card:has(.fox-compact-context-layer) .fox-expert-lanyard { visibility: hidden; }
 @media (prefers-reduced-motion: reduce) {
   .fox-expert-lanyard-body { transition: none; }
 }

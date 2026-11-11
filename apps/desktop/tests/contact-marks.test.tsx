@@ -135,21 +135,45 @@ const renderChat = (snapshot: ConversationDetail, ctx = context()) => render(
     <AssistantUiChat conversation={{ enabled: true, detail: snapshot, streamingText: '' } as never} callbacks={{ onSubmit: () => {} }} />
   </ContactsContext.Provider>)
 
-/** 气泡旁的「更多」菜单（原生 details）。用户气泡的身份是它的消息 id。 */
+/** 气泡旁的两个菜单现在是 Radix DropdownMenu（SPEC item 11）：触发器是真实
+ * button（aria-label 表情反馈 / 更多消息操作），内容渲染在 portal（document.body）。
+ * 打开用键盘 Enter（本仓库对 Radix 菜单的既有可靠驱动方式），菜单项走真实 click。
+ * 用户气泡的身份是它的消息 id。 */
 const bubbleSection = (container: HTMLElement, bubbleId: string) => {
   const section = container.querySelector(`[data-bubble-id="${bubbleId}"], [data-turn-message-id="${bubbleId}"]`)
   if (!section) throw new Error(`missing bubble ${bubbleId}`)
   return section as HTMLElement
 }
-const openMenu = (container: HTMLElement, bubbleId: string) => {
-  const section = bubbleSection(container, bubbleId)
-  fireEvent.click(section.querySelector('.fox-contact-bubble-more > summary') as HTMLElement)
-  return section
+const menuTrigger = (container: HTMLElement, bubbleId: string, label: string) => {
+  const trigger = bubbleSection(container, bubbleId).querySelector(`button[aria-label="${label}"]`)
+  if (!trigger) throw new Error(`missing menu trigger ${label} on ${bubbleId}`)
+  return trigger as HTMLElement
 }
-const openReactions = (container: HTMLElement, bubbleId: string) => {
-  const section = bubbleSection(container, bubbleId)
-  fireEvent.click(section.querySelector('.fox-contact-reactions > summary') as HTMLElement)
-  return section
+const anyOpenMenu = () => document.querySelector('.fox-contact-bubble-menu, .fox-contact-reaction-menu') as HTMLElement | null
+const settle = async () => { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)) }) }
+/** 菜单互斥由气泡的共享 open 状态保证；连续打开前先确保上一层已经退出 portal。 */
+const closeMenus = async () => {
+  const content = anyOpenMenu()
+  if (!content) return
+  await act(async () => { fireEvent.keyDown(content, { key: 'Escape' }) })
+  await settle()
+}
+const openBubbleMenu = async (container: HTMLElement, bubbleId: string, label: string, menuClass: string) => {
+  await closeMenus()
+  await act(async () => { fireEvent.keyDown(menuTrigger(container, bubbleId, label), { key: 'Enter' }) })
+  return await waitFor(() => {
+    const menu = document.querySelector(menuClass)
+    if (!menu) throw new Error(`menu ${menuClass} did not open`)
+    return menu as HTMLElement
+  })
+}
+const openMenu = (container: HTMLElement, bubbleId: string) => openBubbleMenu(container, bubbleId, '更多消息操作', '.fox-contact-bubble-menu')
+const openReactions = (container: HTMLElement, bubbleId: string) => openBubbleMenu(container, bubbleId, '表情反馈', '.fox-contact-reaction-menu')
+const menuItems = (menu: HTMLElement) => [...menu.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+const clickItem = async (item: HTMLElement | undefined) => {
+  if (!item) throw new Error('missing menu item')
+  await act(async () => { fireEvent.click(item) })
+  await settle()
 }
 
 afterEach(() => { cleanup(); clearMocks(); toasts.length = 0 })
@@ -166,8 +190,8 @@ describe('C07 永久标记只接受已落库气泡', () => {
     const view = renderChat(live)
     await waitFor(() => expect(view.container.querySelector('[data-contact-message-id]')).toBeTruthy())
     expect(view.container.querySelector('[data-bubble-id]')).toBeNull()
-    expect(view.container.querySelector('.fox-contact-bubble-more')).toBeNull()
-    expect(view.container.querySelector('.fox-contact-reactions')).toBeNull()
+    expect(view.container.querySelector('button[aria-label="更多消息操作"]')).toBeNull()
+    expect(view.container.querySelector('button[aria-label="表情反馈"]')).toBeNull()
     expect(view.container.querySelectorAll('.fox-thread-copy-button').length).toBeGreaterThan(0)
     view.unmount()
 
@@ -177,8 +201,8 @@ describe('C07 永久标记只接受已落库气泡', () => {
     expect(settled.container.querySelector('[data-bubble-id="run:response:2"]')!.getAttribute('data-delivery-order')).toBe('2')
     for (const id of ['user-1', 'run:response:2']) {
       const section = bubbleSection(settled.container, id)
-      expect(section.querySelector('.fox-contact-bubble-more')).toBeTruthy()
-      expect(section.querySelector('.fox-contact-reactions')).toBeTruthy()
+      expect(section.querySelector('button[aria-label="更多消息操作"]')).toBeTruthy()
+      expect(section.querySelector('button[aria-label="表情反馈"]')).toBeTruthy()
     }
     // 纯附件消息没有气泡，也就没有永久入口。
     settled.unmount()
@@ -188,8 +212,8 @@ describe('C07 永久标记只接受已落库气泡', () => {
     }))
     await waitFor(() => expect(filesOnly.container.querySelector('[data-bubble-id="run:response:2"]')).toBeTruthy())
     const plainUser = filesOnly.container.querySelector('[data-turn-message-id="user-1"]')
-    expect(plainUser?.querySelector('.fox-contact-bubble-more') ?? null).toBeNull()
-    expect(plainUser?.querySelector('.fox-contact-reactions') ?? null).toBeNull()
+    expect(plainUser?.querySelector('button[aria-label="更多消息操作"]') ?? null).toBeNull()
+    expect(plainUser?.querySelector('button[aria-label="表情反馈"]') ?? null).toBeNull()
     expect(calls).toHaveLength(0)
   })
 
@@ -200,34 +224,27 @@ describe('C07 永久标记只接受已落库气泡', () => {
     const view = renderChat(detail(), context({ jumpToMessage: id => jumps.push(id), quoteBubble: async id => { quoted.push(id) } }))
     await waitFor(() => expect(view.container.querySelector('[data-bubble-id="run:response:2"]')).toBeTruthy())
 
-    let section = openMenu(view.container, 'run:response:2')
-    fireEvent.click(section.querySelector('.fox-contact-bubble-menu > button')!)
+    await clickItem(menuItems(await openMenu(view.container, 'run:response:2'))[0]) // 引用回复
     expect(quoted).toEqual(['run:response:2'])
 
-    section = openMenu(view.container, 'run:response:2')
-    fireEvent.click([...section.querySelectorAll('.fox-contact-bubble-menu > button')].find(node => node.textContent?.includes('收藏'))!)
+    await clickItem(menuItems(await openMenu(view.container, 'run:response:2')).find(node => node.textContent?.includes('收藏')))
     await waitFor(() => expect(calls.some(call => call.command === 'companion_bubble_favorite')).toBe(true))
     expect(calls.at(-1)).toEqual({ command: 'companion_bubble_favorite', request: { companionId: 'contact', bubbleId: 'run:response:2', favorited: true } })
-    await act(async () => {})
-    section = openMenu(view.container, 'run:response:2')
-    expect([...section.querySelectorAll('.fox-contact-bubble-menu > button')].some(node => node.textContent?.includes('取消收藏'))).toBe(true)
+    expect(menuItems(await openMenu(view.container, 'run:response:2')).some(node => node.textContent?.includes('取消收藏'))).toBe(true)
 
-    section = openReactions(view.container, 'run:response:2')
-    fireEvent.click(section.querySelector('.fox-contact-reaction-panel > button')!)
+    await clickItem(menuItems(await openReactions(view.container, 'run:response:2'))[0])
     await waitFor(() => expect(view.container.querySelector('.fox-contact-reaction-chip')?.textContent).toBe('👍'))
     expect(calls.at(-1)).toEqual({ command: 'companion_bubble_reaction', request: { companionId: 'contact', bubbleId: 'run:response:2', reaction: '👍' } })
     expect(view.container.querySelectorAll('.fox-contact-reaction-chip')).toHaveLength(1)
 
     // 换一个表情是替换，不是累加；收藏不受影响。
-    section = openReactions(view.container, 'run:response:2')
-    fireEvent.click([...section.querySelectorAll('.fox-contact-reaction-panel > button')].find(node => node.textContent === '😂')!)
+    await clickItem(menuItems(await openReactions(view.container, 'run:response:2')).find(node => node.textContent === '😂'))
     await waitFor(() => expect(view.container.querySelector('.fox-contact-reaction-chip')?.textContent).toBe('😂'))
     expect(view.container.querySelectorAll('.fox-contact-reaction-chip')).toHaveLength(1)
     expect(marks['run:response:2'].favoritedAt).toBeTruthy()
 
     // 再点同一个取消，芯片消失，收藏还在。
-    section = openReactions(view.container, 'run:response:2')
-    fireEvent.click([...section.querySelectorAll('.fox-contact-reaction-panel > button')].find(node => node.textContent === '😂')!)
+    await clickItem(menuItems(await openReactions(view.container, 'run:response:2')).find(node => node.textContent === '😂'))
     await waitFor(() => expect(view.container.querySelector('.fox-contact-reaction-chip')).toBeNull())
     expect(marks['run:response:2'].reaction).toBeNull()
     expect(marks['run:response:2'].favoritedAt).toBeTruthy()
@@ -239,13 +256,41 @@ describe('C07 永久标记只接受已落库气泡', () => {
     const quoted: string[] = []
     const view = renderChat(detail(), context({ quoteBubble: async id => { quoted.push(id) } }))
     await waitFor(() => expect(view.container.querySelector('[data-turn-message-id="user-1"]')).toBeTruthy())
-    const section = openMenu(view.container, 'user-1')
-    fireEvent.click(section.querySelector('.fox-contact-bubble-menu > button')!)
+    await clickItem(menuItems(await openMenu(view.container, 'user-1'))[0])
     expect(quoted).toEqual(['user-1'])
-    fireEvent.click(openReactions(view.container, 'user-1').querySelector('.fox-contact-reaction-panel > button')!)
+    await clickItem(menuItems(await openReactions(view.container, 'user-1'))[0])
     await waitFor(() => expect(calls.some(call => call.command === 'companion_bubble_reaction' && call.request.bubbleId === 'user-1')).toBe(true))
     // 用户气泡不提供「标为未读」。
     expect(bubbleSection(view.container, 'user-1').querySelector('.fox-thread-unread-button')).toBeNull()
+  })
+
+  // SPEC item 11：Radix DropdownMenu 的关闭语义与互斥。
+  test('Escape 与外部指针都关闭菜单；同一气泡两层菜单互斥；菜单开着时操作行保持可见', async () => {
+    host()
+    const view = renderChat(detail())
+    await waitFor(() => expect(view.container.querySelector('[data-bubble-id="run:response:2"]')).toBeTruthy())
+    const section = bubbleSection(view.container, 'run:response:2')
+
+    // Escape 关闭。
+    await openMenu(view.container, 'run:response:2')
+    await act(async () => { fireEvent.keyDown(document.querySelector('.fox-contact-bubble-menu')!, { key: 'Escape' }) })
+    await waitFor(() => expect(document.querySelector('.fox-contact-bubble-menu')).toBeNull())
+    await waitFor(() => expect(section.getAttribute('data-menu-open')).toBeNull())
+
+    // 外部指针按下关闭。
+    await openReactions(view.container, 'run:response:2')
+    expect(section.getAttribute('data-menu-open')).toBe('true')
+    await act(async () => { fireEvent.pointerDown(document.body, { button: 0 }) })
+    await waitFor(() => expect(document.querySelector('.fox-contact-reaction-menu')).toBeNull())
+
+    // 互斥：表情菜单开着时直接打开「更多」，表情层必须退出。
+    await openReactions(view.container, 'run:response:2')
+    await act(async () => { fireEvent.keyDown(menuTrigger(view.container, 'run:response:2', '更多消息操作'), { key: 'Enter' }) })
+    await waitFor(() => expect(document.querySelector('.fox-contact-bubble-menu')).toBeTruthy())
+    expect(document.querySelector('.fox-contact-reaction-menu')).toBeNull()
+    expect(section.getAttribute('data-menu-open')).toBe('true')
+    await closeMenus()
+    expect(section.getAttribute('data-menu-open')).toBeNull()
   })
 })
 
@@ -300,16 +345,18 @@ describe('C07 收藏与重启', () => {
     ]
     const view = renderChat(detail({ bubbleMarks: stored }))
     await waitFor(() => expect(view.container.querySelector('.fox-contact-reaction-chip')?.textContent).toBe('🎉'))
-    expect(openMenu(view.container, 'run:response:2').textContent).toContain('取消收藏')
-    expect(openMenu(view.container, 'user-1').textContent).toContain('取消收藏')
+    expect((await openMenu(view.container, 'run:response:2')).textContent).toContain('取消收藏')
+    expect((await openMenu(view.container, 'user-1')).textContent).toContain('取消收藏')
+    await closeMenus()
     view.unmount()
 
     // 取消收藏与表情后，Host 不再返回任何标记：重开也不恢复。
     const cancelled = renderChat(detail({ bubbleMarks: [] }))
     await waitFor(() => expect(cancelled.container.querySelector('[data-bubble-id="run:response:2"]')).toBeTruthy())
     expect(cancelled.container.querySelector('.fox-contact-reaction-chip')).toBeNull()
-    expect(openMenu(cancelled.container, 'run:response:2').textContent).toContain('收藏')
-    expect(openMenu(cancelled.container, 'run:response:2').textContent).not.toContain('取消收藏')
+    const menu = await openMenu(cancelled.container, 'run:response:2')
+    expect(menu.textContent).toContain('收藏')
+    expect(menu.textContent).not.toContain('取消收藏')
   })
 
   test('收藏页列出摘要与时间，可回到原消息或取消收藏，并说明不写笔记', async () => {
@@ -357,15 +404,17 @@ describe('C07 收藏与重启', () => {
     }
     const view = render(<Harness />)
     await waitFor(() => expect(view.container.querySelector('[data-bubble-id="run:response:2"]')).toBeTruthy())
-    expect(openMenu(view.container, 'run:response:2').textContent).toContain('取消收藏')
+    expect((await openMenu(view.container, 'run:response:2')).textContent).toContain('取消收藏')
+    await closeMenus()
     await waitFor(() => expect(view.container.querySelectorAll('.fox-contact-favorite')).toHaveLength(1))
 
     fireEvent.click(view.getByLabelText('取消收藏'))
     await waitFor(() => expect(calls.some(call => call.command === 'companion_bubble_favorite' && call.request.favorited === false)).toBe(true))
     await waitFor(() => expect(view.container.querySelectorAll('.fox-contact-favorite')).toHaveLength(0))
     // 不重载会话，气泡菜单也立刻同步。
-    await waitFor(() => expect(openMenu(view.container, 'run:response:2').textContent).not.toContain('取消收藏'))
-    expect(openMenu(view.container, 'run:response:2').textContent).toContain('收藏')
+    expect((await openMenu(view.container, 'run:response:2')).textContent).not.toContain('取消收藏')
+    expect((await openMenu(view.container, 'run:response:2')).textContent).toContain('收藏')
+    await closeMenus()
   })
 })
 
@@ -390,7 +439,7 @@ describe('C07 引用目标在分页后仍可定位', () => {
       const [snapshot, setSnapshot] = useState(window_)
       const ctx = context({ locateRequest: locate, jumpToMessage: id => setLocate({ id, key: Date.now() }) })
       return <ContactsContext.Provider value={ctx}>
-        <ContactTopbar detail={snapshot} onReset={() => {}} loadEarlierMessages={async () => { loads += 1; setSnapshot(paged) }} />
+        <ContactTopbar detail={snapshot} loadEarlierMessages={async () => { loads += 1; setSnapshot(paged) }} />
         <AssistantUiChat conversation={{ enabled: true, detail: snapshot, streamingText: '' } as never} callbacks={{ onSubmit: () => {} }} />
       </ContactsContext.Provider>
     }
@@ -429,17 +478,16 @@ describe('C06 新建联系人当前会话三操作（无需重启）', () => {
     expect(toasts).toHaveLength(0)
 
     // 引用：目标是同一条已落库气泡，不是位置相近的另一条。
-    let section = openMenu(view.container, 'run:response:2')
-    fireEvent.click(section.querySelector('.fox-contact-bubble-menu > button')!)
+    await clickItem(menuItems(await openMenu(view.container, 'run:response:2'))[0])
     expect(quoted).toEqual(['run:response:2'])
 
     // 收藏：Host 确认一次收藏事实，菜单同步为「取消收藏」，没有错误通知。
-    section = openMenu(view.container, 'run:response:2')
-    fireEvent.click([...section.querySelectorAll('.fox-contact-bubble-menu > button')].find(node => node.textContent?.includes('收藏'))!)
+    await clickItem(menuItems(await openMenu(view.container, 'run:response:2')).find(node => node.textContent?.includes('收藏')))
     await waitFor(() => expect(calls.some(call => call.command === 'companion_bubble_favorite')).toBe(true))
     expect(calls.at(-1)).toEqual({ command: 'companion_bubble_favorite', request: { companionId: 'contact', bubbleId: 'run:response:2', favorited: true } })
     await act(async () => {})
-    expect(openMenu(view.container, 'run:response:2').textContent).toContain('取消收藏')
+    expect((await openMenu(view.container, 'run:response:2')).textContent).toContain('取消收藏')
+    await closeMenus()
     expect(marks['run:response:2']?.favoritedAt).toBeTruthy()
     expect(toasts).toHaveLength(0)
   })
@@ -471,12 +519,13 @@ describe('C06 新建联系人当前会话三操作（无需重启）', () => {
     await waitFor(() => expect(view.container.querySelector('[data-bubble-id="run:response:2"]')).toBeTruthy())
 
     // 收藏被拒：菜单仍是「收藏」，没有收藏事实，原始错误展示出来。
-    let section = openMenu(view.container, 'run:response:2')
-    fireEvent.click([...section.querySelectorAll('.fox-contact-bubble-menu > button')].find(node => node.textContent?.includes('收藏'))!)
+    await clickItem(menuItems(await openMenu(view.container, 'run:response:2')).find(node => node.textContent?.includes('收藏')))
     await waitFor(() => expect(toasts).toContain(backfillMessage))
     await act(async () => {})
-    expect(openMenu(view.container, 'run:response:2').textContent).toContain('收藏')
-    expect(openMenu(view.container, 'run:response:2').textContent).not.toContain('取消收藏')
+    const refused = await openMenu(view.container, 'run:response:2')
+    expect(refused.textContent).toContain('收藏')
+    expect(refused.textContent).not.toContain('取消收藏')
+    await closeMenus()
     expect(marks['run:response:2']).toBeUndefined()
 
     // 标未读被拒：按钮不翻成「已标为未读」（不吞错冒充成功），原始错误展示出来。
@@ -488,8 +537,7 @@ describe('C06 新建联系人当前会话三操作（无需重启）', () => {
     expect(unreadButton.getAttribute('aria-label')).toBe('标为未读')
 
     // 引用被拒：不产生引用草稿，原始错误展示出来。
-    section = openMenu(view.container, 'run:response:2')
-    fireEvent.click(section.querySelector('.fox-contact-bubble-menu > button')!)
+    await clickItem(menuItems(await openMenu(view.container, 'run:response:2'))[0])
     await waitFor(() => expect(calls.some(call => call.command === 'companion_quote_preview')).toBe(true))
     await act(async () => {})
     expect(view.container.querySelector('.fox-contact-quote-draft')).toBeNull()

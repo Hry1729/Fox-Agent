@@ -1,6 +1,8 @@
 import { ImportSuggestion, ProjectGrantPrompt, WriteCallsContext } from '@/features/companions/chat-cards'
 import { ContactsContext, showContactError, useContactList, useReadCursor, type ContactLocateRequest } from '@/features/companions/context'
 import { ContactTopbar, ContactRepairBanner } from '@/features/companions/chat-controls'
+import { ContactSideCard, CONTACT_SIDE_CARD_WIDTH } from '@/features/companions/contact-side-card'
+import { useContactChatSearch } from '@/features/companions/chat-search'
 import { ContactWorkStatus } from '@/features/companions/chat-status'
 import { contacts, type Companion, type QuotePreview } from '@/features/companions/api'
 import { FoxRunStatusBar } from './components/FoxRunStatusBar'
@@ -47,8 +49,10 @@ import { type ManagementReturnRoutes, captureManagementReturnRoutes, managementE
 import { type KnowledgeSourceLocator, type LocalKnowledgeDocumentAsk, type NavigateWorkspace, type WorkspaceView } from '@/features/workspace/types'
 import { WorkspaceShell } from '@/features/workspace/workspace-shell'
 import { useNavigationHistory } from '@/features/workspace/use-navigation-history'
+import { useSidebarWindowGrowth, type SidebarGrowthEntry, type SidebarGrowthRefusal } from '@/features/workspace/use-sidebar-window-growth'
+import { sideCardGrowthRollback, useChatWorkspaceSideCard } from './workbench-side-cards'
 import { File, ShieldAlert, ShieldCheck } from 'lucide-react'
-import { type KeyboardEvent, type ReactNode, Profiler, Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { type KeyboardEvent, Profiler, Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { needsLocalKnowledgeNames } from './composer/knowledge-chip-name'
 import { MemoizedComposer, composerEntryFrozen, composerUsesNewConversation, conversationFirstReplyCompleted, isChangeOrCommandTool, readStoredSeenChanges } from './composer/fox-composer'
 import { ComposerEntryContext } from './composer/composer-entry-context'
@@ -126,23 +130,6 @@ function SidebarResizeDivider({ width, onResize }: { width: number; onResize: (d
     onPointerMove={(event) => { if (start.current === null) return; const delta = event.clientX - start.current; start.current = event.clientX; onResize(delta) }}
     onPointerUp={() => { start.current = null }} onPointerCancel={() => { start.current = null }} onLostPointerCapture={() => { start.current = null }}
     onKeyDown={(event) => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); onResize((event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 24 : 8)) } else if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); onResize((event.key === 'Home' ? 220 : 456) - width) } }} />
-}
-
-// Keep the compact drawer inside the content card: its backdrop and maximized
-// width share the chat's bounds, while history navigation stays reachable.
-function CompactRightPanel({ children, maximized, onClose }: { children: ReactNode; maximized: boolean; onClose: () => void }) {
-  const panel = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    panel.current?.focus({ preventScroll: true })
-    return () => { if (previous?.isConnected) previous.focus({ preventScroll: true }) }
-  }, [])
-  return <div className="fox-compact-context-layer">
-    <button type="button" tabIndex={-1} className="fox-compact-context-backdrop" aria-label="收起右侧边栏" onClick={onClose} />
-    <div ref={panel} role="region" aria-label="对话右侧面板" tabIndex={-1} className={`fox-compact-context-sheet ${maximized ? 'is-maximized' : ''}`} onKeyDown={(event) => {
-      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose() }
-    }}>{children}</div>
-  </div>
 }
 
 /**
@@ -303,6 +290,20 @@ export function Workbench() {
   }, [])
   const [rightMode, setRightMode] = useState<RightMode | null>(readStoredRightMode)
   const [contactLocateRequest, setContactLocateRequest] = useState<ContactLocateRequest | null>(null)
+  // SPEC item 3: the private-chat contact card is a sibling card of the content
+  // card, not a RightPanel mode. Its open state is pinned to a conversation id
+  // so switching chats can never leave a stale card behind.
+  const [contactCardConversationId, setContactCardConversationId] = useState<string | null>(null)
+  // The private-chat search is lifted out of the topbar so the topbar and the
+  // contact card share ONE instance: the card's 「在对话中查找」 opens the topbar's
+  // search panel, and external locate requests (favorites, quote refs) still ring
+  // the bubble without showing the chip.
+  const contactSearch = useContactChatSearch({
+    conversationId: privateChat ? desktopConversation.detail?.conversation.id : undefined,
+    detail: desktopConversation.detail,
+    loadEarlierMessages: desktopConversation.loadEarlierMessages,
+    locateRequest: contactLocateRequest,
+  })
   // C07: the composer's quote draft. It belongs to one private chat and is never
   // carried into another conversation or into the next message after a send.
   const [contactQuote, setContactQuote] = useState<QuotePreview | null>(null)
@@ -324,8 +325,6 @@ export function Workbench() {
   const [rightWidth, setRightWidth] = useState(() => childAgentVisualQaPanelWidth() ?? readStoredNumber(layoutStorage.rightWidth, 360, 280, 760))
   const [seenChangeCounts, setSeenChangeCounts] = useState<Record<string, number>>(readStoredSeenChanges)
   const [dark, setDark] = useState(() => typeof window !== 'undefined' && window.localStorage.getItem(layoutStorage.theme) === 'dark')
-  const [compactLayout, setCompactLayout] = useState(() => typeof window !== 'undefined' && window.matchMedia('(max-width: 1180px)').matches)
-  const [compactRightOpen, setCompactRightOpen] = useState(false)
   const [emptyConversation, setEmptyConversation] = useState(false)
   const [composerHeight, setComposerHeight] = useState(180)
   const [knowledgeDialogOpen, setKnowledgeDialogOpen] = useState(false)
@@ -493,16 +492,6 @@ export function Workbench() {
     }, 1500)
     return () => { disposed = true; window.clearTimeout(timer) }
   }, [knowledgeDialogOpen, localKnowledgeBases])
-  useEffect(() => {
-    const query = window.matchMedia('(max-width: 1180px)')
-    const syncLayout = () => {
-      setCompactLayout(query.matches)
-      setCompactRightOpen(query.matches && !rightSidebarCollapsed)
-    }
-    syncLayout()
-    query.addEventListener('change', syncLayout)
-    return () => query.removeEventListener('change', syncLayout)
-  }, [rightSidebarCollapsed])
   useEffect(() => () => {
     if (workflowTimer.current !== null) window.clearTimeout(workflowTimer.current)
   }, [])
@@ -538,12 +527,10 @@ export function Workbench() {
     setRightSidebarCollapsed(false)
     setRightPanelMaximized(false)
     setRightMode(null)
-    if (compactLayout) setCompactRightOpen(true)
   }
   const collapseRightSidebar = () => {
     setRightSidebarCollapsed(true)
     setRightPanelMaximized(false)
-    setCompactRightOpen(false)
   }
   const selectRightMode = (mode: RightMode) => {
     setRightSidebarCollapsed(false)
@@ -554,7 +541,6 @@ export function Workbench() {
       setSeenChangeCounts((current) => current[activeConversationId] === totalChangeCount ? current : { ...current, [activeConversationId]: totalChangeCount })
     }
     setRightMode(mode)
-    if (compactLayout) setCompactRightOpen(true)
   }
   const closeRightMode = (mode: RightMode) => {
     const closingIndex = openRightTabs.indexOf(mode)
@@ -582,14 +568,12 @@ export function Workbench() {
     setRightSidebarCollapsed(false)
     setRightMode('files')
     setActiveFileTabId(tab.id)
-    if (compactLayout) setCompactRightOpen(true)
   }
   const activateFile = (tabId: string) => {
     if (!openFileTabs.some((tab) => tab.id === tabId)) return
     setRightSidebarCollapsed(false)
     setRightMode('files')
     setActiveFileTabId(tabId)
-    if (compactLayout) setCompactRightOpen(true)
   }
   const closeFile = (tabId: string) => {
     const closingIndex = openFileTabs.findIndex((tab) => tab.id === tabId)
@@ -608,7 +592,6 @@ export function Workbench() {
     setActiveChildAgent({ run, avatarIndex })
     setRightSidebarCollapsed(false)
     setRightMode('agents')
-    if (compactLayout) setCompactRightOpen(true)
   }
   const openArtifact = (artifact: ArtifactRecord) => {
     const projectRoot = desktopConversation.detail?.conversation.projectRoot
@@ -1119,7 +1102,6 @@ export function Workbench() {
     setActiveDocumentId(context?.documentId ?? null)
     setActiveSourceLocator(context?.sourceLocator ?? null)
     setActiveView(view)
-    setCompactRightOpen(false)
     setRightSidebarCollapsed(true)
     setRightPanelMaximized(false)
     setRightMode(null)
@@ -1139,7 +1121,6 @@ export function Workbench() {
     setActiveEntityId(previous.entityId)
     setActiveDocumentId(previous.documentId)
     setActiveSourceLocator(null)
-    setCompactRightOpen(false)
     setRightSidebarCollapsed(true)
     setRightPanelMaximized(false)
     setRightMode(null)
@@ -1151,7 +1132,6 @@ export function Workbench() {
     setActiveEntityId(target.entityId)
     setActiveDocumentId(target.documentId)
     setActiveSourceLocator(null)
-    setCompactRightOpen(false)
     setRightSidebarCollapsed(true)
     setRightPanelMaximized(false)
     setRightMode(null)
@@ -1198,9 +1178,36 @@ export function Workbench() {
   useEffect(() => {
     if (activeView !== 'chat' || !timelineEmpty) return
     setRightSidebarCollapsed(true)
-    setCompactRightOpen(false)
   }, [activeView, timelineEmpty])
   const showConversationRightSidebar = activeView === 'chat' && (!timelineEmpty || privateChat)
+  const closeContactCard = useStableCallback(() => { setContactCardConversationId(null) })
+  // The contact card is a chat-workspace card: settings / shared-memory / agent pages
+  // keep the SAME conversation selected, so leaving chat has to clear the open state
+  // (otherwise it reopens stale on the way back) and the predicate has to gate it
+  // (otherwise the card, and its native width claim, leaks for one frame).
+  const insideChatWorkspace = useChatWorkspaceSideCard(activeView, closeContactCard)
+  const contactCardOpen = insideChatWorkspace && Boolean(contactCardConversationId && contact && contact.conversationId === contactCardConversationId)
+  // SPEC item 4: ONE shared controller turns the open sibling side cards into
+  // native window growth (each card costs width + its 5px gap). A maximized
+  // right panel keeps the window as-is and covers the chat instead, so it is
+  // not declared here.
+  const sidebarGrowthEntries = useMemo(() => {
+    const entries: SidebarGrowthEntry[] = []
+    if (showConversationRightSidebar && !rightSidebarCollapsed && !rightPanelMaximized) entries.push({ id: 'right-panel', width: rightWidth })
+    if (contactCardOpen) entries.push({ id: 'contact-card', width: CONTACT_SIDE_CARD_WIDTH })
+    return entries
+  }, [showConversationRightSidebar, rightSidebarCollapsed, rightPanelMaximized, rightWidth, contactCardOpen])
+  const handleSidebarGrowthRefused = useStableCallback((refusals: SidebarGrowthRefusal[]) => {
+    // DOM rollback: the native growth was refused after a retry, so undo the cards
+    // that asked for room the window does not reflect — an already-open card goes
+    // back to the width it actually has, a card that never got it closes, and a
+    // sibling the window already carries is left alone in either opening order.
+    const rollback = sideCardGrowthRollback(refusals)
+    if (rollback.closeContactCard) closeContactCard()
+    if (rollback.restoreRightPanelWidth !== null) setRightWidth(rollback.restoreRightPanelWidth)
+    if (rollback.closeRightPanel) collapseRightSidebar()
+  })
+  useSidebarWindowGrowth(sidebarGrowthEntries, handleSidebarGrowthRefused)
   const handleRuntimeOpenSource = useStableCallback((source: RuntimeSource) => {
     navigate(source.source === 'local' ? 'local-knowledge-documents' : 'knowledge-detail', source.knowledgeBaseId, { documentId: source.documentId, sourceLocator: source.locator })
   })
@@ -1742,7 +1749,6 @@ export function Workbench() {
       setPendingUserMessage(null)
     }
     setExpertDetailId(null)
-    setCompactRightOpen(false)
     setRightSidebarCollapsed(true)
     setRightPanelMaximized(false)
     setRightMode(null)
@@ -1750,10 +1756,10 @@ export function Workbench() {
 
   const openContact = useStableCallback((item: Companion, profile = false) => {
     handleOpenConversation(item.conversationId)
-    if (profile) selectRightMode('companion')
+    if (profile) setContactCardConversationId(item.conversationId)
   })
   const addContact = useStableCallback(() => navigate('agents'))
-  const showContactProfile = useStableCallback(() => selectRightMode('companion'))
+  const showContactProfile = useStableCallback(() => { if (contact) setContactCardConversationId(contact.conversationId) })
   const getSelectedConversationId = useStableCallback(
     () => desktopConversation.selectedConversationId,
   )
@@ -1776,8 +1782,7 @@ export function Workbench() {
   })
   const clearContactQuote = useStableCallback(() => setContactQuote(null))
   const jumpToMessage = useStableCallback((bubbleId: string) => {
-    closeRightMode('companion')
-    if (compactLayout) setCompactRightOpen(false)
+    setContactCardConversationId(null)
     setContactLocateRequest({ id: bubbleId, key: Date.now() })
   })
   const leaveContact = useStableCallback((item: Companion) => {
@@ -1790,11 +1795,18 @@ export function Workbench() {
   const askToOrganize = useStableCallback(() => {
     const request = '请帮我整理主笔记，把适合归入专题的内容移到专题里，腾出空间后再保存草稿。'
     setComposerDraft(previous => previous.trim() ? previous + '\n' + request : request)
-    if (compactLayout) setCompactRightOpen(false)
     requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('.fox-prompt-textarea')?.focus())
   })
   const contactModel = modelService.service?.modelId || '尚未配置'
   const contactPermission = desktopConversation.detail?.conversation.permissionMode ?? 'ask'
+  // The contact card belongs to one conversation: it stays open when it was
+  // opened FOR the conversation now on screen (openContact sets the id before the
+  // selection lands) and closes on every other switch. This is a shell/layout
+  // reset, so it stays out of the quote-reset effect below — that block is
+  // extracted verbatim by contact-quote-preview-race.test.ts.
+  useEffect(() => {
+    setContactCardConversationId(current => current === desktopConversation.selectedConversationId ? current : null)
+  }, [desktopConversation.selectedConversationId])
   useEffect(() => {
     setContactLocateRequest(null)
     setContactQuote(null)
@@ -1817,8 +1829,8 @@ export function Workbench() {
       <div className="fox-workbench">
         <MemoizedSidebar collapsed={sidebarCollapsed} assistantMode={assistantMode} onModeChange={handleAssistantModeChange} onNewChat={handleNewChat} onNewProjectChat={handleNewProjectChat} onAddProject={handleComposerProject} onCreateLocalKnowledge={handleCreateLocalKnowledge} onOpenConversation={handleOpenConversation} onRenameConversation={handleRenameConversation} projects={projects} onPinProject={handlePinProject} onPinConversation={handlePinConversation} onArchiveConversation={handleArchiveConversation} onUnarchiveConversation={handleUnarchiveConversation} onTrashConversation={handleTrashConversation} onRestoreConversation={handleRestoreConversation} onPurgeConversation={handlePurgeConversation} onDeleteProject={handleDeleteProject} onNavigate={handleWorkspaceNavigate} onExitManagement={handleExitManagement} onExpand={handleExpandSidebar} onTheme={handleToggleTheme} onSettings={handleOpenSettings} runtimeConversations={desktopConversation.enabled ? desktopConversation.conversations : undefined} archivedConversations={desktopConversation.enabled ? desktopConversation.archivedConversations : undefined} trashedConversations={desktopConversation.enabled ? desktopConversation.trashedConversations : undefined} onGlobalSearch={desktopRuntimeAvailable ? desktopClient.globalSearch : undefined} activeConversationId={desktopConversation.selectedConversationId ?? undefined} newChatActive={activeView === 'chat' && timelineEmpty && !desktopConversation.selectedConversationId} runIndicators={desktopConversation.enabled ? desktopConversation.runIndicators : undefined} yuxiService={sidebarYuxiService} yuxiUser={yuxiUser.user} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} />
         {!sidebarCollapsed && <SidebarResizeDivider width={expandedSidebarWidth} onResize={(delta) => setExpandedSidebarWidth((value) => Math.min(456, Math.max(220, value + delta)))} />}
-        <div className={`fox-content-card ${showConversationRightSidebar && !rightSidebarCollapsed && (!compactLayout || compactRightOpen) ? 'has-open-right-panel' : ''}`}>
-        <div className={`fox-content-surface ${rightPanelMaximized && showConversationRightSidebar && !rightSidebarCollapsed && !compactLayout ? 'is-right-maximized' : ''}`}>
+        <div className="fox-content-card">
+        <div className="fox-content-surface">
         <section className="fox-chat-pane">
           {expertPickerOpen && <Suspense fallback={null}><ExpertPickerDialog open={expertPickerOpen} onOpenChange={setExpertPickerOpen} agents={agentResource.agents} defaultExpert={activeAgent} selectedExpertId={desktopConversation.selectedExpertId ?? activeAgent?.id} readOnly={expertReadOnly} onSelect={selectExpert} /></Suspense>}
           {expertDetailId && <Suspense fallback={null}><AgentDetailDialog
@@ -1830,9 +1842,7 @@ export function Workbench() {
           /></Suspense>}
           <TimelineRuntimeContext.Provider value={timelineRuntimeContextValue}>
           <ComposerRuntimeContext.Provider value={composerRuntimeContextValue}>
-          {workspacePage ?? <>{privateChat ? <ContactTopbar detail={desktopConversation.detail} loadEarlierMessages={desktopConversation.loadEarlierMessages} onReset={() => {
-            if (desktopConversation.detail) void resetManagedConversation(desktopConversation.detail.conversation)
-          }} /> : !timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onRightSidebarCollapse={collapseRightSidebar} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || modelService.service?.modelId || (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) || '未配置模型'} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onResetContext={(conversation) => void resetManagedConversation(conversation)} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} projects={projects} onChangeProject={(conversation, root, mode) => void handleTopbarChangeProject(conversation, root, mode)} onPickProjectFolder={(conversation) => void handleTopbarPickProject(conversation)} />}
+          {workspacePage ?? <>{privateChat ? <ContactTopbar detail={desktopConversation.detail} loadEarlierMessages={desktopConversation.loadEarlierMessages} search={contactSearch} /> : !timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onRightSidebarCollapse={collapseRightSidebar} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || modelService.service?.modelId || (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) || '未配置模型'} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onResetContext={(conversation) => void resetManagedConversation(conversation)} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} projects={projects} onChangeProject={(conversation, root, mode) => void handleTopbarChangeProject(conversation, root, mode)} onPickProjectFolder={(conversation) => void handleTopbarPickProject(conversation)} />}
 {privateChat && <ContactRepairBanner detail={desktopConversation.detail} />}
 {contact && <ImportSuggestion key={contact.id} contact={contact}/>}
 {grantCandidate && desktopConversation.detail?.conversation.projectId && <ProjectGrantPrompt key={desktopConversation.detail.conversation.id+grantCandidate.id} contact={grantCandidate} conversationId={desktopConversation.detail.conversation.id} projectId={desktopConversation.detail.conversation.projectId}/>}
@@ -1845,12 +1855,19 @@ export function Workbench() {
           </ComposerRuntimeContext.Provider>
           </TimelineRuntimeContext.Provider>
         </section>
-        {showConversationRightSidebar && !rightSidebarCollapsed && !compactLayout && <>{!rightPanelMaximized && <ResizeDivider onResize={(delta) => setRightWidth((value) => Math.min(760, Math.max(280, value + delta)))} />}<RightPanel mode={rightMode} tabs={openRightTabs} detail={desktopConversation.detail} activity={activityPanelProps} width={rightWidth} maximized={rightPanelMaximized} fileTabs={openFileTabs} activeFileTabId={activeFileTabId} activeChildAgent={activeChildAgent} onMode={selectRightMode} onCloseMode={closeRightMode} onOpenFile={openFile} onActivateFile={activateFile} onCloseFile={closeFile} onOpenChildAgent={openChildAgent} onBackChildAgent={() => setActiveChildAgent(null)} onOpenEvidence={openEvidence} onToggleMaximized={() => setRightPanelMaximized((value) => !value)} onCollapse={collapseRightSidebar} /></>}
         </div>
-        {showConversationRightSidebar && !rightSidebarCollapsed && compactLayout && compactRightOpen && <CompactRightPanel maximized={rightPanelMaximized} onClose={collapseRightSidebar}>
-          <RightPanel compact mode={rightMode} tabs={openRightTabs} detail={desktopConversation.detail} activity={activityPanelProps} width={rightWidth} maximized={rightPanelMaximized} fileTabs={openFileTabs} activeFileTabId={activeFileTabId} activeChildAgent={activeChildAgent} onMode={selectRightMode} onCloseMode={closeRightMode} onOpenFile={openFile} onActivateFile={activateFile} onCloseFile={closeFile} onOpenChildAgent={openChildAgent} onBackChildAgent={() => setActiveChildAgent(null)} onOpenEvidence={openEvidence} onToggleMaximized={() => setRightPanelMaximized((value) => !value)} onCollapse={collapseRightSidebar} />
-        </CompactRightPanel>}
         </div>
+        {/* SPEC item 4: the ordinary right sidebar is a sibling rounded card of
+            the content card; the divider occupies the existing 5px gap. */}
+        {showConversationRightSidebar && !rightSidebarCollapsed && <>{!rightPanelMaximized && <ResizeDivider onResize={(delta) => setRightWidth((value) => Math.min(760, Math.max(280, value + delta)))} />}<RightPanel mode={rightMode} tabs={openRightTabs} detail={desktopConversation.detail} activity={activityPanelProps} width={rightWidth} maximized={rightPanelMaximized} fileTabs={openFileTabs} activeFileTabId={activeFileTabId} activeChildAgent={activeChildAgent} onMode={selectRightMode} onCloseMode={closeRightMode} onOpenFile={openFile} onActivateFile={activateFile} onCloseFile={closeFile} onOpenChildAgent={openChildAgent} onBackChildAgent={() => setActiveChildAgent(null)} onOpenEvidence={openEvidence} onToggleMaximized={() => setRightPanelMaximized((value) => !value)} onCollapse={collapseRightSidebar} /></>}
+        {contactCardOpen && contact && <ContactSideCard
+          key={contact.id}
+          contact={contact}
+          detail={desktopConversation.detail}
+          onClose={() => setContactCardConversationId(null)}
+          onResetContext={() => { if (desktopConversation.detail) void resetManagedConversation(desktopConversation.detail.conversation) }}
+          search={contactSearch}
+        />}
       </div>
       <KnowledgeBindingDialog open={knowledgeDialogOpen} remoteItems={knowledge.items} localItems={localKnowledgeBases} localLoading={localKnowledgeLoading} remoteLoading={knowledge.loading} remoteError={knowledge.error} onRetry={refreshKnowledgeChoices} references={desktopConversation.knowledgeReferences} bindings={desktopConversation.knowledgeBindings} busy={knowledgeDialogBusy} error={knowledgeDialogError} onOpenChange={setKnowledgeDialogOpen} onConfirm={(references, names) => void saveKnowledgeBindings(references, names)} />
       <ConversationManagementDialogs conversation={conversationDialog?.conversation ?? null} mode={conversationDialog?.mode ?? null} busy={conversationDialogBusy} error={conversationDialogError} onClose={() => { setConversationDialog(null); setConversationDialogError(null) }} onRename={(title) => void renameManagedConversation(title)} onDelete={() => void purgeManagedConversation()} />

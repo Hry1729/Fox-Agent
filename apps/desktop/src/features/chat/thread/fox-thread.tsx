@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ThreadPrimitive, useAuiState } from '@assistant-ui/react'
 import { type GoalProgressData } from '../hooks/use-goal-progress'
 import type { ArtifactRecord, ConversationMessage } from '../../conversations/model/types'
@@ -81,15 +81,28 @@ function FoxBottomDock({ plan }: { plan?: GoalProgressData['planRevisions'][numb
  */
 export default function FoxThread({ statusBar, approvalSlot, fox, suggestions, onStart, planRevision, turnRailMessages, turnRailArtifacts }: FoxThreadProps) {
   const [scrolledUnderTopbar, setScrolledUnderTopbar] = useState(false)
+  // SPEC item 5: brief `.is-scrolling` state reveals the scrollbar thumb while
+  // the list is actively scrolling (~800ms after the last scroll event).
+  const [scrolling, setScrolling] = useState(false)
+  const scrollingTimer = useRef<number | null>(null)
+  useEffect(() => () => {
+    if (scrollingTimer.current !== null) window.clearTimeout(scrollingTimer.current)
+  }, [])
+  const handleViewportScroll = (event: { currentTarget: { scrollTop: number } }) => {
+    setScrolledUnderTopbar(event.currentTarget.scrollTop > 4)
+    setScrolling(true)
+    if (scrollingTimer.current !== null) window.clearTimeout(scrollingTimer.current)
+    scrollingTimer.current = window.setTimeout(() => setScrolling(false), 800)
+  }
   return (
     <FoxThreadContext.Provider value={fox}>
       <div className={`fox-thread${fox.contactChat ? ' is-contact-chat' : ''}`}>
         {!fox.contactChat && <ConversationTurnRail messages={turnRailMessages ?? []} artifacts={turnRailArtifacts ?? []} />}
         <ThreadPrimitive.Root className="fox-thread-root">
           <ThreadPrimitive.Viewport
-            className={`fox-thread-viewport${scrolledUnderTopbar ? ' is-scrolled-under-topbar' : ''}`}
+            className={`fox-thread-viewport${scrolledUnderTopbar ? ' is-scrolled-under-topbar' : ''}${scrolling ? ' is-scrolling' : ''}`}
             autoScroll
-            onScroll={event => setScrolledUnderTopbar(event.currentTarget.scrollTop > 4)}
+            onScroll={handleViewportScroll}
           >
             {/* Hybrid rollback: the empty conversation keeps the classic
                 mascot + suggestions screen from the legacy timeline. */}

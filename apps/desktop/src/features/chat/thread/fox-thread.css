@@ -4,12 +4,10 @@
    workbench.css and are reused by name. */
 
 /* The workbench mounts the thread inside this shell (hybrid rollback): the
-   classic composer is an absolutely-positioned overlay on `.fox-chat-stage`,
-   exactly like the legacy branch, so the shell must constrain the thread's
-   height and reserve the composer's occlusion area. Without this, the shell is
-   an auto-height block: `.fox-thread`'s `height: 100%` resolves to auto, the
-   viewport grows past the stage and `.fox-chat-stage`'s `overflow: hidden`
-   clips it — the message list cannot scroll. */
+   classic composer is an absolutely-positioned overlay on `.fox-chat-stage`.
+   SPEC item 5: the shell no longer reserves the composer's occlusion area —
+   the scroll viewport runs to the bottom of the card (full-height scrollbar)
+   and the occlusion lives in the viewport's content padding instead. */
 .fox-thread-shell {
   min-width: 0;
   width: 100%;
@@ -17,13 +15,6 @@
   flex: 1;
   flex-direction: column;
   min-height: 0;
-  padding-bottom: max(0px, calc(var(--fox-composer-occlusion, 180px) - 6px));
-}
-
-/* Empty conversations centre the classic composer on the stage itself
-   (`fox-composer-wrap.is-empty`), so the thread must not reserve the dock. */
-.fox-chat-stage.is-empty .fox-thread-shell {
-  padding-bottom: 0;
 }
 
 .fox-thread {
@@ -46,6 +37,11 @@
   position: relative;
 }
 
+/* The dock floats above the composer, which now overlaps the scroll viewport. */
+.fox-thread-root .fox-conversation-bottom-dock {
+  bottom: calc(var(--fox-composer-occlusion, 180px) + 1px);
+}
+
 .fox-thread-viewport {
   scroll-behavior: auto;
   min-width: 0;
@@ -55,10 +51,29 @@
   overflow-y: auto;
   padding: var(--fox-space-xl) 0;
   scrollbar-gutter: stable both-edges;
-  padding-bottom: 20px;
+  /* Content-bottom occlusion: the last message scrolls clear of the floating
+     composer instead of the viewport being truncated above it. */
+  padding-bottom: calc(var(--fox-composer-occlusion, 180px) + 20px);
   display: flex;
   flex-direction: column;
   gap: var(--fox-space-l);
+  scrollbar-color: transparent transparent;
+}
+
+/* Chat thumbs stay invisible until hover/focus or a short scroll burst
+   (.is-scrolling, ~800ms). The gutter is fixed, so nothing shifts. */
+.fox-thread-viewport::-webkit-scrollbar-thumb {
+  background: transparent;
+  background-clip: padding-box;
+  transition: background var(--fox-duration-fast, 150ms) ease;
+}
+.fox-thread-viewport:is(:hover, :focus-within)::-webkit-scrollbar-thumb,
+.fox-thread-viewport.is-scrolling::-webkit-scrollbar-thumb {
+  background: color-mix(in oklch, var(--muted-foreground) 35%, transparent);
+}
+.fox-thread-viewport:is(:hover, :focus-within),
+.fox-thread-viewport.is-scrolling {
+  scrollbar-color: color-mix(in oklch, var(--muted-foreground) 35%, transparent) transparent;
 }
 
 .fox-chat-stage.is-empty .fox-thread-viewport {

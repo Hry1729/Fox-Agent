@@ -33,7 +33,7 @@ afterEach(cleanup)
 after(async () => { await server.close() })
 
 const panelProps = (overrides = {}) => ({
-  mode: null, tabs: [], detail: null, activity: {}, width: 320, compact: false, maximized: false,
+  mode: null, tabs: [], detail: null, activity: {}, width: 320, maximized: false,
   fileTabs: [], activeFileTabId: null, activeChildAgent: null,
   onMode: () => {}, onCloseMode: () => {}, onOpenFile: () => {}, onActivateFile: () => {},
   onCloseFile: () => {}, onOpenChildAgent: () => {}, onBackChildAgent: () => {},

@@ -2149,6 +2149,30 @@
   pointer-events: none;
 }
 
+/* SPEC item 4: the right sidebar and the private-chat contact card are sibling
+   rounded cards of the content card, outside it. They share the content card's
+   chrome (2px top / 5px bottom margins, 5px gaps, same radii). The panel's
+   resize divider sits inside the pre-existing 5px gap so it adds no width. */
+.fox-workbench > .fox-resize-divider {
+  margin: 0 -5px 0 0;
+}
+
+.fox-workbench > .fox-context-panel {
+  flex: none;
+  margin: 2px 5px 5px 0;
+  min-height: 0;
+  border-radius: calc(var(--fox-radius-window) + 4px) calc(var(--fox-radius-window) + 4px) var(--fox-radius-window) calc(var(--fox-radius-window) + 4px);
+  box-shadow: var(--fox-shadow-sm);
+}
+
+/* Maximized as a sibling card: the panel grows and the chat card narrows —
+   nothing hides and nothing overlays. */
+.fox-workbench > .fox-context-panel.is-maximized {
+  flex: 1 1 auto;
+  width: auto;
+  max-width: none;
+}
+
 .fox-content-surface {
   position: relative;
   z-index: 1;
@@ -2160,10 +2184,6 @@
   overflow: hidden;
   border-radius: inherit;
   background: var(--fox-canvas);
-}
-
-.fox-content-surface.is-right-maximized .fox-chat-pane {
-  display: none;
 }
 
 .fox-chat-pane {
@@ -2712,7 +2732,6 @@ button.fox-chat-project-row:disabled {
 
 .fox-chat-stage { --fox-chat-column-width: min(58rem, calc(100cqw - clamp(96px, 8vw, 112px))); }
 .fox-composer-wrap:not(.is-empty) { width: var(--fox-chat-column-width); }
-.fox-content-card.has-open-right-panel :is(.fox-turn-rail, .fox-conversation-rail) { display: none; }
 @container fox-chat (max-width: 900px) {
   .fox-chat-stage { --fox-chat-column-width: min(52rem, calc(100cqw - 96px)); }
 }
@@ -2732,15 +2751,14 @@ button.fox-chat-project-row:disabled {
   --fox-empty-vertical-offset: calc(clamp(18px, 3vh, 30px) - 13px);
 }
 
+/* SPEC item 5: the scroll container reaches the bottom of the card so the
+   scrollbar draws full height; the floating composer's occlusion moved into the
+   scroll CONTENT's bottom padding instead of truncating the viewport. */
 .fox-conversation {
   position: absolute;
-  inset: 0 0 var(--fox-composer-occlusion, 180px);
+  inset: 0;
   min-height: 0;
   overflow: hidden;
-}
-
-.fox-chat-stage:has(.fox-goal-floater):has([data-conversation-at-bottom='false']) .fox-conversation {
-  bottom: max(0px, calc(var(--fox-composer-occlusion, 180px) - 42px));
 }
 
 .fox-conversation-scroll {
@@ -2749,6 +2767,29 @@ button.fox-chat-project-row:disabled {
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
+  padding-bottom: var(--fox-composer-occlusion, 180px);
+  scrollbar-color: transparent transparent;
+}
+
+/* Chat thumbs stay invisible until hover/focus or a short scroll burst
+   (.is-scrolling, ~800ms). The gutter is fixed, so nothing shifts. */
+.fox-conversation-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  background-clip: padding-box;
+  transition: background var(--fox-duration-fast, 150ms) ease;
+}
+.fox-conversation-scroll:is(:hover, :focus-within)::-webkit-scrollbar-thumb,
+.fox-conversation-scroll.is-scrolling::-webkit-scrollbar-thumb {
+  background: color-mix(in oklch, var(--muted-foreground) 35%, transparent);
+}
+.fox-conversation-scroll:is(:hover, :focus-within),
+.fox-conversation-scroll.is-scrolling {
+  scrollbar-color: color-mix(in oklch, var(--muted-foreground) 35%, transparent) transparent;
+}
+
+/* The dock floats above the composer, which now overlaps the scroll container. */
+.fox-conversation .fox-conversation-bottom-dock {
+  bottom: calc(var(--fox-composer-occlusion, 180px) + 7px);
 }
 
 .fox-turn-rail {
@@ -4563,6 +4604,35 @@ img[src='/avatars/fox-assistant.png'] {
   margin-top: 2px;
 }
 
+/* UI 1104-06（SPEC item 6）：助手消息的整条页脚（操作 + 名称/模型/时间）默认隐藏，
+   悬停或聚焦这条消息时显示。只用 opacity——页脚高度始终占位，显示时没有布局跳动；
+   Tab 仍能聚焦到页脚里的按钮，聚焦时（:focus-within）整条显示。
+   触屏设备（没有悬停）始终显示。运行时时间线和 assistant-ui thread 两条路径都覆盖。 */
+.fox-assistant-message > .fox-message-footer,
+.fox-thread-msg.is-assistant > .fox-message-footer {
+  opacity: 0;
+  transition: opacity var(--fox-duration-fast, 120ms) var(--fox-ease-out, ease);
+}
+
+.fox-assistant-message:is(:hover, :focus-within) > .fox-message-footer,
+.fox-thread-msg.is-assistant:is(:hover, :focus-within) > .fox-message-footer {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .fox-assistant-message > .fox-message-footer,
+  .fox-thread-msg.is-assistant > .fox-message-footer {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fox-assistant-message > .fox-message-footer,
+  .fox-thread-msg.is-assistant > .fox-message-footer {
+    transition: none;
+  }
+}
+
 .fox-message-footer .fox-message-meta {
   margin-left: 0;
   min-width: 0;
@@ -4706,10 +4776,6 @@ img[src='/avatars/fox-assistant.png'] {
   gap: 6px;
   pointer-events: none;
   transform: translateX(-50%);
-}
-
-.fox-chat-stage:has(.fox-goal-floater):has([data-conversation-at-bottom='false']) .fox-conversation-bottom-dock {
-  bottom: 49px;
 }
 
 .fox-conversation-bottom-dock > * {
@@ -6843,14 +6909,6 @@ img[src='/avatars/fox-assistant.png'] {
   background: var(--fox-canvas);
 }
 
-.fox-context-panel.is-compact {
-  width: 100%;
-  height: 100%;
-  min-width: 0;
-  max-width: none;
-  border-left: 0;
-}
-
 .fox-context-panel.is-maximized {
   width: 100%;
   min-width: 0;
@@ -7017,51 +7075,6 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-context-tab-close:hover {
   background: color-mix(in oklch, var(--fox-hover) 86%, var(--fox-border));
   color: var(--fox-text);
-}
-
-.fox-compact-context-layer {
-  position: absolute;
-  z-index: 40;
-  inset: 0;
-  overflow: hidden;
-  isolation: isolate;
-  border-radius: inherit;
-}
-
-.fox-compact-context-backdrop {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  padding: 0;
-  border: 0;
-  background: color-mix(in oklch, var(--fox-text) 12%, transparent);
-}
-
-.fox-compact-context-sheet {
-  position: absolute;
-  inset: 0 0 0 auto;
-  width: min(390px, 88%);
-  max-width: 100%;
-  height: 100%;
-  min-width: 0;
-  min-height: 0;
-  padding: 0;
-  overflow: hidden;
-  outline: none;
-  border-left: 1px solid var(--fox-border);
-  background: var(--fox-canvas);
-  box-shadow: var(--fox-shadow-md);
-}
-
-.fox-compact-context-sheet.is-maximized {
-  width: 100%;
-}
-
-/* The normal panel is hidden at compact breakpoints; the local drawer still
-   renders the same real panel, within the content card's left boundary. */
-.fox-compact-context-sheet > .fox-context-panel.is-compact {
-  display: grid;
 }
 
 .fox-context-home {
@@ -10954,9 +10967,9 @@ img[src='/avatars/fox-assistant.png'] {
   .fox-model-control { width: max-content; max-width: min(150px, 52%); flex-basis: auto; }
 }
 
+/* SPEC item 4: the right sidebar is a sibling window-grown card, so it is never
+   hidden by a viewport breakpoint — narrow windows simply get a narrower chat. */
 @media (max-width: 1180px) {
-  .fox-context-panel { display: none; }
-  .fox-resize-divider { display: none; }
   .fox-chat-top-actions { margin-right: 0; }
 }
 
@@ -11275,6 +11288,9 @@ img[src='/avatars/fox-assistant.png'] {
   padding: 0;
 }
 
+/* UI 1104-08（SPEC item 8）：所有刻度（含选中项）默认都是短横线；选中项只用更深的
+   前景色区分，其它刻度浅。只有悬停/聚焦的那一条会加深并变长——顺序放在 is-active
+   之后，悬停选中的刻度同样变长。 */
 .fox-conversation-marks button span {
   width: 5px;
   height: 2px;
@@ -11284,16 +11300,15 @@ img[src='/avatars/fox-assistant.png'] {
   transition: width 120ms ease, opacity 120ms ease, background 120ms ease;
 }
 
+.fox-conversation-marks button.is-active span {
+  background: var(--foreground);
+  opacity: 1;
+}
+
 .fox-conversation-marks button:hover span,
 .fox-conversation-marks button:focus-visible span {
   width: 12px;
-  background: var(--fox-muted);
-  opacity: .9;
-}
-
-.fox-conversation-marks button.is-active span {
-  width: 16px;
-  background: var(--fox-accent);
+  background: var(--foreground);
   opacity: 1;
 }
 
