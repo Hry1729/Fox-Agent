@@ -80,7 +80,6 @@ function FoxBottomDock({ plan }: { plan?: GoalProgressData['planRevisions'][numb
  * instead of mixing message streams.
  */
 export default function FoxThread({ statusBar, approvalSlot, fox, suggestions, onStart, planRevision, turnRailMessages, turnRailArtifacts }: FoxThreadProps) {
-  const [scrolledUnderTopbar, setScrolledUnderTopbar] = useState(false)
   // SPEC item 5: brief `.is-scrolling` state reveals the scrollbar thumb while
   // the list is actively scrolling (~800ms after the last scroll event).
   const [scrolling, setScrolling] = useState(false)
@@ -88,8 +87,7 @@ export default function FoxThread({ statusBar, approvalSlot, fox, suggestions, o
   useEffect(() => () => {
     if (scrollingTimer.current !== null) window.clearTimeout(scrollingTimer.current)
   }, [])
-  const handleViewportScroll = (event: { currentTarget: { scrollTop: number } }) => {
-    setScrolledUnderTopbar(event.currentTarget.scrollTop > 4)
+  const handleViewportScroll = () => {
     setScrolling(true)
     if (scrollingTimer.current !== null) window.clearTimeout(scrollingTimer.current)
     scrollingTimer.current = window.setTimeout(() => setScrolling(false), 800)
@@ -100,7 +98,7 @@ export default function FoxThread({ statusBar, approvalSlot, fox, suggestions, o
         {!fox.contactChat && <ConversationTurnRail messages={turnRailMessages ?? []} artifacts={turnRailArtifacts ?? []} />}
         <ThreadPrimitive.Root className="fox-thread-root">
           <ThreadPrimitive.Viewport
-            className={`fox-thread-viewport${scrolledUnderTopbar ? ' is-scrolled-under-topbar' : ''}${scrolling ? ' is-scrolling' : ''}`}
+            className={`fox-thread-viewport${scrolling ? ' is-scrolling' : ''}`}
             autoScroll
             onScroll={handleViewportScroll}
           >

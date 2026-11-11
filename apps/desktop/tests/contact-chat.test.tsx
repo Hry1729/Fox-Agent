@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { mockIPC, clearMocks } from '@tauri-apps/api/mocks'
@@ -44,6 +45,44 @@ const renderChat = (snapshot: ConversationDetail) => withContact(<AssistantUiCha
   callbacks={{ onSubmit: () => {} }} />)
 
 afterEach(() => { cleanup(); clearMocks() })
+
+describe('聊天边缘渐变', () => {
+  const contactCss = readFileSync(new URL('../src/features/companions/contact-chat.css', import.meta.url), 'utf8')
+  const workbenchCss = readFileSync(new URL('../src/styles/workbench.css', import.meta.url), 'utf8')
+  const rule = (css: string, selector: string) => {
+    const start = css.indexOf(`\n${selector} {`)
+    expect(start).toBeGreaterThanOrEqual(0)
+    return css.slice(start + 1, css.indexOf('}', start) + 1)
+  }
+
+  test('名称与搜索悬浮在聊天卡片顶端，渐变从卡片边缘开始', () => {
+    const header = rule(contactCss, '.fox-chat-topbar.fox-contact-topbar')
+    expect(header).toContain('position: absolute;')
+    expect(header).toContain('inset: 0 0 auto;')
+    expect(header).toContain('margin: 0;')
+    expect(header).toContain('pointer-events: none;')
+    expect(rule(contactCss, '.fox-chat-topbar.fox-contact-topbar > *')).toContain('pointer-events: auto;')
+    const fade = rule(contactCss, '.fox-chat-topbar.fox-contact-topbar::before')
+    expect(fade).toContain('inset: 0;')
+    expect(fade).toContain('linear-gradient(to bottom, var(--fox-canvas), transparent)')
+    expect(contactCss).not.toContain('mask-image:')
+    expect(rule(contactCss, '.is-contact-chat .fox-thread-viewport')).toContain('padding-top: calc(var(--fox-contact-header-height, 60px) + var(--fox-space-xl));')
+  })
+
+  test('私聊与普通对话共用全宽底部遮挡，渐变末端之后保持实色', () => {
+    const fade = rule(workbenchCss, '.fox-chat-stage:has(> .fox-composer-wrap:not(.is-empty))::after')
+    expect(fade).toContain('inset: auto 0 0;')
+    expect(fade).toContain('height: calc(var(--fox-composer-occlusion, 180px) - 6px + 42px);')
+    expect(fade).toContain('linear-gradient(to bottom, transparent, var(--fox-canvas) 42px)')
+    expect(fade).toContain('pointer-events: none;')
+    const fadeZ = Number(fade.match(/z-index: (\d+)/)?.[1])
+    const dockZ = Number(rule(workbenchCss, '.fox-conversation-bottom-dock').match(/z-index: (\d+)/)?.[1])
+    const composerZ = Number(rule(workbenchCss, '.fox-composer-wrap').match(/z-index: (\d+)/)?.[1])
+    expect(fadeZ).toBeLessThan(dockZ)
+    expect(dockZ).toBeLessThan(composerZ)
+    expect(workbenchCss).not.toContain('.fox-composer-wrap:not(.is-empty)::before')
+  })
+})
 
 describe('联系人按条送达', () => {
   test('三条中途说明与最终回复各成气泡，流式预览即用持久身份，工具过程不进入聊天，历史分段相同', async () => {

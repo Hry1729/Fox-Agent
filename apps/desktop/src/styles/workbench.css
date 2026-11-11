@@ -4840,15 +4840,15 @@ img[src='/avatars/fox-assistant.png'] {
   transform: translateX(-50%);
 }
 
-.fox-composer-wrap:not(.is-empty)::before {
+/* The viewport extends behind the composer; the fade must also cover the area below it. */
+.fox-chat-stage:has(> .fox-composer-wrap:not(.is-empty))::after {
   content: '';
   position: absolute;
+  z-index: 11;
   pointer-events: none;
-  left: 0;
-  right: 0;
-  bottom: 100%;
-  height: 42px;
-  background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--fox-canvas) 90%, transparent));
+  inset: auto 0 0;
+  height: calc(var(--fox-composer-occlusion, 180px) - 6px + 42px);
+  background: linear-gradient(to bottom, transparent, var(--fox-canvas) 42px);
 }
 
 .fox-composer-wrap.is-empty {

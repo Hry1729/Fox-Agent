@@ -12,24 +12,38 @@
 }
 @keyframes fox-contact-working { 50% { opacity: 0.55; } }
 
-.is-contact-chat .fox-thread-viewport { gap: 16px; }
-/* Content dissolving under the floating topbar instead of shearing off at a hard edge. */
-.is-contact-chat .fox-thread-viewport.is-scrolled-under-topbar {
-  mask-image: linear-gradient(to bottom, transparent 0, #000 20px);
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 20px);
+.fox-chat-pane:has(> .fox-contact-topbar) {
+  --fox-contact-header-height: 60px;
 }
-/* Fox private-chat topbar: no bottom border. A ~42px reversed composer-style
-   fade below the bar dissolves scrolling the pill/search controls. */
-.fox-chat-topbar.fox-contact-topbar { border-bottom: 0; }
-.fox-chat-topbar.fox-contact-topbar::after {
+.is-contact-chat .fox-thread-viewport {
+  gap: 16px;
+  padding-top: calc(var(--fox-contact-header-height, 60px) + var(--fox-space-xl));
+  scroll-padding-top: var(--fox-contact-header-height, 60px);
+}
+.fox-chat-topbar.fox-contact-topbar {
+  position: absolute;
+  inset: 0 0 auto;
+  min-height: var(--fox-contact-header-height);
+  margin: 0;
+  padding: 12px 16px;
+  border: 0;
+  background: transparent;
+  pointer-events: none;
+}
+.fox-chat-topbar.fox-contact-topbar > * { pointer-events: auto; }
+.fox-chat-topbar.fox-contact-topbar::before {
   content: '';
   position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
-  height: 42px;
+  z-index: -1;
+  inset: 0;
   pointer-events: none;
-  background: linear-gradient(to bottom, color-mix(in srgb, var(--fox-canvas) 90%, transparent), transparent);
+  background: linear-gradient(to bottom, var(--fox-canvas), transparent);
+}
+.fox-contact-topbar ~ .fox-contact-banner:first-of-type {
+  margin-top: var(--fox-contact-header-height);
+}
+.fox-contact-topbar ~ .fox-contact-banner ~ .fox-chat-stage .fox-thread-viewport {
+  padding-top: var(--fox-space-xl);
 }
 
 /* --- Rakazo-style contact bubbles (plan C00 + SPEC item 9) -----------------
