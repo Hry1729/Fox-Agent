@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { StrictMode, useRef, useState } from 'react'
 import { act, cleanup, render, renderHook } from '@testing-library/react'
-import { sideCardGrowthRollback } from '../src/features/chat/workbench-side-cards'
+import { sideCardGrowthRollback, useRightPanelGrowthWidth } from '../src/features/chat/workbench-side-cards'
 import {
   SIDEBAR_CARD_GAP,
   useSidebarWindowGrowth,
@@ -73,6 +73,43 @@ function SidebarLayout({ entries, deps, onGrowthRefused }: {
 afterEach(cleanup)
 
 describe('useSidebarWindowGrowth hook', () => {
+  test('调整右栏只改变栏宽；关闭后缩回，重新打开按新栏宽增长一次', async () => {
+    const win = createFakeWindow()
+    const deps = createDeps(win)
+    const hook = renderHook(() => {
+      const [open, setOpen] = useState(false)
+      const [width, setWidth] = useState(300)
+      const paidWidth = useRightPanelGrowthWidth(open, width)
+      const entries = paidWidth === null ? [] : [{ id: 'right-panel', width: paidWidth }]
+      useSidebarWindowGrowth(entries, undefined, undefined, deps)
+      return { setOpen, setWidth, width }
+    })
+    await settle()
+    act(() => hook.result.current.setOpen(true))
+    await settle()
+    expect(win.state.width).toBe(1365)
+    const callsAfterOpen = sizeCalls(win).length
+    act(() => hook.result.current.setWidth(420))
+    await settle()
+    expect(hook.result.current.width).toBe(420)
+    expect(win.state.width).toBe(1365)
+    expect(sizeCalls(win)).toHaveLength(callsAfterOpen)
+    act(() => hook.result.current.setWidth(280))
+    await settle()
+    expect(win.state.width).toBe(1365)
+    expect(sizeCalls(win)).toHaveLength(callsAfterOpen)
+    act(() => hook.result.current.setOpen(false))
+    await settle()
+    expect(win.state.width).toBe(1060)
+    act(() => hook.result.current.setOpen(true))
+    await settle()
+    expect(win.state.width).toBe(1345)
+    act(() => hook.result.current.setOpen(false))
+    await settle()
+    expect(win.state.width).toBe(1060)
+    hook.unmount()
+  })
+
   test('DOM width locks before native open and close finish, then returns to auto width', async () => {
     const win = createFakeWindow({ defer: true })
     const deps = createDeps(win)

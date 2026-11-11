@@ -15,12 +15,23 @@
  *    restored to that width instead of being closed, and a card the window never
  *    got is closed.
  */
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import type { SidebarGrowthRefusal } from '@/features/workspace/use-sidebar-window-growth'
 import type { WorkspaceView } from '@/features/workspace/types'
 
 export const RIGHT_PANEL_GROWTH_ID = 'right-panel'
 export const CONTACT_CARD_GROWTH_ID = 'contact-card'
+
+/** The window pays for a panel when it opens; dragging only redistributes that space. */
+export function useRightPanelGrowthWidth(open: boolean, width: number): number | null {
+  return useMemo(() => open ? width : null, [open])
+}
+
+export function rightPanelResizeBounds(width: number, layoutWidth: number, panelWidth: number, chatWidth: number) {
+  const visibleWidth = panelWidth > 0 ? panelWidth : Math.min(width, layoutWidth * .48)
+  const maxWidth = Math.max(280, Math.min(760, layoutWidth * .48, visibleWidth + Math.max(0, chatWidth - 280)))
+  return { width: visibleWidth, min: 280, max: maxWidth }
+}
 
 /** What the DOM has to undo after a refused growth pass, keyed by the card that
  *  asked for the room instead of by render order. */

@@ -17,9 +17,11 @@ type ObserverEntry = { target: Element; isIntersecting: boolean }
 let observers: FakeObserver[] = []
 class FakeObserver {
   callback: (entries: ObserverEntry[]) => void
+  options?: IntersectionObserverInit
   targets = new Set<Element>()
-  constructor(callback: (entries: ObserverEntry[]) => void) {
+  constructor(callback: (entries: ObserverEntry[]) => void, options?: IntersectionObserverInit) {
     this.callback = callback
+    this.options = options
     observers.push(this)
   }
   observe(target: Element) { this.targets.add(target) }
@@ -77,6 +79,19 @@ afterEach(() => {
 })
 
 describe('K6 阅读游标视口进入', () => {
+  test('长气泡部分可见且窗口获得焦点后及时标为已读', async () => {
+    let focused = false
+    document.hasFocus = () => focused
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    const view = render(<Harness contact={contact()} detail={detail([1000])} visible />)
+    expect(observers.at(-1)?.options?.threshold).toBe(0)
+    await intersect(view.container, [1000], true)
+    expect(markRead.mock.calls.length).toBe(0)
+    focused = true
+    await act(() => window.dispatchEvent(new Event('focus')))
+    expect(markRead.mock.calls[0]).toEqual(['contact', 1000, expect.any(Number)])
+  })
+
   test('会话内手动未读不被立即抵消，重开同一聊天重新进入视口后才清除', async () => {
     document.hasFocus = () => true
     Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })

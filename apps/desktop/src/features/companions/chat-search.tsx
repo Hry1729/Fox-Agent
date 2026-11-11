@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ChevronDown, ChevronUp, LoaderCircle, Search, X } from 'lucide-react'
+import { CalendarDays, ChevronDown, ChevronUp, LoaderCircle, Search, X } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
 import { notify as toast } from '@/features/notifications'
 import type { ContactBubbleSearchHit, ConversationDetail } from '@/features/conversations/model/types'
@@ -250,9 +253,9 @@ export function useContactChatSearch({ conversationId, detail, loadEarlierMessag
   }
 }
 
-export function ContactSearchBar({ search }: { search: ContactChatSearch }) {
+export function ContactSearchBar({ search, onClose }: { search: ContactChatSearch; onClose: () => void }) {
   const inputRef = useRef<HTMLInputElement>(null)
-  useEffect(() => { inputRef.current?.focus() }, [])
+  useEffect(() => { inputRef.current?.focus({ preventScroll: true }) }, [])
   return <div className="fox-contact-search-bar">
     <Search size={14} aria-hidden="true" />
     <input
@@ -262,25 +265,25 @@ export function ContactSearchBar({ search }: { search: ContactChatSearch }) {
       aria-label="搜索私聊"
       onChange={event => search.setDraft(event.target.value)}
       onKeyDown={event => {
+        if (event.nativeEvent.isComposing) return
         if (event.key === 'ArrowDown') { event.preventDefault(); search.moveSelection(1) }
         else if (event.key === 'ArrowUp') { event.preventDefault(); search.moveSelection(-1) }
         else if (event.key === 'Enter') { event.preventDefault(); search.locate(search.selected) }
-        else if (event.key === 'Escape') { event.preventDefault(); search.close() }
       }}
     />
     {search.busy && <LoaderCircle size={14} className="is-spinning" aria-label="搜索中" />}
-    <button type="button" className="fox-icon-button" aria-label="关闭搜索" onClick={search.close}><X size={14} /></button>
+    <Button type="button" variant="ghost" size="icon-xs" aria-label="关闭搜索" onClick={onClose}><X /></Button>
   </div>
 }
 
-export function ContactSearchChip({ search }: { search: ContactChatSearch }) {
+export function ContactSearchChip({ search, onClose }: { search: ContactChatSearch; onClose: () => void }) {
   return <div className="fox-contact-search-chip" role="status" aria-label="搜索定位">
     <Search size={13} aria-hidden="true" />
     <b>{search.query || '定位消息'}</b>
     <span>{search.results.length ? `${search.activeIndex + 1} / ${search.results.length}` : search.query ? '0 / 0' : '正在定位…'}</span>
-    <button type="button" className="fox-icon-button" aria-label="上一条结果" disabled={!search.results.length} onClick={() => search.step(-1)}><ChevronUp size={14} /></button>
-    <button type="button" className="fox-icon-button" aria-label="下一条结果" disabled={!search.results.length} onClick={() => search.step(1)}><ChevronDown size={14} /></button>
-    <button type="button" className="fox-icon-button" aria-label="关闭搜索" onClick={search.close}><X size={14} /></button>
+    <Button type="button" variant="ghost" size="icon-xs" aria-label="上一条结果" disabled={!search.results.length} onClick={() => search.step(-1)}><ChevronUp /></Button>
+    <Button type="button" variant="ghost" size="icon-xs" aria-label="下一条结果" disabled={!search.results.length} onClick={() => search.step(1)}><ChevronDown /></Button>
+    <Button type="button" variant="ghost" size="icon-xs" aria-label="关闭搜索" onClick={onClose}><X /></Button>
   </div>
 }
 
@@ -293,17 +296,22 @@ export function ContactSearchPanel({ search, contact, contactName }: {
 }) {
   return <div className="fox-contact-search-panel" role="dialog" aria-label="搜索私聊结果">
     <div className="fox-contact-search-head">
-      <span>{search.total} 条消息</span>
-      <span aria-hidden="true">·</span>
-      <span>只搜索和{contactName}的私聊</span>
-      <div className="fox-contact-search-ranges" role="group" aria-label="时间范围">
-        {RANGE_LABELS.map(([value, label]) => <button key={value} type="button" aria-pressed={search.range === value} onClick={() => search.setRange(value)}>{label}</button>)}
+      <div className="fox-contact-search-caption">
+        <strong>{search.total} 条消息</strong>
+        <span>只搜索和{contactName}的私聊</span>
       </div>
+      <Select value={search.range} onValueChange={value => search.setRange(value as ContactSearchRange)}>
+        <SelectTrigger size="sm" className="fox-contact-search-range-trigger" aria-label="时间范围">
+          <CalendarDays aria-hidden="true" /><SelectValue />
+        </SelectTrigger>
+        <SelectContent align="end" className="fox-contact-search-range-menu">
+          {RANGE_LABELS.map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}
+        </SelectContent>
+      </Select>
     </div>
     {search.range === 'custom' && <div className="fox-contact-search-custom">
-      <input type="date" value={search.customSince} aria-label="开始日期" onChange={event => search.setCustomSince(event.target.value)} />
-      <span>至</span>
-      <input type="date" value={search.customUntil} aria-label="结束日期" onChange={event => search.setCustomUntil(event.target.value)} />
+      <label><span>开始</span><Input type="date" value={search.customSince} aria-label="开始日期" onChange={event => search.setCustomSince(event.target.value)} /></label>
+      <label><span>结束</span><Input type="date" value={search.customUntil} aria-label="结束日期" onChange={event => search.setCustomUntil(event.target.value)} /></label>
     </div>}
     <div className="fox-contact-search-results">
       {search.error

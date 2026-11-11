@@ -4,6 +4,7 @@ import type { AgentRecord, ContactBubbleMarkRecord, ConversationContextReset, Me
 export interface Companion {
   id: string
   conversationId: string
+  latestMessagePreview?: string | null
   templateAgentId: string
   displayName: string
   avatarRef: string

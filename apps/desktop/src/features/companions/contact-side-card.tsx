@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ArrowLeft, Bell, BookOpen, ChevronRight, Cpu, FileOutput, Folder, FolderOpen, FolderPlus, FolderSearch, NotebookPen, Plug, RotateCcw, Search, Settings2, ShieldCheck, Star, X } from 'lucide-react'
+import { ArrowLeft, Bell, BellDot, BellOff, BellRing, BookOpen, ChevronRight, Eye, FileOutput, Folder, FolderOpen, FolderPlus, FolderSearch, MessageSquare, NotebookPen, Pencil, Plug, RotateCcw, Search, Settings2, ShieldCheck, SlidersHorizontal, Star, X, type LucideIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { useExpertIcons } from '@/features/agents/use-expert-icons'
 import { notify as toast } from '@/features/notifications'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
 import type { ConversationDetail, ProjectFileEntry, ProjectRecord } from '@/features/conversations/model/types'
@@ -28,18 +31,18 @@ export const CONTACT_SIDE_CARD_WIDTH = 320
 
 export type ContactSideCardTab = 'details' | 'files' | 'workspace'
 const TAB_LABELS: Array<[ContactSideCardTab, string]> = [['details', '详情'], ['files', '资料库'], ['workspace', '工作目录']]
-const REMINDER_OPTIONS: Array<[ReminderMode, string]> = [
-  ['follow_global', '跟随全局设置'],
-  ['all', '所有消息'],
-  ['action_only', '只有需要我确认的消息'],
-  ['muted', '暂时不提醒'],
+const REMINDER_OPTIONS: Array<[ReminderMode, string, LucideIcon]> = [
+  ['follow_global', '跟随全局设置', SlidersHorizontal],
+  ['all', '所有消息', BellRing],
+  ['action_only', '只有需要我确认的消息', BellDot],
+  ['muted', '暂时不提醒', BellOff],
 ]
 /** The real contract: `permissionMode` is read_only / ask / allow (see profile.tsx
  *  and the composer), and it is applied through `ctx.setPermission`. */
-const PERMISSION_OPTIONS: Array<[ProjectRecord['permissionMode'], string]> = [
-  ['read_only', '只读'],
-  ['ask', '每轮询问'],
-  ['allow', '自动接受'],
+const PERMISSION_OPTIONS: Array<[ProjectRecord['permissionMode'], string, LucideIcon]> = [
+  ['read_only', '只读', Eye],
+  ['ask', '每轮询问', MessageSquare],
+  ['allow', '自动接受', ShieldCheck],
 ]
 
 /** The private-chat contact card (SPEC item 3): an independent 320px sibling card
@@ -121,6 +124,7 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
   }
   const heading = view === 'capabilities' ? '可用能力' : view === 'favorites' ? '收藏' : view === 'notes' ? '笔记' : view === 'settings' ? '联系人设置' : '联系人资料'
   const resetBlocked = Boolean(detail?.contextResetBlockedReason || contact.activeRunStatus)
+  const permission = ctx?.permission ?? 'ask'
   return <aside className="fox-contact-side-card" role="complementary" aria-label={`${contact.displayName} 资料卡`}>
     <header className={`fox-contact-side-card-head${view === 'main' ? ' is-main' : ''}`}>
       {view !== 'main' && <button type="button" className="fox-contact-side-card-control" aria-label="返回详情" title="返回详情" onClick={() => setView('main')}><ArrowLeft size={16} /></button>}
@@ -150,7 +154,9 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
           </div>
         : <>
             <div className="fox-contact-side-hero">
-              <ContactAvatar contact={contact} />
+              <ContactAvatarEditor key={contact.id} contact={contact} onSaved={avatarRef => {
+                setProfileDraft(draft => ({ ...draft, avatar: avatarRef }))
+              }} />
               {renaming
                 ? <input
                     aria-label="重命名联系人"
@@ -174,16 +180,13 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
             {tab === 'details' && <div className="fox-contact-side-details">
               <section className="fox-contact-side-group" aria-label="模型">
                 <h3>模型</h3>
-                <div className="fox-library-card">
-                  <div className="fox-contact-side-item is-model">
-                    <Cpu size={16} aria-hidden="true" />
-                    <ContactModelSelect key={contact.id} contact={contact} />
-                  </div>
+                <div className="fox-contact-list-card">
+                  <ContactModelSelect key={contact.id} contact={contact} inSideCard />
                 </div>
               </section>
               {(search || detail?.contextReset?.supported) && <section className="fox-contact-side-group" aria-label="这个对话">
                 <h3>这个对话</h3>
-                <div className="fox-library-card">
+                <div className="fox-contact-list-card">
                   {search && <button type="button" className="fox-contact-side-item" onClick={search.open}>
                     <Search size={16} aria-hidden="true" /><span className="fox-contact-side-lab">在对话中查找</span><ChevronRight size={14} className="fox-contact-side-chev" aria-hidden="true" />
                   </button>}
@@ -197,22 +200,31 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
               </section>}
               <section className="fox-contact-side-group" aria-label="偏好">
                 <h3>偏好</h3>
-                <div className="fox-library-card">
-                  <label className="fox-contact-side-item"><Bell size={16} aria-hidden="true" /><span className="fox-contact-side-lab">提醒</span>
-                    <select className="fox-contact-side-select" value={contact.reminderMode} aria-label="提醒" disabled={busy}
-                      onChange={event => void run(async () => { await contacts.setReminderMode(contact.id, event.target.value as ReminderMode) }, '提醒设置已保存')}>
-                      {REMINDER_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                    </select></label>
-                  <label className="fox-contact-side-item"><ShieldCheck size={16} aria-hidden="true" /><span className="fox-contact-side-lab">权限</span>
-                    <select className="fox-contact-side-select" value={ctx?.permission ?? 'ask'} aria-label="权限" disabled={busy}
-                      onChange={event => ctx?.setPermission(event.target.value as ProjectRecord['permissionMode'])}>
-                      {PERMISSION_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                    </select></label>
+                <div className="fox-contact-list-card">
+                  <Select value={contact.reminderMode} disabled={busy}
+                    onValueChange={value => void run(() => contacts.setReminderMode(contact.id, value as ReminderMode), '提醒设置已保存')}>
+                    <SelectTrigger size="sm" className="fox-contact-side-item fox-contact-side-select" aria-label="提醒">
+                      <Bell size={16} aria-hidden="true" /><span className="fox-contact-side-lab">提醒</span>
+                      <SelectValue>{REMINDER_OPTIONS.find(([value]) => value === contact.reminderMode)?.[1]}</SelectValue>
+                    </SelectTrigger>
+                    <SelectContent align="end" collisionPadding={8} className="fox-contact-side-select-menu">
+                      {REMINDER_OPTIONS.map(([value, label, Icon]) => <SelectItem key={value} value={value}><Icon aria-hidden="true" />{label}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                  <Select value={permission} disabled={busy} onValueChange={value => ctx?.setPermission(value as ProjectRecord['permissionMode'])}>
+                    <SelectTrigger size="sm" className="fox-contact-side-item fox-contact-side-select" aria-label="权限">
+                      <ShieldCheck size={16} aria-hidden="true" /><span className="fox-contact-side-lab">权限</span>
+                      <SelectValue>{PERMISSION_OPTIONS.find(([value]) => value === permission)?.[1]}</SelectValue>
+                    </SelectTrigger>
+                    <SelectContent align="end" collisionPadding={8} className="fox-contact-side-select-menu">
+                      {PERMISSION_OPTIONS.map(([value, label, Icon]) => <SelectItem key={value} value={value}><Icon aria-hidden="true" />{label}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
                 </div>
               </section>
               <section className="fox-contact-side-group" aria-label="资料与能力">
                 <h3>资料与能力</h3>
-                <div className="fox-library-card">
+                <div className="fox-contact-list-card">
                   <button type="button" className="fox-contact-side-item" onClick={ctx?.openSharedMemory}><BookOpen size={16} aria-hidden="true" /><span className="fox-contact-side-lab">共享记忆</span><ChevronRight size={14} className="fox-contact-side-chev" aria-hidden="true" /></button>
                   <button type="button" className="fox-contact-side-item" onClick={() => setView('capabilities')}><Plug size={16} aria-hidden="true" /><span className="fox-contact-side-lab">可用能力</span><ChevronRight size={14} className="fox-contact-side-chev" aria-hidden="true" /></button>
                   <button type="button" className="fox-contact-side-item" onClick={() => setView('favorites')}><Star size={16} aria-hidden="true" /><span className="fox-contact-side-lab">收藏</span><ChevronRight size={14} className="fox-contact-side-chev" aria-hidden="true" /></button>
@@ -225,14 +237,14 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
             {tab === 'workspace' && <div className="fox-contact-side-details">
               <section className="fox-contact-side-group" aria-label="位置">
                 <h3>位置</h3>
-                <div className="fox-library-card">
+                <div className="fox-contact-list-card">
                   <div className="fox-contact-side-item is-path"><Folder size={16} aria-hidden="true" /><code>{contact.workspaceDir}</code></div>
                   {contact.workspaceError && <p className="fox-contact-side-sub" role="alert">{contact.workspaceError}</p>}
                 </div>
               </section>
               <section className="fox-contact-side-group" aria-label="操作">
                 <h3>操作</h3>
-                <div className="fox-library-card fox-contact-side-workspace-actions">
+                <div className="fox-contact-list-card fox-contact-side-workspace-actions">
                   <Button size="sm" variant="outline" disabled={busy}
                     onClick={() => void run(() => desktopClient.openProjectFolder(contact.conversationId))}><FolderOpen size={16} />打开文件夹</Button>
                   {contact.workspaceState !== 'ready' && <Button size="sm" variant="outline" disabled={busy}
@@ -255,6 +267,49 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
           </>}
     </div>
   </aside>
+}
+
+function ContactAvatarEditor({ contact, onSaved }: { contact: Companion; onSaved: (avatarRef: string) => void }) {
+  const ctx = useContacts()
+  const [open, setOpen] = useState(false)
+  const [avatarRef, setAvatarRef] = useState(contact.avatarRef)
+  const [saving, setSaving] = useState(false)
+  const { items, loading } = useExpertIcons(open)
+  const options = items.some(item => item.src === contact.avatarRef)
+    ? items
+    : [{ id: 'current', name: '当前头像', src: contact.avatarRef }, ...items]
+  const save = async () => {
+    setSaving(true)
+    try {
+      const saved = await contacts.profile(contact.id, { avatarRef })
+      onSaved(saved.avatarRef)
+      await ctx?.refresh()
+      setOpen(false)
+    } catch (error) { showContactError(error) } finally { setSaving(false) }
+  }
+  return <Dialog open={open} onOpenChange={next => {
+    if (saving) return
+    if (next) setAvatarRef(contact.avatarRef)
+    setOpen(next)
+  }}>
+    <DialogTrigger asChild><button type="button" className="fox-contact-side-avatar-edit" aria-label="更换头像" title="更换头像">
+      <ContactAvatar contact={contact} />
+      <span className="fox-contact-side-avatar-pencil"><Pencil size={13} aria-hidden="true" /></span>
+    </button></DialogTrigger>
+    <DialogContent showCloseButton={false}>
+      <DialogHeader><DialogTitle>更换头像</DialogTitle><DialogDescription>为{contact.displayName}选择头像。</DialogDescription></DialogHeader>
+      <div className="fox-contact-avatar-picker" role="group" aria-label="选择头像" aria-busy={loading}>
+        {options.map(item => <Button key={item.id} type="button" variant="ghost" size="icon" aria-pressed={avatarRef === item.src}
+          aria-label={item.name} title={item.name} disabled={saving} onClick={() => setAvatarRef(item.src)}>
+          <ContactAvatar contact={{ ...contact, avatarRef: item.src }} />
+        </Button>)}
+      </div>
+      <DialogFooter>
+        <Button variant="outline" disabled={saving} onClick={() => setOpen(false)}>取消</Button>
+        <Button disabled={saving || avatarRef === contact.avatarRef} onClick={() => void save()}>{saving ? '保存中…' : '保存头像'}</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
 }
 
 /** The settings subview: the fields and actions the old profile page owned, in

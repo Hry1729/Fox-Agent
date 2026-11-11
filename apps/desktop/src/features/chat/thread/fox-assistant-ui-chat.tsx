@@ -68,10 +68,11 @@ export default function AssistantUiChat({ statusBar, approvalSlot, conversation,
   const contactBubblesByRun = useMemo(() => {
     const grouped = new Map<string, NonNullable<typeof detail>['bubbles']>()
     for (const bubble of detail?.bubbles ?? []) {
-      if (!bubble.runId || bubble.author !== 'companion') continue
-      const bucket = grouped.get(bubble.runId)
+      if (bubble.author !== 'companion') continue
+      const key = bubble.runId ?? bubble.messageId
+      const bucket = grouped.get(key)
       if (bucket) bucket.push(bubble)
-      else grouped.set(bubble.runId, [bubble])
+      else grouped.set(key, [bubble])
     }
     return grouped as Map<string, import('../../conversations/model/types').ContactBubbleRecord[]>
   }, [detail])

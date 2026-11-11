@@ -33,6 +33,8 @@ test('the prompt distinguishes the read-only project view from a private profile
   const reader = companionMemoryPrompt({ ...facts, role: 'reader' })
   assert.ok(owner.required.includes(facts.duty) && owner.required.includes('4/4000'))
   assert.ok(owner.required.includes('当前私聊不支持定时任务'))
+  assert.match(owner.required, /私聊默认采用自然对话/)
+  assert.doesNotMatch(reader.required, /私聊默认采用自然对话/)
   assert.match(owner.required, /"author":"user"/)
   assert.match(owner.required, /note_organize/)
   assert.match(owner.required, /本次会话的压缩摘要/)

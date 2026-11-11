@@ -88,7 +88,7 @@
   overscroll-behavior-y: auto;
 }
 
-.fox-runtime-process .fox-runtime-process-scroll { scrollbar-width: thin; }
+.fox-runtime-process .fox-runtime-process-scroll { scrollbar-width: var(--fox-native-scrollbar-width, thin); }
 .fox-runtime-process .fox-runtime-process-content { gap: 6px; }
 .fox-runtime-process.is-fully-expanded .fox-chain-of-thought-header { display: none; }
 .fox-runtime-process.is-fully-expanded .fox-runtime-process-scroll { max-height: none; overflow: visible; }

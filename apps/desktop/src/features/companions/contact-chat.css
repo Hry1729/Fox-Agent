@@ -35,7 +35,7 @@
   content: '';
   position: absolute;
   z-index: -1;
-  inset: 0;
+  inset: 0 var(--fox-scrollbar-size, 6px) 0 0;
   pointer-events: none;
   background: linear-gradient(to bottom, var(--fox-canvas), transparent);
 }
@@ -46,21 +46,22 @@
   padding-top: var(--fox-space-xl);
 }
 
-/* --- Rakazo-style contact bubbles (plan C00 + SPEC item 9) -----------------
-   One committed reply is one bubble; the action row and time appear beside the
-   bubble on hover/focus and never shift the text. The per-run avatar is gone
-   (the topbar pill carries it), so the assistant run is a plain column that
-   stretches to the chat column and limits the bubble inside. Bubbles, approval
-   and question cards share one width token: 80% of the conversation column,
-   capped at 35rem — never 80% of an already-narrowed parent. */
 .is-contact-chat {
-  --fox-bubble-pct: 80%;
-  --fox-bubble-max: 35rem;
-  --fox-bubble-width: min(var(--fox-bubble-max), var(--fox-bubble-pct), 100%);
+  --fox-bubble-width: 70%;
+}
+.fox-contact-time-divider {
+  width: 100%;
+  align-self: stretch;
+  padding: 12px 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
 }
 .fox-contact-run {
   min-width: 0;
 }
+.is-contact-chat .fox-thread-msg { max-width: 100%; }
 .fox-contact-run-body {
   display: flex;
   flex-direction: column;
@@ -83,16 +84,23 @@
   min-width: 0;
 }
 .fox-contact-bubble .fox-answer-response { min-width: 0; }
+.fox-contact-bubble .fox-answer-response :is(h1, h2, h3, h4, h5, h6) {
+  font-size: inherit;
+  line-height: inherit;
+  font-weight: 600;
+  margin-block: 14px 6px;
+}
+.fox-contact-bubble .fox-answer-response :is(p, ul, ol, blockquote) { margin-block: 8px; }
+.fox-contact-bubble .fox-answer-response > :first-child { margin-top: 0; }
+.fox-contact-bubble .fox-answer-response > :last-child { margin-bottom: 0; }
+.fox-contact-bubble .fox-answer-response :is(ul, ol) { padding-inline-start: 1.5em; }
 .fox-contact-bubble pre { max-width: 100%; overflow-x: auto; }
-/* SPEC item 10：操作行统一度量——行盒 26px、间距 2px，时间和按钮共用同一行盒；
-   复制/标未读按钮改成 grid，两枚图标（grid-area 1/1）真正叠在一起切换；
-   整行相对气泡下沿垂直居中（bottom: 0 + translateY(50%)），不再目测 bottom: 4px。
-   菜单开在 portal 里时焦点离开气泡 DOM，用 data-menu-open 保持操作行可见。 */
+/* Portal 菜单打开后焦点离开消息 DOM，仍保留消息操作行。 */
 .fox-contact-message-meta {
   position: absolute;
   left: 100%;
-  bottom: 0;
-  transform: translateY(50%);
+  top: 50%;
+  transform: translateY(-50%);
   display: inline-flex;
   align-items: center;
   gap: 2px;
@@ -143,8 +151,9 @@
 .is-contact-chat .fox-thread-msg.is-user { align-items: flex-end; }
 /* The row hugs the bubble, so the action gap sits beside it rather than at the
    far edge of the chat column. Width comes from the shared bubble token. */
-.fox-contact-user-row { position: relative; display: flex; justify-content: flex-end; max-width: var(--fox-bubble-width); margin-left: auto; }
-.fox-contact-user-row .fox-user-bubble {
+.fox-contact-user-row { position: relative; display: flex; justify-content: flex-end; width: fit-content; min-width: 0; max-width: var(--fox-bubble-width); margin-left: auto; }
+.is-contact-chat .fox-thread-msg.is-user .fox-contact-user-row > .fox-user-bubble {
+  min-width: 0;
   max-width: 100%;
   padding: 10px 16px !important;
   border-radius: 18px !important;
@@ -156,8 +165,9 @@
 .is-contact-chat .fox-contact-user-row .fox-user-meta {
   position: absolute;
   right: 100%;
-  bottom: 0;
-  transform: translateY(50%);
+  top: 50%;
+  bottom: auto;
+  transform: translateY(-50%);
   margin: 0;
   padding-right: 6px;
   display: inline-flex;
@@ -196,8 +206,25 @@
 .is-contact-chat .fox-contact-user-row .fox-user-meta[data-menu-open="true"] { opacity: 1; }
 .fox-contact-ended { color: var(--muted-foreground); font-size: var(--fox-type-caption); }
 
-/* SPEC item 9：审批卡 / 问句卡与气泡共用同一宽度 token（80% 列宽，上限 35rem），
-   不再是各自为政的固定 480px；卡片在 entry 内铺满，不再叠加内层收窄。 */
+@container fox-chat (max-width: 480px) {
+  .fox-contact-message, .fox-contact-user-row { padding-bottom: 26px; }
+  .fox-contact-message-meta {
+    top: auto;
+    bottom: 0;
+    left: 0;
+    padding-left: 0;
+    transform: none;
+  }
+  .fox-contact-message > .fox-contact-reaction-chip { bottom: 16px; }
+  .is-contact-chat .fox-contact-user-row .fox-user-meta {
+    top: auto;
+    bottom: 0;
+    right: 0;
+    padding-right: 0;
+    transform: none;
+  }
+}
+
 .fox-contact-decision-entry { width: var(--fox-bubble-width); min-width: 0; }
 .is-contact-chat .fox-contact-decision-entry > * { max-width: 100%; }
 /* approval-card 自带 Tailwind max-w-sm（24rem）：在私聊列里跟 token 走。 */
@@ -220,7 +247,7 @@
 .fox-contact-decision header { display: grid; gap: var(--fox-space-xs); }
 .fox-contact-decision header strong { font-weight: 600; }
 /* 直接挂在 run-body / thread 消息下的写入确认组也走同一 token（百分比只作用一层）。 */
-.fox-contact-write-results { max-width: var(--fox-bubble-width); min-width: 0; }
+.fox-contact-write-results { width: var(--fox-bubble-width); min-width: 0; }
 .fox-contact-decision header p,
 .fox-contact-decision-note,
 .fox-contact-question > small { color: var(--muted-foreground); font-size: var(--fox-type-caption); }

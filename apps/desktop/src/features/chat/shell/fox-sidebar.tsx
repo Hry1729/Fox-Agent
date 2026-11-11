@@ -474,12 +474,12 @@ export function Sidebar({
       {showSidebarUtilities && !collapsed && (
         <div className="fox-sidebar-mode-row">
           <SidebarModeTabs value={selectedMode} onValueChange={(value) => onModeChange(value as AssistantMode)}>
-              <AnimatedIconTrigger><SidebarModeTab value="assistant"><Sparkles />助手</SidebarModeTab></AnimatedIconTrigger>
+              <AnimatedIconTrigger><SidebarModeTab value="assistant" aria-label="助手"><Sparkles /><span className="fox-mode-label">助手</span></SidebarModeTab></AnimatedIconTrigger>
               {/* The trigger has to be wrapped, not the icon: AnimatedIconTrigger
                   injects its hover/focus handlers onto whatever it wraps, so an
                   icon-level wrapper leaves the label and padding as dead zones
                   and the animation only fires over the 14px glyph. */}
-              <AnimatedIconTrigger><SidebarModeTab value="knowledge"><BookCopy />资料</SidebarModeTab></AnimatedIconTrigger>
+              <AnimatedIconTrigger><SidebarModeTab value="knowledge" aria-label="资料"><BookCopy /><span className="fox-mode-label">资料</span></SidebarModeTab></AnimatedIconTrigger>
             </SidebarModeTabs>
           <div className="fox-sidebar-mode-actions"><AnimatedIconTrigger><button type="button" className={`fox-sidebar-search-trigger ${searchOpen ? 'is-active' : ''}`} onClick={toggleSearch} aria-label="搜索" title={searchTitle}><Search /></button></AnimatedIconTrigger></div>
         </div>

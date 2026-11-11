@@ -73,6 +73,27 @@ describe('联系人私聊搜索', () => {
     fireEvent.change(view.getByRole('textbox', { name: '搜索私聊' }), { target: { value: query } })
   }
 
+  async function chooseRange(view: ReturnType<typeof renderTopbar>, label: string) {
+    fireEvent.keyDown(view.getByRole('combobox', { name: '时间范围' }), { key: 'Enter' })
+    const option = await view.findByRole('option', { name: label })
+    fireEvent.pointerDown(option, { pointerType: 'mouse', button: 0 })
+    fireEvent.pointerUp(option, { pointerType: 'mouse', button: 0 })
+    await waitFor(() => expect(view.queryByRole('listbox')).toBeNull())
+  }
+
+  test('展开后保留联系人名称，点时间菜单选项不关闭搜索，点击外部关闭', async () => {
+    const view = renderTopbar(settled())
+    fireEvent.click(view.getByRole('button', { name: '搜索私聊' }))
+    expect(view.getByRole('button', { name: '资料伙伴' })).toBeDefined()
+    const dialog = view.getByRole('dialog', { name: '搜索私聊结果' })
+    await chooseRange(view, '最近 7 天')
+    expect(view.getByRole('dialog')).toBe(dialog)
+    expect(view.getByRole('combobox', { name: '时间范围' }).textContent).toBe('最近 7 天')
+    fireEvent.pointerDown(document.body)
+    expect(view.queryByRole('dialog')).toBeNull()
+    expect(view.getByRole('button', { name: '搜索私聊' })).toBeDefined()
+  })
+
   test('关键词命中后按条定位：气泡加圈、计数 chip、上下切换、关闭清除', async () => {
     const calls = mockSearch([
       hit('run:response:3', 'companion', '帮我核对资料', 2, 4),
@@ -107,12 +128,12 @@ describe('联系人私聊搜索', () => {
     await waitFor(() => expect(calls).toHaveLength(1))
     expect(calls[0].since).toBeUndefined()
 
-    fireEvent.click(view.getByRole('button', { name: '最近 7 天' }))
+    await chooseRange(view, '最近 7 天')
     await waitFor(() => expect(calls).toHaveLength(2))
     expect(typeof calls[1].since).toBe('number')
     expect(calls[1].query).toBe('核对')
 
-    fireEvent.click(view.getByRole('button', { name: '自定义' }))
+    await chooseRange(view, '自定义')
     fireEvent.change(view.getByLabelText('开始日期'), { target: { value: '2026-10-01' } })
     fireEvent.change(view.getByLabelText('结束日期'), { target: { value: '2026-10-31' } })
     await waitFor(() => expect(calls.length).toBeGreaterThanOrEqual(3))
@@ -207,6 +228,10 @@ describe('联系人私聊搜索', () => {
     const view = renderTopbar(settled())
     await openAndType(view, '核对')
     await waitFor(() => expect(view.container.querySelectorAll('.fox-contact-search-result')).toHaveLength(1))
+    fireEvent.keyDown(view.getByRole('combobox', { name: '时间范围' }), { key: 'Enter' })
+    fireEvent.keyDown(await view.findByRole('listbox'), { key: 'Escape' })
+    await waitFor(() => expect(view.queryByRole('listbox')).toBeNull())
+    expect(view.getByRole('dialog', { name: '搜索私聊结果' })).toBeDefined()
     fireEvent.keyDown(view.getByRole('textbox', { name: '搜索私聊' }), { key: 'Escape' })
     await waitFor(() => expect(view.getByRole('button', { name: '搜索私聊' })).toBeDefined())
     expect(view.container.querySelector('.fox-contact-search-panel')).toBeNull()

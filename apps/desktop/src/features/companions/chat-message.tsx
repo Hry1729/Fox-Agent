@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { Fragment, useMemo } from 'react'
 import { MessagePrimitive, useAuiState } from '@assistant-ui/react'
 import type { FoxThreadMessage } from '@/features/chat/thread/convert-detail'
 import { useFoxThread } from '@/features/chat/thread/fox-thread-context'
@@ -8,7 +8,8 @@ import { ErrorPrompt } from '@/features/chat/demo/fox-demo-prompts'
 import { notify as toast } from '@/features/notifications'
 import { ContactWriteCards } from './chat-cards'
 import { ContactDecisionCards } from './chat-decisions'
-import { contactReplies } from './chat-message-model'
+import { visibleContactReplies } from './chat-message-model'
+import { ContactTimeDivider } from './chat-time'
 import { ContactReplyBubble } from './marks'
 import { useContacts } from './context'
 import './contact-chat.css'
@@ -23,30 +24,12 @@ export function ContactAssistantMessage() {
     return state.thread.messages.findLast(item => item.role === 'assistant'
       && (item.metadata?.custom?.fox as FoxThreadMessage | undefined)?.runId === current?.runId)?.id === state.message.id
   })
-  // Committed bubbles own the identity once the run settles. While the run is
-  // live, event-derived replies that already match a persisted bubble take its
-  // durable identity and delivery order; only drafts and replaceable previews
-  // stay display-only until delivery.
-  const persisted = message?.runId ? fox.contactBubblesByRun?.get(message.runId) : undefined
-  const committed = !message?.isActiveRun ? persisted : undefined
-  const replies = useMemo(() => {
-    if (!message) return []
-    if (committed?.length) return committed.map(bubble => ({ id: bubble.id, text: bubble.content, createdAt: bubble.deliveredAt, deliveryOrder: bubble.deliveryOrder as number | undefined }))
-    const byId = new Map((persisted ?? []).map(bubble => [bubble.id, bubble]))
-    const delivered = contactReplies(message, message.runId ? fox.eventsByRun.get(message.runId) ?? [] : [])
-    const previews = message.isActiveRun && message.runId ? fox.contactKernelPreviewsByRun?.get(message.runId) ?? [] : []
-    return [
-      ...delivered.map(reply => {
-        const bubble = byId.get(reply.id)
-        return bubble
-          ? { id: bubble.id, text: bubble.content, createdAt: bubble.deliveredAt, deliveryOrder: bubble.deliveryOrder as number | undefined }
-          : { ...reply, deliveryOrder: undefined as number | undefined }
-      }),
-      ...previews
-        .filter(reply => !byId.has(reply.id))
-        .map(reply => ({ ...reply, deliveryOrder: undefined as number | undefined })),
-    ]
-  }, [message, fox.eventsByRun, fox.contactKernelPreviewsByRun, committed, persisted])
+  const replies = useMemo(() => message ? visibleContactReplies(
+    message,
+    message.runId ? fox.eventsByRun.get(message.runId) ?? [] : [],
+    fox.contactBubblesByRun?.get(message.runId ?? message.id),
+    message.runId ? fox.contactKernelPreviewsByRun?.get(message.runId) : undefined,
+  ) : [], [message, fox.eventsByRun, fox.contactBubblesByRun, fox.contactKernelPreviewsByRun])
   if (!message || !fox.contactChat) return null
   const artifacts = message.content.flatMap(part => part.type === 'data-fox-artifacts' ? part.data : [])
   return <div id={`fox-turn-${message.id}`} data-turn-message-id={message.id} className="fox-turn-anchor">
@@ -62,8 +45,8 @@ export function ContactAssistantMessage() {
     }}>
       {/* SPEC item 9：不再渲染每条回复旁的模型头像——顶部胶囊已经有头像。 */}
       <div className="fox-contact-run-body">
-        {replies.map(reply => <ContactReplyBubble key={reply.id} contact={contact} reply={reply}
-          initialMark={fox.contactBubbleMarks?.get(reply.id)} />)}
+        {replies.map(reply => <Fragment key={reply.id}><ContactTimeDivider messageId={reply.id} /><ContactReplyBubble contact={contact} reply={reply}
+          initialMark={fox.contactBubbleMarks?.get(reply.id)} /></Fragment>)}
       {lastInRun && <>
         <RuntimeArtifacts artifacts={artifacts.filter(artifact => artifact.declaredAt != null)} onOpenArtifact={fox.onOpenArtifact} />
         {message.runId && <ContactDecisionCards runId={message.runId} />}

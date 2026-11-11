@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/react'
 import { mockIPC, clearMocks } from '@tauri-apps/api/mocks'
 import { ContactsContext, type ContactsContextValue } from '../src/features/companions/context'
-import { ContactFiles, FILES_WORKDIR_HINT, formatLibraryRelative, libraryMediaKind, libraryTimeGroup } from '../src/features/companions/files'
+import { ContactFiles, formatLibraryRelative, libraryMediaKind, libraryTimeGroup } from '../src/features/companions/files'
 import { ContactProfile } from '../src/features/companions/profile'
 import { formatSearchTime } from '../src/features/companions/chat-search'
 import type { Companion, CompanionFileEntry, CompanionFiles } from '../src/features/companions/api'
@@ -42,7 +42,7 @@ interface Harness { gets: number; calls: Record<string, unknown>[] }
 function mockFiles(data: CompanionFiles = files(), harness: Harness = { gets: 0, calls: [] }) {
   mockIPC((command, args) => {
     if (command === 'companion_files_list') { harness.gets += 1; return { ok: true, data } }
-    if (command === 'companion_file_open' || command === 'companion_file_save' || command === 'project_folder_open') {
+    if (command === 'companion_file_open' || command === 'companion_file_save') {
       harness.calls.push({ command, ...(args as Record<string, unknown>) }); return { ok: true, data: null }
     }
     throw new Error('Unexpected command: ' + command)
@@ -53,7 +53,10 @@ function mockFiles(data: CompanionFiles = files(), harness: Harness = { gets: 0,
 const renderFiles = (jumpToMessage?: (bubbleId: string) => void) =>
   render(<ContactsContext.Provider value={context(contact, jumpToMessage)}><ContactFiles contact={contact} /></ContactsContext.Provider>)
 
-const openMenu = (row: HTMLElement) => fireEvent.click(within(row).getByLabelText(`${row.getAttribute('aria-label')} 的操作`))
+async function openMenu(row: HTMLElement) {
+  fireEvent.keyDown(within(row).getByRole('button', { name: `${row.getAttribute('aria-label')} 的操作` }), { key: 'Enter' })
+  return within(document.body).findByRole('menu')
+}
 
 afterEach(() => { cleanup(); clearMocks() })
 
@@ -64,13 +67,14 @@ describe('联系人资料库', () => {
     await waitFor(() => expect(harness.gets).toBe(1))
     const provided = view.getByLabelText('报价单.pdf')
     expect(within(provided).getByText('我提供的文件')).toBeDefined()
-    expect(within(provided).getAllByText(/来源消息/).length).toBeGreaterThan(0)
+    const providedMenu = await openMenu(provided)
+    expect(within(providedMenu).getByText(/来源消息/)).toBeDefined()
+    fireEvent.keyDown(providedMenu, { key: 'Escape' })
     const task = view.getByLabelText('周报.docx')
     expect(within(task).getByText('联系人生成的结果')).toBeDefined()
     expect(within(task).getAllByText(/定时任务「每周周报」/).length).toBeGreaterThan(0)
-    expect(within(task).getAllByText(/来源消息/).length).toBeGreaterThan(0)
+    expect(within(await openMenu(task)).getByText(/来源消息/)).toBeDefined()
     expect(view.container.querySelector('section[aria-label="今天"]')).not.toBeNull()
-    expect(view.getByText(FILES_WORKDIR_HINT)).toBeDefined()
   })
 
   test('缺失文件写明状态并禁用打开与另存，无来源消息禁用回到消息', async () => {
@@ -78,25 +82,23 @@ describe('联系人资料库', () => {
     const view = renderFiles()
     const missing = await waitFor(() => view.getByLabelText('丢失的产物.txt'))
     expect(within(missing).getByText('文件缺失')).toBeDefined()
-    openMenu(missing)
-    expect(within(missing).getAllByText(/暂无来源消息/).length).toBeGreaterThan(0)
-    expect((within(missing).getByText('打开') as HTMLButtonElement).disabled).toBe(true)
-    expect((within(missing).getByText('另存为') as HTMLButtonElement).disabled).toBe(true)
-    expect((within(missing).getByText('回到消息') as HTMLButtonElement).disabled).toBe(true)
+    const menu = await openMenu(missing)
+    expect(within(menu).getByText(/暂无来源消息/)).toBeDefined()
+    expect(within(menu).getByRole('menuitem', { name: '打开' }).getAttribute('aria-disabled')).toBe('true')
+    expect(within(menu).getByRole('menuitem', { name: '另存为' }).getAttribute('aria-disabled')).toBe('true')
+    expect(within(menu).getByRole('menuitem', { name: '回到消息' }).getAttribute('aria-disabled')).toBe('true')
+    fireEvent.keyDown(menu, { key: 'Escape' })
     const ok = view.getByLabelText('报价单.pdf')
-    openMenu(ok)
-    expect((within(ok).getByText('打开') as HTMLButtonElement).disabled).toBe(false)
+    expect(within(await openMenu(ok)).getByRole('menuitem', { name: '打开' }).getAttribute('aria-disabled')).toBeNull()
   })
 
   test('打开与另存为带上联系人与文件标识交给后端核验', async () => {
     const harness = mockFiles()
     const view = renderFiles()
     const row = await waitFor(() => view.getByLabelText('分析结果.md'))
-    openMenu(row)
-    fireEvent.click(within(row).getByText('打开'))
+    fireEvent.click(within(await openMenu(row)).getByRole('menuitem', { name: '打开' }))
     await waitFor(() => expect(harness.calls).toHaveLength(1))
-    openMenu(row)
-    fireEvent.click(within(row).getByText('另存为'))
+    fireEvent.click(within(await openMenu(row)).getByRole('menuitem', { name: '另存为' }))
     await waitFor(() => expect(harness.calls).toHaveLength(2))
     expect(harness.calls[0]).toEqual({ command: 'companion_file_open', request: { companionId: 'contact', kind: 'artifact', fileId: 'art-1' } })
     expect(harness.calls[1]).toEqual({ command: 'companion_file_save', request: { companionId: 'contact', kind: 'artifact', fileId: 'art-1' } })
@@ -107,26 +109,23 @@ describe('联系人资料库', () => {
     mockFiles()
     const view = renderFiles(id => jumps.push(id))
     const provided = await waitFor(() => view.getByLabelText('报价单.pdf'))
-    openMenu(provided)
-    fireEvent.click(within(provided).getByText('回到消息'))
+    fireEvent.click(within(await openMenu(provided)).getByRole('menuitem', { name: '回到消息' }))
+    await waitFor(() => expect(view.queryByRole('menu')).toBeNull())
     const task = view.getByLabelText('周报.docx')
-    openMenu(task)
-    fireEvent.click(within(task).getByText('回到消息'))
+    fireEvent.click(within(await openMenu(task)).getByRole('menuitem', { name: '回到消息' }))
     expect(jumps).toEqual(['msg-1', 'dc-report-run-2'])
   })
 
-  test('⋯ 菜单保持原生 details，外部点击与 Escape 收起', async () => {
+  test('⋯ 菜单支持外部点击和 Escape 收起', async () => {
     mockFiles()
     const view = renderFiles()
     const row = await waitFor(() => view.getByLabelText('报价单.pdf'))
-    const menu = row.querySelector('details')!
-    expect(menu).not.toBeNull()
-    menu.open = true
-    fireEvent.pointerDown(document.body)
-    expect(menu.open).toBe(false)
-    menu.open = true
-    fireEvent.keyDown(document, { key: 'Escape' })
-    expect(menu.open).toBe(false)
+    await openMenu(row)
+    await waitFor(() => expect(view.getByRole('menu')).toBeDefined())
+    fireEvent.pointerDown(document.body, { button: 0 })
+    await waitFor(() => expect(view.queryByRole('menu')).toBeNull())
+    fireEvent.keyDown(await openMenu(row), { key: 'Escape' })
+    await waitFor(() => expect(view.queryByRole('menu')).toBeNull())
   })
 
   test('筛选 pills 区分媒体与文件，选中态互斥', async () => {
@@ -206,11 +205,11 @@ describe('联系人资料库', () => {
     expect(md.querySelector('.fox-library-line')).not.toBeNull()
   })
 
-  test('空列表给出两类空态提示', async () => {
+  test('空资料库只显示没有文件', async () => {
     mockFiles(files({ provided: [], generated: [] }))
     const view = renderFiles()
-    await waitFor(() => expect(view.getByText('还没有通过消息提供过文件。')).toBeDefined())
-    expect(view.getByText('还没有生成过文件。')).toBeDefined()
+    await view.findByText('没有文件。')
+    expect(view.container.querySelector('.fox-library')?.textContent).toBe('没有文件。')
   })
 
   test('筛选无结果时给出筛选空态', async () => {
@@ -237,14 +236,6 @@ describe('联系人资料库', () => {
     fireEvent.click(view.getByText('重试'))
     await waitFor(() => expect(view.getByLabelText('报价单.pdf')).toBeDefined())
     expect(harness.gets).toBe(2)
-  })
-
-  test('打开工作目录走既有入口', async () => {
-    const harness = mockFiles()
-    const view = renderFiles()
-    fireEvent.click(await waitFor(() => view.getByText('打开工作目录')))
-    await waitFor(() => expect(harness.calls).toHaveLength(1))
-    expect(harness.calls[0]).toEqual({ command: 'project_folder_open', request: { conversationId: 'chat' } })
   })
 
   test('资料页入口打开资料库，并可返回资料', async () => {

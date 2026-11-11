@@ -423,3 +423,40 @@ describe('a refused rewind restores the failed run for another retry', () => {
     expect(h.render().detail?.lastRun).toEqual(committed.lastRun)
   })
 })
+
+describe('重发失败的对话', () => {
+  for (const backend of ['pi', 'fox'] as const) {
+    test(`${backend} 使用对应的 Host 入口`, async () => {
+      const persisted = {
+        conversation: { id: 'retry-chat', agentId: 'fox-general', agentBackend: backend, permissionMode: 'ask' },
+        messages: [{ id: 'user-1', conversationId: 'retry-chat', runId: 'failed-1', role: 'user', kind: 'text', content: '重新检查', status: 'completed', ordinal: 1, createdAt: 1, updatedAt: 1 }],
+        runtimeEvents: [], toolCalls: [], approvals: [], attachments: [], artifacts: [], knowledgeBindings: [], expertBindings: [],
+        goals: [], tasks: [], evidence: [], lastRun: { id: 'failed-1', status: 'failed', model: 'model-1', lastSeq: 1 },
+      }
+      const rewinds: any[] = []
+      const h = harness(async (request) => ({ run: { id: 'new-run', status: 'queued' }, userMessage: { ...persisted.messages[0], id: 'new-user', content: request.text }, attachments: [] }), {
+        hostRunnable: true,
+        rewindRun: async request => { rewinds.push(request); return { run: { id: 'new-run' } } },
+      })
+      h.addConversation(persisted)
+      await h.render().openConversation('retry-chat')
+      const workbench = readFileSync(new URL('../src/features/chat/workbench.tsx', import.meta.url), 'utf8')
+      const retrySource = workbench.slice(workbench.indexOf('  const retryLatestRun ='), workbench.indexOf('\n  /**', workbench.indexOf('  const retryLatestRun =')))
+      const retry = new Function('desktopConversation', 'conversationAgentBackend', 'conversationModelOverride', 'activeAgent', 'yuxiModels', 'finishWorkflow', 'clearWorkflowTimer', 'setActivePrompt', 'setComposerDraft', 'setPendingUserMessage', 'setChatState',
+        `${new Bun.Transpiler({ loader: 'tsx' }).transformSync(retrySource)}; return retryLatestRun`)(
+        { ...h.render(), enabled: true }, conversationAgentBackend, () => 'model-1', {}, { models: [] }, () => {}, () => {}, () => {}, () => {}, () => {}, () => {},
+      )
+      retry()
+      for (let i = 0; i < 50 && h.startRequests.length + rewinds.length === 0; i++) await Bun.sleep(10)
+      if (backend === 'pi') {
+        expect(h.startRequests).toHaveLength(1)
+        expect(h.startRequests[0]).toMatchObject({ conversationId: 'retry-chat', text: '重新检查', agentBackend: 'pi', model: 'model-1' })
+        expect(rewinds).toHaveLength(0)
+      } else {
+        expect(rewinds).toHaveLength(1)
+        expect(rewinds[0]).toMatchObject({ conversationId: 'retry-chat', messageId: 'user-1', text: '重新检查', model: 'model-1' })
+        expect(h.startRequests).toHaveLength(0)
+      }
+    })
+  }
+})

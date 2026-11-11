@@ -128,6 +128,8 @@ export interface SidebarWindowGrowthDeps {
    *  Receives ONLY the cards that asked for new room (see `SidebarGrowthRefusal`),
    *  never a sibling the window already reflects. */
   onGrowthRefused?: (refusals: SidebarGrowthRefusal[]) => void
+  loadGrowth?: () => { width: number; delta: number } | null
+  saveGrowth?: (growth: { width: number; delta: number } | null) => void
 }
 
 export interface SidebarWindowGrowth {
@@ -185,6 +187,7 @@ export function createSidebarWindowGrowth(deps: SidebarWindowGrowthDeps): Sideba
   const rejectedAccommodation = new Map<symbol, Failure>()
   let declarationGeneration = 0
   let appliedDelta = 0
+  let savedGrowth = deps.loadGrowth?.() ?? null
   let closedBase: number | null = null
   let suppressed = false
   let mode: Mode = 'unknown'
@@ -370,6 +373,13 @@ export function createSidebarWindowGrowth(deps: SidebarWindowGrowthDeps): Sideba
       if (!(await normal(appWindow, operation))) return
       let geometry = pendingResize ? await resolveResize(appWindow, operation) : await readGeometry(appWindow, operation)
       if (!(await normal(appWindow, operation)) || !geometry) return
+      if (savedGrowth) {
+        if (Math.abs(geometry.width - savedGrowth.width) < 2) {
+          setOwned(savedGrowth.delta)
+          minimumUncertain = true
+        }
+        savedGrowth = null
+      }
       if (pendingMovement && !hasBounds(geometry)) return
       pendingMovement = false
       if (suppressed) {
@@ -483,6 +493,9 @@ export function createSidebarWindowGrowth(deps: SidebarWindowGrowthDeps): Sideba
       }
     } finally {
       if (current(operation) && (suppressed || operation.entries.length === 0)) await syncMinimum(appWindow, operation, BASE_MIN_WIDTH)
+      if (current(operation) && operation.geometry && !suppressed) {
+        deps.saveGrowth?.(appliedDelta > 0 ? { width: operation.geometry.width, delta: appliedDelta } : null)
+      }
       reconciling = false
     }
   }
@@ -576,6 +589,18 @@ const NATIVE_DEPS: SidebarWindowGrowthDeps = {
   },
   getMonitor: async () => await currentMonitor(),
   log: (message) => console.warn(message),
+  loadGrowth: () => {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem('fox.sidebar-window-growth') ?? 'null')
+      return saved && Number.isFinite(saved.width) && Number.isFinite(saved.delta) && saved.delta > 0 && saved.delta < saved.width ? saved : null
+    } catch { return null }
+  },
+  saveGrowth: (growth) => {
+    try {
+      if (growth) sessionStorage.setItem('fox.sidebar-window-growth', JSON.stringify(growth))
+      else sessionStorage.removeItem('fox.sidebar-window-growth')
+    } catch { /* Storage is unavailable in some webviews. */ }
+  },
 }
 
 type RefusalHandler = (refusals: SidebarGrowthRefusal[]) => void

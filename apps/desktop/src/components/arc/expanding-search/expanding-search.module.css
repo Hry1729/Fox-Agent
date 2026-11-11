@@ -37,7 +37,7 @@
 /* A floating layer: its width is the field's, so it unfolds from the field on first open; its content keeps the final width and rides the leading edge. */
 .panel { position: absolute; z-index: 40; top: calc(100% + 8px); right: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface-raised); box-shadow: var(--shadow-floating); pointer-events: auto; }
 .root[data-anchor="start"] .panel { right: auto; left: 0; }
-.body { position: relative; width: calc(var(--es-width, 360px) - 2px); max-height: min(22rem, 60vh); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; padding: 6px; scrollbar-width: thin; }
+.body { position: relative; width: calc(var(--es-width, 360px) - 2px); max-height: min(22rem, 60vh); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; padding: 6px; scrollbar-width: var(--fox-native-scrollbar-width, thin); }
 .view { position: relative; }
 /* A flex gap, not margins: a group popping out while it leaves never lets the next one's margin collapse through the list. */
 .listbox { position: relative; isolation: isolate; display: flex; flex-direction: column; gap: 4px; }

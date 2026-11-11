@@ -77,7 +77,7 @@ function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSett
   return (
     <header className="fox-window-titlebar" data-tauri-drag-region {...{ [WINDOW_CHROME_ATTR]: '' }}>
       <div className="fox-window-product" data-tauri-drag-region>
-        <img src="/app-logo.png" alt="" />
+        <img src="/app-icon.png" alt="" />
         <div className="fox-titlebar-sidebar-controls" aria-label="标题栏控制">
           <AppMenu onNewChat={onNewChat} onOpenProject={onOpenProject} onSettings={onSettings} onAbout={onAbout} leftSidebarCollapsed={leftSidebarCollapsed} onToggleSidebar={onToggleSidebar} onZoom={onZoom} onClose={() => void windowAction('close')} shortcutHint={shortcutHint} />
           <AnimatedIconTrigger><button type="button" aria-label={leftSidebarCollapsed ? '展开左侧边栏' : '收起左侧边栏'} title={leftSidebarCollapsed ? '展开左侧边栏' : '收起左侧边栏'} aria-pressed={!leftSidebarCollapsed} onClick={onToggleSidebar}><PanelLeft /></button></AnimatedIconTrigger>

@@ -73,6 +73,7 @@ pub(crate) struct CompanionView {
     #[serde(flatten)]
     pub profile: CompanionProfile,
     pub conversation_id: String,
+    pub latest_message_preview: Option<String>,
     pub unread_count: i64,
     pub active_run_status: Option<String>,
     /// K6: the effective bubble read position (converted legacy cursor included).
@@ -132,6 +133,9 @@ const EFFECTIVE_READ: &str = "coalesce(p.last_read_delivery_order,
 fn view_sql() -> String {
     format!(
         "SELECT p.*, c.id AS conversation_id,
+            (SELECT substr(ltrim(b.content, char(9,10,13,32)), 1, 240)
+                FROM contact_bubbles b WHERE b.conversation_id=c.id
+                ORDER BY b.delivery_order DESC LIMIT 1) AS latest_message_preview,
             ({effective}) AS read_delivery_order,
             (SELECT count(*) FROM contact_bubbles b WHERE b.conversation_id=c.id AND b.author='companion'
                 AND (b.delivery_order > ({effective})
@@ -176,6 +180,7 @@ fn view(row: &rusqlite::Row<'_>) -> rusqlite::Result<CompanionView> {
             updated_at: row.get("updated_at")?,
         },
         conversation_id: row.get("conversation_id")?,
+        latest_message_preview: row.get("latest_message_preview")?,
         unread_count: row.get("unread_count")?,
         active_run_status: row.get("active_run_status")?,
         read_delivery_order: row.get("read_delivery_order")?,
@@ -844,11 +849,25 @@ fn create_companion(
     if let Some(expert) = expert {
         activate_expert_binding(tx, &conversation_id, expert, "companion_create")?;
     }
-    // C06/D2: a brand-new private chat has no history (no messages/runs/bubbles
-    // yet), so its K1 backfill is an empty-set completion. Record it inside the
-    // creation transaction so bubble actions work without a restart scan. This
-    // must stay creation-only: restore/legacy chats keep waiting for the real
-    // startup backfill.
+    let greeting_id = Uuid::new_v4().to_string();
+    let introduction = match expert {
+        None => "我可以帮你处理文件、整理资料和日常问题。".to_string(),
+        Some(expert) => {
+            let description = expert.description.split(['。', '！', '？', '\n', '\r']).next().unwrap_or("").trim();
+            if description.is_empty() || description.chars().count() > 80 {
+                "我可以协助你处理相关工作。".to_string()
+            } else {
+                format!("我的职责：{description}。")
+            }
+        }
+    };
+    let greeting = format!("你好，我是{name}。{introduction}有什么需要我帮忙的？");
+    tx.execute(
+        "INSERT INTO messages(id,conversation_id,role,kind,content,status,ordinal,created_at,updated_at)
+         VALUES (?1,?2,'assistant','text',?3,'completed',1,?4,?4)",
+        params![greeting_id, conversation_id, greeting, now],
+    )?;
+    super::contact_bubbles::project_message_in_transaction(tx, &conversation_id, &greeting_id)?;
     tx.execute(
         "INSERT INTO contact_bubble_backfills(conversation_id, completed_at) VALUES (?1, ?2)",
         params![conversation_id, now],
@@ -880,6 +899,17 @@ mod tests {
 
         fn add(&self, expert: &str) -> CompanionView {
             self.db.add_companion(&self.root, expert).unwrap()
+        }
+
+        fn remove_greeting(&self, chat: &str) {
+            self.db.with_connection(|c| {
+                c.execute("INSERT INTO companion_deletions(companion_id,template_agent_id,display_name,plan_json,plan_hash,state,started_at)
+                    SELECT p.id,p.template_agent_id,p.display_name,'{}','test','deleting',0 FROM companion_profiles p
+                    JOIN conversations c ON c.companion_id=p.id WHERE c.id=?1", [chat])?;
+                c.execute("DELETE FROM messages WHERE conversation_id=?1 AND role='assistant' AND run_id IS NULL", [chat])?;
+                c.execute("DELETE FROM companion_deletions WHERE companion_id=(SELECT companion_id FROM conversations WHERE id=?1)", [chat])?;
+                Ok(())
+            }).unwrap();
         }
 
         /// K6 test helper: insert a durable bubble directly so delivery order is
@@ -925,6 +955,40 @@ mod tests {
                 Ok(())
             }).unwrap();
         }
+    }
+
+    #[test]
+    fn new_companions_persist_one_greeting_without_a_run() {
+        let f = Fixture::new();
+        f.db.execute_raw_sql("UPDATE agents SET description='定位根因、修复缺陷。后续说明' WHERE id='fox-debugger'").unwrap();
+        for contact in [f.db.seed_default_companion(&f.root).unwrap(), f.add("fox-debugger")] {
+            let rows: Vec<(String, String, Option<String>)> = f.db.with_connection(|c| {
+                let mut statement = c.prepare(
+                    "SELECT m.content, b.content, m.run_id FROM messages m
+                     JOIN contact_bubbles b ON b.source_message_id=m.id
+                     WHERE m.conversation_id=?1 AND m.role='assistant'",
+                )?;
+                let rows = statement.query_map([&contact.conversation_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+                rows.collect()
+            }).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].0.contains(&contact.profile.display_name));
+            if contact.profile.is_default {
+                assert!(rows[0].0.contains("处理文件、整理资料和日常问题"));
+            } else {
+                assert!(rows[0].0.contains("我的职责：定位根因、修复缺陷。"));
+                assert!(!rows[0].0.contains("后续说明"));
+            }
+            assert_eq!(rows[0].0, rows[0].1);
+            assert!(rows[0].2.is_none());
+            assert_eq!(contact.unread_count, 1);
+        }
+        f.db.execute_raw_sql(&format!("UPDATE agents SET description='{}' WHERE id='fox-reviewer'", "长".repeat(81))).unwrap();
+        let contact = f.add("fox-reviewer");
+        let content: String = f.db.with_connection(|c| c.query_row(
+            "SELECT content FROM messages WHERE conversation_id=?1", [&contact.conversation_id], |row| row.get(0),
+        )).unwrap();
+        assert!(content.contains("我可以协助你处理相关工作。"));
     }
 
     #[test]
@@ -1019,6 +1083,7 @@ mod tests {
         f.db.execute_raw_sql("UPDATE agents SET name='Fox' WHERE id IN ('fox-debugger','fox-reviewer','fox-security')").unwrap();
         let first = f.add("fox-debugger");
         let second = f.add("fox-reviewer");
+        f.remove_greeting(&first.conversation_id);
         let id = &first.profile.id;
         assert_eq!(second.profile.display_name, "Fox（2）");
         let edit = CompanionProfileEdit {
@@ -1076,6 +1141,29 @@ mod tests {
     }
 
     #[test]
+    fn companion_list_previews_the_latest_visible_message_in_each_chat() {
+        let f = Fixture::new();
+        let active = f.add("fox-debugger");
+        let empty = f.add("fox-reviewer");
+        f.remove_greeting(&active.conversation_id);
+        f.remove_greeting(&empty.conversation_id);
+        f.bubble(&active.conversation_id, 2, "companion", 2000, "前一条回复");
+        f.bubble(&active.conversation_id, 3, "user", 3000, "  最新用户消息");
+
+        let list = f.db.list_companions().unwrap().companions;
+        let preview = |id: &str| list.iter().find(|c| c.profile.id == id).unwrap().latest_message_preview.as_deref();
+        assert_eq!(preview(&active.profile.id), Some("最新用户消息"));
+        assert_eq!(preview(&empty.profile.id), None);
+
+        let reply = "新".repeat(300);
+        f.bubble(&active.conversation_id, 4, "companion", 4000, &reply);
+        let updated = f.db.companion_profile(&active.profile.id).unwrap();
+        assert_eq!(updated.latest_message_preview, Some("新".repeat(240)));
+        drop(f.db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    #[test]
     fn c06_reminder_mode_is_per_contact_and_gates_alerts_independently() {
         use crate::database::repositories::app_management::reminder_allows_alert;
         let f = Fixture::new();
@@ -1109,6 +1197,7 @@ mod tests {
     fn c06_mid_run_delivered_bubbles_stay_unread_after_cancel() {
         let f = Fixture::new();
         let c = f.add("fox-debugger");
+        f.remove_greeting(&c.conversation_id);
         let chat = c.conversation_id.clone();
         f.db.with_connection(|conn| {
             conn.execute("INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES ('r1',?1,'running','fox',1)", [&chat])?;
@@ -1297,8 +1386,10 @@ mod tests {
     #[test]
     fn contact_bubble_backfill_resumes_after_a_mid_batch_failure() {
         let f = Fixture::new();
-        let first = f.db.seed_default_companion(&f.root).unwrap();
+        let first = f.add("fox-reviewer");
         let second = f.add("fox-debugger");
+        f.remove_greeting(&first.conversation_id);
+        f.remove_greeting(&second.conversation_id);
         // 显式构造旧库遗留状态：真实历史未完成回填，新建事务的初始化被回退。
         f.reset_backfill(&first.conversation_id);
         f.reset_backfill(&second.conversation_id);
@@ -1391,7 +1482,8 @@ mod tests {
     #[test]
     fn terminal_transitions_project_bubbles_inside_the_write_transaction() {
         let f = Fixture::new();
-        let companion = f.db.seed_default_companion(&f.root).unwrap();
+        let companion = f.add("fox-debugger");
+        f.remove_greeting(&companion.conversation_id);
         let bubbles = |db: &Database, chat: &str| {
             db.with_connection(|c| {
                 crate::database::repositories::contact_bubbles::query_window(c, chat, 0, None)
@@ -1785,6 +1877,7 @@ mod tests {
     fn legacy_partial_backfill_stays_pending_until_projection_completes() {
         let f = Fixture::new();
         let c = f.add("fox-debugger");
+        f.remove_greeting(&c.conversation_id);
         let chat = c.conversation_id.clone();
         let id = c.profile.id.clone();
         f.reset_backfill(&chat);

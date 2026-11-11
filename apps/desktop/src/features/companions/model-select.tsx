@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react'
+import { CircleAlert, Cpu, Globe, Image, Type } from 'lucide-react'
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
 import type { ModelProviderRecord } from '@/features/conversations/model/types'
 import { contacts, type Companion } from './api'
@@ -16,7 +18,7 @@ export function overrideUnavailableReason(contact: Companion, providers: ModelPr
   return null
 }
 
-export function ContactModelSelect({ contact }: { contact: Companion }) {
+export function ContactModelSelect({ contact, inSideCard = false }: { contact: Companion; inSideCard?: boolean }) {
   const ctx = useContacts()
   const [providers, setProviders] = useState<ModelProviderRecord[] | null>(null)
   const [busy, setBusy] = useState(false)
@@ -39,24 +41,37 @@ export function ContactModelSelect({ contact }: { contact: Companion }) {
       await ctx?.refresh()
     } catch (error) { showContactError(error) } finally { setBusy(false) }
   }
-  const description = unavailable
-    ?? (value ? '只影响下一轮对话，正在进行的任务继续用原来的模型' : `现在是 ${ctx?.model ?? '尚未配置'}，全局换了它也跟着换`)
-  return <div className="fox-contact-model-select">
-    <select
-      aria-label="联系人模型"
-      value={unavailable ? '__unavailable__' : value}
-      disabled={busy || !providers}
-      onChange={event => void change(event.target.value)}
-    >
-      <option value="">跟随全局{ctx?.model ? ` · ${ctx.model}` : ''}</option>
-      {unavailable && <option value="__unavailable__" disabled>独立模型不可用</option>}
-      {(providers ?? []).map(provider =>
-        <optgroup key={provider.id} label={provider.enabled ? provider.name : `${provider.name}（已停用）`} disabled={!provider.enabled}>
-          {provider.models.map(model => <option key={`${provider.id}:${model.id}`} value={`${provider.id}:${model.id}`}>
-            {model.displayName} · {model.supportsImageInput ? '能看图' : '不能看图'}
-          </option>)}
-        </optgroup>)}
-    </select>
-    <small className={unavailable ? 'fox-contact-model-error' : undefined} role={unavailable ? 'alert' : undefined}>{description}</small>
+  const globalModelName = ctx?.model || '未配置模型'
+  const selectedModel = providers?.find(provider => provider.id === contact.modelProviderId)
+    ?.models.find(model => model.id === contact.modelRef)
+  const modelName = unavailable ? '独立模型不可用' : value ? selectedModel?.displayName ?? '正在读取模型…' : globalModelName
+  return <div className={inSideCard ? 'fox-contact-model-select is-side-card' : 'fox-contact-model-select'}>
+    <Select value={unavailable ? '__unavailable__' : value || '__global__'} disabled={busy || !providers} onValueChange={next => void change(next)}>
+      <SelectTrigger size="sm" className={inSideCard ? 'fox-contact-model-trigger fox-contact-side-item' : 'fox-contact-model-trigger'} aria-label="联系人模型" title={modelName}>
+        {inSideCard && <Cpu size={16} aria-hidden="true" />}
+        <SelectValue>
+          <span className="fox-contact-model-value">
+            <span className="fox-contact-model-name">{modelName}</span>
+            {!value && <small className="fox-contact-model-note">跟随全局</small>}
+          </span>
+        </SelectValue>
+      </SelectTrigger>
+      <SelectContent align="end" collisionPadding={8} className="fox-contact-side-select-menu">
+        <SelectItem value="__global__" textValue={globalModelName}>
+          <Globe aria-hidden="true" /><span className="fox-contact-model-name">{globalModelName}</span>
+          <small className="fox-contact-model-note">跟随全局</small>
+        </SelectItem>
+        {unavailable && <SelectItem value="__unavailable__" disabled><CircleAlert aria-hidden="true" />独立模型不可用</SelectItem>}
+        {(providers ?? []).map(provider => <SelectGroup key={provider.id}>
+          <SelectLabel>{provider.enabled ? provider.name : `${provider.name}（已停用）`}</SelectLabel>
+          {provider.models.map(model => <SelectItem key={model.id} value={`${provider.id}:${model.id}`} textValue={model.displayName} disabled={!provider.enabled}>
+            {model.supportsImageInput ? <Image aria-hidden="true" /> : <Type aria-hidden="true" />}
+            <span className="fox-contact-model-name">{model.displayName}</span>
+            <small className="fox-contact-model-note">{model.supportsImageInput ? '能看图' : '不能看图'}</small>
+          </SelectItem>)}
+        </SelectGroup>)}
+      </SelectContent>
+    </Select>
+    {unavailable && <small className="fox-contact-model-error" role="alert">{unavailable}</small>}
   </div>
 }

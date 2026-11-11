@@ -3448,6 +3448,7 @@
 /* Manage-page avatar fills the rounded rect edge to edge. */
 .fox-agent-manage-page .fox-agent-hero > span {
   flex: none;
+  border-radius: 50%;
 }
 
 .fox-agent-manage-page .fox-agent-hero img {
@@ -4606,7 +4607,7 @@
 }
 
 .fox-agent-editor-grid::-webkit-scrollbar {
-  width: 8px;
+  width: 6px;
 }
 
 .fox-agent-editor-grid::-webkit-scrollbar-track {
@@ -6095,7 +6096,7 @@
   flex: none;
   width: 56px;
   height: 56px;
-  border-radius: 14px;
+  border-radius: 50%;
   overflow: hidden;
   background: var(--fox-accent-soft);
 }
@@ -6124,7 +6125,7 @@
 }
 
 .fox-agent-view-body::-webkit-scrollbar {
-  width: 8px;
+  width: 6px;
 }
 
 .fox-agent-view-body::-webkit-scrollbar-thumb {
@@ -6581,7 +6582,7 @@
   flex: none;
   width: 52px;
   height: 52px;
-  border-radius: 13px;
+  border-radius: 50%;
   overflow: hidden;
   background: var(--fox-accent-soft);
 }

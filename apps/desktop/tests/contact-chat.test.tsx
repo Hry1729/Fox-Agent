@@ -63,15 +63,15 @@ describe('聊天边缘渐变', () => {
     expect(header).toContain('pointer-events: none;')
     expect(rule(contactCss, '.fox-chat-topbar.fox-contact-topbar > *')).toContain('pointer-events: auto;')
     const fade = rule(contactCss, '.fox-chat-topbar.fox-contact-topbar::before')
-    expect(fade).toContain('inset: 0;')
+    expect(fade).toContain('inset: 0 var(--fox-scrollbar-size, 6px) 0 0;')
     expect(fade).toContain('linear-gradient(to bottom, var(--fox-canvas), transparent)')
     expect(contactCss).not.toContain('mask-image:')
     expect(rule(contactCss, '.is-contact-chat .fox-thread-viewport')).toContain('padding-top: calc(var(--fox-contact-header-height, 60px) + var(--fox-space-xl));')
   })
 
-  test('私聊与普通对话共用全宽底部遮挡，渐变末端之后保持实色', () => {
+  test('私聊与普通对话底部遮挡留出滚动条，渐变末端之后保持实色', () => {
     const fade = rule(workbenchCss, '.fox-chat-stage:has(> .fox-composer-wrap:not(.is-empty))::after')
-    expect(fade).toContain('inset: auto 0 0;')
+    expect(fade).toContain('inset: auto 6px 0 0;')
     expect(fade).toContain('height: calc(var(--fox-composer-occlusion, 180px) - 6px + 42px);')
     expect(fade).toContain('linear-gradient(to bottom, transparent, var(--fox-canvas) 42px)')
     expect(fade).toContain('pointer-events: none;')
@@ -85,6 +85,18 @@ describe('聊天边缘渐变', () => {
 })
 
 describe('联系人按条送达', () => {
+  test('没有运行记录的问候使用持久气泡身份', async () => {
+    const greeting = message(1, '你好，我是资料伙伴。', { id: 'greeting', runId: null })
+    const snapshot = detail({ messages: [greeting], lastRun: null, bubbles: [{
+      id: 'greeting', conversationId: 'chat', runId: null, messageId: 'greeting', sourceOrdinal: 1,
+      author: 'companion', projection: 'message', segmentStart: null, segmentEnd: null,
+      deliveryOrder: 1000, deliveredAt: greeting.createdAt, content: greeting.content, fingerprint: 'f',
+    }] })
+    const view = render(renderChat(snapshot))
+    await act(async () => {})
+    expect(view.container.querySelector('[data-delivery-order="1000"]')?.textContent).toContain('你好，我是资料伙伴。')
+  })
+
   test('三条中途说明与最终回复各成气泡，流式预览即用持久身份，工具过程不进入聊天，历史分段相同', async () => {
     const texts = ['我先看一下资料。', '发现了两处问题。', '正在核对最后一项。', '已经处理好了。\n\n```ts\nconst ready = true\n```']
     let snapshot = detail({ runtimeEvents: [event(1, 'tool.started', { tool: 'read_file', toolCallId: 'tool', input: { path: 'secret-process.txt' }, kernelCheckpointSeq: '2' })] })

@@ -35,7 +35,7 @@
 
 .fox-spreadsheet-preview .x-spreadsheet-scrollbar {
   scrollbar-width: auto;
-  scrollbar-color: #9ca3af #f4f5f8;
+  scrollbar-color: var(--fox-native-scrollbar-color, #9ca3af #f4f5f8);
 }
 .fox-spreadsheet-preview .x-spreadsheet-scrollbar.vertical { width: 15px; }
 .fox-spreadsheet-preview .x-spreadsheet-scrollbar.horizontal { height: 15px; }

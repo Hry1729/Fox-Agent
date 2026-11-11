@@ -25,6 +25,10 @@ test('非底部时选中覆盖视口中线的整轮范围', () => {
   expect(computeActiveTurnId(spans, viewport, false)).toBe('u2')
 })
 
+test('短回合顶部对齐时保留该回合，即使中线落在下一轮', () => {
+  expect(computeActiveTurnId([{ id: 'u1', top: 12, bottom: 100 }, { id: 'u2', top: 120, bottom: 300 }], viewport, false)).toBe('u1')
+})
+
 test('最后一轮的用户消息在屏幕外、助手回复可见时仍选中该轮', () => {
   const reading = [
     { id: 'u1', top: -900, bottom: -500 },
@@ -149,7 +153,7 @@ test('点击刻度滚动到该轮并立即选中', async () => {
   expect(activeTick(view)).toBe('第 2 轮：第二问')
 })
 
-test('选中刻度保持短横线（不再加长加亮为强调色），仅悬停/聚焦变长', () => {
+test('选中刻度保持短横线，仅悬停变长', () => {
   // 视觉规格由 CSS 承载（workbench.css .fox-conversation-marks）；这里锁定 DOM 结构：
   // 每个刻度是一个真实 button，内含单个 span，选中态只加 is-active 类。
   const view = render(<RailHarness messages={baseMessages} rects={{ u1: { top: 0, bottom: 40 }, a1: { top: 50, bottom: 120 }, u2: { top: 160, bottom: 200 }, a2: { top: 210, bottom: 300 } }} scroll={{ scrollTop: 600, scrollHeight: 1000, clientHeight: 400 }} />)

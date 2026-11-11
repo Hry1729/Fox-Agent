@@ -55,7 +55,7 @@
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-width: thin;
+  scrollbar-width: var(--fox-native-scrollbar-width, thin);
 }
 /* 折叠菜单和展开侧栏用同一条 icon 列、同一行高。 */
 .fox-sidebar-flyout [role='menuitem'],

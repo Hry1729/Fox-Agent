@@ -83,6 +83,7 @@ export function useReadCursor(contact: Companion | undefined, detail: Conversati
   const hasEarlierMessages = detail?.hasEarlierMessages ?? false
   const seenRef = useRef<Set<number>>(new Set())
   const visibleRef = useRef<Set<number>>(new Set())
+  const pendingFocusRef = useRef<Set<number>>(new Set())
   const reportedRef = useRef(-1)
   const lastIdRef = useRef<string | undefined>(undefined)
   const wasVisibleRef = useRef(false)
@@ -108,18 +109,21 @@ export function useReadCursor(contact: Companion | undefined, detail: Conversati
     if (lastOverrideRef.current === overrideKey) return
     lastOverrideRef.current = overrideKey
     seenRef.current.clear()
+    pendingFocusRef.current.clear()
     reportedRef.current = -1
   }, [overrideKey])
 
   useEffect(() => {
     if (!visible || !id) {
       wasVisibleRef.current = false
+      pendingFocusRef.current.clear()
       return
     }
     if (lastIdRef.current !== id) {
       lastIdRef.current = id
       seenRef.current.clear()
       visibleRef.current.clear()
+      pendingFocusRef.current.clear()
       reportedRef.current = -1
     } else if (!wasVisibleRef.current) {
       // Reopening the same chat is a fresh viewport entry: bubbles still on
@@ -140,17 +144,24 @@ export function useReadCursor(contact: Companion | undefined, detail: Conversati
           if (!visibleRef.current.has(order)) {
             visibleRef.current.add(order)
             if (document.visibilityState === 'visible' && document.hasFocus()) seenRef.current.add(order)
+            else pendingFocusRef.current.add(order)
           }
         } else {
           visibleRef.current.delete(order)
+          pendingFocusRef.current.delete(order)
         }
       }
       report()
-    }, { threshold: 0.6 })
+    }, { threshold: 0 })
     sections.forEach(section => observer.observe(section))
-    // Focus or visibility alone only reports what was already seen — it never
-    // adds unseen bubbles, so merely focusing the window cannot mark them read.
-    const onFocus = () => report()
+    // Bubbles observed while unfocused count only when the window gains focus.
+    const onFocus = () => {
+      if (document.visibilityState === 'visible' && document.hasFocus()) {
+        pendingFocusRef.current.forEach(order => seenRef.current.add(order))
+        pendingFocusRef.current.clear()
+      }
+      report()
+    }
     window.addEventListener('focus', onFocus)
     document.addEventListener('visibilitychange', onFocus)
     return () => {

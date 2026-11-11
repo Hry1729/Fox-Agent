@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/react'
 import { mockIPC, clearMocks } from '@tauri-apps/api/mocks'
 import { ContactsContext, type ContactsContextValue } from '../src/features/companions/context'
 import { ContactModelSelect, overrideUnavailableReason } from '../src/features/companions/model-select'
@@ -46,26 +46,30 @@ describe('联系人独立模型', () => {
       }
       throw new Error('Unexpected command: ' + command)
     })
-    const view = render(<ContactsContext.Provider value={context(contact, async () => { refreshed += 1 })}>
-      <ContactModelSelect contact={contact} />
-    </ContactsContext.Provider>)
-    const select = await waitFor(() => view.getByLabelText('联系人模型') as HTMLSelectElement)
+    const renderModel = (current: Companion) => <ContactsContext.Provider value={context(current, async () => { refreshed += 1 })}>
+      <ContactModelSelect contact={current} />
+    </ContactsContext.Provider>
+    const view = render(renderModel(contact))
+    const select = view.getByRole('combobox', { name: '联系人模型' }) as HTMLButtonElement
     await waitFor(() => expect(select.disabled).toBe(false))
-    expect(select.value).toBe('')
-    expect(view.getByText('现在是 全局模型，全局换了它也跟着换')).toBeDefined()
-    const options = [...select.querySelectorAll('option')].map(option => option.textContent)
-    expect(options[0]).toContain('跟随全局')
-    expect(options[0]).toContain('全局模型')
-    expect(options).toContain('独立模型 · 能看图')
-    expect(select.querySelector('optgroup')?.label).toBe('独立服务')
-    const disabledGroups = [...select.querySelectorAll('optgroup')].filter(group => group.disabled)
-    expect(disabledGroups).toHaveLength(1)
-    expect(disabledGroups[0].label).toContain('停用服务')
-
-    fireEvent.change(select, { target: { value: 'prov:prov-model' } })
+    expect(within(select).getByText('全局模型')).toBeDefined()
+    expect(within(select).getByText('跟随全局').tagName).toBe('SMALL')
+    expect(view.queryByText(/全局换了它也跟着换/)).toBeNull()
+    fireEvent.keyDown(select, { key: 'Enter' })
+    const list = within(await view.findByRole('listbox'))
+    const enabled = list.getByRole('group', { name: '独立服务' })
+    const disabled = list.getByRole('group', { name: '停用服务（已停用）' })
+    expect(within(disabled).getByRole('option').getAttribute('aria-disabled')).toBe('true')
+    const modelOption = within(enabled).getByRole('option', { name: /独立模型.*能看图/ })
+    expect(modelOption.querySelector('svg[aria-hidden="true"]')).not.toBeNull()
+    fireEvent.click(modelOption)
     await waitFor(() => expect(calls).toEqual([{ request: { companionId: 'contact', providerId: 'prov', modelRef: 'prov-model' } }]))
     expect(refreshed).toBe(1)
-    fireEvent.change(select, { target: { value: '' } })
+    view.rerender(renderModel({ ...contact, modelProviderId: 'prov', modelRef: 'prov-model' }))
+    expect(select.textContent).toBe('独立模型')
+    expect(view.queryByText(/只影响下一轮对话/)).toBeNull()
+    fireEvent.keyDown(select, { key: 'Enter' })
+    fireEvent.click(within(await view.findByRole('listbox')).getByRole('option', { name: /全局模型.*跟随全局/ }))
     await waitFor(() => expect(calls).toHaveLength(2))
     expect(calls[1]).toEqual({ request: { companionId: 'contact', providerId: null, modelRef: null } })
   })
@@ -80,7 +84,6 @@ describe('联系人独立模型', () => {
       <ContactModelSelect contact={broken} />
     </ContactsContext.Provider>)
     await waitFor(() => expect(view.getByRole('alert').textContent).toContain('停用'))
-    const select = view.getByLabelText('联系人模型') as HTMLSelectElement
-    expect(select.value).toBe('__unavailable__')
+    expect(view.getByRole('combobox', { name: '联系人模型' }).textContent).toBe('独立模型不可用')
   })
 })

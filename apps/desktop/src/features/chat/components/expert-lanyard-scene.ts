@@ -210,7 +210,7 @@ export function createExpertLanyardScene(container: HTMLElement, card: { frontIm
       const portraitLeft = (512 - portraitSize) / 2
       const scale = Math.max(portraitSize / image.naturalWidth, portraitSize / image.naturalHeight)
       const w = image.naturalWidth * scale, h = image.naturalHeight * scale
-      ctx.save(); ctx.beginPath(); ctx.roundRect(portraitLeft, 84, portraitSize, portraitSize, 28); ctx.clip()
+      ctx.save(); ctx.beginPath(); ctx.roundRect(portraitLeft, 84, portraitSize, portraitSize, portraitSize / 2); ctx.clip()
       ctx.fillStyle = 'rgba(255,255,255,.36)'; ctx.fillRect(portraitLeft, 84, portraitSize, portraitSize)
       ctx.drawImage(image, (512 - w) / 2, 84 + (portraitSize - h) / 2, w, h); ctx.restore()
       ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic'

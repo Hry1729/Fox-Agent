@@ -68,6 +68,40 @@ function watchSystemWrites(win: FakeWindow) {
 }
 
 describe('sidebar window growth controller', () => {
+  test('WebView 刷新保留原生窗口时先撤销上次侧栏增长，再次打开不累加', async () => {
+    const { win, deps } = createHarness()
+    let saved: { width: number; delta: number } | null = null
+    const session = { ...deps, loadGrowth: () => saved, saveGrowth: (value: typeof saved) => { saved = value } }
+    const beforeReload = createSidebarWindowGrowth(session)
+    await beforeReload.setSidebars(panelCard)
+    expect(win.state.width).toBe(1365)
+    expect(saved).toEqual({ width: 1365, delta: 305 })
+
+    // The native window survives a WebView reload; the previous JS context does not.
+    const afterReload = createSidebarWindowGrowth(session)
+    await afterReload.setSidebars([])
+    expect(win.state.width).toBe(1060)
+    expect(win.state.min.width).toBe(600)
+    expect(saved).toBeNull()
+    await afterReload.setSidebars(panelCard)
+    expect(win.state.width).toBe(1365)
+    await afterReload.setSidebars([])
+    expect(win.state.width).toBe(1060)
+    expect(saved).toBeNull()
+    afterReload.dispose()
+  })
+
+  test('重启后窗口宽度不匹配旧记录时丢弃记录，不缩小新窗口', async () => {
+    const { win, deps } = createHarness()
+    let saved: { width: number; delta: number } | null = { width: 1365, delta: 305 }
+    const growth = createSidebarWindowGrowth({ ...deps, loadGrowth: () => saved, saveGrowth: (value) => { saved = value } })
+    await growth.setSidebars([])
+    expect(win.state.width).toBe(1060)
+    expect(sizeCalls(win)).toHaveLength(0)
+    expect(saved).toBeNull()
+    growth.dispose()
+  })
+
   test('默认 1060 宽：Fox 侧栏把窗口向右撑 325，并抬高 min 宽（DPI 感知）', async () => {
     const { win, growth } = createHarness({ scaleFactor: 2, width: 1060, height: 778 })
     const seen: number[] = []

@@ -1,4 +1,4 @@
-import type { RunEventRecord } from '@/features/conversations/model/types'
+import type { ContactBubbleRecord, RunEventRecord } from '@/features/conversations/model/types'
 import type { FoxThreadMessage } from '@/features/chat/thread/convert-detail'
 import { projectRuntimeGroups } from '@/features/chat/runtime-process-groups'
 import { splitAssistantContent } from '@/features/chat/timeline/fox-assistant-content'
@@ -7,6 +7,19 @@ export interface ContactReply {
   id: string
   text: string
   createdAt: number
+}
+
+export function visibleContactReplies(message: FoxThreadMessage, events: readonly RunEventRecord[], persisted: ContactBubbleRecord[] = [], previews: ContactReply[] = []): Array<ContactReply & { deliveryOrder?: number }> {
+  // 已提交气泡提供真实送达时间；流式预览沿用同一身份，避免提交时重挂载。
+  if (!message.isActiveRun && persisted.length) return persisted.map(bubble => ({ id: bubble.id, text: bubble.content, createdAt: bubble.deliveredAt, deliveryOrder: bubble.deliveryOrder }))
+  const byId = new Map(persisted.map(bubble => [bubble.id, bubble]))
+  return [
+    ...contactReplies(message, events).map(reply => {
+      const bubble = byId.get(reply.id)
+      return bubble ? { id: bubble.id, text: bubble.content, createdAt: bubble.deliveredAt, deliveryOrder: bubble.deliveryOrder } : reply
+    }),
+    ...(message.isActiveRun ? previews.filter(reply => !byId.has(reply.id)) : []),
+  ]
 }
 
 export function contactReplies(message: FoxThreadMessage, events: readonly RunEventRecord[]): ContactReply[] {

@@ -5,7 +5,6 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { copyMessageResponse } from '@/components/assistant-ui/elements/message-actions'
 import { FoxCopyMessageButton, FoxMarkUnreadButton } from '@/features/chat/thread/fox-message-actions'
 import { StreamingText } from '@/features/chat/components/StreamingText'
-import { formatClockTime } from '@/lib/time-format'
 import type { ContactBubbleMarkRecord, ContactMessageQuoteRecord } from '@/features/conversations/model/types'
 import { contacts, REACTIONS, type Companion, type FavoriteEntry } from './api'
 import { ContactAvatar } from './chat-controls'
@@ -128,13 +127,12 @@ export function ContactReplyBubble({ contact, reply, initialMark }: {
           open={openMenu === 'more'} onOpenChange={next => setOpenMenu(next ? 'more' : null)} />
         {contact && <FoxMarkUnreadButton onMark={() => contacts.markUnread(contact.id, reply.id).then(() => ctx?.refresh()).catch(error => { showContactError(error); throw error })} />}
       </>}
-      <time dateTime={new Date(reply.createdAt).toISOString()}>{formatClockTime(reply.createdAt)}</time>
     </div>
   </section>
 }
 
 /** The same marks on the user's own message of a private chat. */
-export function ContactUserMarks({ contact, messageId, getText, createdAt, initialMark }: {
+export function ContactUserMarks({ contact, messageId, getText, initialMark }: {
   contact: Companion
   messageId: string
   getText: () => string
@@ -148,7 +146,6 @@ export function ContactUserMarks({ contact, messageId, getText, createdAt, initi
   const react = (reaction: string) => run(() => contacts.react(contact.id, messageId, reaction))
   return <div className="fox-user-meta" data-menu-open={openMenu ? 'true' : undefined}>
     {mark?.reaction && <ReactionChip reaction={mark.reaction} busy={busy} onClear={() => react(mark.reaction!)} />}
-    <time className="fox-message-time" dateTime={createdAt.toISOString()}>{formatClockTime(createdAt.getTime())}</time>
     <FoxCopyMessageButton onCopy={() => copyMessageResponse(getText())} />
     <ReactionPicker reaction={mark?.reaction} busy={busy} onReact={react}
       open={openMenu === 'reaction'} onOpenChange={next => setOpenMenu(next ? 'reaction' : null)} />

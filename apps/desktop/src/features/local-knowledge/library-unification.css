@@ -283,7 +283,7 @@
 .fox-local-folder-path { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted-foreground); font-size:12px; }
 .fox-local-folder-empty { color:var(--muted-foreground); padding:16px 0; }
 
-.fox-library-tree-scroll { max-height: min(320px, 40dvh); overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+.fox-library-tree-scroll { max-height: min(320px, 40dvh); overflow: auto; overscroll-behavior: contain; scrollbar-width: var(--fox-native-scrollbar-width, thin); scrollbar-color: var(--fox-native-scrollbar-color, var(--border) transparent); }
 .fox-library-tree-scroll:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
 .fox-library-unified {

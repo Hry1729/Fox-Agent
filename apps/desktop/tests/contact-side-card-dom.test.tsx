@@ -6,7 +6,7 @@
 // 编辑、模板采用/暂不更新、项目笔记授权、置顶/归档/删除。这里用真 DOM 交互 +
 // 真 IPC 边界断言它们都在、参数都对、失败不被吞掉。
 import { afterAll, afterEach, describe, expect, mock, test } from 'bun:test'
-import { cleanup, fireEvent, render, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/react'
 import { ContactSideCard } from '../src/features/companions/contact-side-card'
 import { ContactsContext, type ContactsContextValue } from '../src/features/companions/context'
 import type { ContactChatSearch } from '../src/features/companions/chat-search'
@@ -147,15 +147,17 @@ const toasted = (type: string, text: string) => toasts.some((item) => item.type 
 afterEach(cleanup)
 
 describe('联系人资料卡的 API 合同（缺口 D）', () => {
-  test('权限下拉只有真实契约值 read_only / ask / allow，并且走 ctx.setPermission', () => {
+  test('权限菜单保留三种权限，并且走 ctx.setPermission', async () => {
     host()
     const view = renderCard()
-    const select = view.getByLabelText('权限') as HTMLSelectElement
-    const values = Array.from(select.options).map((option) => option.value)
-    expect(values).toEqual(['read_only', 'ask', 'allow'])
-    for (const dead of ['default', 'allow_edits', 'dont_ask', 'plan']) expect(values).not.toContain(dead)
-    expect(select.value).toBe('ask')
-    fireEvent.change(select, { target: { value: 'allow' } })
+    const select = view.getByRole('combobox', { name: '权限' })
+    expect(within(select).getByText('每轮询问')).toBeDefined()
+    fireEvent.click(within(select).getByText('权限'))
+    const menu = await view.findByRole('listbox')
+    const options = within(menu).getAllByRole('option')
+    expect(options.map(option => option.textContent)).toEqual(['只读', '每轮询问', '自动接受'])
+    expect(options.every(option => option.querySelector('svg[aria-hidden="true"]'))).toBe(true)
+    fireEvent.click(within(menu).getByRole('option', { name: '自动接受' }))
     expect(permissionChoices).toEqual(['allow'])
   })
 
@@ -163,15 +165,27 @@ describe('联系人资料卡的 API 合同（缺口 D）', () => {
     host()
     let refreshed = 0
     const view = renderCard(contextValue({ refresh: async () => { refreshed += 1 } }))
-    const select = view.getByLabelText('提醒') as HTMLSelectElement
-    expect(Array.from(select.options).map(option => option.value)).toEqual(['follow_global', 'all', 'action_only', 'muted'])
-    fireEvent.change(select, { target: { value: 'action_only' } })
-    expect(select.disabled).toBe(true)
+    const select = view.getByRole('combobox', { name: '提醒' }) as HTMLButtonElement
+    fireEvent.click(within(select).getByText('提醒'))
+    const menu = await view.findByRole('listbox')
+    const options = within(menu).getAllByRole('option')
+    expect(options.map(option => option.textContent)).toEqual(['跟随全局设置', '所有消息', '只有需要我确认的消息', '暂时不提醒'])
+    expect(options.every(option => option.querySelector('svg[aria-hidden="true"]'))).toBe(true)
+    fireEvent.click(within(menu).getByRole('option', { name: '只有需要我确认的消息' }))
     await waitFor(() => expect(commandNames()).toContain('companion_set_reminder_mode'))
     expect(requestOf('companion_set_reminder_mode')).toEqual({ companionId: 'cmp_one', mode: 'action_only' })
     await waitFor(() => expect(select.disabled).toBe(false))
     expect(refreshed).toBe(1)
     expect(toasted('success', '提醒设置已保存')).toBe(true)
+  })
+
+  test('点击模型行左边的图标也能打开选择菜单', async () => {
+    host()
+    const view = renderCard()
+    const select = view.getByRole('combobox', { name: '联系人模型' }) as HTMLButtonElement
+    await waitFor(() => expect(select.disabled).toBe(false))
+    fireEvent.click(select.querySelector('svg.lucide-cpu')!)
+    expect(within(await view.findByRole('listbox')).getByRole('option', { name: /test-model.*跟随全局/ })).toBeDefined()
   })
 
   test('打开文件夹传会话 id；导出先列工作目录文件，再按单个文件相对路径另存', async () => {
@@ -284,6 +298,24 @@ describe('旧资料页的功能仍然可达（缺口 E）', () => {
     await waitFor(() => expect(toasted('success', '已保存联系人资料')).toBe(true))
   })
 
+  test('点击头像可以选图，只保存头像并刷新联系人', async () => {
+    host()
+    let refreshed = 0
+    const view = renderCard(contextValue({ refresh: async () => { refreshed += 1 } }))
+    fireEvent.click(view.getByRole('button', { name: '更换头像' }))
+    const dialog = await view.findByRole('dialog', { name: '更换头像' })
+    const choice = within(dialog).getByRole('button', { name: 'Fox 默认' })
+    fireEvent.click(choice)
+    expect(choice.getAttribute('aria-pressed')).toBe('true')
+    const save = within(dialog).getByRole('button', { name: '保存头像' }) as HTMLButtonElement
+    expect(save.disabled).toBe(false)
+    fireEvent.click(save)
+    await waitFor(() => expect(commandNames()).toContain('companion_update_profile'))
+    expect(requestOf('companion_update_profile')).toEqual({ companionId: 'cmp_one', avatarRef: '/mascot/fox_magic.png' })
+    expect(refreshed).toBe(1)
+    await waitFor(() => expect(view.queryByRole('dialog')).toBeNull())
+  })
+
   test('设置子视图：模板变化逐字段可见，采用与暂不更新各走一条命令并刷新状态', async () => {
     host()
     const view = renderCard()
@@ -359,7 +391,7 @@ describe('旧资料页的功能仍然可达（缺口 E）', () => {
     expect(view.getByRole('tab', { name: '资料库' })).toBeDefined()
     expect(view.getByRole('tab', { name: '工作目录' })).toBeDefined()
     expect(view.getByText('模型')).toBeDefined()
-    expect((view.getByLabelText('提醒') as HTMLSelectElement).value).toBe('all')
+    expect(within(view.getByRole('combobox', { name: '提醒' })).getByText('所有消息')).toBeDefined()
     expect(view.getByRole('button', { name: '重置上下文' })).toBeDefined()
     // 「在对话中查找」驱动的是共享的那一个搜索实例（缺口 F）。
     fireEvent.click(view.getByRole('button', { name: '在对话中查找' }))

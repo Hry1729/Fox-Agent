@@ -1398,7 +1398,7 @@
 .fox-local-kb-job-stage-scroll {
   min-width: 0;
   overflow-x: auto;
-  scrollbar-width: thin;
+  scrollbar-width: var(--fox-native-scrollbar-width, thin);
 }
 
 .fox-local-kb-job-stages {

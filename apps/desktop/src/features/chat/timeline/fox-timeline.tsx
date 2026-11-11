@@ -19,7 +19,7 @@ function turnTarget(scope: Element, messageId: string): HTMLElement | null {
 
 function turnViewport(target: HTMLElement): HTMLElement | null {
   for (let parent = target.parentElement; parent; parent = parent.parentElement) {
-    if (/(auto|scroll)/.test(getComputedStyle(parent).overflowY) && parent.scrollHeight > parent.clientHeight) return parent
+    if (/(auto|scroll)/.test(getComputedStyle(parent).overflowY)) return parent
   }
   return null
 }
@@ -28,13 +28,15 @@ export type TurnSpan = { id: string; top: number; bottom: number };
 
 /**
  * SPEC item 8：回合导航的选中逻辑。滚动到底时强制选中最后一轮；否则选中「整轮
- * （用户消息 + 该轮全部助手消息）范围覆盖视口中线」的那一轮；没有覆盖中线的
+ * 顶部对齐的回合优先；否则选中「整轮（用户消息 + 助手消息）覆盖视口中线」的那一轮；没有覆盖中线的
  * （停在两轮之间的空隙）取距离中线最近的一轮，距离相同取靠前的一轮。
  * 不再用「最接近视口顶部的用户消息」当锚点——那样长回复会把选中项钉在屏外。
  */
 export function computeActiveTurnId(spans: TurnSpan[], viewport: { top: number; bottom: number }, atBottom: boolean): string | null {
   if (!spans.length) return null
   if (atBottom) return spans.at(-1)!.id
+  const aligned = spans.find((span) => Math.abs(span.top - viewport.top - 12) <= 4)
+  if (aligned) return aligned.id
   const mid = (viewport.top + viewport.bottom) / 2
   let best: string | null = null
   let bestDistance = Infinity
@@ -112,9 +114,13 @@ export function ConversationTurnRail({ messages, artifacts }: { messages: Conver
         }
         if (top !== Infinity) spans.push({ id: turn.user.id, top, bottom })
       }
-      if (!spans.length) return
       const viewport = root.getBoundingClientRect()
       const atBottom = root.scrollHeight - root.scrollTop - root.clientHeight <= 8
+      if (atBottom) {
+        setActiveId(turns.at(-1)!.user.id)
+        return
+      }
+      if (!spans.length) return
       const next = computeActiveTurnId(spans, { top: viewport.top, bottom: viewport.bottom }, atBottom)
       if (next) setActiveId((current) => current === next ? current : next)
     }

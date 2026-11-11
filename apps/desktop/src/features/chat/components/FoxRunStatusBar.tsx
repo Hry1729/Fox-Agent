@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from 'react'
-import { CircleAlert } from 'lucide-react'
 import type { ConversationDetail } from '@/features/conversations/model/types'
 import { presentConversationActivity } from '../run-activity-presentation'
 import { formatRunElapsed } from '../turn-process-timing'
@@ -29,9 +28,7 @@ export function FoxRunStatusBar({ detail, conversationId }: { detail: Conversati
   const duration = presentation.startedAt !== null && (presentation.active || presentation.endedAt !== null)
     ? formatRunElapsed((presentation.endedAt ?? now) - presentation.startedAt) : null
   return <div className="fox-run-status-bar" data-run-id={presentation.runId ?? ''}>
-    {presentation.outcome === 'failed'
-      ? <span className="fox-run-status-alert"><CircleAlert aria-hidden="true" /></span>
-      : <BlueFoxAvatar state={animation} progress={current.progress} animate={animate} startedAt={presentation.startedAt} />}
+    <BlueFoxAvatar state={animation} progress={current.progress} animate={animate} startedAt={presentation.startedAt} />
     <span role="status" aria-live="polite" className="fox-run-status-label">{current.label}</span>
     {duration && <><span aria-hidden="true">·</span><span role="timer" className="fox-run-status-time">{duration}</span></>}
   </div>

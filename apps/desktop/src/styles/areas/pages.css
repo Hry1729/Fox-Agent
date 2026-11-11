@@ -170,7 +170,7 @@
   width: var(--fox-pages-card-icon);
   height: var(--fox-pages-card-icon);
   align-self: center;
-  border-radius: var(--fox-radius-control);
+  border-radius: 50%;
 }
 
 .fox-agent-list-page .fox-shadcn-kb-heading,

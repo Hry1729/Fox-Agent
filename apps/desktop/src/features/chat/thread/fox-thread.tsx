@@ -10,6 +10,8 @@ import { FoxThreadContext, type FoxThreadContextValue } from './fox-thread-conte
 import { FoxUserMessage } from './fox-user-message'
 import './fox-thread.css'
 import { ContactOrphanDecisions } from '@/features/companions/chat-decisions'
+import { useContacts } from '@/features/companions/context'
+import { ContactTimeGroups } from '@/features/companions/chat-time'
 
 export interface FoxThreadProps {
   statusBar?: import('react').ReactNode
@@ -80,6 +82,7 @@ function FoxBottomDock({ plan }: { plan?: GoalProgressData['planRevisions'][numb
  * instead of mixing message streams.
  */
 export default function FoxThread({ statusBar, approvalSlot, fox, suggestions, onStart, planRevision, turnRailMessages, turnRailArtifacts }: FoxThreadProps) {
+  const contact = useContacts()
   // SPEC item 5: brief `.is-scrolling` state reveals the scrollbar thumb while
   // the list is actively scrolling (~800ms after the last scroll event).
   const [scrolling, setScrolling] = useState(false)
@@ -104,13 +107,13 @@ export default function FoxThread({ statusBar, approvalSlot, fox, suggestions, o
           >
             {/* Hybrid rollback: the empty conversation keeps the classic
                 mascot + suggestions screen from the legacy timeline. */}
-            <ThreadPrimitive.Empty>
+            {!contact?.privateChat && <ThreadPrimitive.Empty>
               <ConversationEmptyPrompt suggestions={suggestions} onStart={onStart ?? (() => undefined)} />
-            </ThreadPrimitive.Empty>
+            </ThreadPrimitive.Empty>}
             <FoxThreadLoadEarlier />
             <ThreadPrimitive.If empty={false}>
-              <div className="fox-thread-date"><span>今天</span></div>
-              <ThreadPrimitive.Messages components={{ UserMessage: FoxUserMessage, AssistantMessage: FoxAssistantMessage }} />
+              {!fox.contactChat && <div className="fox-thread-date"><span>今天</span></div>}
+              <ContactTimeGroups><ThreadPrimitive.Messages components={{ UserMessage: FoxUserMessage, AssistantMessage: FoxAssistantMessage }} /></ContactTimeGroups>
               {fox.contactChat && <ContactOrphanDecisions />}
               {approvalSlot && <div className="fox-thread-approval">{approvalSlot}</div>}
               {!fox.contactChat && statusBar}

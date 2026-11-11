@@ -1,5 +1,6 @@
 import { useContacts } from '@/features/companions/context'
 import { ContactQuoteRef, ContactUserMarks } from '@/features/companions/marks'
+import { ContactTimeDivider } from '@/features/companions/chat-time'
 import { useFoxThread } from './fox-thread-context'
 import { ActionBarPrimitive, MessagePrimitive, useAui, useAuiState } from '@assistant-ui/react'
 import type { TextMessagePartProps, Attachment as AuiAttachment } from '@assistant-ui/react'
@@ -51,7 +52,7 @@ export function FoxUserMessage() {
         getText={() => aui.message.getState().content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n\n')} />
     : null
   const meta = !isEditing && <div className="fox-user-meta">
-    <time className="fox-message-time" dateTime={createdAt.toISOString()}>{formatDateTime(createdAt)}</time>
+    {!contactChat && <time className="fox-message-time" dateTime={createdAt.toISOString()}>{formatDateTime(createdAt)}</time>}
     <ActionBarPrimitive.Root autohide="never" className="fox-user-actions">
       <FoxCopyMessageButton onCopy={() => copyMessageResponse(aui.message.getState().content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n\n'))} />
       {!companion?.privateChat && <button type="button" className="fox-thread-action-button" disabled={running} aria-label="从此消息创建分支" title="从此消息创建分支" onClick={() => requestConversationFork(aui.message.getState().id)}>
@@ -64,6 +65,7 @@ export function FoxUserMessage() {
   </div>
   return (
     <div id={`fox-turn-${messageId}`} data-turn-message-id={messageId} className="fox-turn-anchor">
+      {contactChat && <ContactTimeDivider messageId={messageId} />}
       <MessagePrimitive.Root className={`fox-thread-msg is-user${companion?.privateChat ? ' is-contact-user' : ''}`}>
         <MessagePrimitive.If hasAttachments>
           <div className="fox-thread-attachments">

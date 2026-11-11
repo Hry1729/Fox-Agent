@@ -11,7 +11,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { useState } from 'react'
 import { act, cleanup, renderHook } from '@testing-library/react'
-import { sideCardGrowthRollback, useChatWorkspaceSideCard } from '../src/features/chat/workbench-side-cards'
+import { rightPanelResizeBounds, sideCardGrowthRollback, useChatWorkspaceSideCard } from '../src/features/chat/workbench-side-cards'
 import type { SidebarGrowthEntry, SidebarGrowthRefusal } from '../src/features/workspace/use-sidebar-window-growth'
 import type { WorkspaceView } from '../src/features/workspace/types'
 
@@ -20,6 +20,12 @@ afterEach(cleanup)
 const CONTACT_ID = 'conv-1'
 const CONTACT_CARD: SidebarGrowthEntry = { id: 'contact-card', width: 320 }
 const RIGHT_PANEL: SidebarGrowthEntry = { id: 'right-panel', width: 300 }
+
+test('右栏拖动以实际可见宽度为起点，并给聊天区留空间', () => {
+  expect(rightPanelResizeBounds(760, 1000, 480, 300)).toEqual({ width: 480, min: 280, max: 480 })
+  expect(rightPanelResizeBounds(400, 1000, 400, 320)).toEqual({ width: 400, min: 280, max: 440 })
+  expect(rightPanelResizeBounds(400, 1000, 400, 260)).toEqual({ width: 400, min: 280, max: 400 })
+})
 
 interface ProbeProps { initialView: WorkspaceView; cleared: WorkspaceView[] }
 

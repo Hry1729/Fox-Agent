@@ -834,13 +834,11 @@
 
 /* One animated value drives the collapse: the sidebar shares the shell's
    --fox-sidebar-width, so expanding writes the remembered width once and the
-   width, the rail's padding and the app's centred column all move together.
-   The min() keeps a remembered width that no longer fits a narrow window from
-   squeezing the conversation card. */
+   width, the rail's padding and the app's centred column all move together. */
 .fox-sidebar {
   min-height: 0;
   position: relative;
-  width: min(var(--fox-sidebar-width), 34vw);
+  width: min(var(--fox-sidebar-width), max(220px, calc(100vw - 380px)));
   flex: 0 0 auto;
   min-width: 0;
   display: flex;
@@ -863,6 +861,8 @@
   padding-inline: 6px;
   overflow: visible;
 }
+
+.fox-workbench:has(.fox-sidebar-resize-divider[data-resizing]) .fox-sidebar { transition: none; }
 
 .fox-sidebar-title-safe {
   height: 16px;
@@ -1025,8 +1025,8 @@
 
 .fox-mode-tabs {
   min-width: 0;
-  width: 146px;
-  flex: 0 1 146px;
+  width: 116px;
+  flex: 0 1 116px;
 }
 
 /* Same geometry as the shadcn Tabs default variant (muted track, 3px inset,
@@ -2154,7 +2154,7 @@
    chrome (2px top / 5px bottom margins, 5px gaps, same radii). The panel's
    resize divider sits inside the pre-existing 5px gap so it adds no width. */
 .fox-workbench > .fox-resize-divider {
-  margin: 0 -5px 0 0;
+  margin: 0 0 0 -5px;
 }
 
 .fox-workbench > .fox-context-panel {
@@ -2664,7 +2664,9 @@ button.fox-chat-project-row:disabled {
 }
 
 .fox-execution-menu[data-backend] {
-  min-width: 232px;
+  width: max-content;
+  min-width: 144px;
+  max-width: min(300px, calc(100vw - 24px));
 }
 
 /* Composer batch: full name + the reason of a greyed mode, inside the menu. */
@@ -2768,7 +2770,7 @@ button.fox-chat-project-row:disabled {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding-bottom: var(--fox-composer-occlusion, 180px);
-  scrollbar-color: transparent transparent;
+  scrollbar-color: var(--fox-native-scrollbar-color, transparent transparent);
 }
 
 /* Chat thumbs stay invisible until hover/focus or a short scroll burst
@@ -2784,7 +2786,7 @@ button.fox-chat-project-row:disabled {
 }
 .fox-conversation-scroll:is(:hover, :focus-within),
 .fox-conversation-scroll.is-scrolling {
-  scrollbar-color: color-mix(in oklch, var(--muted-foreground) 35%, transparent) transparent;
+  scrollbar-color: var(--fox-native-scrollbar-color, color-mix(in oklch, var(--muted-foreground) 35%, transparent) transparent);
 }
 
 /* The dock floats above the composer, which now overlaps the scroll container. */
@@ -4846,7 +4848,7 @@ img[src='/avatars/fox-assistant.png'] {
   position: absolute;
   z-index: 11;
   pointer-events: none;
-  inset: auto 0 0;
+  inset: auto 6px 0 0;
   height: calc(var(--fox-composer-occlusion, 180px) - 6px + 42px);
   background: linear-gradient(to bottom, transparent, var(--fox-canvas) 42px);
 }
@@ -5077,7 +5079,7 @@ img[src='/avatars/fox-assistant.png'] {
   display: flex;
   align-items: stretch;
   overflow: hidden;
-  scrollbar-width: thin;
+  scrollbar-width: var(--fox-native-scrollbar-width, thin);
 }
 
 .fox-decision-approval-list > .fox-runtime-confirmation {
@@ -5253,7 +5255,7 @@ img[src='/avatars/fox-assistant.png'] {
   display: grid;
   gap: 11px;
   overflow-y: auto;
-  scrollbar-width: thin;
+  scrollbar-width: var(--fox-native-scrollbar-width, thin);
 }
 
 .fox-question-field {
@@ -6305,7 +6307,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-runtime-confirmation .fox-confirmation-content { min-height: 0; gap: var(--fox-space-xs); }
 .fox-runtime-confirmation .fox-confirmation-content p { margin: 0; }
 .fox-runtime-confirmation .fox-confirmation-body code { overflow-wrap: anywhere; word-break: normal; }
-.fox-approval-details-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.fox-approval-details-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: var(--fox-native-scrollbar-width, thin); }
 .fox-approval-error { color: var(--destructive); font-size: var(--fox-type-caption); line-height: 1.6; }
 .fox-approval-scope-note { margin: 0 0 var(--fox-space-m); color: var(--fox-text); font-size: var(--fox-type-chrome); line-height: 1.6; }
 .fox-approval-disclosure { border-top: 1px solid var(--fox-border); padding-block: var(--fox-space-m); }
@@ -6377,7 +6379,7 @@ img[src='/avatars/fox-assistant.png'] {
   line-height: 1.55;
   white-space: pre;
 }
-.fox-approval-disclosure .fox-approval-write-preview { max-height: 240px; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.fox-approval-disclosure .fox-approval-write-preview { max-height: 240px; overflow: auto; overscroll-behavior: contain; scrollbar-width: var(--fox-native-scrollbar-width, thin); }
 .fox-approval-write-preview, .fox-approval-write-preview > code { color: var(--fox-muted); }
 .fox-approval-details-scroll:has(.fox-approval-write-preview) { flex: 0 0 auto; max-height: none; max-block-size: none; overflow: visible; }
 .fox-approval-details-scroll:has(.fox-approval-write-preview) .fox-approval-scope-note { color: var(--fox-muted); }
@@ -6877,25 +6879,14 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-resize-divider::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  left: auto;
-  right: 0;
-  width: 1px;
-  background: linear-gradient(180deg, transparent, var(--fox-border) 8%, var(--fox-border) 92%, transparent);
-  opacity: .78;
-  transition: background 140ms ease, box-shadow 140ms ease;
+  content: none;
 }
 
 .fox-resize-divider span {
   display: none;
 }
 
-.fox-resize-divider:hover::before {
-  background: linear-gradient(180deg, transparent, var(--fox-accent) 10%, var(--fox-accent) 90%, transparent);
-  box-shadow: 0 0 7px var(--fox-accent-soft);
-}
+.fox-resize-divider:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
 .fox-context-panel {
   min-width: min(280px, 48%);
@@ -6938,7 +6929,7 @@ img[src='/avatars/fox-assistant.png'] {
   gap: 4px;
   overflow-x: auto;
   overflow-y: hidden;
-  scrollbar-width: thin;
+  scrollbar-width: var(--fox-native-scrollbar-width, thin);
 }
 
 .fox-context-tab-actions {
@@ -10358,6 +10349,7 @@ img[src='/avatars/fox-assistant.png'] {
   height: 30px;
   display: block;
   object-fit: contain;
+  border-radius: 50%;
 }
 
 .fox-agent-list-copy {
@@ -11100,7 +11092,7 @@ img[src='/avatars/fox-assistant.png'] {
   overflow-y: auto;
   gap: var(--fox-space-xs);
   padding-right: 2px;
-  scrollbar-width: thin;
+  scrollbar-width: var(--fox-native-scrollbar-width, thin);
 }
 
 .fox-context-sidebar-nav.is-settings {
@@ -11293,7 +11285,7 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 /* UI 1104-08（SPEC item 8）：所有刻度（含选中项）默认都是短横线；选中项只用更深的
-   前景色区分，其它刻度浅。只有悬停/聚焦的那一条会加深并变长——顺序放在 is-active
+   前景色区分，其它刻度浅。只有悬停的那一条会加深并变长——顺序放在 is-active
    之后，悬停选中的刻度同样变长。 */
 .fox-conversation-marks button span {
   width: 5px;
@@ -11309,8 +11301,7 @@ img[src='/avatars/fox-assistant.png'] {
   opacity: 1;
 }
 
-.fox-conversation-marks button:hover span,
-.fox-conversation-marks button:focus-visible span {
+.fox-conversation-marks button:hover span {
   width: 12px;
   background: var(--foreground);
   opacity: 1;
@@ -12342,7 +12333,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-composer-wrap.is-history.is-expanded .fox-prompt-toolbar { display: flex; }
 .fox-composer-wrap.is-history.is-expanded .fox-composer-tools { display: flex; }
 .fox-composer-wrap.is-history.is-expanded .fox-composer-attachments { width: 100%; }
-.fox-composer-wrap.is-history .fox-prompt-textarea { scrollbar-width: thin; }
+.fox-composer-wrap.is-history .fox-prompt-textarea { scrollbar-width: var(--fox-native-scrollbar-width, thin); }
 .fox-user-message:not(.is-editing) { width: fit-content; max-width: 80%; }
 .fox-thread-msg.is-user .fox-user-bubble { width: fit-content; max-width: 80%; }
 

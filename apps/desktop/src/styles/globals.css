@@ -276,9 +276,15 @@ html body { font-family: var(--font-sans); font-weight: 400; -webkit-font-smooth
 }
 /* Every other scroller gets the same thin, neutral bar instead of the classic
    Windows one, which is especially loud in dark mode. */
+@supports selector(::-webkit-scrollbar) {
+  :root {
+    --fox-native-scrollbar-width: auto;
+    --fox-native-scrollbar-color: auto;
+  }
+}
 * {
-  scrollbar-width: thin;
-  scrollbar-color: color-mix(in oklch, var(--muted-foreground) 35%, transparent) transparent;
+  scrollbar-width: var(--fox-native-scrollbar-width, thin);
+  scrollbar-color: var(--fox-native-scrollbar-color, color-mix(in oklch, var(--muted-foreground) 35%, transparent) transparent);
 }
 [data-slot="scroll-area-viewport"]::-webkit-scrollbar {
   display: none;
@@ -289,8 +295,8 @@ html body { font-family: var(--font-sans); font-weight: 400; -webkit-font-smooth
    appears) and a rounded thumb matching the previous thin-bar color. Individual
    scrollers (chat thread, legacy timeline) then only vary thumb VISIBILITY. */
 *::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 6px;
+  height: 6px;
 }
 *::-webkit-scrollbar-track {
   background: transparent;
@@ -298,7 +304,7 @@ html body { font-family: var(--font-sans); font-weight: 400; -webkit-font-smooth
 *::-webkit-scrollbar-thumb {
   background: color-mix(in oklch, var(--muted-foreground) 35%, transparent);
   background-clip: padding-box;
-  border: 2px solid transparent;
+  border: 1px solid transparent;
   border-radius: 999px;
 }
 *::-webkit-scrollbar-thumb:hover {

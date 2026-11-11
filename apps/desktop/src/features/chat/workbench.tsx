@@ -50,7 +50,7 @@ import { type KnowledgeSourceLocator, type LocalKnowledgeDocumentAsk, type Navig
 import { WorkspaceShell } from '@/features/workspace/workspace-shell'
 import { useNavigationHistory } from '@/features/workspace/use-navigation-history'
 import { useSidebarWindowGrowth, type SidebarGrowthEntry, type SidebarGrowthRefusal } from '@/features/workspace/use-sidebar-window-growth'
-import { sideCardGrowthRollback, useChatWorkspaceSideCard } from './workbench-side-cards'
+import { rightPanelResizeBounds, sideCardGrowthRollback, useChatWorkspaceSideCard, useRightPanelGrowthWidth } from './workbench-side-cards'
 import { File, ShieldAlert, ShieldCheck } from 'lucide-react'
 import { type KeyboardEvent, Profiler, Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { needsLocalKnowledgeNames } from './composer/knowledge-chip-name'
@@ -62,6 +62,7 @@ import { RightPanel, artifactProjectPath, childAgentVisualQaPanelWidth, createOp
 import { ChatTopbar } from './shell/fox-chat-topbar'
 import { MemoizedSidebar } from './shell/fox-sidebar'
 import { MemoizedWindowTitlebar } from './shell/fox-window-titlebar'
+import { ResizeDivider } from './shell/fox-resize-divider'
 import { type RuntimeSource } from './timeline/fox-runtime-process-model'
 import './runtime-process-groups.css'
 import './runtime-process-row.css'
@@ -106,30 +107,6 @@ export const LOCAL_KNOWLEDGE_WORKSPACE_VIEWS: WorkspaceView[] = [
 export function localKnowledgeDocumentPrompt(payload: LocalKnowledgeDocumentAsk): string {
   const location = payload.relativePath?.trim()
   return `【资料：${payload.documentName}${location ? ` · ${location}` : ''}】\n`
-}
-
-function ResizeDivider({ onResize }: { onResize: (delta: number) => void }) {
-  const start = useRef<{ x: number } | null>(null)
-  return (
-    <div
-      className="fox-resize-divider"
-      role="separator"
-      aria-label="调整右侧面板宽度"
-      aria-orientation="vertical"
-      onPointerDown={(event) => { start.current = { x: event.clientX }; event.currentTarget.setPointerCapture(event.pointerId) }}
-      onPointerMove={(event) => { if (!start.current) return; const delta = start.current.x - event.clientX; start.current = { x: event.clientX }; onResize(delta) }}
-      onPointerUp={() => { start.current = null }}
-    ><span /></div>
-  )
-}
-
-function SidebarResizeDivider({ width, onResize }: { width: number; onResize: (delta: number) => void }) {
-  const start = useRef<number | null>(null)
-  return <div className="fox-sidebar-resize-divider" role="separator" tabIndex={0} aria-label="调整左侧导航栏宽度" aria-orientation="vertical" aria-valuemin={220} aria-valuemax={456} aria-valuenow={Math.round(width)}
-    onPointerDown={(event) => { if (event.button !== 0) return; event.preventDefault(); start.current = event.clientX; event.currentTarget.setPointerCapture(event.pointerId) }}
-    onPointerMove={(event) => { if (start.current === null) return; const delta = event.clientX - start.current; start.current = event.clientX; onResize(delta) }}
-    onPointerUp={() => { start.current = null }} onPointerCancel={() => { start.current = null }} onLostPointerCapture={() => { start.current = null }}
-    onKeyDown={(event) => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); onResize((event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 24 : 8)) } else if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); onResize((event.key === 'Home' ? 220 : 456) - width) } }} />
 }
 
 /**
@@ -515,7 +492,7 @@ export function Workbench() {
     // While collapsed the rail is suppressed (the narrow-rail CSS cannot reach a
     // 0-width sidebar), so the centred column needs no offset. Both numbers move
     // on the same clock as the sidebar's width transition.
-    const railWidth = sidebarCollapsed ? 0 : `min(${expandedSidebarWidth}px, 34vw)`
+    const railWidth = sidebarCollapsed ? 0 : `min(${expandedSidebarWidth}px, max(220px, calc(100vw - 380px)))`
     return {
       '--fox-sidebar-width': `${expandedSidebarWidth}px`,
       '--fox-sidebar-center-offset': `calc(${railWidth} / 2)`,
@@ -658,10 +635,13 @@ export function Workbench() {
     setComposerDraft('')
     setPendingUserMessage(null)
     setChatState('running')
-    void desktopConversation
-      .rerunFromMessage(latestUser.id, latestUser.content, conversationModelOverride(activeAgent, desktopConversation.detail?.lastRun?.model, yuxiModels.models))
+    const model = conversationModelOverride(activeAgent, desktopConversation.detail?.lastRun?.model, yuxiModels.models)
+    const retry = conversationAgentBackend(desktopConversation.detail!.conversation) === 'fox'
+      ? desktopConversation.rerunFromMessage(latestUser.id, latestUser.content, model)
+      : desktopConversation.send(latestUser.content, model)
+    void retry
       .then((started) => {
-        if (!started) setChatState('error')
+        if (started !== true) setChatState('error')
       })
   }
   /**
@@ -682,6 +662,10 @@ export function Workbench() {
     empty?: boolean
   } = {}) => {
     cancelDocumentAsk()
+    setRightSidebarCollapsed(true)
+    setRightPanelMaximized(false)
+    setRightMode(null)
+    setContactCardConversationId(null)
     setComposerInitialAttachments(null)
     clearWorkflowTimer()
     setChatState('complete')
@@ -1174,7 +1158,7 @@ export function Workbench() {
       onLocalKnowledgeCreateRequestHandled={() => setLocalKnowledgeCreateRequest(0)}
     />
   )
-  const timelineEmpty = emptyConversation || (desktopConversation.enabled ? !desktopUserMessage && !pendingUserMessage : false)
+  const timelineEmpty = !privateChat && (emptyConversation || (desktopConversation.enabled ? !desktopUserMessage && !pendingUserMessage : false))
   useEffect(() => {
     if (activeView !== 'chat' || !timelineEmpty) return
     setRightSidebarCollapsed(true)
@@ -1191,12 +1175,13 @@ export function Workbench() {
   // native window growth (each card costs width + its 5px gap). A maximized
   // right panel keeps the window as-is and covers the chat instead, so it is
   // not declared here.
+  const rightPanelGrowthWidth = useRightPanelGrowthWidth(showConversationRightSidebar && !rightSidebarCollapsed && !rightPanelMaximized, rightWidth)
   const sidebarGrowthEntries = useMemo(() => {
     const entries: SidebarGrowthEntry[] = []
-    if (showConversationRightSidebar && !rightSidebarCollapsed && !rightPanelMaximized) entries.push({ id: 'right-panel', width: rightWidth })
+    if (rightPanelGrowthWidth !== null) entries.push({ id: 'right-panel', width: rightPanelGrowthWidth })
     if (contactCardOpen) entries.push({ id: 'contact-card', width: CONTACT_SIDE_CARD_WIDTH })
     return entries
-  }, [showConversationRightSidebar, rightSidebarCollapsed, rightPanelMaximized, rightWidth, contactCardOpen])
+  }, [rightPanelGrowthWidth, contactCardOpen])
   const handleSidebarGrowthRefused = useStableCallback((refusals: SidebarGrowthRefusal[]) => {
     // DOM rollback: the native growth was refused after a retry, so undo the cards
     // that asked for room the window does not reflect — an already-open card goes
@@ -1829,7 +1814,11 @@ export function Workbench() {
       <MemoizedWindowTitlebar leftSidebarCollapsed={sidebarCollapsed} onNewChat={handleNewChat} onOpenProject={handleComposerProject} onSettings={handleOpenSettings} onAbout={handleOpenAbout} onToggleSidebar={handleToggleSidebar} onZoom={handleZoom} canGoBack={navigationHistory.canGoBack} canGoForward={navigationHistory.canGoForward} onGoBack={navigationHistory.back} onGoForward={navigationHistory.forward} />
       <div className="fox-workbench" ref={sidebarLayoutRef}>
         <MemoizedSidebar collapsed={sidebarCollapsed} assistantMode={assistantMode} onModeChange={handleAssistantModeChange} onNewChat={handleNewChat} onNewProjectChat={handleNewProjectChat} onAddProject={handleComposerProject} onCreateLocalKnowledge={handleCreateLocalKnowledge} onOpenConversation={handleOpenConversation} onRenameConversation={handleRenameConversation} projects={projects} onPinProject={handlePinProject} onPinConversation={handlePinConversation} onArchiveConversation={handleArchiveConversation} onUnarchiveConversation={handleUnarchiveConversation} onTrashConversation={handleTrashConversation} onRestoreConversation={handleRestoreConversation} onPurgeConversation={handlePurgeConversation} onDeleteProject={handleDeleteProject} onNavigate={handleWorkspaceNavigate} onExitManagement={handleExitManagement} onExpand={handleExpandSidebar} onTheme={handleToggleTheme} onSettings={handleOpenSettings} runtimeConversations={desktopConversation.enabled ? desktopConversation.conversations : undefined} archivedConversations={desktopConversation.enabled ? desktopConversation.archivedConversations : undefined} trashedConversations={desktopConversation.enabled ? desktopConversation.trashedConversations : undefined} onGlobalSearch={desktopRuntimeAvailable ? desktopClient.globalSearch : undefined} activeConversationId={desktopConversation.selectedConversationId ?? undefined} newChatActive={activeView === 'chat' && timelineEmpty && !desktopConversation.selectedConversationId} runIndicators={desktopConversation.enabled ? desktopConversation.runIndicators : undefined} yuxiService={sidebarYuxiService} yuxiUser={yuxiUser.user} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} />
-        {!sidebarCollapsed && <SidebarResizeDivider width={expandedSidebarWidth} onResize={(delta) => setExpandedSidebarWidth((value) => Math.min(456, Math.max(220, value + delta)))} />}
+        {!sidebarCollapsed && <ResizeDivider className="fox-sidebar-resize-divider" label="调整左侧导航栏宽度" width={expandedSidebarWidth} direction={1} measure={() => {
+          const max = Math.min(456, Math.max(220, window.innerWidth - 380))
+          const actual = sidebarLayoutRef.current?.querySelector<HTMLElement>('.fox-sidebar')?.getBoundingClientRect().width
+          return { width: actual || Math.min(expandedSidebarWidth, max), min: 220, max }
+        }} onResize={setExpandedSidebarWidth} />}
         <div className="fox-content-card">
         <div className="fox-content-surface">
         <section className="fox-chat-pane">
@@ -1860,7 +1849,12 @@ export function Workbench() {
         </div>
         {/* SPEC item 4: the ordinary right sidebar is a sibling rounded card of
             the content card; the divider occupies the existing 5px gap. */}
-        {showConversationRightSidebar && !rightSidebarCollapsed && <>{!rightPanelMaximized && <ResizeDivider onResize={(delta) => setRightWidth((value) => Math.min(760, Math.max(280, value + delta)))} />}<RightPanel mode={rightMode} tabs={openRightTabs} detail={desktopConversation.detail} activity={activityPanelProps} width={rightWidth} maximized={rightPanelMaximized} fileTabs={openFileTabs} activeFileTabId={activeFileTabId} activeChildAgent={activeChildAgent} onMode={selectRightMode} onCloseMode={closeRightMode} onOpenFile={openFile} onActivateFile={activateFile} onCloseFile={closeFile} onOpenChildAgent={openChildAgent} onBackChildAgent={() => setActiveChildAgent(null)} onOpenEvidence={openEvidence} onToggleMaximized={() => setRightPanelMaximized((value) => !value)} onCollapse={collapseRightSidebar} /></>}
+        {showConversationRightSidebar && !rightSidebarCollapsed && <>{!rightPanelMaximized && <ResizeDivider className="fox-resize-divider" label="调整右侧面板宽度" width={rightWidth} direction={-1} measure={() => {
+          const layout = sidebarLayoutRef.current
+          const panel = layout?.querySelector<HTMLElement>('.fox-context-panel')
+          const chat = layout?.querySelector<HTMLElement>('.fox-content-card')
+          return rightPanelResizeBounds(rightWidth, layout?.clientWidth ?? window.innerWidth, panel?.getBoundingClientRect().width ?? 0, chat?.getBoundingClientRect().width ?? window.innerWidth)
+        }} onResize={setRightWidth} />}<RightPanel mode={rightMode} tabs={openRightTabs} detail={desktopConversation.detail} activity={activityPanelProps} width={rightWidth} maximized={rightPanelMaximized} fileTabs={openFileTabs} activeFileTabId={activeFileTabId} activeChildAgent={activeChildAgent} onMode={selectRightMode} onCloseMode={closeRightMode} onOpenFile={openFile} onActivateFile={activateFile} onCloseFile={closeFile} onOpenChildAgent={openChildAgent} onBackChildAgent={() => setActiveChildAgent(null)} onOpenEvidence={openEvidence} onToggleMaximized={() => setRightPanelMaximized((value) => !value)} onCollapse={collapseRightSidebar} /></>}
         {contactCardOpen && contact && <ContactSideCard
           key={contact.id}
           contact={contact}

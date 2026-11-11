@@ -14,7 +14,7 @@ type Props = {
 export function StartupLayout({ avatar, surfaceRef, avatarRef, onWindowAction }: Props) {
   return <div className="fox-startup-screen">
     <header className="fox-startup-titlebar" data-tauri-drag-region="">
-      <span data-tauri-drag-region=""><img src="/app-logo.png" alt="" />Fox</span>
+      <span data-tauri-drag-region=""><img src="/app-icon.png" alt="" />Fox</span>
       <div>
         <button aria-label="最小化" disabled={!onWindowAction} onClick={() => onWindowAction?.('minimize')}><Minus /></button>
         <button aria-label="最大化或还原" disabled={!onWindowAction} onClick={() => onWindowAction?.('toggleMaximize')}><Square /></button>

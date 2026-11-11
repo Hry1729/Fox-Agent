@@ -26,9 +26,13 @@
 .content[data-state="inactive"] { pointer-events: none; }
 .content:focus-visible { --focus-outline-offset: 3px; border-radius: var(--radius-control); }
 /* Fox's mode switch is two equal compact tabs inside a fixed sidebar width. */
-:global(.fox-arc-mode-tabs) .listShell { display: flex; width: 100%; border-radius: 10px; }
+:global(.fox-arc-mode-tabs) .listShell { display: flex; width: 100%; border-radius: 999px; }
 :global(.fox-arc-mode-tabs) .viewport { width: 100%; }
-:global(.fox-arc-mode-tabs) .list { display: flex; width: 100%; }
-:global(.fox-arc-mode-tabs) .trigger { min-width: 0; flex: 1 1 0; padding-inline: var(--space-2); border-radius: 7px; }
+:global(.fox-arc-mode-tabs) .list { display: flex; width: 100%; gap: 0; padding: 2px; }
+:global(.fox-arc-mode-tabs) .trigger { min-width: 0; flex: 1 1 0; padding-inline: 8px; border-radius: 999px; transition: flex 180ms ease, color 150ms ease; }
+:global(.fox-arc-mode-tabs) .trigger[data-state='active'] { flex: 2 1 0; }
+:global(.fox-arc-mode-tabs) .triggerLabel { gap: 0; }
+:global(.fox-arc-mode-tabs) .triggerLabel :global(.fox-mode-label) { max-width: 0; opacity: 0; overflow: hidden; transition: max-width 180ms ease, opacity 120ms ease, margin 180ms ease; }
+:global(.fox-arc-mode-tabs) .trigger[data-state='active'] :global(.fox-mode-label) { max-width: 3em; margin-left: 6px; opacity: 1; }
 .trigger:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 @media (prefers-reduced-motion: reduce) { .trigger { transition: none; } }

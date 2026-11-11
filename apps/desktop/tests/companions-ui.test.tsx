@@ -12,6 +12,7 @@ import type { AgentRecord, ConversationDetail, ToolCallRecord } from '../src/fea
 
 const contact: Companion = {
   id: 'cmp_one', conversationId: 'chat', templateAgentId: 'expert', displayName: '当前联系人',
+  latestMessagePreview: '最新消息\n第二行内容',
   avatarRef: '', duty: '', personaOverride: null, workspaceDir: 'C:/fox/workspace', workspaceState: 'ready',
   workspaceError: null, isDefault: false, pinnedAt: 1, lastReadOrdinal: 0, modelProviderId: null, modelRef: null, unreadCount: 2, activeRunStatus: null,
   archivedAt: null, deletingAt: null,
@@ -29,6 +30,7 @@ describe('联系人桌面组件', () => {
   test('侧栏展示活跃身份、未读与选中会话，归档身份不占位置', () => {
     const html = render(<ContactSidebar activeId="chat" />)
     expect(html).toContain('当前联系人')
+    expect(html).toContain('最新消息 第二行内容')
     expect(html).toContain('2 条新消息')
     expect(html).toContain('aria-current="page"')
     expect(html).not.toContain('已归档角色')
