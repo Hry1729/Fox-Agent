@@ -49,7 +49,8 @@ import { type ManagementReturnRoutes, captureManagementReturnRoutes, managementE
 import { type KnowledgeSourceLocator, type LocalKnowledgeDocumentAsk, type NavigateWorkspace, type WorkspaceView } from '@/features/workspace/types'
 import { WorkspaceShell } from '@/features/workspace/workspace-shell'
 import { useNavigationHistory } from '@/features/workspace/use-navigation-history'
-import { useSidebarWindowGrowth, type SidebarGrowthEntry } from '@/features/workspace/use-sidebar-window-growth'
+import { useSidebarWindowGrowth, type SidebarGrowthEntry, type SidebarGrowthRefusal } from '@/features/workspace/use-sidebar-window-growth'
+import { sideCardGrowthRollback, useChatWorkspaceSideCard } from './workbench-side-cards'
 import { File, ShieldAlert, ShieldCheck } from 'lucide-react'
 import { type KeyboardEvent, Profiler, Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { needsLocalKnowledgeNames } from './composer/knowledge-chip-name'
@@ -1179,7 +1180,13 @@ export function Workbench() {
     setRightSidebarCollapsed(true)
   }, [activeView, timelineEmpty])
   const showConversationRightSidebar = activeView === 'chat' && (!timelineEmpty || privateChat)
-  const contactCardOpen = Boolean(contactCardConversationId && contact && contact.conversationId === contactCardConversationId)
+  const closeContactCard = useStableCallback(() => { setContactCardConversationId(null) })
+  // The contact card is a chat-workspace card: settings / shared-memory / agent pages
+  // keep the SAME conversation selected, so leaving chat has to clear the open state
+  // (otherwise it reopens stale on the way back) and the predicate has to gate it
+  // (otherwise the card, and its native width claim, leaks for one frame).
+  const insideChatWorkspace = useChatWorkspaceSideCard(activeView, closeContactCard)
+  const contactCardOpen = insideChatWorkspace && Boolean(contactCardConversationId && contact && contact.conversationId === contactCardConversationId)
   // SPEC item 4: ONE shared controller turns the open sibling side cards into
   // native window growth (each card costs width + its 5px gap). A maximized
   // right panel keeps the window as-is and covers the chat instead, so it is
@@ -1190,12 +1197,15 @@ export function Workbench() {
     if (contactCardOpen) entries.push({ id: 'contact-card', width: CONTACT_SIDE_CARD_WIDTH })
     return entries
   }, [showConversationRightSidebar, rightSidebarCollapsed, rightPanelMaximized, rightWidth, contactCardOpen])
-  const handleSidebarGrowthRefused = useStableCallback((entries: SidebarGrowthEntry[]) => {
-    // DOM rollback: the native growth was refused after a retry, so close the
-    // card that asked for it instead of leaving the DOM wider than the window.
-    const refused = entries[entries.length - 1]
-    if (refused?.id === 'contact-card') setContactCardConversationId(null)
-    else if (refused?.id === 'right-panel') collapseRightSidebar()
+  const handleSidebarGrowthRefused = useStableCallback((refusals: SidebarGrowthRefusal[]) => {
+    // DOM rollback: the native growth was refused after a retry, so undo the cards
+    // that asked for room the window does not reflect — an already-open card goes
+    // back to the width it actually has, a card that never got it closes, and a
+    // sibling the window already carries is left alone in either opening order.
+    const rollback = sideCardGrowthRollback(refusals)
+    if (rollback.closeContactCard) closeContactCard()
+    if (rollback.restoreRightPanelWidth !== null) setRightWidth(rollback.restoreRightPanelWidth)
+    if (rollback.closeRightPanel) collapseRightSidebar()
   })
   useSidebarWindowGrowth(sidebarGrowthEntries, handleSidebarGrowthRefused)
   const handleRuntimeOpenSource = useStableCallback((source: RuntimeSource) => {

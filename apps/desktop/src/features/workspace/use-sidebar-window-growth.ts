@@ -40,6 +40,14 @@ import { LogicalPosition, LogicalSize, currentMonitor, getCurrentWindow } from '
  *   width that actually landed, so a later close or `dispose()` can still undo
  *   it; only a real native mutation failure reports back, which is the single
  *   case where the DOM rolls the card back;
+ * - a refusal names the cards that asked for room the accepted declaration did not
+ *   already carry, each with the width that declaration gave them
+ *   (`SidebarGrowthRefusal`), so the DOM rolls back the responsible card only —
+ *   never a sibling that was already accommodated, whichever order the cards were
+ *   opened in. A superseded pass whose ALREADY-DISPATCHED write still lands
+ *   SUCCESSFULLY retains each continuously present card's latest successful width
+ *   as rollback history, even if its desired width changed (clamping is not failure);
+ *   rejected writes own measured geometry but never establish that history;
  * - non-Tauri (browser preview) is DOM-only: no native calls at all.
  *
  * Known limit: `BASE_MIN_WIDTH` / `BASE_MIN_HEIGHT` mirror the PRODUCTION
@@ -68,6 +76,23 @@ export const BASE_MIN_WIDTH = 600
 export const BASE_MIN_HEIGHT = 560
 
 export interface SidebarGrowthEntry { id: string; width: number }
+
+/** One card held responsible for a refused growth, paired with the width the
+ *  ACCEPTED declaration carried for it.
+ *
+ *  `onGrowthRefused` reports the CARDS THAT ASKED FOR NEW ROOM and nothing else:
+ *  the declaration is a set of siblings, so "the last entry" is a fixed render
+ *  order, not the requester. A card the accepted declaration already carries (same
+ *  id, same or smaller width) is not part of the failure, and an already-open card
+ *  that only grew wider is rolled back to `accepted` rather than closed. */
+export interface SidebarGrowthRefusal {
+  id: string
+  /** The width this pass asked the native layer to make room for. */
+  width: number
+  /** The width the accepted declaration gave this card, or `null` when the card
+   *  was not open in it — the case that has to close. */
+  accepted: number | null
+}
 
 export interface SizeLike { width: number; height: number }
 export interface PointLike { x: number; y: number }
@@ -99,8 +124,10 @@ export interface SidebarWindowGrowthDeps {
   /** `currentMonitor()` — an exported function of the window module, not a method. */
   getMonitor: () => Promise<MonitorLike | null>
   log?: (message: string) => void
-  /** Called when a growth could not be applied, so the UI can roll the DOM back. */
-  onGrowthRefused?: (entries: SidebarGrowthEntry[]) => void
+  /** Called when a growth could not be applied, so the UI can roll the DOM back.
+   *  Receives ONLY the cards that asked for new room (see `SidebarGrowthRefusal`),
+   *  never a sibling the window already reflects. */
+  onGrowthRefused?: (refusals: SidebarGrowthRefusal[]) => void
 }
 
 export interface SidebarWindowGrowth {
@@ -112,6 +139,19 @@ export interface SidebarWindowGrowth {
 
 function sameEntries(a: SidebarGrowthEntry[], b: SidebarGrowthEntry[]) {
   return a.length === b.length && a.every((entry, index) => entry.id === b[index].id && entry.width === b[index].width)
+}
+
+/** The cards of `entries` that asked for room `accepted` did not already cover,
+ *  each paired with the width the window really reflects for it.
+ *
+ *  Narrowed and removed cards are never reported — they asked for LESS, so they
+ *  cannot be responsible for a growth the native layer refused — and the answer
+ *  is keyed by id, so the declaration order cannot decide who gets rolled back. */
+function refusalsFor(accepted: readonly SidebarGrowthEntry[], entries: readonly SidebarGrowthEntry[]): SidebarGrowthRefusal[] {
+  const baseline = new Map(accepted.map((entry) => [entry.id, entry.width]))
+  return entries
+    .filter((entry) => entry.width > (baseline.get(entry.id) ?? 0))
+    .map((entry) => ({ id: entry.id, width: entry.width, accepted: baseline.get(entry.id) ?? null }))
 }
 
 function describe(cause: unknown) {
@@ -130,12 +170,18 @@ function detach(cleanup: (() => void) | null) {
 
 export function createSidebarWindowGrowth(deps: SidebarWindowGrowthDeps): SidebarWindowGrowth {
   type Mode = 'normal' | 'system' | 'unknown'
-  type Operation = { generation: number; entries: SidebarGrowthEntry[]; wanted: number; deferred: boolean; minimums: Set<number>; fromResize: boolean; geometry: Geometry | null }
+  type Card = Readonly<SidebarGrowthEntry & { lifetime: symbol }>
+  type Failure = Readonly<{ cause: unknown }>
+  type Outcome = { status: 'pending' } | { status: 'fulfilled' } | { status: 'rejected'; failure: Failure }
+  type Operation = { generation: number; entries: readonly Card[]; wanted: number; deferred: boolean; minimums: Set<number>; fromResize: boolean; geometry: Geometry | null }
   type Geometry = { inner: SizeLike; factor: number; width: number; height: number; outer: SizeLike | null; position: PointLike | null; monitor: MonitorLike | null }
-  type PendingResize = { width: number; owned: number; base: number }
+  type PendingResize = Readonly<{ width: number; owned: number; base: number; generation: number; entries: readonly Card[]; outcome: Readonly<Outcome> }>
 
   const log = deps.log ?? (() => undefined)
-  let desired: SidebarGrowthEntry[] = []
+  let desired: Card[] = []
+  // Rollback history is the latest success per continuous card lifetime, not its maximum width or native allocation.
+  let accepted: Card[] = []
+  const rejectedAccommodation = new Map<symbol, Failure>()
   let declarationGeneration = 0
   let appliedDelta = 0
   let closedBase: number | null = null
@@ -156,6 +202,24 @@ export function createSidebarWindowGrowth(deps: SidebarWindowGrowthDeps): Sideba
   const listeners = new Set<() => void>()
 
   const current = (operation: Operation) => operation.generation === declarationGeneration
+  const present = (card: Card) => desired.some((entry) => entry.lifetime === card.lifetime)
+  function accommodate(entries: readonly Card[], successfulWrite = false): Failure | null {
+    const baseline = new Map(accepted.map((entry) => [entry.lifetime, entry]))
+    let failure: Failure | null = null
+    for (const entry of entries) {
+      if (!present(entry)) continue
+      const rejected = rejectedAccommodation.get(entry.lifetime)
+      // Matching geometry after a rejection is not independent evidence of accommodation.
+      if (!successfulWrite && rejected && entry.width !== baseline.get(entry.lifetime)?.width) {
+        failure = rejected
+        continue
+      }
+      baseline.set(entry.lifetime, entry)
+      rejectedAccommodation.delete(entry.lifetime)
+    }
+    accepted = [...baseline.values()]
+    return failure
+  }
   const setOwned = (owned: number) => {
     if (owned === appliedDelta) return
     appliedDelta = owned
@@ -181,6 +245,7 @@ export function createSidebarWindowGrowth(deps: SidebarWindowGrowthDeps): Sideba
     if (mode !== 'system') return
     suppressed = true
     pendingResize = null
+    rejectedAccommodation.clear()
     pendingMovement = false
     blockedGeometry = null
     setOwned(0)
@@ -262,6 +327,14 @@ export function createSidebarWindowGrowth(deps: SidebarWindowGrowthDeps): Sideba
       pendingResize = null
       closedBase = pending.base
       setOwned(Math.max(0, pending.owned + geometry.width - pending.width))
+      if (pending.outcome.status === 'fulfilled') accommodate(pending.entries, true)
+      else if (pending.outcome.status === 'rejected') {
+        for (const entry of pending.entries) {
+          if (present(entry) && entry.width !== accepted.find((card) => card.lifetime === entry.lifetime)?.width) {
+            rejectedAccommodation.set(entry.lifetime, pending.outcome.failure)
+          }
+        }
+      }
     }
     return geometry
   }
@@ -273,7 +346,7 @@ export function createSidebarWindowGrowth(deps: SidebarWindowGrowthDeps): Sideba
     if (active) ensureResizeListener(appWindow)
     const operation: Operation = {
       generation: declarationGeneration,
-      entries: desired.map((entry) => ({ ...entry })),
+      entries: desired.slice(),
       wanted: desired.reduce((sum, entry) => sum + entry.width + SIDEBAR_CARD_GAP, 0),
       deferred: false,
       minimums: new Set(),
@@ -284,7 +357,9 @@ export function createSidebarWindowGrowth(deps: SidebarWindowGrowthDeps): Sideba
     const refuse = (cause: unknown, growing: boolean) => {
       if (!current(operation) || operation.deferred || suppressed) return
       log(`[sidebar-growth] ${growing ? 'growth' : 'shrink'} refused after retry (${describe(cause)}); keeping the measured size`)
-      if (growing) deps.onGrowthRefused?.(operation.entries)
+      // Only the cards that asked for NEW room are rolled back; a sibling the window
+      // already carries keeps its DOM state, whichever order it was declared in.
+      if (growing) deps.onGrowthRefused?.(refusalsFor(accepted, operation.entries))
     }
     reconciling = true
     try {
@@ -336,7 +411,7 @@ export function createSidebarWindowGrowth(deps: SidebarWindowGrowthDeps): Sideba
         }
       }
 
-      let failure: unknown
+      let failure: Failure | null = null
       const growing = operation.wanted > appliedDelta
       for (let attempt = 0; attempt < 2; attempt++) {
         if (attempt > 0) {
@@ -358,37 +433,46 @@ export function createSidebarWindowGrowth(deps: SidebarWindowGrowthDeps): Sideba
         }
         if (!(await normal(appWindow, operation))) return
         if (physicalWidth === geometry.inner.width) {
-          if (failure !== undefined) refuse(failure, growing)
+          if (failure) refuse(failure.cause, growing)
+          else {
+            failure = accommodate(operation.entries)
+            if (failure) refuse(failure.cause, refusalsFor(accepted, operation.entries).length > 0)
+          }
           if (physicalDestination(geometry, operation.wanted) > geometry.inner.width) {
             log('[sidebar-growth] no room left in the work area; the card keeps its width and narrows the chat')
           }
           await syncMinimum(appWindow, operation, settledMinimum())
-          blockedGeometry = { key: geometryKey(geometry, operation), failed: failure !== undefined }
+          blockedGeometry = { key: geometryKey(geometry, operation), failed: failure !== null }
           return
         }
-        if (attempt > 0) log(`[sidebar-growth] setSize failed (${describe(failure)}); retrying once`)
-        pendingResize = { width: geometry.width, owned: appliedDelta, base: closedBase }
-        failure = undefined
+        if (attempt > 0) log(`[sidebar-growth] setSize failed (${describe(failure?.cause)}); retrying once`)
+        const pending: PendingResize = {
+          width: geometry.width, owned: appliedDelta, base: closedBase,
+          generation: operation.generation, entries: operation.entries, outcome: { status: 'pending' },
+        }
+        pendingResize = pending
+        failure = null
         try {
           await appWindow.setSize(new LogicalSize(width, geometry.height))
         } catch (cause) {
-          failure = cause
+          failure = { cause }
           log(`[sidebar-growth] setSize failed: ${describe(cause)}`)
         }
-        // A dispatched write belongs to its pre-write geometry, even after a new declaration.
+        pendingResize = { ...pending, outcome: failure ? { status: 'rejected', failure } : { status: 'fulfilled' } }
         const landed = await resolveResize(appWindow, operation)
+        if (!current(operation)) return
         if (!(await normal(appWindow, operation))) return
         if (!landed) {
-          if (attempt === 1 && failure !== undefined) refuse(failure, growing)
+          if (attempt === 1 && failure) refuse(failure.cause, growing)
           return
         }
         geometry = landed
-        if (failure !== undefined && attempt === 0) continue
-        if (failure !== undefined) refuse(failure, growing)
+        if (failure && attempt === 0) continue
+        if (failure) refuse(failure.cause, growing)
         await syncMinimum(appWindow, operation, settledMinimum())
         if (!(await normal(appWindow, operation))) return
         if (physicalDestination(geometry, operation.wanted) !== geometry.inner.width) {
-          blockedGeometry = { key: geometryKey(geometry, operation), failed: failure !== undefined }
+          blockedGeometry = { key: geometryKey(geometry, operation), failed: failure !== null }
           if (!growing) log(`[sidebar-growth] shrink clamped: still owning ${Math.round(appliedDelta - operation.wanted)}px (min reset ${minReset ? 'succeeded' : 'FAILED'})`)
         }
         return
@@ -431,7 +515,13 @@ export function createSidebarWindowGrowth(deps: SidebarWindowGrowthDeps): Sideba
         blockedGeometry = null
       }
       active = true
-      desired = entries.map((entry) => ({ ...entry }))
+      const lifetimes = new Map(desired.map((entry) => [entry.id, entry.lifetime]))
+      desired = entries.map((entry) => ({ ...entry, lifetime: lifetimes.get(entry.id) ?? Symbol(entry.id) }))
+      accepted = accepted.filter(present)
+      const presentLifetimes = new Set(desired.map((entry) => entry.lifetime))
+      for (const lifetime of rejectedAccommodation.keys()) {
+        if (!presentLifetimes.has(lifetime)) rejectedAccommodation.delete(lifetime)
+      }
       enqueue(() => reconcile())
     },
     getAppliedDelta: () => appliedDelta,
@@ -444,6 +534,8 @@ export function createSidebarWindowGrowth(deps: SidebarWindowGrowthDeps): Sideba
       if (active) declarationGeneration += 1
       active = false
       desired = []
+      accepted = []
+      rejectedAccommodation.clear()
       stopListening()
       enqueue(() => reconcile(true))
     },
@@ -481,7 +573,7 @@ const NATIVE_DEPS: SidebarWindowGrowthDeps = {
   log: (message) => console.warn(message),
 }
 
-type RefusalHandler = (entries: SidebarGrowthEntry[]) => void
+type RefusalHandler = (refusals: SidebarGrowthRefusal[]) => void
 
 /** ONE controller per native window, shared by every hook instance mounted on it.
  *  The window has a single right edge, so two controllers driving the same window
@@ -504,7 +596,7 @@ function createShared(appWindow: SidebarWindowLike, deps: SidebarWindowGrowthDep
     refused,
     users: 0,
     disposeQueued: false,
-    growth: createSidebarWindowGrowth({ ...deps, onGrowthRefused: (entries) => { refused.current?.(entries) } }),
+    growth: createSidebarWindowGrowth({ ...deps, onGrowthRefused: (refusals) => { refused.current?.(refusals) } }),
   }
   sharedGrowths.set(appWindow, shared)
   return shared
@@ -590,7 +682,7 @@ function unbindGrowth(binding: GrowthBinding) {
  *  uses the real Tauri API. */
 export function useSidebarWindowGrowth(
   entries: SidebarGrowthEntry[],
-  onGrowthRefused?: (entries: SidebarGrowthEntry[]) => void,
+  onGrowthRefused?: (refusals: SidebarGrowthRefusal[]) => void,
   deps: SidebarWindowGrowthDeps = NATIVE_DEPS,
 ) {
   const bindingRef = useRef<GrowthBinding | null>(null)
@@ -621,7 +713,7 @@ export function useSidebarWindowGrowth(
     }
     // Browser preview: a private, native-call-free controller.
     const refused = { current: null as RefusalHandler | null }
-    const growth = createSidebarWindowGrowth({ ...deps, onGrowthRefused: (refusedEntries) => { refused.current?.(refusedEntries) } })
+    const growth = createSidebarWindowGrowth({ ...deps, onGrowthRefused: (refusals) => { refused.current?.(refusals) } })
     refused.current = refusedRef.current
     bindGrowth(binding, growth)
     return () => {

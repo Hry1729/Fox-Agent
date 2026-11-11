@@ -11,6 +11,7 @@ import {
   BASE_MIN_WIDTH,
   SIDEBAR_CARD_GAP,
   createSidebarWindowGrowth,
+  type SidebarWindowGrowth,
 } from '../src/features/workspace/use-sidebar-window-growth'
 import {
   createHarness,
@@ -25,6 +26,20 @@ import {
 } from './sidebar-window-growth-harness'
 
 const contactCard = [{ id: 'contact-card', width: 320 }]
+const panelCard = [{ id: 'right-panel', width: 300 }]
+const requestedWidths = (win: FakeWindow) => win.requests.filter((call) => call.name === 'setSize').map((call) => call.width)
+
+async function disposeToBaseline(win: FakeWindow, growth: SidebarWindowGrowth) {
+  const height = win.state.height
+  growth.dispose()
+  await drain(win, growth)
+  expect(win.state.width).toBe(1060)
+  expect(win.state.height).toBe(height)
+  expect(win.state.min).toEqual({ width: BASE_MIN_WIDTH, height: BASE_MIN_HEIGHT })
+  expect(growth.getAppliedDelta()).toBe(0)
+  expect(win.pendingCount()).toBe(0)
+  expect(win.listenerCount()).toBe(0)
+}
 
 function barrier() {
   let release!: () => void
@@ -446,6 +461,698 @@ describe('sidebar window growth controller', () => {
     growth.dispose()
   })
 
+  // 「谁要不到宽度就回滚谁」：声明是一组同级卡片，`entries[length-1]` 只是固定的渲染
+  // 顺序（右侧面板先、联系人卡后），不是请求者。控制器改成按「已接受的声明」做 id 对比，
+  // 所以下面两种开关顺序必须各自只怪罪新增加的那张卡，而不是关掉另一张。
+  test('回滚只看请求者：先开联系人卡、再开右侧面板时只回报面板', async () => {
+    const { win, growth, refused } = createHarness()
+    growth.setSidebars(contactCard)
+    await settle()
+    expect(win.state.width).toBe(1385)
+    win.failNextSetSize(2)
+    growth.setSidebars([...contactCard, { id: 'right-panel', width: 300 }])
+    await settle()
+    expect(refused).toEqual([[{ id: 'right-panel', width: 300, accepted: null }]])
+    expect(win.state.width).toBe(1385)
+    // DOM 只关面板：联系人卡那 325px 仍然归它，dispose 时能干净地缩回基线宽度。
+    growth.setSidebars(contactCard)
+    await settle()
+    expect(refused).toHaveLength(1)
+    expect(growth.getAppliedDelta()).toBe(325)
+    growth.dispose()
+    await settle()
+    expect(win.state.width).toBe(1060)
+    expect(growth.getAppliedDelta()).toBe(0)
+  })
+
+  test('回滚只看请求者：先开右侧面板、再开联系人卡时只回报联系人卡', async () => {
+    const { win, growth, refused } = createHarness()
+    growth.setSidebars([{ id: 'right-panel', width: 300 }])
+    await settle()
+    expect(win.state.width).toBe(1365)
+    win.failNextSetSize(2)
+    growth.setSidebars([{ id: 'right-panel', width: 300 }, ...contactCard])
+    await settle()
+    // 面板排在声明最前面，但真正要不到宽度的是后开的联系人卡。
+    expect(refused).toEqual([[{ id: 'contact-card', width: 320, accepted: null }]])
+    expect(win.state.width).toBe(1365)
+    expect(growth.getAppliedDelta()).toBe(305)
+    growth.dispose()
+    await settle()
+    expect(win.state.width).toBe(1060)
+  })
+
+  test('已经落地的卡片变宽失败：回报它真正拥有的宽度，DOM 恢复而不是关掉', async () => {
+    const { win, growth, refused } = createHarness()
+    growth.setSidebars([{ id: 'right-panel', width: 300 }, { id: 'contact-card', width: 320 }])
+    await settle()
+    expect(win.state.width).toBe(1690)
+    win.failNextSetSize(2)
+    growth.setSidebars([{ id: 'right-panel', width: 500 }, { id: 'contact-card', width: 320 }])
+    await settle()
+    // 变宽的那张卡带着 `accepted: 300`（真正落地的宽度）回来，同级的联系人卡不在名单里。
+    expect(refused).toEqual([[{ id: 'right-panel', width: 500, accepted: 300 }]])
+    expect(win.state.width).toBe(1690)
+    expect(growth.getAppliedDelta()).toBe(630)
+    growth.dispose()
+    await settle()
+    expect(win.state.width).toBe(1060)
+  })
+
+  test('重复的失败声明：每次回报同一份回滚，失败的趟次永不进入已接受基线', async () => {
+    const { win, growth, refused } = createHarness()
+    growth.setSidebars(contactCard)
+    await settle()
+    win.failNextSetSize(100)
+    growth.setSidebars([...contactCard, { id: 'right-panel', width: 300 }])
+    await settle()
+    growth.setSidebars([...contactCard, { id: 'right-panel', width: 300 }])
+    await settle()
+    expect(refused).toEqual([
+      [{ id: 'right-panel', width: 300, accepted: null }],
+      [{ id: 'right-panel', width: 300, accepted: null }],
+    ])
+    expect(sizeCalls(win).map((call) => call.width)).toEqual([1385, 1690, 1690, 1690, 1690])
+    expect(win.state.width).toBe(1385)
+    expect(growth.getAppliedDelta()).toBe(325)
+    growth.dispose()
+    await settle()
+    expect(win.state.width).toBe(1385)
+  })
+
+  test('被新声明取代的失败趟不回报任何东西：陈旧的失败不能回滚活着的 DOM', async () => {
+    const { win, growth, refused } = createHarness({ defer: true })
+    await drain(win, growth, contactCard)
+    expect(win.state.width).toBe(1385)
+    win.failNextSetSize(2)
+    growth.setSidebars([...contactCard, { id: 'right-panel', width: 300 }])
+    await settle()
+    expect(win.pendingNames()).toEqual(['setSize'])
+    // DOM 先关掉面板：这一趟的增长已经过期，失败也不该决定现在的界面。
+    growth.setSidebars(contactCard)
+    await drain(win, growth)
+    expect(refused).toEqual([])
+    expect(sizeCalls(win).map((call) => call.width)).toEqual([1385, 1690])
+    expect(win.state.width).toBe(1385)
+    expect(growth.getAppliedDelta()).toBe(325)
+    // The stale attempt consumed one armed failure; the pending one must not eat
+    // the dispose shrink as well.
+    win.failNextSetSize(0)
+    growth.dispose()
+    await drain(win, growth)
+    expect(win.state.width).toBe(1060)
+  })
+
+  // 审查 P2（复现自现有延迟假窗口）：卡片 A 的增长**已派发**、还压在延迟队列里时新声明插队；
+  // 旧一代的写随后成功落地，窗口确实带着 A 的那段宽度（resolveResize 按实测记账），但
+  // finally 里的 `current(operation)` 拦下了基线更新——accepted 从未记录 A。之后新一代卡片
+  // 两次失败时，refusalsFor 把**两张**卡都按 accepted:null 回报，Workbench 连带关掉已被成功
+  // 容纳的那张。修复：被取代的**成功**趟把它那张在最新声明里原样保留的卡片并入已接受基线，
+  // 同时陈旧回调、未发出的原生写、失败的改写照旧一概不进基线。
+
+  test('被取代的迟到成功仍算容纳（先开联系人卡）：后继面板失败只回报面板', async () => {
+    const { win, growth, refused } = createHarness({ defer: true })
+    growth.setSidebars(contactCard)
+    await settle()
+    // 1385 的 setSize 已派发给原生层、还没执行；新声明在此时插队。
+    expect(win.pendingNames()).toEqual(['setSize'])
+    growth.setSidebars([{ id: 'right-panel', width: 300 }, ...contactCard])
+    await settle()
+    expect(win.state.width).toBe(1060)
+
+    // 旧一代的写现在才成功落地：陈旧回调被代际守卫压住（不重试、不回报），但延迟的
+    // 测量必须恢复真实归属——窗口带着联系人卡的 325。
+    win.flush()
+    await settle()
+    expect(win.state.width).toBe(1385)
+    expect(growth.getAppliedDelta()).toBe(325)
+
+    // 新一代的面板增长两次尝试都失败。联系人卡没要新宽度：它已被那次成功容纳，
+    // 绝不进拒绝名单。
+    win.failNextSetSize(2)
+    await drain(win, growth)
+    expect(refused).toEqual([[{ id: 'right-panel', width: 300, accepted: null }]])
+    expect(sizeCalls(win).map((call) => call.width)).toEqual([1385, 1690, 1690])
+    expect(win.state.width).toBe(1385)
+
+    // DOM 只关面板：那 325 仍归联系人卡，缩回声明零原生写，dispose 干净回到基线。
+    growth.setSidebars(contactCard)
+    await drain(win, growth)
+    expect(refused).toHaveLength(1)
+    expect(growth.getAppliedDelta()).toBe(325)
+    expect(sizeCalls(win).map((call) => call.width)).toEqual([1385, 1690, 1690])
+    growth.dispose()
+    await drain(win, growth)
+    expect(win.state.width).toBe(1060)
+    expect(win.state.min.width).toBe(BASE_MIN_WIDTH)
+    expect(growth.getAppliedDelta()).toBe(0)
+  })
+
+  test('被取代的迟到成功仍算容纳（先开右侧面板）：后继联系人卡失败只回报它', async () => {
+    const { win, growth, refused } = createHarness({ defer: true })
+    const panel = [{ id: 'right-panel', width: 300 }]
+    growth.setSidebars(panel)
+    await settle()
+    expect(win.pendingNames()).toEqual(['setSize'])
+    growth.setSidebars([...panel, ...contactCard])
+    await settle()
+    // 面板的增长迟到但成功：窗口 1365、拥有 305，基线记下 right-panel:300。
+    win.flush()
+    await settle()
+    expect(win.state.width).toBe(1365)
+    expect(growth.getAppliedDelta()).toBe(305)
+    // 声明顺序上面板在最前，但真正要不到宽度的是后开的联系人卡。
+    win.failNextSetSize(2)
+    await drain(win, growth)
+    expect(refused).toEqual([[{ id: 'contact-card', width: 320, accepted: null }]])
+    expect(sizeCalls(win).map((call) => call.width)).toEqual([1365, 1690, 1690])
+    expect(win.state.width).toBe(1365)
+    growth.setSidebars(panel)
+    await drain(win, growth)
+    expect(refused).toHaveLength(1)
+    expect(growth.getAppliedDelta()).toBe(305)
+    growth.dispose()
+    await drain(win, growth)
+    expect(win.state.width).toBe(1060)
+  })
+
+  test('变宽的成功趟被取代：已接受基线跟着变宽，后续失败不再要求恢复旧宽度', async () => {
+    const { win, growth, refused } = createHarness({ defer: true })
+    await drain(win, growth, contactCard)
+    expect(win.state.width).toBe(1385)
+    // 联系人卡 320 → 360：1425 的写已派发时，面板声明插队。
+    growth.setSidebars([{ id: 'contact-card', width: 360 }])
+    await settle()
+    expect(win.pendingNames()).toEqual(['setSize'])
+    growth.setSidebars([{ id: 'contact-card', width: 360 }, { id: 'right-panel', width: 300 }])
+    await settle()
+    win.flush()
+    await settle()
+    expect(win.state.width).toBe(1425)
+    expect(growth.getAppliedDelta()).toBe(365)
+    // 基线里的联系人卡跟着那次成功变成 360；面板失败时它完全不在名单上
+    // （修复前会回报 {width:360, accepted:320} 让 DOM 把已经落地的宽度改回去）。
+    win.failNextSetSize(2)
+    await drain(win, growth)
+    expect(refused).toEqual([[{ id: 'right-panel', width: 300, accepted: null }]])
+    expect(win.state.width).toBe(1425)
+    growth.dispose()
+    await drain(win, growth)
+    expect(win.state.width).toBe(1060)
+  })
+
+  test('钳制成功的陈旧趟也算容纳：基线记声明宽度，不是被工作区挤掉的部分宽度', async () => {
+    // 物理工作区只有 2700：联系人卡的 1385 增长被钳成 1350。钳制不是失败（SPEC §4），
+    // 所以这次被取代的成功写仍把 contact-card:320（声明值）并入基线。
+    const harness = createHarness({
+      defer: true,
+      origin: { x: 0, y: 50 },
+      monitor: createMonitor({ width: 2700, height: 1200, taskbar: 0 }),
+    })
+    const { win, growth, refused } = harness
+    growth.setSidebars(contactCard)
+    await settle()
+    expect(win.pendingNames()).toEqual(['setSize'])
+    growth.setSidebars([...contactCard, { id: 'right-panel', width: 300 }])
+    await settle()
+    // 面板那一趟读到的已是宽敞的工作区（窗口被拖去了外接屏）：它有真实增长空间，
+    // 失败才走真实的拒绝回报路径。先让陈旧的那次钳制写落地（不能让它吃到新装的失败计数）。
+    harness.deps.getMonitor = async () => createMonitor()
+    win.flush()
+    await settle()
+    expect(win.state.width).toBe(1350)
+    expect(growth.getAppliedDelta()).toBe(290)
+    win.failNextSetSize(2)
+    await drain(win, growth)
+    expect(win.state.width).toBe(1350)
+    expect(growth.getAppliedDelta()).toBe(290)
+    expect(sizeCalls(win).map((call) => call.width)).toEqual([1350, 1690, 1690])
+    // 窗口只给了联系人卡 290 而它声明 320——仍算已容纳：拒绝名单只有面板。
+    expect(refused).toEqual([[{ id: 'right-panel', width: 300, accepted: null }]])
+    growth.dispose()
+    await drain(win, growth)
+    expect(win.state.width).toBe(1060)
+    expect(win.state.min.width).toBe(BASE_MIN_WIDTH)
+  })
+
+  test('迟到的失败趟即使部分改写了窗口，也不进入已接受基线', async () => {
+    // setSizeAppliesAnyway：原生调用抛错但窗口其实变宽了。「没有完整的成功就没有
+    // 容纳」：拥有量一路按实测记（325 → 630），基线却一步不让——两张新宽卡都被点名，
+    // DOM 连联系人卡一起关，关闭趟按真实测量的 630 缩回 1060。
+    const { win, growth, refused } = createHarness({ defer: true, setSizeAppliesAnyway: true })
+    growth.setSidebars(contactCard)
+    await settle()
+    growth.setSidebars([...contactCard, { id: 'right-panel', width: 300 }])
+    await settle()
+    win.failNextSetSize(1)
+    win.flush()
+    await settle()
+    expect(win.state.width).toBe(1385)
+    expect(growth.getAppliedDelta()).toBe(325)
+    win.failNextSetSize(2)
+    await drain(win, growth)
+    expect(refused).toEqual([[
+      { id: 'contact-card', width: 320, accepted: null },
+      { id: 'right-panel', width: 300, accepted: null },
+    ]])
+    // 新一代的失败写同样部分生效了：实测记账跟上（630），但基线依然为空——修复只
+    // 救济「完整成功」的那次写，两张要新宽的卡都被点名。
+    expect(win.state.width).toBe(1690)
+    expect(growth.getAppliedDelta()).toBe(630)
+    growth.setSidebars([])
+    await drain(win, growth)
+    expect(win.state.width).toBe(1060)
+    expect(growth.getAppliedDelta()).toBe(0)
+    expect(win.state.min.width).toBe(BASE_MIN_WIDTH)
+    expect(refused).toHaveLength(1)
+    growth.dispose()
+    await settle()
+  })
+
+  test('从未派发的陈旧增长：不写原生、不进基线，新卡片失败时两张一起回报', async () => {
+    // 对偶情形：旧一代还卡在写前的几何读取上（getMonitor 门闸），一个原生写都没发。
+    // 代际守卫必须继续拦住它——修复只救济「已派发且成功」的写。
+    const harness = createHarness()
+    const { win, growth, refused } = harness
+    const gate = barrier()
+    const entered = barrier()
+    harness.deps.getMonitor = async () => { entered.release(); await gate.promise; return createMonitor() }
+    growth.setSidebars(contactCard)
+    await entered.promise
+    growth.setSidebars([...contactCard, { id: 'right-panel', width: 300 }])
+    gate.release()
+    win.failNextSetSize(2)
+    await settle()
+    // 只有新一代的两次失败尝试发过 setSize；陈旧趟连一次都没有。
+    expect(sizeCalls(win).map((call) => call.width)).toEqual([1690, 1690])
+    expect(requestedWidths(win)).toEqual([1690, 1690])
+    expect(win.state.width).toBe(1060)
+    expect(growth.getAppliedDelta()).toBe(0)
+    // 没有任何写真正落地：基线仍是空的，两张要新宽的卡一起被点名。
+    expect(refused).toEqual([[
+      { id: 'contact-card', width: 320, accepted: null },
+      { id: 'right-panel', width: 300, accepted: null },
+    ]])
+    growth.dispose()
+    await settle()
+  })
+
+  for (const superseded of [false, true]) {
+    for (const panelFirst of [false, true]) {
+      test(`delayed successful measurement preserves contact credit: superseded=${superseded}, panelFirst=${panelFirst}`, async () => {
+        const { win, growth, refused } = createHarness({ defer: true })
+        const both = panelFirst ? [...panelCard, ...contactCard] : [...contactCard, ...panelCard]
+        growth.setSidebars(contactCard)
+        await settle()
+        expect(win.pendingNames()).toEqual(['setSize'])
+        if (superseded) growth.setSidebars(both)
+        win.failNextInnerSize(1)
+        win.flush()
+        await settle()
+        expect(win.state.width).toBe(1385)
+        expect(growth.getAppliedDelta()).toBe(superseded ? 325 : 0)
+        expect(refused).toEqual([])
+        win.failNextSetSize(2)
+        if (!superseded) growth.setSidebars(both)
+        await drain(win, growth)
+        expect(requestedWidths(win)).toEqual([1385, 1690, 1690])
+        expect(win.state.width).toBe(1385)
+        expect(growth.getAppliedDelta()).toBe(325)
+        expect(win.state.min.width).toBe(925)
+        expect(refused).toEqual([[{ id: 'right-panel', width: 300, accepted: null }]])
+        await drain(win, growth, contactCard)
+        expect(requestedWidths(win)).toEqual([1385, 1690, 1690])
+        await disposeToBaseline(win, growth)
+      })
+    }
+
+    test(`delayed successful widening establishes the 360 rollback baseline: superseded=${superseded}`, async () => {
+      const { win, growth, refused } = createHarness({ defer: true })
+      const wider = [{ id: 'contact-card', width: 360 }]
+      await drain(win, growth, contactCard)
+      growth.setSidebars(wider)
+      await settle()
+      expect(win.pendingNames()).toEqual(['setSize'])
+      if (superseded) growth.setSidebars([...panelCard, ...wider])
+      win.failNextInnerSize(1)
+      win.flush()
+      await settle()
+      expect(win.state.width).toBe(1425)
+      expect(growth.getAppliedDelta()).toBe(superseded ? 365 : 325)
+      expect(refused).toEqual([])
+      win.failNextSetSize(2)
+      if (!superseded) growth.setSidebars([...panelCard, ...wider])
+      await drain(win, growth)
+      expect(requestedWidths(win)).toEqual([1385, 1425, 1730, 1730])
+      expect(win.state.width).toBe(1425)
+      expect(growth.getAppliedDelta()).toBe(365)
+      expect(refused).toEqual([[{ id: 'right-panel', width: 300, accepted: null }]])
+      win.failNextSetSize(2)
+      await drain(win, growth, [{ id: 'contact-card', width: 400 }])
+      expect(refused).toEqual([
+        [{ id: 'right-panel', width: 300, accepted: null }],
+        [{ id: 'contact-card', width: 400, accepted: 360 }],
+      ])
+      expect(requestedWidths(win)).toEqual([1385, 1425, 1730, 1730, 1465, 1465])
+      await disposeToBaseline(win, growth)
+    })
+  }
+
+  for (const delayed of [false, true]) {
+    test(`late sibling success retains the existing panel's 300 rollback width: delayed=${delayed}`, async () => {
+      const { win, growth, refused } = createHarness({ defer: true })
+      await drain(win, growth, panelCard)
+      growth.setSidebars([...panelCard, ...contactCard])
+      await settle()
+      expect(win.pendingNames()).toEqual(['setSize'])
+      growth.setSidebars([{ id: 'right-panel', width: 340 }, ...contactCard])
+      if (delayed) win.failNextInnerSize(1)
+      win.flush()
+      await settle()
+      expect(win.state.width).toBe(1690)
+      expect(growth.getAppliedDelta()).toBe(630)
+      expect(refused).toEqual([])
+      win.failNextSetSize(2)
+      await drain(win, growth)
+      expect(refused).toEqual([[{ id: 'right-panel', width: 340, accepted: 300 }]])
+      expect(requestedWidths(win)).toEqual([1365, 1690, 1730, 1730])
+      expect(win.state.width).toBe(1690)
+      expect(growth.getAppliedDelta()).toBe(630)
+      await drain(win, growth, [...panelCard, ...contactCard])
+      expect(requestedWidths(win)).toEqual([1365, 1690, 1730, 1730])
+      expect(refused).toHaveLength(1)
+      await disposeToBaseline(win, growth)
+    })
+
+    test(`late success covers a narrower replacement, whose later success replaces rather than maximizes history: delayed=${delayed}`, async () => {
+      const { win, growth, refused } = createHarness({ defer: true })
+      const narrower = [{ id: 'contact-card', width: 280 }]
+      growth.setSidebars(contactCard)
+      await settle()
+      expect(win.pendingNames()).toEqual(['setSize'])
+      growth.setSidebars([...panelCard, ...narrower])
+      if (delayed) win.failNextInnerSize(1)
+      win.flush()
+      await settle()
+      expect(win.state.width).toBe(1385)
+      expect(growth.getAppliedDelta()).toBe(325)
+      win.failNextSetSize(2)
+      await drain(win, growth)
+      expect(refused).toEqual([[{ id: 'right-panel', width: 300, accepted: null }]])
+      expect(requestedWidths(win)).toEqual([1385, 1650, 1650])
+      await drain(win, growth, narrower)
+      expect(win.state.width).toBe(1345)
+      expect(growth.getAppliedDelta()).toBe(285)
+      expect(win.state.min.width).toBe(885)
+      win.failNextSetSize(2)
+      await drain(win, growth, [{ id: 'contact-card', width: 300 }])
+      expect(refused).toEqual([
+        [{ id: 'right-panel', width: 300, accepted: null }],
+        [{ id: 'contact-card', width: 300, accepted: 280 }],
+      ])
+      expect(requestedWidths(win)).toEqual([1385, 1650, 1650, 1345, 1365, 1365])
+      await disposeToBaseline(win, growth)
+    })
+
+    test(`a late 320 success does not pre-accept a desired 360 replacement: delayed=${delayed}`, async () => {
+      const { win, growth, refused } = createHarness({ defer: true })
+      growth.setSidebars(contactCard)
+      await settle()
+      expect(win.pendingNames()).toEqual(['setSize'])
+      growth.setSidebars([{ id: 'contact-card', width: 360 }, ...panelCard])
+      if (delayed) win.failNextInnerSize(1)
+      win.flush()
+      await settle()
+      expect(refused).toEqual([])
+      win.failNextSetSize(2)
+      await drain(win, growth)
+      expect(refused).toEqual([[
+        { id: 'contact-card', width: 360, accepted: 320 },
+        { id: 'right-panel', width: 300, accepted: null },
+      ]])
+      expect(requestedWidths(win)).toEqual([1385, 1730, 1730])
+      expect(win.state.width).toBe(1385)
+      expect(growth.getAppliedDelta()).toBe(325)
+      await disposeToBaseline(win, growth)
+    })
+
+    test(`a rejected stale write owns its full mutation without accepting either card: delayed=${delayed}`, async () => {
+      const { win, growth, refused } = createHarness({ defer: true, setSizeAppliesAnyway: true })
+      growth.setSidebars(contactCard)
+      await settle()
+      expect(win.pendingNames()).toEqual(['setSize'])
+      growth.setSidebars([...panelCard, ...contactCard])
+      win.failNextSetSize(1)
+      if (delayed) win.failNextInnerSize(1)
+      win.flush()
+      await settle()
+      expect(win.state.width).toBe(1385)
+      expect(growth.getAppliedDelta()).toBe(325)
+      expect(refused).toEqual([])
+      win.failNextSetSize(1)
+      await drain(win, growth)
+      expect(refused).toEqual([[
+        { id: 'right-panel', width: 300, accepted: null },
+        { id: 'contact-card', width: 320, accepted: null },
+      ]])
+      expect(requestedWidths(win)).toEqual([1385, 1690])
+      expect(win.state.width).toBe(1690)
+      expect(growth.getAppliedDelta()).toBe(630)
+      await disposeToBaseline(win, growth)
+    })
+  }
+
+  test('delayed second rejected partial widening recovers ownership, not the rejected width baseline', async () => {
+    const { win, growth, refused } = createHarness({ defer: true, setSizeApplyFraction: 0.5 })
+    await drain(win, growth, contactCard)
+    win.failNextSetSize(2)
+    growth.setSidebars([{ id: 'contact-card', width: 360 }])
+    await settle()
+    expect(win.pendingNames()).toEqual(['setSize'])
+    win.flush()
+    await settle()
+    expect(win.state.width).toBe(1405)
+    expect(growth.getAppliedDelta()).toBe(345)
+    expect(win.pendingNames()).toEqual(['setSize'])
+    win.failNextInnerSize(1)
+    win.flush()
+    await settle()
+    expect(win.state.width).toBe(1415)
+    expect(growth.getAppliedDelta()).toBe(345)
+    expect(refused).toEqual([[{ id: 'contact-card', width: 360, accepted: 320 }]])
+    win.fireResize()
+    await settle()
+    expect(growth.getAppliedDelta()).toBe(355)
+    expect(win.pendingNames()).toEqual(['setMinSize'])
+    win.failNextSetSize(2)
+    growth.setSidebars([{ id: 'contact-card', width: 400 }])
+    await drain(win, growth)
+    expect(refused).toEqual([
+      [{ id: 'contact-card', width: 360, accepted: 320 }],
+      [{ id: 'contact-card', width: 400, accepted: 320 }],
+    ])
+    expect(requestedWidths(win)).toEqual([1385, 1425, 1425, 1465, 1465])
+    expect(win.state.width).toBe(1452.5)
+    expect(growth.getAppliedDelta()).toBe(392.5)
+    win.state.height = 900
+    await disposeToBaseline(win, growth)
+  })
+
+  test('recovered rejected narrowing retains the last successful wider baseline without a growth callback', async () => {
+    const { win, growth, refused } = createHarness({ defer: true, setSizeAppliesAnyway: true })
+    await drain(win, growth, contactCard)
+    growth.setSidebars([{ id: 'contact-card', width: 280 }])
+    await settle()
+    expect(win.pendingNames()).toEqual(['setMinSize'])
+    win.flush()
+    await settle()
+    expect(win.pendingNames()).toEqual(['setSize'])
+    win.failNextSetSize(1)
+    win.failNextInnerSize(1)
+    win.flush()
+    await settle()
+    expect(win.state.width).toBe(1345)
+    expect(growth.getAppliedDelta()).toBe(325)
+    win.fireResize()
+    await drain(win, growth)
+    expect(growth.getAppliedDelta()).toBe(285)
+    expect(win.state.min.width).toBe(885)
+    expect(requestedWidths(win)).toEqual([1385, 1345])
+    expect(refused).toEqual([])
+    win.failNextSetSize(1)
+    await drain(win, growth, [{ id: 'contact-card', width: 340 }])
+    expect(refused).toEqual([[{ id: 'contact-card', width: 340, accepted: 320 }]])
+    expect(requestedWidths(win)).toEqual([1385, 1345, 1405])
+    expect(win.state.width).toBe(1405)
+    expect(growth.getAppliedDelta()).toBe(345)
+    await disposeToBaseline(win, growth)
+  })
+
+  for (const fraction of [1, 0.5]) {
+    test(`recovered rejection cannot become acceptance through ${fraction === 1 ? 'equality' : 'zero-room clamping'}`, async () => {
+      const { win, growth, refused, deps } = createHarness({ defer: true, origin: { x: 0, y: 50 }, setSizeApplyFraction: fraction })
+      growth.setSidebars(contactCard)
+      await settle()
+      expect(win.pendingNames()).toEqual(['setSize'])
+      win.failNextSetSize(1)
+      win.failNextInnerSize(1)
+      win.flush()
+      await settle()
+      expect(win.state.width).toBe(fraction === 1 ? 1385 : 1222.5)
+      expect(growth.getAppliedDelta()).toBe(0)
+      expect(refused).toEqual([])
+      if (fraction !== 1) deps.getMonitor = async () => createMonitor({ width: 2445 })
+      win.fireResize()
+      await drain(win, growth)
+      expect(requestedWidths(win)).toEqual([1385])
+      expect(growth.getAppliedDelta()).toBe(fraction === 1 ? 325 : 162.5)
+      expect(refused).toEqual([[{ id: 'contact-card', width: 320, accepted: null }]])
+      deps.getMonitor = async () => createMonitor()
+      win.failNextSetSize(fraction === 1 ? 1 : 2)
+      await drain(win, growth, [...panelCard, ...contactCard])
+      expect(refused).toEqual([
+        [{ id: 'contact-card', width: 320, accepted: null }],
+        [{ id: 'right-panel', width: 300, accepted: null }, { id: 'contact-card', width: 320, accepted: null }],
+      ])
+      expect(requestedWidths(win)).toEqual(fraction === 1 ? [1385, 1690] : [1385, 1690, 1690])
+      expect(win.state.width).toBe(fraction === 1 ? 1690 : 1573.5)
+      expect(growth.getAppliedDelta()).toBe(fraction === 1 ? 630 : 513.5)
+      await disposeToBaseline(win, growth)
+    })
+  }
+
+  for (const flag of ['isMaximized', 'isFullscreen'] as const) {
+    test(`successful pending declaration survives unknown ${flag} ownership without writing or refusing`, async () => {
+      const { win, growth, refused } = createHarness({ defer: true })
+      growth.setSidebars(contactCard)
+      await settle()
+      expect(win.pendingNames()).toEqual(['setSize'])
+      const readFlag = win[flag]
+      win[flag] = async () => { throw new Error('ownership unavailable') }
+      win.flush()
+      await settle()
+      expect(win.state.width).toBe(1385)
+      expect(growth.getAppliedDelta()).toBe(0)
+      growth.setSidebars([...panelCard, ...contactCard])
+      win.fireResize()
+      await drain(win, growth)
+      expect(requestedWidths(win)).toEqual([1385])
+      expect(win.requests).toHaveLength(1)
+      expect(win.state.min.width).toBe(600)
+      expect(refused).toEqual([])
+      win[flag] = readFlag
+      win.failNextSetSize(2)
+      win.fireResize()
+      await drain(win, growth)
+      expect(win.state.width).toBe(1385)
+      expect(growth.getAppliedDelta()).toBe(325)
+      expect(refused).toEqual([[{ id: 'right-panel', width: 300, accepted: null }]])
+      expect(requestedWidths(win)).toEqual([1385, 1690, 1690])
+      await disposeToBaseline(win, growth)
+    })
+  }
+
+  for (const delayed of [false, true]) {
+    for (const action of ['replace', 'remove/readd', 'dispose/revive'] as const) {
+      test(`pending success cannot transfer credit across ${action}: delayed=${delayed}`, async () => {
+        const { win, growth, refused } = createHarness({ defer: true })
+        growth.setSidebars(contactCard)
+        await settle()
+        expect(win.pendingNames()).toEqual(['setSize'])
+        if (action === 'remove/readd') growth.setSidebars([])
+        if (action === 'dispose/revive') growth.dispose()
+        growth.setSidebars(action === 'replace' ? [{ id: 'right-panel', width: 400 }] : [...panelCard, ...contactCard])
+        if (delayed) win.failNextInnerSize(1)
+        win.flush()
+        await settle()
+        expect(win.state.width).toBe(1385)
+        expect(growth.getAppliedDelta()).toBe(325)
+        expect(refused).toEqual([])
+        win.failNextSetSize(2)
+        await drain(win, growth)
+        expect(refused).toEqual([action === 'replace'
+          ? [{ id: 'right-panel', width: 400, accepted: null }]
+          : [{ id: 'right-panel', width: 300, accepted: null }, { id: 'contact-card', width: 320, accepted: null }]])
+        expect(requestedWidths(win)).toEqual(action === 'replace' ? [1385, 1465, 1465] : [1385, 1690, 1690])
+        expect(win.state.width).toBe(1385)
+        expect(growth.getAppliedDelta()).toBe(325)
+        expect(win.listenerCount()).toBe(1)
+        expect(win.pendingCount()).toBe(0)
+        await disposeToBaseline(win, growth)
+      })
+    }
+  }
+
+  for (const dispose of [false, true]) {
+    test(`ending an accepted card lifetime clears both old history and pending success: dispose=${dispose}`, async () => {
+      const { win, growth, refused } = createHarness({ defer: true })
+      await drain(win, growth, [{ id: 'contact-card', width: 280 }])
+      growth.setSidebars(contactCard)
+      await settle()
+      expect(win.pendingNames()).toEqual(['setSize'])
+      if (dispose) growth.dispose()
+      else growth.setSidebars([])
+      growth.setSidebars([...panelCard, ...contactCard])
+      win.failNextInnerSize(1)
+      win.flush()
+      await settle()
+      win.failNextSetSize(2)
+      await drain(win, growth)
+      expect(refused).toEqual([[
+        { id: 'right-panel', width: 300, accepted: null },
+        { id: 'contact-card', width: 320, accepted: null },
+      ]])
+      expect(requestedWidths(win)).toEqual([1345, 1385, 1690, 1690])
+      expect(win.state.width).toBe(1385)
+      expect(growth.getAppliedDelta()).toBe(325)
+      await disposeToBaseline(win, growth)
+    })
+
+    test(`unread pending success remains removable without another card: dispose=${dispose}`, async () => {
+      const { win, growth, refused } = createHarness({ defer: true })
+      growth.setSidebars(contactCard)
+      await settle()
+      expect(win.pendingNames()).toEqual(['setSize'])
+      if (dispose) growth.dispose()
+      else growth.setSidebars([])
+      win.failNextInnerSize(1)
+      await drain(win, growth)
+      expect(requestedWidths(win)).toEqual([1385, 1060])
+      expect(refused).toEqual([])
+      expect(win.state.width).toBe(1060)
+      expect(growth.getAppliedDelta()).toBe(0)
+      expect(win.state.min.width).toBe(600)
+      expect(win.pendingCount()).toBe(0)
+      await disposeToBaseline(win, growth)
+    })
+  }
+
+  for (const room of [0, 290]) {
+    test(`${room}px work-area accommodation retains the declared contact width after failed panel growth`, async () => {
+      const { win, growth, refused, deps } = createHarness({
+        defer: true, origin: { x: 0, y: 50 }, monitor: createMonitor({ width: (1060 + room) * 2 }),
+      })
+      growth.setSidebars(contactCard)
+      await settle()
+      if (room > 0) {
+        expect(win.pendingNames()).toEqual(['setSize'])
+        win.failNextInnerSize(1)
+        win.flush()
+        await settle()
+      } else expect(win.requests).toEqual([])
+      expect(win.state.width).toBe(1060 + room)
+      expect(refused).toEqual([])
+      deps.getMonitor = async () => createMonitor()
+      win.failNextSetSize(2)
+      await drain(win, growth, [...panelCard, ...contactCard])
+      expect(refused).toEqual([[{ id: 'right-panel', width: 300, accepted: null }]])
+      expect(win.state.width).toBe(1060 + room)
+      expect(growth.getAppliedDelta()).toBe(room)
+      expect(requestedWidths(win)).toEqual(room > 0 ? [1350, 1690, 1690] : [1690, 1690])
+      await disposeToBaseline(win, growth)
+    })
+  }
+
   test('增长请求在途时关闭：迟到的成功按实测记账，再由排队的关闭对账撤销', async () => {
     const { win, growth } = createHarness({ defer: true })
     growth.setSidebars([{ id: 'contact-card', width: 320 }])
@@ -658,7 +1365,7 @@ describe('sidebar window growth controller', () => {
       expect(win.state.width).toBe(partial ? 1415 : 1385)
       expect(growth.getAppliedDelta()).toBe(partial ? 345 : 325)
       expect(win.state.min.width).toBe(925)
-      expect(refused).toEqual([[{ id: 'contact-card', width: 360 }]])
+      expect(refused).toEqual([[{ id: 'contact-card', width: 360, accepted: 320 }]])
       growth.setSidebars([])
       await settle()
       expect(win.state.width).toBe(1060)
@@ -1084,7 +1791,8 @@ describe('sidebar window growth controller', () => {
     })
 
     test(`${mode} invalidates pending normal measurement and clears ownership once`, async () => {
-      const { win, growth } = createHarness()
+      const { win, growth, refused } = createHarness()
+      const forbidden = watchSystemWrites(win)
       growth.setSidebars(contactCard)
       await settle()
       const setSize = win.setSize
@@ -1103,6 +1811,11 @@ describe('sidebar window growth controller', () => {
       await settle()
       expect(seen).toEqual([0])
       expect(win.state.min.width).toBe(600)
+      expect(win.state.width).toBe(1920)
+      expect(growth.getAppliedDelta()).toBe(0)
+      expect(requestedWidths(win)).toEqual([1385, 1425])
+      expect(forbidden).toEqual([])
+      expect(refused).toEqual([])
       win.state[mode] = false
       win.state.width = 1425
       win.fireResize()
@@ -1110,10 +1823,10 @@ describe('sidebar window growth controller', () => {
       expect(growth.getAppliedDelta()).toBe(365)
       expect(win.state.min.width).toBe(965)
       expect(sizeCalls(win)).toHaveLength(2)
+      expect(forbidden).toEqual([])
+      expect(refused).toEqual([])
       win.setSize = setSize
-      growth.dispose()
-      await settle()
-      expect(win.state.width).toBe(1060)
+      await disposeToBaseline(win, growth)
     })
   }
 
@@ -1288,7 +2001,7 @@ describe('sidebar window growth controller', () => {
     expect(win.state.width).toBe(1060)
     expect(growth.getAppliedDelta()).toBe(0)
     expect(win.state.min.width).toBe(600)
-    expect(refused).toEqual([contactCard])
+    expect(refused).toEqual([[{ id: 'contact-card', width: 320, accepted: null }]])
     win.fireResize()
     await settle()
     expect(sizeCalls(win)).toHaveLength(2)

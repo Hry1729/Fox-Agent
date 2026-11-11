@@ -25,6 +25,8 @@ import {
   BASE_MIN_WIDTH,
   type MonitorLike,
   type SidebarGrowthEntry,
+  type SidebarGrowthRefusal,
+  type SidebarWindowGrowth,
   type SidebarWindowGrowthDeps,
   type SidebarWindowLike,
   createSidebarWindowGrowth,
@@ -96,6 +98,12 @@ export interface FakeWindow extends SidebarWindowLike {
   failNextSetMinSize: (times: number) => void
 }
 
+/** Every fake this module built: the controller keeps queueing work long after
+ *  the test handed the window over, so the idle barrier in `settle` watches them all.
+ *  A test file creates a couple of hundred of these; they are never removed on
+ *  purpose — a finished window simply stops contributing activity. */
+const liveWindows = new Set<FakeWindow>()
+
 export function createFakeWindow(options: FakeOptions = {}): FakeWindow {
   const factor = options.scaleFactor ?? 2
   const chrome = options.chrome ?? { width: 0, height: 30 }
@@ -146,7 +154,7 @@ export function createFakeWindow(options: FakeOptions = {}): FakeWindow {
    *  dispatched a mutation, so an "inflight" test would test nothing. */
   const read = <T>(value: () => T): Promise<T> => Promise.resolve().then(value)
 
-  return {
+  const win: FakeWindow = {
     state,
     calls,
     requests,
@@ -227,6 +235,8 @@ export function createFakeWindow(options: FakeOptions = {}): FakeWindow {
         : Promise.resolve(unlisten)
     },
   }
+  liveWindows.add(win)
+  return win
 }
 
 export type FakeMonitor = MonitorLike & { size: { width: number; height: number }; position: { x: number; y: number }; scaleFactor: number }
@@ -251,8 +261,10 @@ export function createMonitor(options: { x?: number; y?: number; width?: number;
 export interface Harness {
   win: FakeWindow
   logs: string[]
-  refused: SidebarGrowthEntry[][]
-  growth: ReturnType<typeof createSidebarWindowGrowth>
+  /** One entry per refused pass: the cards that asked for room the native layer
+   *  would not give, each with the width the window actually reflects for it. */
+  refused: SidebarGrowthRefusal[][]
+  growth: SidebarWindowGrowth
   monitor: MonitorLike | null
   deps: SidebarWindowGrowthDeps
 }
@@ -260,29 +272,80 @@ export interface Harness {
 export function createHarness(options: FakeOptions = {}): Harness {
   const win = createFakeWindow(options)
   const logs: string[] = []
-  const refused: SidebarGrowthEntry[][] = []
+  const refused: SidebarGrowthRefusal[][] = []
   const monitor = options.monitor === undefined ? createMonitor() : options.monitor
   const deps: SidebarWindowGrowthDeps = {
     getWindow: () => win,
     getMonitor: async () => monitor,
     log: (message) => logs.push(message),
-    onGrowthRefused: (entries) => { refused.push(entries) },
+    onGrowthRefused: (refusals) => { refused.push(refusals) },
   }
   return { win, logs, refused, monitor, deps, growth: createSidebarWindowGrowth(deps) }
 }
 
-/** Drain the native-call promise queue. */
-export const settle = async () => {
-  for (let i = 0; i < 80; i++) await new Promise((resolve) => setTimeout(resolve, 0))
+/** Any native interaction at all: issued mutation, executed mutation, listener
+ *  attached or detached. A change between two event-loop passes means work is
+ *  still flowing through this controller. */
+const activityOf = (win: FakeWindow) => win.requests.length + win.calls.length + win.listenerCount() + win.unlistenCount()
+const totalActivity = () => [...liveWindows].reduce((sum, win) => sum + activityOf(win), 0)
+const parkedReport = () => {
+  const requests = [...liveWindows].reduce((sum, win) => sum + win.requests.length, 0)
+  const parked = [...liveWindows].flatMap((win) => win.pendingNames())
+  return `${liveWindows.size} fake window(s), ${requests} native requests, parked ${parked.join('+') || 'none'}`
 }
 
-/** Deferred mode: run parked native calls, then drain the queue — repeatedly. */
-export async function drain(win: FakeWindow, growth: ReturnType<typeof createSidebarWindowGrowth>, entries: SidebarGrowthEntry[] | null = null) {
-  if (entries) growth.setSidebars(entries)
-  for (let i = 0; i < 60; i++) {
-    win.flush()
+/** A chain that only awaits promises needs one pass; React's scheduler hands work
+ *  to a MessageChannel, so a render can sit one more pass deep. Three consecutive
+ *  idle passes cannot be confused with either. */
+const IDLE_PASSES = 3
+/** Generous upper bound on the work one settle can legitimately queue (two native
+ *  attempts per pass, plus the bounded late-event recovery). Hitting it means the
+ *  controller is spinning, which is a bug the test must see as a failure. */
+const MAX_PASSES = 60
+
+/**
+ * Wait until the controller's queue is idle.
+ *
+ * The controller and the fake window only ever await promises, so the previous
+ * implementation — 80 unconditional `setTimeout(0)` rounds — was not a barrier
+ * but a wait. On Windows CI a zero-delay timer is clamped to ~15.6ms, so one
+ * settle cost ~1.2s and every test with more than four of them died on the 5s
+ * suite timeout while the Linux run stayed green. A single `setTimeout(0)` still
+ * advances one whole event-loop pass (microtasks, immediate/message queue and due
+ * timers — a couple of tests deliver their late native failure event from a
+ * timer), so the loop keeps passing until nothing new happened, and stops there:
+ * bounded by the work instead of by the clock.
+ */
+export async function settle() {
+  let previous = totalActivity()
+  let idle = 0
+  for (let pass = 0; pass < MAX_PASSES; pass++) {
     await new Promise((resolve) => setTimeout(resolve, 0))
+    const activity = totalActivity()
+    if (activity !== previous) {
+      previous = activity
+      idle = 0
+    } else if (++idle >= IDLE_PASSES) return
   }
+  throw new Error(`sidebar-growth queue never went idle in ${MAX_PASSES} event-loop passes (${parkedReport()})`)
+}
+
+/** Deferred mode: run the parked native mutations, then wait for the queue to go
+ *  idle — until a pass both starts and ends with nothing parked. */
+export async function drainDeferred(win: FakeWindow) {
+  for (let round = 0; round < MAX_PASSES; round++) {
+    const parked = win.pendingCount()
+    win.flush()
+    await settle()
+    if (parked === 0 && win.pendingCount() === 0) return
+  }
+  throw new Error(`parked native writes never settled on ${win.pendingNames().join('+') || 'an empty queue'}`)
+}
+
+/** Deferred mode: run parked native calls, then drain the queue. */
+export async function drain(win: FakeWindow, growth: SidebarWindowGrowth, entries: SidebarGrowthEntry[] | null = null) {
+  if (entries) growth.setSidebars(entries)
+  await drainDeferred(win)
 }
 
 export const sizeCalls = (win: FakeWindow) => win.calls.filter((call) => call.name === 'setSize')
