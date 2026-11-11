@@ -2,7 +2,7 @@
 // per-surface expansion state and turns the store snapshot into a discriminated
 // state (loading / ready / error) that both the 资料库 rows and the right
 // sidebar version list render from.
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { desktopRuntimeAvailable, type ManagedFileVersion } from '@/features/conversations/api/desktop-client'
 import {
   groupManagedFileVersions,
@@ -28,6 +28,7 @@ export interface ManagedFilesController {
   conversationId: string
   state: ManagedFilesState
   busyId: string | null
+  restoreError: ManagedFilesSnapshot['restoreError']
   forceHint: Record<string, string>
   /** Expanded file groups, keyed by storage path (per surface instance). */
   expanded: Record<string, boolean>
@@ -41,30 +42,34 @@ export function useManagedFiles(
   refreshKey?: unknown,
 ): ManagedFilesController | null {
   const activeId = desktopRuntimeAvailable && conversationId ? conversationId : null
-  const [snapshot, setSnapshot] = useState<ManagedFilesSnapshot | null>(null)
+  const [loaded, setLoaded] = useState<{ conversationId: string; snapshot: ManagedFilesSnapshot } | null>(null)
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
-  const conversationIdRef = useRef(activeId)
-  conversationIdRef.current = activeId
+  const subscription = useRef<{ conversationId: string } | null>(null)
+  const previousRefresh = useRef({ activeId, refreshKey })
+  const snapshot = loaded?.conversationId === activeId ? loaded.snapshot : null
 
-  useEffect(() => {
-    if (!activeId) {
-      setSnapshot(null)
-      return
-    }
+  useLayoutEffect(() => {
+    if (!activeId) return
+    const current = { conversationId: activeId }
+    subscription.current = current
     setExpanded({})
-    return subscribeManagedFiles(activeId, setSnapshot)
+    const unsubscribe = subscribeManagedFiles(activeId, (snapshot) => setLoaded({ ...current, snapshot }))
+    return () => {
+      subscription.current = null
+      unsubscribe()
+    }
   }, [activeId])
 
-  // Event-driven re-check: a mount or a runtime signal (run state, message or
-  // artifact count) says the registry may have grown. Silent, so shown data is
-  // never replaced by a skeleton; the store deduplicates overlapping loads.
   useEffect(() => {
-    if (!activeId || refreshKey === undefined) return
-    revalidateManagedFiles(activeId)
+    const previous = previousRefresh.current
+    previousRefresh.current = { activeId, refreshKey }
+    if (activeId && activeId === previous.activeId && refreshKey !== undefined && !Object.is(refreshKey, previous.refreshKey)) {
+      revalidateManagedFiles(activeId)
+    }
   }, [activeId, refreshKey])
 
   const state = useMemo<ManagedFilesState>(() => {
-    if (!snapshot) return { status: 'loading' }
+    if (!snapshot || snapshot.loading) return { status: 'loading' }
     if (snapshot.error && snapshot.rows.length === 0) return { status: 'error', message: snapshot.error }
     const groups = groupManagedFileVersions(snapshot.rows)
     return {
@@ -80,21 +85,22 @@ export function useManagedFiles(
   }, [])
 
   const restore = useCallback((version: ManagedFileVersion, force: boolean) => {
-    if (!activeId) return
-    const id = activeId
-    void restoreManagedFile(id, version, force, () => conversationIdRef.current === id)
+    const current = subscription.current
+    if (!current || current.conversationId !== activeId) return
+    void restoreManagedFile(current.conversationId, version, force, () => subscription.current === current)
   }, [activeId])
 
   const refresh = useCallback(() => {
     if (activeId) refreshManagedFiles(activeId)
   }, [activeId])
 
-  if (!activeId || !snapshot) return null
+  if (!activeId) return null
   return {
     conversationId: activeId,
     state,
-    busyId: snapshot.busyId,
-    forceHint: snapshot.forceHint,
+    busyId: snapshot?.busyId ?? null,
+    restoreError: snapshot?.restoreError ?? null,
+    forceHint: snapshot?.forceHint ?? {},
     expanded,
     toggleExpanded,
     restore,

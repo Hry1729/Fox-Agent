@@ -50,7 +50,9 @@
   cursor: pointer;
 }
 .fox-version-restore:hover:not(:disabled) { background: color-mix(in srgb, var(--foreground) 6%, transparent); }
-.fox-version-restore:disabled { cursor: not-allowed; opacity: .5; }
+.fox-version-restore:disabled,
+.fox-version-note button:disabled,
+.fox-version-state button:disabled { cursor: not-allowed; opacity: .5; }
 .fox-version-note {
   margin: 0 8px 4px 44px;
   font-size: 12px;
@@ -105,15 +107,23 @@
   color: var(--muted-foreground);
 }
 .fox-version-info {
+  flex: none;
   display: inline-grid;
   place-items: center;
   width: 14px;
   height: 14px;
+  padding: 0;
   border-radius: 50%;
   border: 1px solid color-mix(in srgb, var(--muted-foreground) 50%, transparent);
+  background: transparent;
+  color: inherit;
   font-size: 9px;
   line-height: 1;
   cursor: help;
+}
+.fox-version-info:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 .fox-version-refresh {
   flex: none;
@@ -137,9 +147,11 @@
   margin: 8px 4px;
   font-size: 12px;
   color: var(--muted-foreground);
+  overflow-wrap: anywhere;
 }
 .fox-version-state.is-error { color: var(--destructive); }
 .fox-version-state button {
+  flex: none;
   padding: 0 4px;
   border: 0;
   background: transparent;
@@ -153,28 +165,28 @@
    panel and menu chips render the dot at the tab's outer corner. */
 .fox-contact-side-tabs button { position: relative; }
 .fox-contact-side-tabs button:has(.fox-tab-dot) { padding-right: 18px; }
-.fox-contact-side-tabs .fox-tab-dot {
-  position: absolute;
-  top: 5px;
-  right: 6px;
+.fox-tab-dot {
+  flex: none;
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: #e8590c;
   pointer-events: none;
+}
+.fox-contact-side-tabs .fox-tab-dot {
+  position: absolute;
+  top: 5px;
+  right: 6px;
 }
 .fox-context-tab { position: relative; }
 .fox-context-tab > .fox-tab-dot {
   position: absolute;
   top: -3px;
   right: -3px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #e8590c;
   box-shadow: 0 0 0 2px var(--fox-canvas);
-  pointer-events: none;
 }
+.fox-context-tab-actions > button { position: relative; }
+.fox-context-tab-actions > button > .fox-tab-dot { position: absolute; top: 2px; right: 2px; }
 .fox-tab-dot.is-inline {
   position: static;
   display: inline-block;

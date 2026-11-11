@@ -25,6 +25,7 @@ import { userFacingCause } from '@/features/chat/send-failure-notice'
 import { managedFilesFingerprintOf, useManagedFiles, type ManagedFilesController } from '../components/managed-files/use-managed-files'
 import { useManagedFileUnseen } from '../components/managed-files/use-managed-file-unseen'
 import { ManagedFileVersions } from '../components/managed-files/ManagedFileVersions'
+import { managedFilesRefreshKey } from '../components/managed-files/model'
 
 const ActivityDetailPanel = lazy(() => import('../components/ActivityDetailPanel').then((module) => ({ default: module.ActivityDetailPanel })))
 const HtmlFilePreview = lazy(() => import('../html-file-preview').then((module) => ({ default: module.HtmlFilePreview })))
@@ -670,6 +671,7 @@ function ChildAgentConversationPanel({ run, avatarIndex, onBack }: { run: ChildR
 
 function ContextContent({ mode, detail, fileTabs, activeFileTabId, activity, managed, onOpenFile, onOpenEvidence, onOpenChildAgent }: { mode: RightMode; detail: ConversationDetail | null; fileTabs: OpenFileTab[]; activeFileTabId: string | null; activity: Omit<ActivityDetailPanelProps, "detail">; managed: ManagedFilesController | null; onOpenFile: (path: string, artifactId: string | null) => void; onOpenEvidence?: (evidence: TaskEvidenceRecord) => void; onOpenChildAgent: (run: ChildRunRecord, avatarIndex: number) => void }) {
   const conversationId = detail?.conversation.id ?? null
+  const projectRoot = detail?.conversation.projectRoot
   const [selectedChange, setSelectedChange] = useState('')
   const [fileSearch, setFileSearch] = useState('')
   const [projectFiles, setProjectFiles] = useState<ProjectFileEntry[]>([])
@@ -677,7 +679,7 @@ function ContextContent({ mode, detail, fileTabs, activeFileTabId, activity, man
   const [fileError, setFileError] = useState<string | null>(null)
 
   useEffect(() => {
-    if (mode !== 'files' || !conversationId) return
+    if (mode !== 'files' || !conversationId || !projectRoot) return
     let cancelled = false
     setFileLoading(true)
     setFileError(null)
@@ -688,24 +690,23 @@ function ContextContent({ mode, detail, fileTabs, activeFileTabId, activity, man
       if (!cancelled) setFileError(userFacingCause(cause))
     }).finally(() => { if (!cancelled) setFileLoading(false) })
     return () => { cancelled = true }
-  }, [conversationId, mode])
+  }, [conversationId, mode, projectRoot])
 
   const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null
   const selectedArtifact = detail?.artifacts.find((item) => item.id === activeFileTab?.artifactId) ?? null
 
   if (mode === 'files') {
+    if (!conversationId || !detail) return <div className="fox-empty-panel"><Folders size={29} /><strong>尚未选择项目</strong><span>为当前对话授权一个项目文件夹后即可浏览。</span></div>
     const normalizedSearch = fileSearch.trim().toLowerCase()
     const visibleFiles = projectFiles.filter((item) => !item.isDirectory && (!normalizedSearch || item.path.toLowerCase().includes(normalizedSearch)))
-    if (!conversationId || !detail?.conversation.projectRoot) return <div className="fox-empty-panel"><Folders size={29} /><strong>尚未选择项目</strong><span>为当前对话授权一个项目文件夹后即可浏览。</span></div>
     const selectFile = (path: string) => {
-      const matchingArtifact = detail.artifacts.find((artifact) => artifactProjectPath(artifact, detail.conversation.projectRoot!, projectFiles) === path)
+      if (!projectRoot) return
+      const matchingArtifact = detail.artifacts.find((artifact) => artifactProjectPath(artifact, projectRoot, projectFiles) === path)
       onOpenFile(path, matchingArtifact?.id ?? null)
     }
-    const openedFilePath = activeFileTab?.path ?? ''
-    const openedFileDisplayPath = openedFilePath ? projectDisplayPath(openedFilePath, detail.conversation.projectRoot) : ''
-    // The list hides itself when the registry is empty, so the separating
-    // border must know that too.
-    const hasVersionContent = managed !== null && !(managed.state.status === 'ready' && managed.state.groups.length === 0)
+    const openedFilePath = projectRoot ? activeFileTab?.path : undefined
+    const openedFileDisplayPath = projectRoot && openedFilePath ? projectDisplayPath(openedFilePath, projectRoot) : ''
+    const hasVersionContent = managed && (managed.state.status !== 'ready' || managed.state.groups.length > 0 || managed.state.error || managed.restoreError)
     return (
       <div className={`fox-file-panel ${openedFilePath ? 'is-file-open' : 'is-tree-only'}`}>
         {openedFilePath
@@ -713,14 +714,17 @@ function ContextContent({ mode, detail, fileTabs, activeFileTabId, activity, man
             ? <ArtifactFilePreview detail={detail} artifactId={selectedArtifact.id} displayPath={openedFileDisplayPath} />
             : <ProjectFilePreviewPane conversationId={conversationId} path={openedFilePath} displayPath={openedFileDisplayPath} />
           : <div className="fox-file-tree-pane">
-              <div className="fox-panel-search"><Search size={14} /><input value={fileSearch} onChange={(event) => setFileSearch(event.target.value)} placeholder="搜索文件" />{fileSearch && <button type="button" aria-label="清除搜索" onClick={() => setFileSearch('')}><X size={12} /></button>}</div>
+              {projectRoot && <div className="fox-panel-search"><Search size={14} /><input value={fileSearch} onChange={(event) => setFileSearch(event.target.value)} placeholder="搜索文件" />{fileSearch && <button type="button" aria-label="清除搜索" onClick={() => setFileSearch('')}><X size={12} /></button>}</div>}
               <ScrollArea className="fox-file-tree">
-                {fileLoading ? <div className="fox-panel-loading"><LoaderCircle className="animate-spin" />正在读取项目文件</div> : normalizedSearch ? <div className="fox-file-search-results">{visibleFiles.map((item) => <button type="button" key={item.path} onClick={() => selectFile(item.path)}><FileText size={14} /><span><strong>{item.name}</strong><small>{item.parent || detail.conversation.projectRoot}</small></span></button>)}{visibleFiles.length === 0 && <p>没有匹配的文件</p>}</div> : <>
-                  {hasVersionContent && <ManagedFileVersions controller={managed} />}
-                  <div className={hasVersionContent ? 'fox-file-tree-sep' : undefined}><ProjectFileTree entries={projectFiles} workspaceName={detail.conversation.projectRoot.split(/[\\/]/).at(-1) || detail.conversation.projectRoot} selectedFile="" onSelect={selectFile} /></div>
-                </>}
+                {hasVersionContent && <ManagedFileVersions controller={managed} />}
+                <div className={hasVersionContent ? 'fox-file-tree-sep' : undefined}>
+                  {!projectRoot ? <div className="fox-empty-panel"><Folders size={29} /><strong>尚未选择项目</strong><span>为当前对话授权一个项目文件夹后即可浏览。</span></div>
+                    : fileLoading ? <div className="fox-panel-loading"><LoaderCircle className="animate-spin" />正在读取项目文件</div>
+                    : fileError ? <p className="fox-file-tree-error" role="alert"><AlertTriangle size={14} />{fileError}</p>
+                    : normalizedSearch ? <div className="fox-file-search-results">{visibleFiles.map((item) => <button type="button" key={item.path} onClick={() => selectFile(item.path)}><FileText size={14} /><span><strong>{item.name}</strong><small>{item.parent || projectRoot}</small></span></button>)}{visibleFiles.length === 0 && <p>没有匹配的文件</p>}</div>
+                    : <ProjectFileTree entries={projectFiles} workspaceName={projectRoot.split(/[\\/]/).at(-1) || projectRoot} selectedFile="" onSelect={selectFile} />}
+                </div>
               </ScrollArea>
-              {fileError && <p className="fox-file-tree-error"><AlertTriangle size={14} />{fileError}</p>}
             </div>}
       </div>
     )
@@ -786,17 +790,15 @@ export function RightPanel({ mode, tabs, detail, activity, width, maximized = fa
     ? detail?.childRuns.find((run) => run.childRunId === activeChildAgent.run.childRunId) ?? activeChildAgent.run
     : null
   const rightItems = baseRightItems
-  // Versions share the store with the contact card 资料库: one source per
-  // conversation, no duplicated IPC, and the runtime counters are the only
-  // signal that tells the registry it may have grown.
-  const managedRefreshKey = `${detail?.messages.length ?? 0}:${detail?.artifacts.length ?? 0}:${detail?.toolCalls.length ?? 0}`
-  const managed = useManagedFiles(detail?.conversation.id ?? null, managedRefreshKey)
+  const managed = useManagedFiles(detail?.conversation.id, managedFilesRefreshKey(detail))
+  const showingFilePreview = detail?.conversation.projectRoot && fileTabs.some(tab => tab.id === activeFileTabId && tab.path)
   const [versionsUnseen] = useManagedFileUnseen({
     surface: 'files',
     conversationId: detail?.conversation.id ?? null,
     fingerprint: managedFilesFingerprintOf(managed),
-    viewing: mode === 'files' && activeFileTabId === null,
+    viewing: mode === 'files' && !showingFilePreview,
   })
+  const hasFilesTab = tabs.includes('files') && fileTabs.length === 0
   const homeItemCounts: Record<RightMode, number> = {
     knowledge: detail?.knowledgeBindings.filter((binding) => binding.enabled !== false).length ?? 0,
     files: detail?.artifacts.length ?? 0,
@@ -815,7 +817,7 @@ export function RightPanel({ mode, tabs, detail, activity, width, maximized = fa
             // A file tab *is* the files view. Keeping the mode tab beside it left a
             // second, default-looking tab for the same panel — the file tabs own it
             // while any are open, and the list stays reachable from the + menu.
-            if (tabMode === 'files' && fileTabs.length > 0) return null
+            if (tabMode === 'files' && !hasFilesTab) return null
             const active = tabMode === mode && (tabMode !== 'files' || activeFileTabId === null)
             return <div key={tabMode} className={`fox-context-tab ${active ? 'is-active' : ''}`}>
               <button type="button" role="tab" aria-selected={active} title={item[1]} onClick={() => onMode(tabMode)}>{item[2]}<span>{item[1]}</span></button>
@@ -833,7 +835,7 @@ export function RightPanel({ mode, tabs, detail, activity, width, maximized = fa
         </div>
         <div className="fox-context-tab-actions">
           <DropdownMenu>
-            <DropdownMenuTrigger asChild><button type="button" aria-label="打开页面" title="打开页面"><Plus size={14} /></button></DropdownMenuTrigger>
+            <DropdownMenuTrigger asChild><button type="button" aria-label="打开页面" title="打开页面"><Plus size={14} />{versionsUnseen && mode && !hasFilesTab && <span className="fox-tab-dot" aria-hidden="true" />}</button></DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="fox-context-add-menu">
               {rightItems.map(([id, label, icon]) => <DropdownMenuItem key={id} onSelect={() => onMode(id)}>{icon}<span>{label}</span>{id === 'files' && versionsUnseen && <span className="fox-tab-dot is-inline" aria-hidden="true" />}</DropdownMenuItem>)}
             </DropdownMenuContent>

@@ -3,6 +3,7 @@
 // (write_file/edit_file/fox-office). The Host owns hashes, drift detection and
 // the append-only registry; this module only reads the records.
 import type { ManagedFileVersion } from '@/features/conversations/api/desktop-client'
+import type { ConversationDetail } from '@/features/conversations/model/types'
 
 export interface ManagedFileGroup {
   storagePath: string
@@ -50,21 +51,15 @@ export function managedFilesFingerprint(groups: ManagedFileGroup[]): string {
     .join('|')
 }
 
-/** Pairing identity of ONE file location. Library entries and managed groups
- *  meet only through an authoritative storage path (the message-side entry id
- *  resolves to a `ConversationDetail.artifacts` record); file NAMES are never
- *  used, because the same name in different folders would merge unrelated
- *  version histories. Normalizes separators, `./` prefixes, duplicate and
- *  trailing slashes, and compares case-insensitively — Windows Host paths are
- *  case-insensitive, and both surfaces store the same physical location. */
 export function managedFilePathKey(path: string): string {
-  return path
-    .trim()
-    .replace(/\\/g, '/')
+  // Host canonicalization can add the Windows verbatim path prefix.
+  const normalized = path.trim().replace(/\\/g, '/')
+    .replace(/^\/\/\?\/UNC\//i, '//')
+    .replace(/^\/\/\?\/(?=[a-z]:\/)/i, '')
     .replace(/^\.\//, '')
-    .replace(/\/{2,}/g, '/')
-    .replace(/\/$/, '')
-    .toLocaleLowerCase()
+  const unc = normalized.startsWith('//')
+  const key = (unc ? '/' : '') + normalized.replace(/\/{2,}/g, '/').replace(/\/$/, '')
+  return unc || /^[a-z]:\//i.test(key) ? key.toLowerCase() : key
 }
 
 export function formatVersionBytes(value: number | null): string {
@@ -99,4 +94,15 @@ export function toolStatusSignal(toolCalls: Array<{ status: string }> | null | u
   const counts = new Map<string, number>()
   for (const call of toolCalls) counts.set(call.status, (counts.get(call.status) ?? 0) + 1)
   return [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([status, count]) => `${status}×${count}`).join(',')
+}
+
+export function managedFilesRefreshKey(detail: ConversationDetail | null): string {
+  return [
+    detail?.messages?.length ?? 0,
+    detail?.artifacts?.length ?? 0,
+    toolStatusSignal(detail?.toolCalls),
+    detail?.lastRun?.id ?? '',
+    detail?.lastRun?.status ?? '',
+    detail?.lastRun?.finishedAt ?? '',
+  ].join(':')
 }

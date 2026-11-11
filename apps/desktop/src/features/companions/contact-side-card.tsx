@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { ArrowLeft, Bell, BookOpen, ChevronRight, Cpu, FileOutput, Folder, FolderOpen, FolderPlus, FolderSearch, NotebookPen, Plug, RotateCcw, Search, Settings2, ShieldCheck, Star, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { notify as toast } from '@/features/notifications'
@@ -9,6 +9,7 @@ import {
   useManagedFiles,
 } from '@/features/chat/components/managed-files/use-managed-files'
 import { useManagedFileUnseen } from '@/features/chat/components/managed-files/use-managed-file-unseen'
+import { managedFilesRefreshKey } from '@/features/chat/components/managed-files/model'
 import { contacts, type Companion, type ReminderMode, type TemplateStatus } from './api'
 import { ContactAvatar } from './chat-controls'
 import { ContactModelSelect } from './model-select'
@@ -68,20 +69,7 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
   const [profileDraft, setProfileDraft] = useState({ avatar: contact.avatarRef, duty: contact.duty, persona: contact.personaOverride ?? '' })
   const [template, setTemplate] = useState<TemplateStatus | null>(null)
   const [deleting, setDeleting] = useState(false)
-  // Managed file versions share the store with the right sidebar; this card
-  // only adds the per-surface expansion and the unseen dot on 「资料库」. The
-  // runtime signals below are what tells the registry it may have grown. Every
-  // collection is read defensively: a detail that is still assembling (or an
-  // older cached shape) must never take the card down.
-  const managedRefreshKey = useMemo(() => [
-    detail?.messages?.length ?? 0,
-    detail?.artifacts?.length ?? 0,
-    detail?.toolCalls?.length ?? 0,
-    contact.activeRunStatus ?? '',
-    detail?.lastRun?.status ?? '',
-    detail?.lastRun?.finishedAt ?? '',
-  ].join(':'), [detail?.messages?.length, detail?.artifacts?.length, detail?.toolCalls?.length, contact.activeRunStatus, detail?.lastRun?.status, detail?.lastRun?.finishedAt])
-  const managed = useManagedFiles(contact.conversationId, managedRefreshKey)
+  const managed = useManagedFiles(contact.conversationId, `${managedFilesRefreshKey(detail)}:${contact.activeRunStatus ?? ''}`)
   const [versionsUnseen] = useManagedFileUnseen({
     surface: 'library',
     conversationId: contact.conversationId,
@@ -232,7 +220,8 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
                 </div>
               </section>
             </div>}
-            {tab === 'files' && <div className="fox-contact-side-view"><ContactFiles key={contact.id} contact={contact} managed={managed} /></div>}
+            {tab === 'files' && <div className="fox-contact-side-view"><ContactFiles key={contact.conversationId} contact={contact} managed={managed}
+              detail={detail?.conversation?.id === contact.conversationId ? detail : null} /></div>}
             {tab === 'workspace' && <div className="fox-contact-side-details">
               <section className="fox-contact-side-group" aria-label="位置">
                 <h3>位置</h3>

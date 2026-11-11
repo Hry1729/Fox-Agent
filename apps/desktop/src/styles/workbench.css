@@ -7439,6 +7439,10 @@ img[src='/avatars/fox-assistant.png'] {
   border-bottom: 1px solid var(--fox-border);
 }
 
+.fox-file-tree-pane:not(:has(> .fox-panel-search)) {
+  grid-template-rows: minmax(0, 1fr);
+}
+
 .fox-file-tree-tabs,
 .fox-file-tabbar,
 .fox-file-breadcrumbs {

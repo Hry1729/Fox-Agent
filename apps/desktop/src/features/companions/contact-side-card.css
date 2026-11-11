@@ -191,10 +191,19 @@ label.fox-contact-side-item:hover { background: color-mix(in srgb, var(--foregro
   color: var(--muted-foreground);
   overflow-wrap: anywhere;
 }
-.fox-contact-side-item.is-model { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 6px 10px; cursor: default; }
+.fox-contact-side-item.is-model {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: minmax(40px, auto) auto;
+  align-items: center;
+  column-gap: 10px;
+  padding-block: 0;
+  font-size: 13px;
+  cursor: default;
+}
 .fox-contact-side-item.is-model .fox-contact-model-select { display: contents; }
 .fox-contact-side-item.is-model select {
-  --fox-type-ui: 12px;
+  --fox-type-ui: 13px;
   grid-column: 2;
   min-width: 0;
   max-width: none;
@@ -203,8 +212,8 @@ label.fox-contact-side-item:hover { background: color-mix(in srgb, var(--foregro
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--muted-foreground);
-  font-size: 12px;
+  color: var(--foreground);
+  font-size: 13px;
   text-align: right;
   text-align-last: right;
   text-overflow: ellipsis;
@@ -214,6 +223,7 @@ label.fox-contact-side-item:hover { background: color-mix(in srgb, var(--foregro
   grid-column: 1 / -1;
   max-width: none;
   padding-left: 26px;
+  padding-bottom: 6px;
   font-size: 12px;
   line-height: 1.5;
   text-align: left;

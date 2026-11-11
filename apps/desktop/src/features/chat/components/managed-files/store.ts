@@ -20,6 +20,7 @@ export interface ManagedFilesSnapshot {
   /** The very first read for this conversation is still in flight. */
   loading: boolean
   error: string | null
+  restoreError: { message: string; version: ManagedFileVersion; force: boolean } | null
   /** The version whose restore is in flight, across every surface. */
   busyId: string | null
   /** Restore failures that force-answer (drift or deletion), by version id. */
@@ -31,9 +32,9 @@ type Listener = (snapshot: ManagedFilesSnapshot) => void
 interface ManagedFileSource extends ManagedFilesSnapshot {
   conversationId: string
   listeners: Set<Listener>
-  /** Bumped per accepted load; a late response for an older sequence is dropped. */
-  seq: number
-  inflight: boolean
+  reading: Promise<void> | null
+  pendingSilent: boolean | null
+  confirming: boolean
   restoreIdentities: RestoreRequestIdentities
 }
 
@@ -44,12 +45,14 @@ function createSource(conversationId: string): ManagedFileSource {
     rows: [],
     loading: true,
     error: null,
+    restoreError: null,
     busyId: null,
     forceHint: {},
     conversationId,
     listeners: new Set(),
-    seq: 0,
-    inflight: false,
+    reading: null,
+    pendingSilent: null,
+    confirming: false,
     restoreIdentities: new RestoreRequestIdentities(),
   }
 }
@@ -63,49 +66,59 @@ function sourceOf(conversationId: string): ManagedFileSource {
   return source
 }
 
-function publish(source: ManagedFileSource) {
-  const snapshot: ManagedFilesSnapshot = {
+function snapshotOf(source: ManagedFileSource): ManagedFilesSnapshot {
+  return {
     rows: source.rows,
     loading: source.loading,
     error: source.error,
+    restoreError: source.restoreError,
     busyId: source.busyId,
     forceHint: source.forceHint,
   }
+}
+
+function publish(source: ManagedFileSource) {
+  const snapshot = snapshotOf(source)
   for (const listener of [...source.listeners]) listener(snapshot)
 }
 
-async function load(source: ManagedFileSource, silent: boolean) {
-  if (!desktopRuntimeAvailable) return
-  if (source.inflight) return
-  source.inflight = true
-  const seq = ++source.seq
-  if (!silent) {
-    source.loading = source.rows.length === 0
-    publish(source)
+function load(source: ManagedFileSource, silent: boolean): Promise<void> {
+  source.pendingSilent = (source.pendingSilent ?? true) && silent
+  if (!source.reading) {
+    source.reading = Promise.resolve().then(async () => {
+      try {
+        while (source.pendingSilent !== null) {
+          const silentRead = source.pendingSilent
+          source.pendingSilent = null
+          if (!silentRead && source.rows.length === 0) {
+            source.loading = true
+            publish(source)
+          }
+          try {
+            source.rows = await desktopClient.listManagedFileVersions(source.conversationId)
+            source.error = null
+          } catch (cause) {
+            if (!silentRead) source.error = desktopErrorDetails(cause).message
+          }
+          source.loading = false
+          publish(source)
+        }
+      } finally {
+        source.reading = null
+      }
+    })
   }
-  try {
-    const rows = await desktopClient.listManagedFileVersions(source.conversationId)
-    if (seq !== source.seq) return
-    source.rows = rows
-    source.error = null
-    source.loading = false
-  } catch (cause) {
-    // A silent re-check never replaces shown data with an error; the user can
-    // still restore what is on screen and retry manually.
-    if (seq !== source.seq || silent) return
-    source.error = desktopErrorDetails(cause).message
-    source.loading = false
-  } finally {
-    if (seq === source.seq) source.inflight = false
-    publish(source)
-  }
+  return source.reading
 }
 
 export function subscribeManagedFiles(conversationId: string, listener: Listener): () => void {
   const source = sourceOf(conversationId)
+  const firstSubscriber = source.listeners.size === 0
   source.listeners.add(listener)
-  listener({ rows: source.rows, loading: source.loading, error: source.error, busyId: source.busyId, forceHint: source.forceHint })
-  void load(source, source.rows.length > 0)
+  listener(snapshotOf(source))
+  if (desktopRuntimeAvailable && firstSubscriber && !source.reading) {
+    void load(source, source.rows.length > 0)
+  }
   return () => { source.listeners.delete(listener) }
 }
 
@@ -123,9 +136,7 @@ export function revalidateManagedFiles(conversationId: string) {
 
 /**
  * Restore one version. `force` answers a drift/deletion rejection: the Host
- * backs the current bytes up first, then overwrites. The confirmation dialog
- * is the only await before the busy flag, so a double click is one request;
- * the request identity behind it is reused until the action ends undecided.
+ * backs the current bytes up first, then overwrites.
  */
 export async function restoreManagedFile(
   conversationId: string,
@@ -134,18 +145,21 @@ export async function restoreManagedFile(
   isCurrent: () => boolean = () => true,
 ): Promise<void> {
   const source = sourceOf(conversationId)
-  if (source.busyId) return
+  if (source.busyId || !isCurrent()) return
   if (force) {
+    if (source.confirming) return
+    source.confirming = true
     const confirmed = await confirmDialog({
       title: '强制恢复文件',
       description: `文件 ${version.displayName} 在任务之外被修改过。\n强制恢复会先把当前内容备份，再覆盖为所选版本。是否继续？`,
       confirmLabel: '强制恢复',
       destructive: true,
     })
-    // The surface may have switched conversation while the dialog was open.
-    if (!confirmed || !isCurrent()) return
+    source.confirming = false
+    if (!confirmed || !isCurrent() || source.busyId) return
   }
   source.busyId = version.id
+  source.restoreError = null
   publish(source)
   try {
     // The action is "restore THIS version, with or without force". Whether the
@@ -163,13 +177,16 @@ export async function restoreManagedFile(
     const nextHint = { ...source.forceHint }
     delete nextHint[version.id]
     source.forceHint = nextHint
-    await load(source, true)
+    await load(source, false)
     toast.success(`已恢复 ${version.displayName} 到 v${restored.versionNo}，当前内容已自动备份`)
   } catch (cause) {
     const details = desktopErrorDetails(cause)
-    source.error = details.message
-    // Drift/deletion rejections are exactly the cases force handles.
-    if (!force) source.forceHint = { ...source.forceHint, [version.id]: details.message }
+    const requiresForce = !force && (
+      details.message.includes('changed outside the recorded task history') ||
+      details.message.includes('was deleted after the last recorded change')
+    )
+    source.restoreError = { message: details.message, version, force: force || requiresForce }
+    if (requiresForce) source.forceHint = { ...source.forceHint, [version.id]: details.message }
   } finally {
     source.busyId = null
     publish(source)

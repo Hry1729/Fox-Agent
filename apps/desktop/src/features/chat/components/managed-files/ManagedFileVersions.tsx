@@ -5,6 +5,7 @@
 // in the store; these components only view it.
 import { Fragment } from 'react'
 import { AlertTriangle, ChevronDown, ChevronUp, LoaderCircle, RefreshCw, RotateCcw } from 'lucide-react'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { LibraryGlyph, LIBRARY_GROUPS, libraryTimeGroup } from '@/features/companions/library-shared'
 import { managedFileVersionPresentation } from '../managed-file-presentation'
 import {
@@ -62,7 +63,7 @@ export function VersionRows({ group, controller }: { group: ManagedFileGroup; co
                 : <button
                     type="button"
                     className="fox-version-restore"
-                    disabled={busy || !view.restorable}
+                    disabled={controller.busyId !== null || !view.restorable}
                     title={view.restorable ? '把文件恢复为该版本记录的内容（当前内容会先备份）' : view.blocker ?? '该版本没有可验证的内容快照，无法恢复'}
                     onClick={() => controller.restore(version, !!hint)}
                   >
@@ -74,7 +75,7 @@ export function VersionRows({ group, controller }: { group: ManagedFileGroup; co
             {hint && (
               <p className="fox-version-note is-force">
                 {hint}
-                {!busy && <button type="button" onClick={() => controller.restore(version, true)}>强制恢复（先备份当前内容）</button>}
+                <button type="button" disabled={controller.busyId !== null} onClick={() => controller.restore(version, true)}>强制恢复（先备份当前内容）</button>
               </p>
             )}
           </Fragment>
@@ -110,7 +111,12 @@ export function ManagedFilesFootnote({ controller }: { controller: ManagedFilesC
   return (
     <p className="fox-version-hint">
       <span>{MANAGED_FILES_BACKUP_NOTE}</span>
-      <span className="fox-version-info" title={MANAGED_FILES_SCOPE_NOTE} aria-label="版本记录范围">i</span>
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild><button type="button" className="fox-version-info" aria-label="版本记录范围">i</button></TooltipTrigger>
+          <TooltipContent>{MANAGED_FILES_SCOPE_NOTE}</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
       <button type="button" className="fox-version-refresh" title="重新检查文件版本" aria-label="重新检查文件版本" onClick={controller.refresh}>
         {controller.state.status === 'loading' ? <LoaderCircle size={11} className="animate-spin" /> : <RefreshCw size={11} />}
       </button>
@@ -118,32 +124,36 @@ export function ManagedFilesFootnote({ controller }: { controller: ManagedFilesC
   )
 }
 
+export function ManagedFilesStatus({ controller }: { controller: ManagedFilesController }) {
+  const { state, restoreError } = controller
+  const readError = state.status === 'error' ? state.message : state.status === 'ready' ? state.error : null
+  return <>
+    {state.status === 'loading' && <p className="fox-version-state" role="status"><LoaderCircle size={12} className="animate-spin" />正在读取文件版本…</p>}
+    {readError && <p className="fox-version-state is-error" role="alert">
+      {readError}<button type="button" onClick={controller.refresh}>重试</button>
+    </p>}
+    {restoreError && <p className="fox-version-state is-error" role="alert">
+      {restoreError.message}
+      <button type="button" disabled={controller.busyId !== null}
+        onClick={() => controller.restore(restoreError.version, restoreError.force)}>重试恢复</button>
+    </p>}
+  </>
+}
+
 /**
  * The version history as its own list — the right sidebar 文件 page renders it
  * above the project tree with the 资料库 time groups and file rows. Contact
  * cards embed `VersionToggle` / `VersionRows` in their own rows instead.
  */
-export function ManagedFileVersions({ controller, className }: { controller: ManagedFilesController; className?: string }) {
-  if (controller.state.status === 'error') {
-    return (
-      <p className={`fox-version-state is-error${className ? ` ${className}` : ''}`} role="alert">
-        {controller.state.message}
-        <button type="button" onClick={controller.refresh}>重试</button>
-      </p>
-    )
-  }
-  if (controller.state.status === 'loading') {
-    return <p className={`fox-version-state${className ? ` ${className}` : ''}`} role="status"><LoaderCircle size={12} className="animate-spin" />正在读取文件版本…</p>
-  }
-  const groups = controller.state.groups
-  if (groups.length === 0) return null
+export function ManagedFileVersions({ controller }: { controller: ManagedFilesController }) {
+  const groups = controller.state.status === 'ready' ? controller.state.groups : []
+  if (groups.length === 0) return <ManagedFilesStatus controller={controller} />
   const now = Date.now()
   const bands = LIBRARY_GROUPS
     .map(([value, label]) => ({ value, label, items: groups.filter(group => libraryTimeGroup(managedFileGroupAt(group), now) === value) }))
     .filter(band => band.items.length > 0)
-  const failed = controller.state.error
   return (
-    <div className={`fox-file-versions${className ? ` ${className}` : ''}`}>
+    <div className="fox-file-versions">
       {bands.map(band => (
         <section className="fox-library-group" key={band.value} aria-label={band.label}>
           <h3>{band.label}</h3>
@@ -153,7 +163,7 @@ export function ManagedFileVersions({ controller, className }: { controller: Man
         </section>
       ))}
       <ManagedFilesFootnote controller={controller} />
-      {failed && <p className="fox-version-state is-error" role="alert">{failed}</p>}
+      <ManagedFilesStatus controller={controller} />
     </div>
   )
 }

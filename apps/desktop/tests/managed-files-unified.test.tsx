@@ -68,7 +68,10 @@ describe('版本分组与配对', () => {
 
   test('跨界面配对只用规范化路径：分隔符、大小写、空白、重复斜杠都要归一', () => {
     expect(managedFilePathKey('C:\\Docs\\报价.PDF')).toBe(managedFilePathKey(' c:/docs/报价.pdf '))
-    expect(managedFilePathKey('./notes//readme.Md/')).toBe('notes/readme.md')
+    expect(managedFilePathKey('//?/C:/Docs/报价.PDF')).toBe('c:/docs/报价.pdf')
+    expect(managedFilePathKey('//?/UNC/Server/Share/Report.md')).toBe('//server/share/report.md')
+    expect(managedFilePathKey('./notes//readme.Md/')).toBe('notes/readme.Md')
+    expect(managedFilePathKey('/docs/A.md')).not.toBe(managedFilePathKey('/docs/a.md'))
     // 同名不同路径是两份互不相干的历史，绝不能并成一组。
     expect(managedFilePathKey('C:/a/report.md')).not.toBe(managedFilePathKey('C:/b/report.md'))
   })
