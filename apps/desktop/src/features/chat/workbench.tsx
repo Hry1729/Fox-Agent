@@ -1207,7 +1207,8 @@ export function Workbench() {
     if (rollback.restoreRightPanelWidth !== null) setRightWidth(rollback.restoreRightPanelWidth)
     if (rollback.closeRightPanel) collapseRightSidebar()
   })
-  useSidebarWindowGrowth(sidebarGrowthEntries, handleSidebarGrowthRefused)
+  const sidebarLayoutRef = useRef<HTMLDivElement>(null)
+  useSidebarWindowGrowth(sidebarGrowthEntries, handleSidebarGrowthRefused, sidebarLayoutRef)
   const handleRuntimeOpenSource = useStableCallback((source: RuntimeSource) => {
     navigate(source.source === 'local' ? 'local-knowledge-documents' : 'knowledge-detail', source.knowledgeBaseId, { documentId: source.documentId, sourceLocator: source.locator })
   })
@@ -1826,7 +1827,7 @@ export function Workbench() {
     <ContactsContext.Provider value={desktopConversation.enabled ? contactsContext : null}>
     <main className="fox-shell" style={shellStyle} onPointerDownCapture={acknowledgeVisibleCompletion} onWheelCapture={acknowledgeVisibleCompletion} onKeyDownCapture={acknowledgeVisibleCompletion}>
       <MemoizedWindowTitlebar leftSidebarCollapsed={sidebarCollapsed} onNewChat={handleNewChat} onOpenProject={handleComposerProject} onSettings={handleOpenSettings} onAbout={handleOpenAbout} onToggleSidebar={handleToggleSidebar} onZoom={handleZoom} canGoBack={navigationHistory.canGoBack} canGoForward={navigationHistory.canGoForward} onGoBack={navigationHistory.back} onGoForward={navigationHistory.forward} />
-      <div className="fox-workbench">
+      <div className="fox-workbench" ref={sidebarLayoutRef}>
         <MemoizedSidebar collapsed={sidebarCollapsed} assistantMode={assistantMode} onModeChange={handleAssistantModeChange} onNewChat={handleNewChat} onNewProjectChat={handleNewProjectChat} onAddProject={handleComposerProject} onCreateLocalKnowledge={handleCreateLocalKnowledge} onOpenConversation={handleOpenConversation} onRenameConversation={handleRenameConversation} projects={projects} onPinProject={handlePinProject} onPinConversation={handlePinConversation} onArchiveConversation={handleArchiveConversation} onUnarchiveConversation={handleUnarchiveConversation} onTrashConversation={handleTrashConversation} onRestoreConversation={handleRestoreConversation} onPurgeConversation={handlePurgeConversation} onDeleteProject={handleDeleteProject} onNavigate={handleWorkspaceNavigate} onExitManagement={handleExitManagement} onExpand={handleExpandSidebar} onTheme={handleToggleTheme} onSettings={handleOpenSettings} runtimeConversations={desktopConversation.enabled ? desktopConversation.conversations : undefined} archivedConversations={desktopConversation.enabled ? desktopConversation.archivedConversations : undefined} trashedConversations={desktopConversation.enabled ? desktopConversation.trashedConversations : undefined} onGlobalSearch={desktopRuntimeAvailable ? desktopClient.globalSearch : undefined} activeConversationId={desktopConversation.selectedConversationId ?? undefined} newChatActive={activeView === 'chat' && timelineEmpty && !desktopConversation.selectedConversationId} runIndicators={desktopConversation.enabled ? desktopConversation.runIndicators : undefined} yuxiService={sidebarYuxiService} yuxiUser={yuxiUser.user} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} />
         {!sidebarCollapsed && <SidebarResizeDivider width={expandedSidebarWidth} onResize={(delta) => setExpandedSidebarWidth((value) => Math.min(456, Math.max(220, value + delta)))} />}
         <div className="fox-content-card">

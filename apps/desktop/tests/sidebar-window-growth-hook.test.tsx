@@ -4,8 +4,8 @@
 // 真实 React 生命周期下的表现：控制器挂在 ref 上而不是模块单例，卸载必须把自己拥有的增长
 // 缩回去并解除 onResized 监听，StrictMode 双调用 effect 不能叠加两次增长。
 import { afterEach, describe, expect, test } from 'bun:test'
-import { StrictMode, useState } from 'react'
-import { act, cleanup, renderHook } from '@testing-library/react'
+import { StrictMode, useRef, useState } from 'react'
+import { act, cleanup, render, renderHook } from '@testing-library/react'
 import { sideCardGrowthRollback } from '../src/features/chat/workbench-side-cards'
 import {
   SIDEBAR_CARD_GAP,
@@ -53,14 +53,258 @@ function createDeps(
   }
 }
 
+function SidebarLayout({ entries, deps, onGrowthRefused }: {
+  entries: SidebarGrowthEntry[]
+  deps: SidebarWindowGrowthDeps
+  onGrowthRefused?: (refusals: SidebarGrowthRefusal[]) => void
+}) {
+  const layoutRef = useRef<HTMLDivElement>(null)
+  const owned = useSidebarWindowGrowth(entries, onGrowthRefused, layoutRef, deps)
+  return (
+    <div ref={layoutRef} data-testid="layout" data-growth={owned} style={{ display: 'flex', gap: SIDEBAR_CARD_GAP }}>
+      <main style={{ flex: 1, minWidth: 0 }}>Chat</main>
+      {entries.map((entry) => (
+        <aside key={entry.id} data-testid={entry.id} style={{ width: entry.width, flexShrink: 0 }} />
+      ))}
+    </div>
+  )
+}
+
 afterEach(cleanup)
 
 describe('useSidebarWindowGrowth hook', () => {
+  test('DOM width locks before native open and close finish, then returns to auto width', async () => {
+    const win = createFakeWindow({ defer: true })
+    const deps = createDeps(win)
+    const view = render(<SidebarLayout entries={[]} deps={deps} />)
+    const layout = view.getByTestId('layout')
+    layout.getBoundingClientRect = () => new DOMRect(0, 0, win.state.width, win.state.height)
+    await settle()
+    expect(layout.style.width).toBe('')
+    expect(win.pendingCount()).toBe(0)
+
+    view.rerender(<SidebarLayout entries={cards} deps={deps} />)
+    expect(view.getByTestId('contact-card').style.width).toBe('320px')
+    expect(layout.style.width).toBe('1385px')
+    expect(win.state.width).toBe(1060)
+    await settle()
+    expect(win.pendingNames()).toEqual(['setSize'])
+    expect(layout.style.width).toBe('1385px')
+
+    await act(async () => { win.flush(); await idleNativeQueue() })
+    expect(win.state.width).toBe(1385)
+    expect(layout.dataset.growth).toBe('325')
+    expect(win.pendingNames()).toEqual(['setMinSize'])
+    expect(layout.style.width).toBe('1385px')
+    await flushNative(win)
+    expect(layout.style.width).toBe('')
+
+    view.rerender(<SidebarLayout entries={[]} deps={deps} />)
+    expect(view.queryByTestId('contact-card')).toBeNull()
+    expect(layout.style.width).toBe('1060px')
+    expect(win.state.width).toBe(1385)
+    await settle()
+    expect(win.pendingNames()).toEqual(['setMinSize'])
+    await act(async () => { win.flush(); await idleNativeQueue() })
+    expect(win.pendingNames()).toEqual(['setSize'])
+    expect(layout.style.width).toBe('1060px')
+    expect(win.state.width).toBe(1385)
+    await flushNative(win)
+    expect(win.state.width).toBe(1060)
+    expect(layout.dataset.growth).toBe('0')
+    expect(layout.style.width).toBe('')
+    view.unmount()
+    await flushNative(win)
+  })
+
+  test('rapid open/close/open keeps the latest DOM lock when an old resize settles', async () => {
+    const win = createFakeWindow({ defer: true })
+    const deps = createDeps(win)
+    const view = render(<SidebarLayout entries={[]} deps={deps} />)
+    const layout = view.getByTestId('layout')
+    layout.getBoundingClientRect = () => new DOMRect(0, 0, win.state.width, win.state.height)
+    await settle()
+
+    view.rerender(<SidebarLayout entries={cards} deps={deps} />)
+    expect(layout.style.width).toBe('1385px')
+    await settle()
+    expect(win.pendingNames()).toEqual(['setSize'])
+    view.rerender(<SidebarLayout entries={[]} deps={deps} />)
+    expect(layout.style.width).toBe('1060px')
+    view.rerender(<SidebarLayout entries={cards} deps={deps} />)
+    expect(layout.style.width).toBe('1385px')
+    expect(win.state.width).toBe(1060)
+
+    await act(async () => { win.flush(); await idleNativeQueue() })
+    expect(win.state.width).toBe(1385)
+    expect(win.pendingNames()).toEqual(['setMinSize'])
+    expect(layout.style.width).toBe('1385px')
+    await flushNative(win)
+    expect(layout.style.width).toBe('')
+    expect(layout.dataset.growth).toBe('325')
+    expect(sizeCalls(win).map((call) => call.width)).toEqual([1385])
+    view.unmount()
+    await flushNative(win)
+    expect(win.state.width).toBe(1060)
+  })
+
+  test('unmount clears the detached DOM lock before an in-flight resize completes', async () => {
+    const win = createFakeWindow({ defer: true })
+    const deps = createDeps(win)
+    const view = render(<SidebarLayout entries={[]} deps={deps} />)
+    const layout = view.getByTestId('layout')
+    layout.getBoundingClientRect = () => new DOMRect(0, 0, win.state.width, win.state.height)
+    await settle()
+    view.rerender(<SidebarLayout entries={cards} deps={deps} />)
+    expect(layout.style.width).toBe('1385px')
+    await settle()
+    expect(win.pendingNames()).toEqual(['setSize'])
+
+    view.unmount()
+    expect(layout.isConnected).toBe(false)
+    expect(layout.style.width).toBe('')
+    await flushNative(win)
+    expect(layout.style.width).toBe('')
+    expect(win.state.width).toBe(1060)
+    expect(win.state.min.width).toBe(600)
+    expect(win.pendingCount()).toBe(0)
+    expect(win.listenerCount()).toBe(0)
+  })
+
+  test.each(['maximized', 'fullscreen'] as const)('%s never locks DOM width', async (mode) => {
+    const win = createFakeWindow({ defer: true, [mode]: true })
+    const deps = createDeps(win)
+    const view = render(<SidebarLayout entries={[]} deps={deps} />)
+    const layout = view.getByTestId('layout')
+    layout.getBoundingClientRect = () => new DOMRect(0, 0, win.state.width, win.state.height)
+    await settle()
+
+    view.rerender(<SidebarLayout entries={cards} deps={deps} />)
+    expect(layout.style.width).toBe('')
+    await settle()
+    expect(layout.style.width).toBe('')
+    expect(layout.dataset.growth).toBe('0')
+    expect(view.queryByTestId('contact-card')).not.toBeNull()
+    view.rerender(<SidebarLayout entries={[]} deps={deps} />)
+    expect(layout.style.width).toBe('')
+    await settle()
+    expect(layout.style.width).toBe('')
+    expect(win.requests).toEqual([])
+    view.unmount()
+    await flushNative(win)
+    expect(win.listenerCount()).toBe(0)
+  })
+
+  test('browser-only cards never lock DOM width or call native writes', async () => {
+    const win = createFakeWindow({ defer: true })
+    const deps = { ...createDeps(win), getWindow: () => null }
+    const view = render(<SidebarLayout entries={[]} deps={deps} />)
+    const layout = view.getByTestId('layout')
+    layout.getBoundingClientRect = () => new DOMRect(0, 0, win.state.width, win.state.height)
+    await settle()
+
+    view.rerender(<SidebarLayout entries={cards} deps={deps} />)
+    expect(layout.style.width).toBe('')
+    await settle()
+    expect(layout.style.width).toBe('')
+    expect(layout.dataset.growth).toBe('0')
+    expect(view.queryByTestId('contact-card')).not.toBeNull()
+    view.rerender(<SidebarLayout entries={[]} deps={deps} />)
+    expect(layout.style.width).toBe('')
+    await settle()
+    expect(layout.style.width).toBe('')
+    view.unmount()
+    await settle()
+    expect(win.requests).toEqual([])
+    expect(win.calls).toEqual([])
+    expect(win.listenerCount()).toBe(0)
+  })
+
+  test('failed native growth rolls the real card DOM back without leaving a fixed width', async () => {
+    const win = createFakeWindow({ defer: true, setSizeFailures: 2 })
+    const deps = createDeps(win)
+    const refused: SidebarGrowthRefusal[][] = []
+    function RollbackLayout() {
+      const [entries, setEntries] = useState<SidebarGrowthEntry[]>([])
+      return (
+        <>
+          <button onClick={() => setEntries(cards)}>Open contact</button>
+          <SidebarLayout entries={entries} deps={deps} onGrowthRefused={(failures) => {
+            refused.push(failures)
+            if (sideCardGrowthRollback(failures).closeContactCard) setEntries([])
+          }} />
+        </>
+      )
+    }
+    const view = render(<RollbackLayout />)
+    const layout = view.getByTestId('layout')
+    layout.getBoundingClientRect = () => new DOMRect(0, 0, win.state.width, win.state.height)
+    await settle()
+    act(() => { view.getByRole('button', { name: 'Open contact' }).click() })
+    expect(view.queryByTestId('contact-card')).not.toBeNull()
+    expect(layout.style.width).toBe('1385px')
+    await settle()
+    expect(win.pendingNames()).toEqual(['setSize'])
+    await act(async () => { win.flush(); await idleNativeQueue() })
+    expect(win.pendingNames()).toEqual(['setSize'])
+    expect(layout.style.width).toBe('1385px')
+    expect(refused).toEqual([])
+
+    await flushNative(win)
+    await settle()
+    expect(refused).toEqual([[{ id: 'contact-card', width: 320, accepted: null }]])
+    expect(view.queryByTestId('contact-card')).toBeNull()
+    expect(layout.style.width).toBe('')
+    expect(layout.dataset.growth).toBe('0')
+    expect(sizeCalls(win)).toHaveLength(2)
+    expect(win.state.width).toBe(1060)
+    expect(win.state.min.width).toBe(600)
+    view.unmount()
+    await flushNative(win)
+  })
+
+  test.each([
+    { workAreaWidth: 2400, nativeWidth: 1200 },
+    { workAreaWidth: 2000, nativeWidth: 1060 },
+  ])('work-area clamp at $workAreaWidth releases the DOM lock without closing the card', async ({ workAreaWidth, nativeWidth }) => {
+    const win = createFakeWindow({ defer: true })
+    const monitor = createMonitor()
+    monitor.workArea.size.width = workAreaWidth
+    const deps = createDeps(win, { monitor })
+    const refused: SidebarGrowthRefusal[][] = []
+    const onGrowthRefused = (failures: SidebarGrowthRefusal[]) => { refused.push(failures) }
+    const view = render(<SidebarLayout entries={[]} deps={deps} onGrowthRefused={onGrowthRefused} />)
+    const layout = view.getByTestId('layout')
+    layout.getBoundingClientRect = () => new DOMRect(0, 0, win.state.width, win.state.height)
+    await settle()
+
+    view.rerender(<SidebarLayout entries={cards} deps={deps} onGrowthRefused={onGrowthRefused} />)
+    expect(layout.style.width).toBe('1385px')
+    expect(win.state.width).toBe(1060)
+    await settle()
+    expect(win.pendingNames()).toEqual(['setPosition'])
+    expect(layout.style.width).toBe('1385px')
+    await flushNative(win)
+    expect(win.state.width).toBe(nativeWidth)
+    expect(layout.dataset.growth).toBe(String(nativeWidth - 1060))
+    expect(layout.style.width).toBe('')
+    expect(view.getByTestId('contact-card').style.width).toBe('320px')
+    expect(refused).toEqual([])
+    expect(win.pendingCount()).toBe(0)
+
+    view.rerender(<SidebarLayout entries={[]} deps={deps} onGrowthRefused={onGrowthRefused} />)
+    await flushNative(win)
+    expect(win.state.width).toBe(1060)
+    expect(layout.style.width).toBe('')
+    view.unmount()
+    await flushNative(win)
+  })
+
   test('挂载即增长，声明变化即调整，卸载缩回并解除监听', async () => {
     const win = createFakeWindow()
     const deps = createDeps(win)
     const { result, rerender, unmount } = renderHook(
-      ({ entries }: { entries: SidebarGrowthEntry[] }) => useSidebarWindowGrowth(entries, undefined, deps),
+      ({ entries }: { entries: SidebarGrowthEntry[] }) => useSidebarWindowGrowth(entries, undefined, undefined, deps),
       { initialProps: { entries: cards } },
     )
     await settle()
@@ -94,7 +338,7 @@ describe('useSidebarWindowGrowth hook', () => {
 
   test('StrictMode：effect 双调用只增长一次，卸载也不残留', async () => {
     const win = createFakeWindow()
-    const { result, unmount } = renderHook(() => useSidebarWindowGrowth(cards, undefined, createDeps(win)), { wrapper: StrictMode })
+    const { result, unmount } = renderHook(() => useSidebarWindowGrowth(cards, undefined, undefined, createDeps(win)), { wrapper: StrictMode })
     await settle()
     expect(result.current).toBe(325)
     expect(win.state.width).toBe(1385)
@@ -109,7 +353,7 @@ describe('useSidebarWindowGrowth hook', () => {
     const win = createFakeWindow()
     const deps = createDeps(win)
     const { result, rerender, unmount } = renderHook(
-      ({ entries }: { entries: SidebarGrowthEntry[] }) => useSidebarWindowGrowth(entries, undefined, deps),
+      ({ entries }: { entries: SidebarGrowthEntry[] }) => useSidebarWindowGrowth(entries, undefined, undefined, deps),
       { initialProps: { entries: cards }, wrapper: StrictMode },
     )
     await settle()
@@ -136,14 +380,14 @@ describe('useSidebarWindowGrowth hook', () => {
   test('卸载后重新挂载：从缩回来的宽度重新增长，而不是叠加', async () => {
     const win = createFakeWindow()
     const deps = createDeps(win)
-    const first = renderHook(() => useSidebarWindowGrowth(cards, undefined, deps))
+    const first = renderHook(() => useSidebarWindowGrowth(cards, undefined, undefined, deps))
     await settle()
     expect(win.state.width).toBe(1385)
     first.unmount()
     await settle()
     expect(win.state.width).toBe(1060)
 
-    const second = renderHook(() => useSidebarWindowGrowth(cards, undefined, deps))
+    const second = renderHook(() => useSidebarWindowGrowth(cards, undefined, undefined, deps))
     await settle()
     expect(second.result.current).toBe(325)
     expect(win.state.width).toBe(1385)
@@ -166,7 +410,7 @@ describe('useSidebarWindowGrowth hook', () => {
       scaleFactor: 1,
     } satisfies FakeMonitor
     const deps = createDeps(win, { monitor })
-    const { result } = renderHook(() => useSidebarWindowGrowth(cards, (refusals) => { refused.push(refusals) }, deps))
+    const { result } = renderHook(() => useSidebarWindowGrowth(cards, (refusals) => { refused.push(refusals) }, undefined, deps))
     await settle()
     expect(result.current).toBe(0)
     expect(sizeCalls(win)).toEqual([])
@@ -178,7 +422,7 @@ describe('useSidebarWindowGrowth hook', () => {
     const win = createFakeWindow({ setSizeFailures: 2 })
     const refused: SidebarGrowthRefusal[][] = []
     const deps = createDeps(win)
-    const { result } = renderHook(() => useSidebarWindowGrowth(cards, (refusals) => { refused.push(refusals) }, deps))
+    const { result } = renderHook(() => useSidebarWindowGrowth(cards, (refusals) => { refused.push(refusals) }, undefined, deps))
     await settle()
     expect(refused).toEqual([[{ id: 'contact-card', width: 320, accepted: null }]])
     expect(result.current).toBe(0)
@@ -187,7 +431,7 @@ describe('useSidebarWindowGrowth hook', () => {
 
   test('非 Tauri（浏览器预览）：零原生调用，增量为 0，卡片靠压缩聊天存在', async () => {
     const win = createFakeWindow()
-    const { result } = renderHook(() => useSidebarWindowGrowth(cards, undefined, { getWindow: () => null, getMonitor: async () => null, log: () => undefined }))
+    const { result } = renderHook(() => useSidebarWindowGrowth(cards, undefined, undefined, { getWindow: () => null, getMonitor: async () => null, log: () => undefined }))
     await settle()
     expect(result.current).toBe(0)
     expect(win.calls).toEqual([])
@@ -196,7 +440,7 @@ describe('useSidebarWindowGrowth hook', () => {
   test('real remount during cleanup cancels an unsent shrink and keeps forwarding ownership', async () => {
     const win = createFakeWindow({ defer: true })
     const deps = createDeps(win)
-    const first = renderHook(() => useSidebarWindowGrowth(cards, undefined, deps))
+    const first = renderHook(() => useSidebarWindowGrowth(cards, undefined, undefined, deps))
     await flushNative(win)
     expect(first.result.current).toBe(325)
     expect(win.state.width).toBe(1385)
@@ -204,7 +448,7 @@ describe('useSidebarWindowGrowth hook', () => {
     first.unmount()
     await settle()
     expect(win.pendingNames()).toEqual(['setMinSize'])
-    const second = renderHook(() => useSidebarWindowGrowth(cards, undefined, deps))
+    const second = renderHook(() => useSidebarWindowGrowth(cards, undefined, undefined, deps))
     await flushNative(win)
     expect(second.result.current).toBe(325)
     expect(win.state.width).toBe(1385)
@@ -223,7 +467,7 @@ describe('useSidebarWindowGrowth hook', () => {
   test('real remount repairs cleanup minimum debt even with zero size ownership', async () => {
     const win = createFakeWindow()
     const deps = createDeps(win)
-    const first = renderHook(() => useSidebarWindowGrowth(cards, undefined, deps))
+    const first = renderHook(() => useSidebarWindowGrowth(cards, undefined, undefined, deps))
     await settle()
     expect(first.result.current).toBe(325)
     win.failNextSetMinSize(2)
@@ -233,7 +477,7 @@ describe('useSidebarWindowGrowth hook', () => {
     expect(win.state.min.width).toBe(925)
     expect(win.listenerCount()).toBe(0)
     const sizes = sizeCalls(win).length
-    const second = renderHook(() => useSidebarWindowGrowth([], undefined, deps))
+    const second = renderHook(() => useSidebarWindowGrowth([], undefined, undefined, deps))
     await settle()
     expect(second.result.current).toBe(0)
     expect(win.state.width).toBe(1060)
@@ -248,7 +492,7 @@ describe('useSidebarWindowGrowth hook', () => {
   test('late listener registration cleans up across real remount without doubled growth', async () => {
     const win = createFakeWindow({ deferListeners: true, autoResize: true })
     const deps = createDeps(win)
-    const first = renderHook(() => useSidebarWindowGrowth(cards, undefined, deps), { wrapper: StrictMode })
+    const first = renderHook(() => useSidebarWindowGrowth(cards, undefined, undefined, deps), { wrapper: StrictMode })
     await settle()
     expect(first.result.current).toBe(325)
     expect(win.state.width).toBe(1385)
@@ -257,7 +501,7 @@ describe('useSidebarWindowGrowth hook', () => {
     await settle()
     expect(win.state.width).toBe(1060)
     const second = renderHook(
-      ({ entries }: { entries: SidebarGrowthEntry[] }) => useSidebarWindowGrowth(entries, undefined, deps),
+      ({ entries }: { entries: SidebarGrowthEntry[] }) => useSidebarWindowGrowth(entries, undefined, undefined, deps),
       { initialProps: { entries: cards }, wrapper: StrictMode },
     )
     await settle()
@@ -289,8 +533,8 @@ describe('useSidebarWindowGrowth hook', () => {
   test('same-declaration consumers share real geometry and one listener until the last unmount', async () => {
     const win = createFakeWindow({ autoResize: true })
     const deps = createDeps(win)
-    const first = renderHook(() => useSidebarWindowGrowth(cards, undefined, deps))
-    const second = renderHook(() => useSidebarWindowGrowth(cards, undefined, deps))
+    const first = renderHook(() => useSidebarWindowGrowth(cards, undefined, undefined, deps))
+    const second = renderHook(() => useSidebarWindowGrowth(cards, undefined, undefined, deps))
     await settle()
     expect(first.result.current).toBe(325)
     expect(second.result.current).toBe(325)
@@ -325,7 +569,7 @@ describe('useSidebarWindowGrowth hook', () => {
     const deps = createDeps(win)
     const refused: SidebarGrowthRefusal[][] = []
     const hook = renderHook(
-      ({ entries }: { entries: SidebarGrowthEntry[] }) => useSidebarWindowGrowth(entries, (failed) => { refused.push(failed) }, deps),
+      ({ entries }: { entries: SidebarGrowthEntry[] }) => useSidebarWindowGrowth(entries, (failed) => { refused.push(failed) }, undefined, deps),
       { initialProps: { entries: cards } },
     )
     await settle()
@@ -349,7 +593,7 @@ describe('useSidebarWindowGrowth hook', () => {
     const deps = createDeps(win)
     const refused: SidebarGrowthRefusal[][] = []
     const { result, rerender } = renderHook(
-      ({ entries }: { entries: SidebarGrowthEntry[] }) => useSidebarWindowGrowth(entries, (refusals) => { refused.push(refusals) }, deps),
+      ({ entries }: { entries: SidebarGrowthEntry[] }) => useSidebarWindowGrowth(entries, (refusals) => { refused.push(refusals) }, undefined, deps),
       { initialProps: { entries: cards } },
     )
     await settle()
@@ -387,7 +631,7 @@ describe('useSidebarWindowGrowth hook', () => {
     const deps = createDeps(win)
     const refused: SidebarGrowthRefusal[][] = []
     const { result, rerender, unmount } = renderHook(
-      ({ entries }: { entries: SidebarGrowthEntry[] }) => useSidebarWindowGrowth(entries, (refusals) => { refused.push(refusals) }, deps),
+      ({ entries }: { entries: SidebarGrowthEntry[] }) => useSidebarWindowGrowth(entries, (refusals) => { refused.push(refusals) }, undefined, deps),
       { initialProps: { entries: cards } },
     )
     await settle()
@@ -414,7 +658,7 @@ describe('useSidebarWindowGrowth hook', () => {
     const deps = createDeps(win)
     const refused: SidebarGrowthRefusal[][] = []
     const { result, rerender, unmount } = renderHook(
-      ({ entries }: { entries: SidebarGrowthEntry[] }) => useSidebarWindowGrowth(entries, (failures) => { refused.push(failures) }, deps),
+      ({ entries }: { entries: SidebarGrowthEntry[] }) => useSidebarWindowGrowth(entries, (failures) => { refused.push(failures) }, undefined, deps),
       { initialProps: { entries: cards } },
     )
     await settle()
@@ -464,7 +708,7 @@ describe('useSidebarWindowGrowth hook', () => {
         if (rollback.closeContactCard) setContactOpen(false)
         if (rollback.closeRightPanel) setPanelOpen(false)
         else if (rollback.restoreRightPanelWidth !== null) setPanelWidth(rollback.restoreRightPanelWidth)
-      }, deps)
+      }, undefined, deps)
       return { owned, entries, panelWidth, panelOpen, contactOpen, setPanelWidth, setContactOpen }
     })
     await flushNative(win)
@@ -505,7 +749,7 @@ describe('useSidebarWindowGrowth hook', () => {
   test('在途增长 + 立即卸载：卸载仍把真实落地的增长缩回来', async () => {
     const win = createFakeWindow({ defer: true })
     const deps = createDeps(win)
-    const { unmount } = renderHook(() => useSidebarWindowGrowth(cards, undefined, deps))
+    const { unmount } = renderHook(() => useSidebarWindowGrowth(cards, undefined, undefined, deps))
     await settle()
     // 真实的“在途”：增长调用已经发给原生层，还压在延迟队列里没执行。
     expect(win.pendingNames()).toEqual(['setSize'])

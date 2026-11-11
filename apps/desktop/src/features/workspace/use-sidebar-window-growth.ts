@@ -1,4 +1,4 @@
-import { useEffect, useRef, useSyncExternalStore } from 'react'
+import { useEffect, useLayoutEffect, useRef, useSyncExternalStore, type RefObject } from 'react'
 import { LogicalPosition, LogicalSize, currentMonitor, getCurrentWindow } from '@tauri-apps/api/window'
 
 /**
@@ -131,8 +131,9 @@ export interface SidebarWindowGrowthDeps {
 }
 
 export interface SidebarWindowGrowth {
-  setSidebars: (entries: SidebarGrowthEntry[]) => void
+  setSidebars: (entries: SidebarGrowthEntry[]) => Promise<void>
   getAppliedDelta: () => number
+  canResize: () => boolean
   subscribe: (listener: () => void) => () => void
   dispose: () => void
 }
@@ -186,6 +187,7 @@ export function createSidebarWindowGrowth(deps: SidebarWindowGrowthDeps): Sideba
   let appliedDelta = 0
   let closedBase: number | null = null
   let suppressed = false
+  let mode: Mode = 'unknown'
   let pendingResize: PendingResize | null = null
   let pendingMovement = false
   let lastMinimum = BASE_MIN_WIDTH
@@ -229,6 +231,7 @@ export function createSidebarWindowGrowth(deps: SidebarWindowGrowthDeps): Sideba
     queue = queue.then(() => operation().catch((cause) => {
       log(`[sidebar-growth] operation failed: ${describe(cause)}`)
     }))
+    return queue
   }
   async function read<T>(name: string, getter: () => Promise<T>): Promise<T | null> {
     try { return await getter() } catch (cause) { log(`[sidebar-growth] ${name} read failed: ${describe(cause)}`); return null }
@@ -238,8 +241,9 @@ export function createSidebarWindowGrowth(deps: SidebarWindowGrowthDeps): Sideba
       read('maximize', () => appWindow.isMaximized()),
       read('fullscreen', () => appWindow.isFullscreen()),
     ])
-    if (maximized === true || fullscreen === true) return 'system'
-    return maximized === null || fullscreen === null ? 'unknown' : 'normal'
+    mode = maximized === true || fullscreen === true ? 'system'
+      : maximized === null || fullscreen === null ? 'unknown' : 'normal'
+    return mode
   }
   function observeMode(mode: Mode) {
     if (mode !== 'system') return
@@ -522,9 +526,10 @@ export function createSidebarWindowGrowth(deps: SidebarWindowGrowthDeps): Sideba
       for (const lifetime of rejectedAccommodation.keys()) {
         if (!presentLifetimes.has(lifetime)) rejectedAccommodation.delete(lifetime)
       }
-      enqueue(() => reconcile())
+      return enqueue(() => reconcile())
     },
     getAppliedDelta: () => appliedDelta,
+    canResize: () => mode === 'normal',
     subscribe(listener) {
       listeners.add(listener)
       return () => { listeners.delete(listener) }
@@ -683,6 +688,7 @@ function unbindGrowth(binding: GrowthBinding) {
 export function useSidebarWindowGrowth(
   entries: SidebarGrowthEntry[],
   onGrowthRefused?: (refusals: SidebarGrowthRefusal[]) => void,
+  layoutRef?: RefObject<HTMLElement | null>,
   deps: SidebarWindowGrowthDeps = NATIVE_DEPS,
 ) {
   const bindingRef = useRef<GrowthBinding | null>(null)
@@ -698,7 +704,7 @@ export function useSidebarWindowGrowth(
   })
 
   // Declared before the entries effect, so the controller exists when it runs.
-  useEffect(() => {
+  useLayoutEffect(() => {
     const shared = acquireGrowth(deps)
     sharedRef.current = shared
     if (shared) {
@@ -725,10 +731,33 @@ export function useSidebarWindowGrowth(
     // refcount must follow real mount / unmount, not callback identity.
   }, [])
 
+  const layoutWidth = useRef<number | null>(null)
+  const previousCardWidth = useRef(0)
   const key = JSON.stringify(entries)
-  useEffect(() => {
-    binding.growth?.setSidebars(JSON.parse(key) as SidebarGrowthEntry[])
-  }, [binding, key])
+  useLayoutEffect(() => {
+    const declaration = JSON.parse(key) as SidebarGrowthEntry[]
+    const wanted = declaration.reduce((sum, entry) => sum + entry.width + SIDEBAR_CARD_GAP, 0)
+    const change = wanted - previousCardWidth.current
+    previousCardWidth.current = wanted
+    const container = layoutRef?.current
+    const growth = binding.growth
+    let cancelled = false
+
+    // Keep the chat still between React's card commit and the native window resize.
+    if (container && growth?.canResize() && (change !== 0 || layoutWidth.current !== null)) {
+      layoutWidth.current = Math.max(0, (layoutWidth.current ?? container.getBoundingClientRect().width) + change)
+      container.style.width = `${layoutWidth.current}px`
+    }
+    void growth?.setSidebars(declaration).then(() => {
+      if (cancelled) return
+      layoutWidth.current = null
+      container?.style.removeProperty('width')
+    })
+    return () => {
+      cancelled = true
+      container?.style.removeProperty('width')
+    }
+  }, [binding, key, layoutRef])
 
   return appliedDelta
 }

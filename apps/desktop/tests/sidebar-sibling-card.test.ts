@@ -75,7 +75,8 @@ describe('同级侧栏卡片（缺口 A）', () => {
     expect(memo).toContain("if (contactCardOpen) entries.push({ id: 'contact-card', width: CONTACT_SIDE_CARD_WIDTH })")
     // 没有任何视口断点或覆盖层条件参与增长判断。
     expect(/compact|matchMedia|1180|innerWidth/.test(memo)).toBe(false)
-    expect(workbench).toContain('useSidebarWindowGrowth(sidebarGrowthEntries, handleSidebarGrowthRefused)')
+    expect(workbench).toContain('useSidebarWindowGrowth(sidebarGrowthEntries, handleSidebarGrowthRefused, sidebarLayoutRef)')
+    expect(workbench).toContain('<div className="fox-workbench" ref={sidebarLayoutRef}>')
   })
 
   test('CSS：同级卡片共享 content-card 的外边距与圆角，5px 间隙等宽', () => {
