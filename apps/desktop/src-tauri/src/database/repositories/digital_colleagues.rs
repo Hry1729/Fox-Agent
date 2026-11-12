@@ -1,10 +1,12 @@
+use super::{create_run_in_transaction, now_ms, Database};
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::{create_run_in_transaction, now_ms, Database};
 use crate::database::{
+    local_day_start_ms, resolved_device_timezone, validate_catchup_window,
     CreateDigitalColleagueInput, DigitalColleagueAuditRecord, DigitalColleagueChannelRecord,
-    DigitalColleagueRecord, DigitalColleagueScheduleRecord, DigitalColleagueTriggerAcceptance,
-    DigitalColleagueTriggerRecord, PreparedDigitalColleagueTrigger,
+    DigitalColleagueRecord, DigitalColleagueScheduleRecord, DigitalColleagueScheduleSpec,
+    DigitalColleagueTriggerAcceptance, DigitalColleagueTriggerRecord,
+    PreparedDigitalColleagueTrigger,
 };
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{json, Value};
@@ -29,9 +31,10 @@ impl Database {
                 Some(target.workspace_dir.clone()),
                 Some("ask".to_owned()),
                 if input.expert_id.trim().is_empty() {
-                    target.template_agent_id.clone().ok_or_else(|| {
-                        "digital_colleague.companion_unavailable".to_owned()
-                    })?
+                    target
+                        .template_agent_id
+                        .clone()
+                        .ok_or_else(|| "digital_colleague.companion_unavailable".to_owned())?
                 } else {
                     input.expert_id.clone()
                 },
@@ -67,8 +70,8 @@ impl Database {
         }
         let now = now_ms();
         let id = Uuid::new_v4().to_string();
-        let package_snapshot_json =
-            crate::canonical_json::to_string(&binding.package_snapshot).map_err(|error| error.to_string())?;
+        let package_snapshot_json = crate::canonical_json::to_string(&binding.package_snapshot)
+            .map_err(|error| error.to_string())?;
         let knowledge_json = crate::canonical_json::to_string(&input.knowledge_references)
             .map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
@@ -84,9 +87,9 @@ impl Database {
                 params![
                     id,
                     input.name,
-                    expert_id,
-                    binding.id,
-                    binding.package_hash,
+                    Some(expert_id.clone()),
+                    Some(binding.id),
+                    Some(binding.package_hash.clone()),
                     package_snapshot_json,
                     conversation.id,
                     input.objective,
@@ -292,6 +295,22 @@ impl Database {
             .ok_or_else(|| "digital_colleague.not_found".to_owned())
     }
 
+    fn persisted_schedule_timezone(&self, schedule_id: &str) -> Option<String> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT timezone FROM digital_colleague_schedules WHERE id = ?1",
+                    [schedule_id],
+                    |row| row.get(0),
+                )
+                .optional()
+        })
+        .ok()
+        .flatten()
+    }
+
+    /// Compatibility wrapper for the pre-3b command API. New callers use the
+    /// typed variant below; this wrapper keeps interval creation semantics.
     pub fn save_digital_colleague_schedule(
         &self,
         schedule_id: Option<&str>,
@@ -301,13 +320,65 @@ impl Database {
         catchup_window_seconds: i64,
         enabled: bool,
     ) -> Result<DigitalColleagueScheduleRecord, String> {
+        // Existing plans keep their persisted zone; only a new plan resolves
+        // the current device timezone. Otherwise a later interval-wrapper save
+        // would rewrite the zone and reset cadence.
+        let timezone = schedule_id
+            .and_then(|id| self.persisted_schedule_timezone(id))
+            .unwrap_or_else(|| resolved_device_timezone().unwrap_or_else(|_| "UTC".to_owned()));
+        self.save_typed_digital_colleague_schedule_at(
+            schedule_id,
+            colleague_id,
+            name,
+            DigitalColleagueScheduleSpec::Interval {
+                interval_seconds,
+                timezone,
+            },
+            catchup_window_seconds,
+            enabled,
+            now_ms(),
+        )
+    }
+
+    pub fn save_typed_digital_colleague_schedule(
+        &self,
+        schedule_id: Option<&str>,
+        colleague_id: &str,
+        name: &str,
+        spec: DigitalColleagueScheduleSpec,
+        catchup_window_seconds: i64,
+        enabled: bool,
+    ) -> Result<DigitalColleagueScheduleRecord, String> {
+        self.save_typed_digital_colleague_schedule_at(
+            schedule_id,
+            colleague_id,
+            name,
+            spec,
+            catchup_window_seconds,
+            enabled,
+            now_ms(),
+        )
+    }
+
+    pub fn save_typed_digital_colleague_schedule_at(
+        &self,
+        schedule_id: Option<&str>,
+        colleague_id: &str,
+        name: &str,
+        spec: DigitalColleagueScheduleSpec,
+        catchup_window_seconds: i64,
+        enabled: bool,
+        now: i64,
+    ) -> Result<DigitalColleagueScheduleRecord, String> {
+        let spec = spec.canonicalized()?;
+        spec.validate()?;
+        validate_catchup_window(catchup_window_seconds)?;
         let id = schedule_id
             .map(str::to_owned)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let now = now_ms();
-        let next_due_at = now.saturating_add(interval_seconds.saturating_mul(1_000));
         self.with_connection(|connection| {
-            let active: bool = connection.query_row(
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let active: bool = transaction.query_row(
                 "SELECT status = 'active' FROM digital_colleagues WHERE id = ?1",
                 [colleague_id],
                 |row| row.get(0),
@@ -315,27 +386,85 @@ impl Database {
             if enabled && !active {
                 return Err(rusqlite::Error::InvalidQuery);
             }
-            connection.execute(
+            let existing = query_schedule(&transaction, &id).optional()?;
+            if existing.as_ref().is_some_and(|record| record.colleague_id != colleague_id) {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            let unchanged = existing.as_ref().is_some_and(|record| {
+                DigitalColleagueScheduleSpec::from_record(record).ok().as_ref() == Some(&spec)
+            });
+            let anchor_at = match &spec {
+                DigitalColleagueScheduleSpec::Interval { .. } if unchanged => {
+                    existing.as_ref().and_then(|record| record.anchor_at)
+                }
+                DigitalColleagueScheduleSpec::Interval { .. } => Some(now),
+                _ => None,
+            };
+            let recomputed = spec.next_after(anchor_at, now).map_err(|error| {
+                rusqlite::Error::ToSqlConversionFailure(error.into())
+            })?;
+            let next_due_at = if unchanged
+                && existing.as_ref().is_some_and(|record| record.enabled || !enabled)
+            {
+                existing.as_ref().map(|record| record.next_due_at).unwrap_or(now)
+            } else {
+                match recomputed {
+                    Some(next) => next,
+                    None if !enabled => match &spec {
+                        DigitalColleagueScheduleSpec::Once { at_ms, .. } => *at_ms,
+                        _ => existing.as_ref().map(|record| record.next_due_at).unwrap_or(now),
+                    },
+                    None => return Err(rusqlite::Error::InvalidQuery),
+                }
+            };
+            let (interval_seconds, once_at, weekdays, local_time) = match &spec {
+                DigitalColleagueScheduleSpec::Once { at_ms, .. } => {
+                    (None, Some(*at_ms), None, None)
+                }
+                DigitalColleagueScheduleSpec::Interval { interval_seconds, .. } => {
+                    (Some(*interval_seconds), None, None, None)
+                }
+                DigitalColleagueScheduleSpec::Daily { weekdays, local_time, .. }
+                | DigitalColleagueScheduleSpec::Weekly { weekdays, local_time, .. } => {
+                    (None, None, Some(weekdays.clone()), Some(local_time.clone()))
+                }
+            };
+            let weekdays_json = weekdays
+                .map(|days| serde_json::to_string(&days))
+                .transpose()
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            transaction.execute(
                 "INSERT INTO digital_colleague_schedules(
-                    id, colleague_id, name, schedule_kind, interval_seconds,
-                    catchup_window_seconds, enabled, next_due_at, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, 'interval', ?4, ?5, ?6, ?7, ?8, ?8)
+                    id, colleague_id, name, schedule_kind, interval_seconds, once_at,
+                    weekdays_json, local_time, timezone, anchor_at, catchup_window_seconds,
+                    enabled, next_due_at, last_scheduled_at, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                           (SELECT last_scheduled_at FROM digital_colleague_schedules WHERE id = ?1), ?14, ?14)
                  ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
+                    schedule_kind = excluded.schedule_kind,
                     interval_seconds = excluded.interval_seconds,
+                    once_at = excluded.once_at,
+                    weekdays_json = excluded.weekdays_json,
+                    local_time = excluded.local_time,
+                    timezone = excluded.timezone,
+                    anchor_at = excluded.anchor_at,
                     catchup_window_seconds = excluded.catchup_window_seconds,
                     enabled = excluded.enabled,
-                    next_due_at = CASE
-                        WHEN digital_colleague_schedules.interval_seconds != excluded.interval_seconds
-                          OR (digital_colleague_schedules.enabled = 0 AND excluded.enabled = 1)
-                        THEN excluded.next_due_at ELSE digital_colleague_schedules.next_due_at END,
+                    next_due_at = excluded.next_due_at,
                     updated_at = excluded.updated_at
                  WHERE digital_colleague_schedules.colleague_id = excluded.colleague_id",
                 params![
                     id,
                     colleague_id,
                     name,
+                    spec.kind(),
                     interval_seconds,
+                    once_at,
+                    weekdays_json,
+                    local_time,
+                    spec.timezone(),
+                    anchor_at,
                     catchup_window_seconds,
                     enabled,
                     next_due_at,
@@ -343,16 +472,17 @@ impl Database {
                 ],
             )?;
             append_audit(
-                connection,
+                &transaction,
                 Some(colleague_id),
                 None,
                 None,
                 "schedule.saved",
                 "applied",
                 "user",
-                &json!({ "scheduleId": id, "enabled": enabled }),
+                &json!({ "scheduleId": id, "enabled": enabled, "kind": spec.kind(), "timezone": spec.timezone() }),
                 now,
-            )
+            )?;
+            transaction.commit()
         })?;
         self.get_digital_colleague_schedule(&id)?
             .ok_or_else(|| "digital_colleague.schedule_not_found".to_owned())
@@ -550,7 +680,8 @@ impl Database {
         actor: &str,
     ) -> Result<DigitalColleagueTriggerAcceptance, String> {
         let now = now_ms();
-        let payload_json = crate::canonical_json::to_string(payload).map_err(|error| error.to_string())?;
+        let payload_json =
+            crate::canonical_json::to_string(payload).map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
             if let Some(existing) =
@@ -562,25 +693,31 @@ impl Database {
                     prepared: None,
                 }));
             }
-            let admission =
-                match admit_trigger_in_transaction(&transaction, colleague_id, actor, now, None)? {
-                    Ok(admission) => admission,
-                    Err(conclusion) => {
-                        append_audit(
-                            &transaction,
-                            Some(colleague_id),
-                            source_id.filter(|_| source_type == "channel"),
-                            None,
-                            "trigger.received",
-                            conclusion.status,
-                            actor,
-                            &conclusion.details,
-                            now,
-                        )?;
-                        transaction.commit()?;
-                        return Ok(Err(conclusion.code));
-                    }
-                };
+            let admission = match admit_trigger_in_transaction(
+                &transaction,
+                colleague_id,
+                actor,
+                now,
+                None,
+                None,
+            )? {
+                Ok(admission) => admission,
+                Err(conclusion) => {
+                    append_audit(
+                        &transaction,
+                        Some(colleague_id),
+                        source_id.filter(|_| source_type == "channel"),
+                        None,
+                        "trigger.received",
+                        conclusion.status,
+                        actor,
+                        &conclusion.details,
+                        now,
+                    )?;
+                    transaction.commit()?;
+                    return Ok(Err(conclusion.code));
+                }
+            };
             let trigger_id = insert_trigger_record(
                 &transaction,
                 colleague_id,
@@ -630,38 +767,33 @@ impl Database {
             let claimed = self.with_connection(|connection| {
                 let transaction =
                     connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                let due = transaction
+                let schedule_id = transaction
                     .query_row(
-                        "SELECT id, colleague_id, catchup_window_seconds, next_due_at, interval_seconds
-                         FROM digital_colleague_schedules
+                        "SELECT id FROM digital_colleague_schedules
                          WHERE enabled = 1 AND next_due_at <= ?1
                          ORDER BY next_due_at, id LIMIT 1",
                         [now],
-                        |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, String>(1)?,
-                                row.get::<_, i64>(2)?,
-                                row.get::<_, i64>(3)?,
-                                row.get::<_, i64>(4)?,
-                            ))
-                        },
+                        |row| row.get::<_, String>(0),
                     )
                     .optional()?;
-                let Some((schedule_id, colleague_id, catchup_seconds, due_at, interval_seconds)) =
-                    due
-                else {
+                let Some(schedule_id) = schedule_id else {
                     transaction.commit()?;
                     return Ok(None);
                 };
-                let interval_ms = interval_seconds.saturating_mul(1_000);
-                let mut next_due = due_at.saturating_add(interval_ms);
-                while next_due <= now {
-                    next_due = next_due.saturating_add(interval_ms);
-                }
+                let schedule = query_schedule(&transaction, &schedule_id)?;
+                let colleague_id = schedule.colleague_id.clone();
+                let catchup_seconds = schedule.catchup_window_seconds;
+                let due_at = schedule.next_due_at;
+                let spec = DigitalColleagueScheduleSpec::from_record(&schedule)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
+                let next_due = spec
+                    .next_after(schedule.anchor_at, now)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
                 let claimed_cursor = transaction.execute(
                     "UPDATE digital_colleague_schedules
-                     SET next_due_at = ?2, last_scheduled_at = ?3, updated_at = ?4
+                     SET next_due_at = COALESCE(?2, next_due_at),
+                         enabled = CASE WHEN ?2 IS NULL THEN 0 ELSE 1 END,
+                         last_scheduled_at = ?3, updated_at = ?4
                      WHERE id = ?1 AND enabled = 1 AND next_due_at = ?3",
                     params![schedule_id, next_due, due_at, now],
                 )?;
@@ -711,6 +843,7 @@ impl Database {
                         "scheduler",
                         now,
                         None,
+                        Some(&schedule.timezone),
                     )? {
                         Err(conclusion) => {
                             let trigger_id = insert_trigger_record(
@@ -752,6 +885,19 @@ impl Database {
                                 None,
                                 now,
                             )?;
+                            if now > due_at {
+                                append_audit(
+                                    &transaction,
+                                    Some(&colleague_id),
+                                    None,
+                                    Some(&trigger_id),
+                                    "schedule.catchup",
+                                    "accepted",
+                                    "scheduler",
+                                    &json!({ "scheduleId": schedule_id, "scheduledFor": due_at, "claimedAt": now }),
+                                    now,
+                                )?;
+                            }
                             if let Some(trigger) = dispatch_or_skip_in_transaction(
                                 &transaction,
                                 &admission,
@@ -854,12 +1000,27 @@ impl Database {
                     continue;
                 }
                 let payload: Value = parse_json_column(payload_json)?;
+                let schedule_timezone = if source_type == "schedule" {
+                    source_id
+                        .as_deref()
+                        .map(|schedule_id| {
+                            transaction.query_row(
+                                "SELECT timezone FROM digital_colleague_schedules WHERE id = ?1",
+                                [schedule_id],
+                                |row| row.get::<_, String>(0),
+                            )
+                        })
+                        .transpose()?
+                } else {
+                    None
+                };
                 match admit_trigger_in_transaction(
                     &transaction,
                     &colleague_id,
                     "startup",
                     now,
                     Some(&trigger_id),
+                    schedule_timezone.as_deref(),
                 )? {
                     Err(conclusion) => {
                         finalize_trigger_conclusion(
@@ -1089,6 +1250,7 @@ fn admit_trigger_in_transaction(
     // A recovered claim already owns a trigger row: it must not count itself
     // towards the daily quota or block itself as an overlap.
     pending_trigger_id: Option<&str>,
+    schedule_timezone: Option<&str>,
 ) -> rusqlite::Result<Result<TriggerAdmission, TriggerConclusion>> {
     // A Run that ended without its terminal event being projected must not keep
     // occupying the colleague, or every later claim overlap-skips forever.
@@ -1128,7 +1290,11 @@ fn admit_trigger_in_transaction(
     } else {
         None
     };
-    let day_start = now - now.rem_euclid(86_400_000);
+    let day_start = match schedule_timezone {
+        Some(timezone) => local_day_start_ms(now, timezone)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?,
+        None => now - now.rem_euclid(86_400_000),
+    };
     let (runs_today, tokens_today): (i64, i64) = transaction.query_row(
         "SELECT COUNT(*), COALESCE(SUM(total_tokens), 0)
          FROM digital_colleague_triggers
@@ -1299,47 +1465,43 @@ fn dispatch_or_skip_in_transaction(
     let colleague = &admission.colleague;
     let channel_id = source_id.filter(|_| source_type == "channel");
     let prompt = digital_colleague_prompt(colleague, source_type, payload)?;
-    let started = match create_run_in_transaction(
-        transaction,
-        &colleague.conversation_id,
-        &prompt,
-        None,
-    ) {
-        Ok(started) => started,
-        // QueryReturnedNoRows means the execution conversation is archived,
-        // trashed or otherwise gone: a persistable skip, not a transaction
-        // failure. Rolling back would leave the cursor on the same due
-        // occurrence and block every later schedule on each poll.
-        Err(error @ (rusqlite::Error::InvalidQuery | rusqlite::Error::QueryReturnedNoRows)) => {
-            let message = match error {
-                rusqlite::Error::QueryReturnedNoRows => {
-                    "本次触发无法派发：执行会话已归档或不再存在。"
-                }
-                _ => "本次触发无法派发：执行会话不可用，或已有正在进行的运行。",
-            };
-            finalize_trigger_conclusion(
-                transaction,
-                trigger_id,
-                "skipped",
-                TRIGGER_DISPATCH_UNAVAILABLE,
-                message,
-                now,
-            )?;
-            append_audit(
-                transaction,
-                Some(&colleague.id),
-                channel_id,
-                Some(trigger_id),
-                "trigger.received",
-                "skipped",
-                actor,
-                &json!({ "code": TRIGGER_DISPATCH_UNAVAILABLE }),
-                now,
-            )?;
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    };
+    let started =
+        match create_run_in_transaction(transaction, &colleague.conversation_id, &prompt, None) {
+            Ok(started) => started,
+            // QueryReturnedNoRows means the execution conversation is archived,
+            // trashed or otherwise gone: a persistable skip, not a transaction
+            // failure. Rolling back would leave the cursor on the same due
+            // occurrence and block every later schedule on each poll.
+            Err(error @ (rusqlite::Error::InvalidQuery | rusqlite::Error::QueryReturnedNoRows)) => {
+                let message = match error {
+                    rusqlite::Error::QueryReturnedNoRows => {
+                        "本次触发无法派发：执行会话已归档或不再存在。"
+                    }
+                    _ => "本次触发无法派发：执行会话不可用，或已有正在进行的运行。",
+                };
+                finalize_trigger_conclusion(
+                    transaction,
+                    trigger_id,
+                    "skipped",
+                    TRIGGER_DISPATCH_UNAVAILABLE,
+                    message,
+                    now,
+                )?;
+                append_audit(
+                    transaction,
+                    Some(&colleague.id),
+                    channel_id,
+                    Some(trigger_id),
+                    "trigger.received",
+                    "skipped",
+                    actor,
+                    &json!({ "code": TRIGGER_DISPATCH_UNAVAILABLE }),
+                    now,
+                )?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
     let frozen_run_budget = json!({
         "contract": "digital_colleague_run_budget_v1",
         "maxDurationMs": colleague.max_duration_ms,
@@ -1655,9 +1817,10 @@ fn colleague_select() -> &'static str {
 }
 
 fn schedule_select() -> &'static str {
-    "SELECT id, colleague_id, name, schedule_kind, interval_seconds,
-            catchup_window_seconds, enabled, next_due_at, last_scheduled_at,
-            created_at, updated_at FROM digital_colleague_schedules"
+    "SELECT id, colleague_id, name, schedule_kind, interval_seconds, once_at,
+            weekdays_json, local_time, timezone, anchor_at, catchup_window_seconds,
+            enabled, next_due_at, last_scheduled_at, created_at, updated_at
+     FROM digital_colleague_schedules"
 }
 
 fn channel_select() -> &'static str {
@@ -1680,7 +1843,11 @@ fn map_colleague(row: &rusqlite::Row<'_>) -> rusqlite::Result<DigitalColleagueRe
         expert_id: row.get(2)?,
         expert_binding_id: row.get(3)?,
         package_hash: row.get(4)?,
-        package_snapshot: parse_json_column(row.get(5)?)?,
+        package_snapshot: row
+            .get::<_, Option<String>>(5)?
+            .map(parse_json_column)
+            .transpose()?
+            .unwrap_or(Value::Null),
         conversation_id: row.get(6)?,
         objective: row.get(7)?,
         project_id: row.get(8)?,
@@ -1701,6 +1868,17 @@ fn map_colleague(row: &rusqlite::Row<'_>) -> rusqlite::Result<DigitalColleagueRe
     })
 }
 
+fn query_schedule(
+    connection: &rusqlite::Connection,
+    schedule_id: &str,
+) -> rusqlite::Result<DigitalColleagueScheduleRecord> {
+    connection.query_row(
+        &format!("{} WHERE id = ?1", schedule_select()),
+        [schedule_id],
+        map_schedule,
+    )
+}
+
 fn map_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<DigitalColleagueScheduleRecord> {
     Ok(DigitalColleagueScheduleRecord {
         id: row.get(0)?,
@@ -1708,12 +1886,27 @@ fn map_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<DigitalColleagueSch
         name: row.get(2)?,
         schedule_kind: row.get(3)?,
         interval_seconds: row.get(4)?,
-        catchup_window_seconds: row.get(5)?,
-        enabled: row.get::<_, i64>(6)? != 0,
-        next_due_at: row.get(7)?,
-        last_scheduled_at: row.get(8)?,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
+        once_at: row.get(5)?,
+        weekdays: row
+            .get::<_, Option<String>>(6)?
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        local_time: row.get(7)?,
+        timezone: row.get(8)?,
+        anchor_at: row.get(9)?,
+        catchup_window_seconds: row.get(10)?,
+        enabled: row.get::<_, i64>(11)? != 0,
+        next_due_at: row.get(12)?,
+        last_scheduled_at: row.get(13)?,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
     })
 }
 
@@ -1928,7 +2121,10 @@ mod tests {
         let (database, path) = test_database();
         let colleague = create_colleague(&database);
         assert_eq!(colleague.status, "active");
-        assert!(!colleague.package_hash.is_empty());
+        assert!(colleague
+            .package_hash
+            .as_deref()
+            .is_some_and(|hash| !hash.is_empty()));
         assert!(database
             .current_conversation_expert_binding(&colleague.conversation_id)
             .expect("load frozen expert binding")
@@ -2993,6 +3189,244 @@ mod tests {
             .collect()
     }
 
+    fn fixed_instant(value: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .expect("valid fixed instant")
+            .timestamp_millis()
+    }
+
+    #[test]
+    fn typed_once_claim_disables_without_deleting_or_duplicating() {
+        let (database, path) = test_database();
+        let colleague = create_colleague(&database);
+        let at = fixed_instant("2026-11-12T00:30:00+08:00");
+        let schedule = database
+            .save_typed_digital_colleague_schedule_at(
+                None,
+                &colleague.id,
+                "one release review",
+                DigitalColleagueScheduleSpec::Once {
+                    at_ms: at,
+                    timezone: "Asia/Shanghai".to_owned(),
+                },
+                3_600,
+                true,
+                at - 60_000,
+            )
+            .expect("save once schedule");
+
+        let claimed = database
+            .claim_due_digital_colleague_triggers(at)
+            .expect("claim the only occurrence");
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].trigger.scheduled_for, Some(at));
+        assert!(database
+            .claim_due_digital_colleague_triggers(at)
+            .expect("repeat the claim")
+            .is_empty());
+
+        drop(database);
+        let reopened = Database::open(path.clone()).expect("reopen after once claim");
+        let stored = reopened
+            .get_digital_colleague_schedule(&schedule.id)
+            .expect("read once schedule")
+            .expect("once schedule remains stored");
+        assert!(!stored.enabled);
+        assert_eq!(stored.next_due_at, at);
+        assert_eq!(stored.last_scheduled_at, Some(at));
+        assert!(reopened
+            .claim_due_digital_colleague_triggers(at + 60_000)
+            .expect("restart does not replay once")
+            .is_empty());
+        assert_eq!(
+            reopened
+                .list_digital_colleague_triggers(&colleague.id, 100)
+                .expect("list once triggers")
+                .len(),
+            1
+        );
+
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn typed_interval_preserves_anchor_for_unchanged_save_and_manual_run() {
+        let (database, path) = test_database();
+        let colleague = create_colleague(&database);
+        let now = fixed_instant("2026-11-12T00:00:00+08:00");
+        let schedule = database
+            .save_typed_digital_colleague_schedule_at(
+                None,
+                &colleague.id,
+                "anchored review",
+                DigitalColleagueScheduleSpec::Interval {
+                    interval_seconds: 60,
+                    timezone: "Asia/Shanghai".to_owned(),
+                },
+                3_600,
+                true,
+                now,
+            )
+            .expect("save interval");
+        assert_eq!(schedule.anchor_at, Some(now));
+        assert_eq!(schedule.next_due_at, now + 60_000);
+
+        let unchanged = database
+            .save_typed_digital_colleague_schedule_at(
+                Some(&schedule.id),
+                &colleague.id,
+                "renamed only",
+                DigitalColleagueScheduleSpec::Interval {
+                    interval_seconds: 60,
+                    timezone: "Asia/Shanghai".to_owned(),
+                },
+                3_600,
+                true,
+                now + 10_000,
+            )
+            .expect("save unchanged cadence");
+        assert_eq!(unchanged.anchor_at, Some(now));
+        assert_eq!(unchanged.next_due_at, now + 60_000);
+
+        let manual = database
+            .accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "manual:fixed-clock",
+                &json!({}),
+                None,
+                "user",
+            )
+            .expect("manual run does not use the schedule cursor");
+        complete_trigger(
+            &database,
+            &manual.prepared.expect("manual run starts").trigger,
+        );
+        assert_eq!(
+            database
+                .get_digital_colleague_schedule(&schedule.id)
+                .expect("read interval")
+                .expect("interval exists")
+                .next_due_at,
+            now + 60_000
+        );
+
+        let claimed = database
+            .claim_due_digital_colleague_triggers(now + 60_000)
+            .expect("claim aligned occurrence");
+        assert_eq!(claimed.len(), 1);
+        complete_trigger(&database, &claimed[0].trigger);
+        assert_eq!(schedule_cursor(&database, &schedule.id).0, now + 120_000);
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn compatibility_save_preserves_persisted_timezone_and_cadence() {
+        let (database, path) = test_database();
+        let colleague = create_colleague(&database);
+        let device = resolved_device_timezone().unwrap_or_else(|_| "UTC".to_owned());
+        let pinned = if device == "Pacific/Auckland" {
+            "Asia/Shanghai"
+        } else {
+            "Pacific/Auckland"
+        };
+        let now = fixed_instant("2026-11-12T00:00:00+08:00");
+        let schedule = database
+            .save_typed_digital_colleague_schedule_at(
+                None,
+                &colleague.id,
+                "pinned review",
+                DigitalColleagueScheduleSpec::Interval {
+                    interval_seconds: 3_600,
+                    timezone: pinned.to_owned(),
+                },
+                3_600,
+                true,
+                now,
+            )
+            .expect("create pinned interval");
+        let updated = database
+            .save_digital_colleague_schedule(
+                Some(&schedule.id),
+                &colleague.id,
+                "pinned review",
+                3_600,
+                3_600,
+                true,
+            )
+            .expect("compatibility resave");
+        assert_eq!(updated.timezone, pinned);
+        assert_eq!(updated.anchor_at, schedule.anchor_at);
+        assert_eq!(updated.next_due_at, schedule.next_due_at);
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn typed_calendar_uses_plan_midnight_for_admission_and_records_catchup() {
+        let (database, path) = test_database();
+        let colleague = create_colleague(&database);
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE digital_colleagues SET max_runs_per_day = 1 WHERE id = ?1",
+                    [&colleague.id],
+                )?;
+                connection.execute(
+                    "INSERT INTO digital_colleague_triggers(
+                        id, colleague_id, source_type, idempotency_key, status,
+                        payload_json, created_at, updated_at, completed_at
+                     ) VALUES ('previous-local-day', ?1, 'manual', 'previous-local-day',
+                        'completed', '{}', ?2, ?2, ?2)",
+                    params![colleague.id, fixed_instant("2026-11-11T23:30:00+08:00")],
+                )?;
+                Ok(())
+            })
+            .expect("persist a trigger in the previous Shanghai day but same UTC day");
+        let now = fixed_instant("2026-11-12T00:30:10+08:00");
+        let schedule = database
+            .save_typed_digital_colleague_schedule_at(
+                None,
+                &colleague.id,
+                "Shanghai daily",
+                DigitalColleagueScheduleSpec::Daily {
+                    weekdays: vec![0, 1, 2, 3, 4, 5, 6],
+                    local_time: "00:30".to_owned(),
+                    timezone: "Asia/Shanghai".to_owned(),
+                },
+                3_600,
+                true,
+                fixed_instant("2026-11-11T00:00:00+08:00"),
+            )
+            .expect("save Shanghai daily");
+        make_schedule_due(
+            &database,
+            &schedule.id,
+            fixed_instant("2026-11-12T00:30:00+08:00"),
+        );
+
+        let claimed = database
+            .claim_due_digital_colleague_triggers(now)
+            .expect("plan-local midnight admits the new day");
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(
+            schedule_cursor(&database, &schedule.id).0,
+            fixed_instant("2026-11-13T00:30:00+08:00")
+        );
+        assert!(database
+            .list_digital_colleague_audit(&colleague.id, 100)
+            .expect("list catchup audit")
+            .iter()
+            .any(|entry| entry.event == "schedule.catchup" && entry.outcome == "accepted"));
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
     /// K3 crash point 1: the claim transaction never commits. The cursor must
     /// roll back with the trigger and the Run, and the occurrence stays
     /// claimable without ever being written twice.
@@ -3456,7 +3890,11 @@ mod tests {
         let prepared = database
             .claim_due_digital_colleague_triggers(now)
             .expect("an archived conversation does not fail the poll");
-        assert_eq!(prepared.len(), 1, "the other due colleague is still claimed");
+        assert_eq!(
+            prepared.len(),
+            1,
+            "the other due colleague is still claimed"
+        );
         assert_eq!(prepared[0].colleague.id, healthy.id);
         assert_eq!(prepared[0].trigger.status, "queued");
         assert!(prepared[0].trigger.run_id.is_some());
@@ -3481,7 +3919,10 @@ mod tests {
             0,
             "the skipped claim creates no Run"
         );
-        assert_eq!(conversation_run_count(&database, &healthy.conversation_id), 1);
+        assert_eq!(
+            conversation_run_count(&database, &healthy.conversation_id),
+            1
+        );
 
         assert!(database
             .claim_due_digital_colleague_triggers(now)
@@ -3508,12 +3949,17 @@ mod tests {
         let (database, path) = test_database();
         let root = std::env::temp_dir().join(format!("fox-k2-chain-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let contact = database.add_companion(&root, "fox-debugger").expect("add contact");
+        let contact = database
+            .add_companion(&root, "fox-debugger")
+            .expect("add contact");
         let colleague = database
             .create_digital_colleague(&colleague_input(Some(contact.profile.id.clone())))
             .expect("create contact task");
         assert!(colleague.companion_bound);
-        assert_eq!(colleague.companion_id.as_deref(), Some(contact.profile.id.as_str()));
+        assert_eq!(
+            colleague.companion_id.as_deref(),
+            Some(contact.profile.id.as_str())
+        );
         assert_eq!(
             colleague.report_conversation_id.as_deref(),
             Some(contact.conversation_id.as_str())
@@ -3534,21 +3980,34 @@ mod tests {
             .expect("background scope");
         assert!(before_dispatch.background);
         assert_eq!(before_dispatch.companion_id, contact.profile.id);
-        let fixed_binding = database.current_conversation_expert_binding(&contact.conversation_id)
-            .unwrap().unwrap();
-        let task_binding = database.current_conversation_expert_binding(&colleague.conversation_id)
-            .unwrap().unwrap();
+        let fixed_binding = database
+            .current_conversation_expert_binding(&contact.conversation_id)
+            .unwrap()
+            .unwrap();
+        let task_binding = database
+            .current_conversation_expert_binding(&colleague.conversation_id)
+            .unwrap()
+            .unwrap();
         assert_ne!(fixed_binding.id, task_binding.id);
         assert_eq!(
-            database.runtime_conversation_expert_binding(&colleague.conversation_id)
-                .unwrap().unwrap().id,
+            database
+                .runtime_conversation_expert_binding(&colleague.conversation_id)
+                .unwrap()
+                .unwrap()
+                .id,
             fixed_binding.id,
             "a background run uses the fixed private chat snapshot, not its own task binding"
         );
 
         let accepted = database
             .accept_digital_colleague_trigger(
-                &colleague.id, "manual", None, "manual:chain", &json!({}), None, "user",
+                &colleague.id,
+                "manual",
+                None,
+                "manual:chain",
+                &json!({}),
+                None,
+                "user",
             )
             .expect("accept contact task trigger");
         let run_id = accepted.trigger.run_id.clone().expect("dispatched run");
@@ -3575,32 +4034,48 @@ mod tests {
             );
         }
         assert_eq!(
-            database.companion_background_conversations(&contact.profile.id).unwrap(),
+            database
+                .companion_background_conversations(&contact.profile.id)
+                .unwrap(),
             vec![colleague.conversation_id.clone()]
         );
 
         // K2: the execution conversation carries the task, not an ordinary chat.
         assert!(
-            !database.list_conversations().unwrap().iter().any(|c| c.id == colleague.conversation_id),
+            !database
+                .list_conversations()
+                .unwrap()
+                .iter()
+                .any(|c| c.id == colleague.conversation_id),
             "后台执行会话不混入普通对话列表"
         );
         assert!(
-            !database.search_conversations("Release guardian", 20).unwrap().iter()
+            !database
+                .search_conversations("Release guardian", 20)
+                .unwrap()
+                .iter()
                 .any(|c| c.id == colleague.conversation_id),
             "私聊搜索不返回后台执行会话"
         );
         let hits = database.global_search("Release guardian", 20).unwrap();
         assert!(
-            !hits.iter().any(|hit| hit.kind == "conversation" && hit.id == colleague.conversation_id),
+            !hits
+                .iter()
+                .any(|hit| hit.kind == "conversation" && hit.id == colleague.conversation_id),
             "全局搜索不把后台执行会话当普通对话"
         );
         assert!(
-            hits.iter().any(|hit| hit.kind == "digital_colleague" && hit.id == colleague.id),
+            hits.iter()
+                .any(|hit| hit.kind == "digital_colleague" && hit.id == colleague.id),
             "任务本身仍然可以搜到"
         );
         let legacy = create_colleague(&database);
         assert!(
-            database.list_conversations().unwrap().iter().any(|c| c.id == legacy.conversation_id),
+            database
+                .list_conversations()
+                .unwrap()
+                .iter()
+                .any(|c| c.id == legacy.conversation_id),
             "未绑定联系人的旧数字同事会话保持原样"
         );
 
@@ -3616,7 +4091,9 @@ mod tests {
         let (database, path) = test_database();
         let root = std::env::temp_dir().join(format!("fox-k2-broken-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let contact = database.add_companion(&root, "fox-debugger").expect("add contact");
+        let contact = database
+            .add_companion(&root, "fox-debugger")
+            .expect("add contact");
         let colleague = database
             .create_digital_colleague(&colleague_input(Some(contact.profile.id.clone())))
             .expect("create contact task");
@@ -3632,7 +4109,13 @@ mod tests {
 
         let rejected = database
             .accept_digital_colleague_trigger(
-                &colleague.id, "manual", None, "manual:broken", &json!({}), None, "user",
+                &colleague.id,
+                "manual",
+                None,
+                "manual:broken",
+                &json!({}),
+                None,
+                "user",
             )
             .expect_err("a broken chain is a persisted conclusion, not a dispatch");
         assert_eq!(rejected, OWNERSHIP_MISSING);
@@ -3686,13 +4169,21 @@ mod tests {
         let (database, path) = test_database();
         let root = std::env::temp_dir().join(format!("fox-k2-report-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let contact = database.add_companion(&root, "fox-debugger").expect("add contact");
+        let contact = database
+            .add_companion(&root, "fox-debugger")
+            .expect("add contact");
         let colleague = database
             .create_digital_colleague(&colleague_input(Some(contact.profile.id.clone())))
             .expect("create contact task");
         let accepted = database
             .accept_digital_colleague_trigger(
-                &colleague.id, "manual", None, "manual:report", &json!({}), None, "user",
+                &colleague.id,
+                "manual",
+                None,
+                "manual:report",
+                &json!({}),
+                None,
+                "user",
             )
             .expect("accept trigger");
         let run_id = accepted.trigger.run_id.clone().expect("dispatched run");
@@ -3704,7 +4195,11 @@ mod tests {
                         created_at, updated_at
                      ) VALUES (?1, ?2, ?3, 'assistant', 'text', '发布检查完成，没有阻塞项。',
                                'completed', 9, 1, 1)",
-                    params![format!("answer-{run_id}"), colleague.conversation_id, run_id],
+                    params![
+                        format!("answer-{run_id}"),
+                        colleague.conversation_id,
+                        run_id
+                    ],
                 )?;
                 Ok(())
             })
@@ -3757,7 +4252,11 @@ mod tests {
             .with_connection(|connection| {
                 let transaction = connection.transaction()?;
                 super::project_digital_colleague_event(
-                    &transaction, &run_id, "run.completed", &json!({}), now_ms(),
+                    &transaction,
+                    &run_id,
+                    "run.completed",
+                    &json!({}),
+                    now_ms(),
                 )?;
                 transaction.commit()
             })
@@ -3792,13 +4291,21 @@ mod tests {
         let (database, path) = test_database();
         let root = std::env::temp_dir().join(format!("fox-k2-approval-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let contact = database.add_companion(&root, "fox-debugger").expect("add contact");
+        let contact = database
+            .add_companion(&root, "fox-debugger")
+            .expect("add contact");
         let colleague = database
             .create_digital_colleague(&colleague_input(Some(contact.profile.id.clone())))
             .expect("create contact task");
         let accepted = database
             .accept_digital_colleague_trigger(
-                &colleague.id, "manual", None, "manual:approval", &json!({}), None, "user",
+                &colleague.id,
+                "manual",
+                None,
+                "manual:approval",
+                &json!({}),
+                None,
+                "user",
             )
             .expect("accept trigger");
         let run_id = accepted.trigger.run_id.clone().expect("dispatched run");
@@ -3807,15 +4314,22 @@ mod tests {
             .expect("start the background run");
         let tool_call = database
             .create_host_tool_call(
-                &run_id, "background-approval", "edit_file",
-                &json!({"path":"note.md"}), "pending", true,
+                &run_id,
+                "background-approval",
+                "edit_file",
+                &json!({"path":"note.md"}),
+                "pending",
+                true,
             )
             .expect("pending background tool call");
         let approval = database
             .create_approval(&tool_call.id, "编辑后台文件", &json!({"path":"note.md"}))
             .expect("create background approval");
         assert!(
-            !database.list_conversations().unwrap().iter()
+            !database
+                .list_conversations()
+                .unwrap()
+                .iter()
                 .any(|summary| summary.id == colleague.conversation_id),
             "the execution conversation stays hidden from the ordinary list"
         );
@@ -3823,18 +4337,31 @@ mod tests {
         let detail = database
             .load_conversation(&contact.conversation_id)
             .expect("load the private chat");
-        let card = detail.approvals.iter()
+        let card = detail
+            .approvals
+            .iter()
             .find(|item| item.id == approval.id)
             .expect("the background approval card loads in the report chat");
         assert_eq!(card.status, "pending");
         assert_eq!(card.run_id, run_id, "the card keeps the original Run");
-        assert_eq!(card.tool_call_id, tool_call.id, "the card keeps the original tool_call");
-        assert_eq!(card.conversation_id, colleague.conversation_id,
-            "the card keeps the original execution conversation identity");
+        assert_eq!(
+            card.tool_call_id, tool_call.id,
+            "the card keeps the original tool_call"
+        );
+        assert_eq!(
+            card.conversation_id, colleague.conversation_id,
+            "the card keeps the original execution conversation identity"
+        );
 
-        let other = database.add_companion(&root, "fox-reviewer").expect("add another contact");
+        let other = database
+            .add_companion(&root, "fox-reviewer")
+            .expect("add another contact");
         assert!(
-            database.load_conversation(&other.conversation_id).unwrap().approvals.iter()
+            database
+                .load_conversation(&other.conversation_id)
+                .unwrap()
+                .approvals
+                .iter()
                 .all(|item| item.id != approval.id),
             "another contact's chat must not see the card"
         );
@@ -3849,14 +4376,22 @@ mod tests {
                 connection.query_row(
                     "SELECT a.status, t.run_id FROM approvals a
                      JOIN tool_calls t ON t.id = a.tool_call_id WHERE a.id = ?1",
-                    [&approval.id], |row| Ok((row.get(0)?, row.get(1)?)),
+                    [&approval.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
             })
             .unwrap();
         assert_eq!(settled_status, "approved");
-        assert_eq!(settled_run, run_id, "the decision landed on the original call");
+        assert_eq!(
+            settled_run, run_id,
+            "the decision landed on the original call"
+        );
         assert!(
-            database.load_conversation(&contact.conversation_id).unwrap().approvals.iter()
+            database
+                .load_conversation(&contact.conversation_id)
+                .unwrap()
+                .approvals
+                .iter()
                 .all(|item| item.id != approval.id),
             "a settled background card no longer loads as pending"
         );
@@ -3874,7 +4409,9 @@ mod tests {
         let (database, path) = test_database();
         let root = std::env::temp_dir().join(format!("fox-k2-stop-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let contact = database.add_companion(&root, "fox-debugger").expect("add contact");
+        let contact = database
+            .add_companion(&root, "fox-debugger")
+            .expect("add contact");
         let colleague = database
             .create_digital_colleague(&colleague_input(Some(contact.profile.id.clone())))
             .expect("create contact task");
@@ -3888,7 +4425,9 @@ mod tests {
             .run
             .id;
         assert!(
-            !database.conversation_has_active_run(&contact.conversation_id).unwrap(),
+            !database
+                .conversation_has_active_run(&contact.conversation_id)
+                .unwrap(),
             "the private chat itself is idle: the old blind spot"
         );
         assert_eq!(
@@ -3900,7 +4439,9 @@ mod tests {
             Some("queued")
         );
         assert_eq!(
-            database.companion_active_run_ids(&contact.profile.id).unwrap(),
+            database
+                .companion_active_run_ids(&contact.profile.id)
+                .unwrap(),
             vec![background.clone()]
         );
         assert!(
@@ -3911,19 +4452,33 @@ mod tests {
         database
             .apply_runtime_event(&background, 1, &json!({ "type": "run.cancelled" }))
             .expect("cancel background run");
-        assert!(database.companion_active_run_ids(&contact.profile.id).unwrap().is_empty());
-        database.archive_companion(&contact.profile.id).expect("archive once terminal");
-        assert!(database.ensure_companion_executable(&contact.profile.id).is_err());
+        assert!(database
+            .companion_active_run_ids(&contact.profile.id)
+            .unwrap()
+            .is_empty());
+        database
+            .archive_companion(&contact.profile.id)
+            .expect("archive once terminal");
+        assert!(database
+            .ensure_companion_executable(&contact.profile.id)
+            .is_err());
         let error = database
             .run_companion_scope(&background)
             .expect_err("an archived contact stops background execution");
         assert!(error.contains(OWNERSHIP_MISSING), "{error}");
-        let plans = database.list_digital_colleague_schedules(&colleague.id).unwrap();
+        let plans = database
+            .list_digital_colleague_schedules(&colleague.id)
+            .unwrap();
         assert_eq!(plans.len(), 1);
         assert!(!plans[0].enabled, "归档先停止新派发");
-        database.restore_companion(&contact.profile.id).expect("restore contact");
+        database
+            .restore_companion(&contact.profile.id)
+            .expect("restore contact");
         assert!(
-            !database.list_digital_colleague_schedules(&colleague.id).unwrap()[0].enabled,
+            !database
+                .list_digital_colleague_schedules(&colleague.id)
+                .unwrap()[0]
+                .enabled,
             "归档恢复不自动启用计划"
         );
 

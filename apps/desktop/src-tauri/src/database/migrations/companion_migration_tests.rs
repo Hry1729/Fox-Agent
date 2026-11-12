@@ -551,7 +551,7 @@ fn a02_v113_upgrade_preserves_identity_and_materializes_companion_skills() {
             '{"id":"tpl-b","name":"Before"}','{"id":"tpl-b"}',0);"#,
     ).unwrap();
     run(&mut db, 2).unwrap();
-    assert_eq!(number(&db, "SELECT max(version) FROM schema_migrations"), 114);
+    assert_eq!(number(&db, "SELECT max(version) FROM schema_migrations"), crate::database::DATABASE_SCHEMA_VERSION);
     let (duty, persona, provider, model): (String, String, String, String) = db.query_row(
         "SELECT duty,persona_override,model_provider_id,model_ref FROM companion_profiles WHERE id='cmp_b'",
         [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),

@@ -2,6 +2,7 @@ mod migrations;
 mod migration_backup;
 mod models;
 mod repositories;
+mod schedule;
 #[cfg(test)]
 mod migration_copy_tests;
 
@@ -14,7 +15,8 @@ mod migration_copy_tests;
 /// v112 adds contact reminder preferences and bubble-level read/unread state (C06/K6).
 /// v113 adds message quotes and the user's own bubble marks (C07).
 /// v114 makes companion source experts optional and freezes binding skills.
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 114;
+/// v115 adds typed timezone-aware schedules and nullable task source experts.
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 115;
 pub(crate) use repositories::{AcceptanceBinding, AcceptanceRow, AcceptanceWrite};
 pub(crate) use repositories::kernel_execution_admission;
 pub(crate) use repositories::permission_rules::{ConversationAccess, PermissionAuditRecord, PermissionRuleRecord};
@@ -65,3 +67,4 @@ pub use repositories::{
     GraphLeadActivationResult, GraphLeadEdgeSnapshot, GraphLeadNodeFinishResult,
     GraphLeadNodeReadiness, GraphLeadNodeSnapshot, GraphLeadNodeStartResult, GraphLeadSnapshot,
 };
+pub use schedule::*;

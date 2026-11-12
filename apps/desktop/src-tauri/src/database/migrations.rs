@@ -1,7 +1,7 @@
-#[allow(unused_imports)]
-use crate::canonical_json::CanonicalJson;
 use super::repositories::{agent_package_snapshot, package_snapshot_hash, query_agent_record};
 use super::DATABASE_SCHEMA_VERSION;
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use rusqlite::{Connection, OptionalExtension, Result};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -6841,7 +6841,9 @@ pub(super) fn read_compatible_schema_version(connection: &Connection) -> Result<
         return Ok(None);
     };
     if kind != "table" {
-        return Err(schema_version_error("database.schema_invalid: schema_migrations 不是数据表".to_owned()));
+        return Err(schema_version_error(
+            "database.schema_invalid: schema_migrations 不是数据表".to_owned(),
+        ));
     }
     let invalid: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM main.schema_migrations WHERE typeof(version) <> 'integer' OR version < 1)",
@@ -6849,7 +6851,9 @@ pub(super) fn read_compatible_schema_version(connection: &Connection) -> Result<
         |row| row.get(0),
     )?;
     if invalid {
-        return Err(schema_version_error("database.schema_invalid: 数据库版本记录无效".to_owned()));
+        return Err(schema_version_error(
+            "database.schema_invalid: 数据库版本记录无效".to_owned(),
+        ));
     }
     let current: i64 = connection.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM main.schema_migrations",
@@ -6916,7 +6920,9 @@ mod future_schema_guard_tests {
              CREATE TABLE guard_evidence(value TEXT NOT NULL);
              INSERT INTO guard_evidence VALUES('keep this database');",
         ).unwrap();
-        connection.execute("INSERT INTO schema_migrations VALUES(?1, 1)", [version]).unwrap();
+        connection
+            .execute("INSERT INTO schema_migrations VALUES(?1, 1)", [version])
+            .unwrap();
         connection
     }
 
@@ -6942,9 +6948,19 @@ mod future_schema_guard_tests {
             let backups = root.join("backups");
             let error = refused(&path, &backups, with_backup);
             assert!(error.contains("database.schema_too_new"), "{error}");
-            assert!(error.contains(&(DATABASE_SCHEMA_VERSION + 1).to_string()), "{error}");
-            assert!(error.contains(&DATABASE_SCHEMA_VERSION.to_string()), "{error}");
-            assert_eq!(state(&path), before, "the main database bytes and mtime must stay exact");
+            assert!(
+                error.contains(&(DATABASE_SCHEMA_VERSION + 1).to_string()),
+                "{error}"
+            );
+            assert!(
+                error.contains(&DATABASE_SCHEMA_VERSION.to_string()),
+                "{error}"
+            );
+            assert_eq!(
+                state(&path),
+                before,
+                "the main database bytes and mtime must stay exact"
+            );
             assert!(!wal_path(&path).exists());
             assert!(!shm_path(&path).exists());
             assert!(!backups.exists());
@@ -6956,24 +6972,47 @@ mod future_schema_guard_tests {
         let root = fixture_root("wal");
         let path = root.join("fox.db");
         let connection = seed_version(&path, DATABASE_SCHEMA_VERSION);
-        connection.pragma_update(None, "journal_mode", "WAL").unwrap();
-        connection.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
-        connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
-        connection.execute("INSERT INTO schema_migrations VALUES(?1, 2)", [DATABASE_SCHEMA_VERSION + 1]).unwrap();
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        connection
+            .pragma_update(None, "wal_autocheckpoint", 0)
+            .unwrap();
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations VALUES(?1, 2)",
+                [DATABASE_SCHEMA_VERSION + 1],
+            )
+            .unwrap();
         let before = state(&path);
         let wal_before = state(&wal_path(&path));
-        assert!(wal_before.as_ref().is_some_and(|state| !state.bytes.is_empty()));
+        assert!(wal_before
+            .as_ref()
+            .is_some_and(|state| !state.bytes.is_empty()));
         let shm_before = state(&shm_path(&path));
         let backups = root.join("backups");
         for with_backup in [false, true] {
             let error = refused(&path, &backups, with_backup);
             assert!(error.contains("database.schema_too_new"), "{error}");
-            assert_eq!(state(&path), before, "the main database must not be checkpointed");
-            assert_eq!(state(&wal_path(&path)), wal_before, "committed WAL bytes and mtime must stay exact");
+            assert_eq!(
+                state(&path),
+                before,
+                "the main database must not be checkpointed"
+            );
+            assert_eq!(
+                state(&wal_path(&path)),
+                wal_before,
+                "committed WAL bytes and mtime must stay exact"
+            );
             assert!(!backups.exists());
         }
-        println!("read-only WAL probe changed SHM coordination bytes: {}",
-            shm_before != state(&shm_path(&path)));
+        println!(
+            "read-only WAL probe changed SHM coordination bytes: {}",
+            shm_before != state(&shm_path(&path))
+        );
         drop(connection);
     }
 
@@ -7005,12 +7044,22 @@ mod future_schema_guard_tests {
         for _ in 0..2 {
             let database = Database::open_with_migration_backup(path.clone(), &backups).unwrap();
             assert_eq!(database.schema_version().unwrap(), DATABASE_SCHEMA_VERSION);
-            let records: i64 = database.with_connection(|connection| connection.query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version=?1", [DATABASE_SCHEMA_VERSION], |row| row.get(0),
-            )).unwrap();
+            let records: i64 = database
+                .with_connection(|connection| {
+                    connection.query_row(
+                        "SELECT COUNT(*) FROM schema_migrations WHERE version=?1",
+                        [DATABASE_SCHEMA_VERSION],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap();
             assert_eq!(records, 1);
         }
-        assert_eq!(std::fs::read_dir(backups).unwrap().count(), 1, "only the real v74 upgrade needs a backup");
+        assert_eq!(
+            std::fs::read_dir(backups).unwrap().count(),
+            1,
+            "only the real v74 upgrade needs a backup"
+        );
     }
 
     #[test]
@@ -7073,6 +7122,8 @@ enum MigrationTarget {
     V106,
     #[cfg(test)]
     V113,
+    #[cfg(test)]
+    V114,
 }
 
 fn run_with_target(connection: &mut Connection, now: i64, target: MigrationTarget) -> Result<()> {
@@ -7090,7 +7141,8 @@ fn run_with_target(connection: &mut Connection, now: i64, target: MigrationTarge
 }
 
 fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarget) -> Result<()> {
-    let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     transaction.execute_batch(MIGRATION_1)?;
     transaction.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, ?1)",
@@ -7274,14 +7326,30 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     )?;
     if !v77_applied {
         transaction.execute_batch(MIGRATION_77)?;
-        transaction.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (77, ?1)", [now])?;
+        transaction.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (77, ?1)",
+            [now],
+        )?;
     }
-    ensure_column_if_missing(&transaction, "kernel_approvals", "policy_version", "INTEGER")?;
-    ensure_column_if_missing(&transaction, "kernel_host_commands", "policy_version", "INTEGER")?;
+    ensure_column_if_missing(
+        &transaction,
+        "kernel_approvals",
+        "policy_version",
+        "INTEGER",
+    )?;
+    ensure_column_if_missing(
+        &transaction,
+        "kernel_host_commands",
+        "policy_version",
+        "INTEGER",
+    )?;
     transaction.execute_batch("CREATE TRIGGER IF NOT EXISTS execution_approval_version AFTER INSERT ON kernel_approvals BEGIN
       UPDATE kernel_approvals SET policy_version=(SELECT p.version FROM kernel_execution_policies p JOIN runs r ON r.conversation_id=p.conversation_id WHERE r.id=NEW.run_id) WHERE run_id=NEW.run_id AND tool_call_id=NEW.tool_call_id;
     END;")?;
-    transaction.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (78, ?1)", [now])?;
+    transaction.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (78, ?1)",
+        [now],
+    )?;
     let v79_applied = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 79)",
         [],
@@ -7502,7 +7570,12 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     // `runtime_type` and the legacy marker (`kernel_runs.kernel_mode`) are not
     // touched. The SQL text is owned by `fox_agent_backend::host_routing` so it
     // is exercised against a real SQLite in that crate's tests.
-    apply_migration(&transaction, AGENT_BACKEND_SCHEMA_VERSION, MIGRATION_95, now)?;
+    apply_migration(
+        &transaction,
+        AGENT_BACKEND_SCHEMA_VERSION,
+        MIGRATION_95,
+        now,
+    )?;
     // v96 (UX batch ①②): per-conversation full-access grant chosen at
     // creation + external-backend audit log. Additive (two new tables, one
     // index); no existing row is read or rewritten. The pre-migration
@@ -7511,13 +7584,23 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     apply_migration(&transaction, FULL_ACCESS_SCHEMA_VERSION, MIGRATION_96, now)?;
     // v97 (provider protocol profiles): per-provider protocol entries as a
     // JSON column, default `[]` (existing providers keep their connection).
-    apply_migration(&transaction, PROVIDER_PROTOCOL_SCHEMA_VERSION, "ALTER TABLE model_providers ADD COLUMN protocol_profiles TEXT NOT NULL DEFAULT '[]';", now)?;
+    apply_migration(
+        &transaction,
+        PROVIDER_PROTOCOL_SCHEMA_VERSION,
+        "ALTER TABLE model_providers ADD COLUMN protocol_profiles TEXT NOT NULL DEFAULT '[]';",
+        now,
+    )?;
     // v98 (stage two, work package C): the Pi-native session mapping. Additive:
     // four columns, every existing row keeps working as format_version 1 (the
     // legacy Fox JSON snapshot) with context generation 1. No historical row is
     // read, rewritten or deleted, so rolling back to the previous build simply
     // ignores the columns.
-    apply_migration(&transaction, RUNTIME_SESSION_MAPPING_SCHEMA_VERSION, MIGRATION_98_RUNTIME_SESSION_MAPPING, now)?;
+    apply_migration(
+        &transaction,
+        RUNTIME_SESSION_MAPPING_SCHEMA_VERSION,
+        MIGRATION_98_RUNTIME_SESSION_MAPPING,
+        now,
+    )?;
     #[cfg(test)]
     if matches!(_target, MigrationTarget::V98) {
         return finish_transaction(transaction);
@@ -7526,36 +7609,71 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     // one new table plus one index. `runtime_sessions` is not touched, so every
     // existing row still maps to generation 1 and rolling back simply ignores
     // the ledger (an older build keeps one generation, as it always did).
-    apply_migration(&transaction, RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION, MIGRATION_99_RUNTIME_SESSION_GENERATIONS, now)?;
+    apply_migration(
+        &transaction,
+        RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION,
+        MIGRATION_99_RUNTIME_SESSION_GENERATIONS,
+        now,
+    )?;
     // v100 is intentionally absent: the contacts plan reserves it. v101
     // (single-path convergence, S2) gives the tool ledger a context generation
     // and a close reason, and widens `state` with `not_started`. The widening
     // needs a table rebuild, so the Rust step runs first and the SQL half only
     // records the version plus the generation index.
     widen_kernel_tool_calls_for_v101(&transaction)?;
-    apply_migration(&transaction, NATIVE_TOOL_LEDGER_SCHEMA_VERSION, MIGRATION_101_NATIVE_TOOL_LEDGER, now)?;
+    apply_migration(
+        &transaction,
+        NATIVE_TOOL_LEDGER_SCHEMA_VERSION,
+        MIGRATION_101_NATIVE_TOOL_LEDGER,
+        now,
+    )?;
     #[cfg(test)]
     if matches!(_target, MigrationTarget::V101) {
         return finish_transaction(transaction);
     }
-    apply_migration(&transaction,NATIVE_MODEL_BUDGET_SCHEMA_VERSION,MIGRATION_102_NATIVE_MODEL_BUDGET,now)?;
+    apply_migration(
+        &transaction,
+        NATIVE_MODEL_BUDGET_SCHEMA_VERSION,
+        MIGRATION_102_NATIVE_MODEL_BUDGET,
+        now,
+    )?;
     // v103: a native approval must never be consumed by the Kernel command
     // queue. The status vocabulary gains `superseded` and the row carries the
     // reason; the approval itself stays pending for the user.
     widen_kernel_host_commands_for_v103(&transaction)?;
-    apply_migration(&transaction,NATIVE_APPROVAL_COMMAND_SCHEMA_VERSION,MIGRATION_103_NATIVE_APPROVAL_COMMAND,now)?;
+    apply_migration(
+        &transaction,
+        NATIVE_APPROVAL_COMMAND_SCHEMA_VERSION,
+        MIGRATION_103_NATIVE_APPROVAL_COMMAND,
+        now,
+    )?;
     // v104 (A1 approval engine): additive only. Full access is a new
     // conversation flag next to the CHECK-constrained `permission_mode`, the
     // per-project "first full access confirmed" marker, project permission
     // rules and the auto-allow audit log. The retired conversation tool
     // permission table stays in place, unread.
-    apply_migration(&transaction,PERMISSION_RULES_SCHEMA_VERSION,MIGRATION_104_PERMISSION_RULES,now)?;
-    apply_migration(&transaction, AGENT_BINDINGS_SCHEMA_VERSION, MIGRATION_105_AGENT_BINDINGS, now)?;
+    apply_migration(
+        &transaction,
+        PERMISSION_RULES_SCHEMA_VERSION,
+        MIGRATION_104_PERMISSION_RULES,
+        now,
+    )?;
+    apply_migration(
+        &transaction,
+        AGENT_BINDINGS_SCHEMA_VERSION,
+        MIGRATION_105_AGENT_BINDINGS,
+        now,
+    )?;
     #[cfg(test)]
     if matches!(_target, MigrationTarget::V105) {
         return finish_transaction(transaction);
     }
-    apply_migration(&transaction, COMPANIONS_SCHEMA_VERSION, MIGRATION_106_COMPANIONS, now)?;
+    apply_migration(
+        &transaction,
+        COMPANIONS_SCHEMA_VERSION,
+        MIGRATION_106_COMPANIONS,
+        now,
+    )?;
     #[cfg(test)]
     if matches!(_target, MigrationTarget::V106) {
         return finish_transaction(transaction);
@@ -7563,32 +7681,67 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     // v107 (contacts C00/K1): the durable bubble projection. Additive: one
     // table and two indexes. Messages, runs and events keep their existing
     // shape; older builds simply ignore the table.
-    apply_migration(&transaction, CONTACT_BUBBLES_SCHEMA_VERSION, MIGRATION_107_CONTACT_BUBBLES, now)?;
+    apply_migration(
+        &transaction,
+        CONTACT_BUBBLES_SCHEMA_VERSION,
+        MIGRATION_107_CONTACT_BUBBLES,
+        now,
+    )?;
     // v108 (contacts K1): the backfill completion ledger. Additive: one table.
     // A row means every message of the private chat has bubbles, so permanent
     // operations (quote, favorite, mark unread) may rely on bubble identity.
-    apply_migration(&transaction, CONTACT_BUBBLE_BACKFILLS_SCHEMA_VERSION, MIGRATION_108_CONTACT_BUBBLE_BACKFILLS, now)?;
+    apply_migration(
+        &transaction,
+        CONTACT_BUBBLE_BACKFILLS_SCHEMA_VERSION,
+        MIGRATION_108_CONTACT_BUBBLE_BACKFILLS,
+        now,
+    )?;
     // v109 (contacts C04/K5): the companion model override and the frozen
     // per-run model snapshot. Additive columns only; existing companions keep
     // NULL (follow the global model) and existing runs resolve once at start.
-    apply_migration(&transaction, COMPANION_MODEL_SCHEMA_VERSION, MIGRATION_109_COMPANION_MODEL, now)?;
+    apply_migration(
+        &transaction,
+        COMPANION_MODEL_SCHEMA_VERSION,
+        MIGRATION_109_COMPANION_MODEL,
+        now,
+    )?;
     // v110 (contacts C02/K4): tool-level companion grants and the frozen
     // per-run capability snapshot. Additive; existing companions get no new
     // capabilities until the user enables them.
-    apply_migration(&transaction, COMPANION_TOOL_GRANTS_SCHEMA_VERSION, MIGRATION_110_COMPANION_TOOL_GRANTS, now)?;
+    apply_migration(
+        &transaction,
+        COMPANION_TOOL_GRANTS_SCHEMA_VERSION,
+        MIGRATION_110_COMPANION_TOOL_GRANTS,
+        now,
+    )?;
     // v111 (contacts C03b/K2): the background ownership chain and the report
     // ledger. Existing colleagues stay unbound (companion_bound = 0) and keep
     // their ordinary execution conversation; only contact tasks resolve a
     // companion identity.
-    apply_migration(&transaction, COMPANION_BACKGROUND_SCHEMA_VERSION, MIGRATION_111_COMPANION_BACKGROUND, now)?;
+    apply_migration(
+        &transaction,
+        COMPANION_BACKGROUND_SCHEMA_VERSION,
+        MIGRATION_111_COMPANION_BACKGROUND,
+        now,
+    )?;
     // v112 (contacts C06/K6): reminder preferences and bubble-level read state.
     // Additive columns; existing contacts follow the global notification behavior
     // and keep their legacy ordinal cursor until the bubble backfill converts it.
-    apply_migration(&transaction, COMPANION_REMINDERS_SCHEMA_VERSION, MIGRATION_112_COMPANION_REMINDERS, now)?;
+    apply_migration(
+        &transaction,
+        COMPANION_REMINDERS_SCHEMA_VERSION,
+        MIGRATION_112_COMPANION_REMINDERS,
+        now,
+    )?;
     // v113 (contacts C07): message quotes and the user's own bubble marks.
     // Additive and empty on upgrade: no history gains a quote, a favorite or a
     // reaction the user never chose.
-    apply_migration(&transaction, CONTACT_MESSAGE_MARKS_SCHEMA_VERSION, MIGRATION_113_CONTACT_MESSAGE_MARKS, now)?;
+    apply_migration(
+        &transaction,
+        CONTACT_MESSAGE_MARKS_SCHEMA_VERSION,
+        MIGRATION_113_CONTACT_MESSAGE_MARKS,
+        now,
+    )?;
     #[cfg(test)]
     if matches!(_target, MigrationTarget::V113) {
         return finish_transaction(transaction);
@@ -7600,15 +7753,41 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
         |row| row.get::<_, bool>(0),
     )?;
     // Other tables' triggers refer to these identities during the table rebuild.
-    let legacy_alter_table = transaction.pragma_query_value(None, "legacy_alter_table", |row| row.get::<_, bool>(0))?;
+    let legacy_alter_table =
+        transaction.pragma_query_value(None, "legacy_alter_table", |row| row.get::<_, bool>(0))?;
     transaction.pragma_update(None, "legacy_alter_table", true)?;
-    let identity_result = apply_migration(&transaction, COMPANION_IDENTITY_SCHEMA_VERSION, MIGRATION_114_COMPANION_IDENTITY, now);
+    let identity_result = apply_migration(
+        &transaction,
+        COMPANION_IDENTITY_SCHEMA_VERSION,
+        MIGRATION_114_COMPANION_IDENTITY,
+        now,
+    );
     let restore_result = transaction.pragma_update(None, "legacy_alter_table", legacy_alter_table);
     identity_result?;
     restore_result?;
     if companion_identity_pending {
         materialize_companion_binding_skills(&transaction)?;
     }
+    #[cfg(test)]
+    if matches!(_target, MigrationTarget::V114) {
+        super::repositories::companions::convert_pending_read_cursors(&transaction)?;
+        return finish_transaction(transaction);
+    }
+    // v115: task source packages are optional and schedules carry typed,
+    // pinned-timezone parameters. Rebuild with the same trigger-safe pattern
+    // as v114; all task, ownership, trigger and report identities are copied.
+    let legacy_alter_table =
+        transaction.pragma_query_value(None, "legacy_alter_table", |row| row.get::<_, bool>(0))?;
+    transaction.pragma_update(None, "legacy_alter_table", true)?;
+    let schedule_result = apply_migration(
+        &transaction,
+        TYPED_SCHEDULES_SCHEMA_VERSION,
+        MIGRATION_115_TYPED_SCHEDULES,
+        now,
+    );
+    let restore_result = transaction.pragma_update(None, "legacy_alter_table", legacy_alter_table);
+    schedule_result?;
+    restore_result?;
     super::repositories::companions::convert_pending_read_cursors(&transaction)?;
     finish_transaction(transaction)
 }
@@ -7814,9 +7993,7 @@ fn rebuild_credentials_check(transaction: &rusqlite::Transaction<'_>) -> Result<
 /// The v69 table plus the four v70 columns are recreated verbatim. Foreign keys
 /// are disabled by `run` before its atomic migration transaction, and the
 /// runner checks the whole database before recording success.
-fn rebuild_kernel_jobs_idempotency_check(
-    transaction: &rusqlite::Transaction<'_>,
-) -> Result<()> {
+fn rebuild_kernel_jobs_idempotency_check(transaction: &rusqlite::Transaction<'_>) -> Result<()> {
     transaction.execute_batch(
         r#"
 CREATE TABLE kernel_jobs_v79 (
@@ -7941,7 +8118,11 @@ fn apply_expert_package_snapshot_migration(
             "UPDATE conversation_expert_bindings
              SET package_snapshot_json = ?2, package_hash = ?3
              WHERE id = ?1",
-            rusqlite::params![binding_id, package_snapshot.canonical_string(), package_hash],
+            rusqlite::params![
+                binding_id,
+                package_snapshot.canonical_string(),
+                package_hash
+            ],
         )?;
     }
     transaction.execute(
@@ -8049,11 +8230,10 @@ CREATE INDEX IF NOT EXISTS idx_kernel_tool_calls_state
         // Prove the rebuild kept every relationship before the version is
         // recorded. A cascade would leave this empty (the rows were deleted
         // legally), which is why the row counts are compared as well.
-        let violations: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM pragma_foreign_key_check",
-            [],
-            |row| row.get(0),
-        )?;
+        let violations: i64 =
+            connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })?;
         if violations != 0 {
             return Err(rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(1),
@@ -8658,11 +8838,10 @@ CREATE INDEX IF NOT EXISTS idx_kernel_tool_calls_state
     ON kernel_tool_calls(run_id, state);
 "#,
         )?;
-        let violations: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM pragma_foreign_key_check",
-            [],
-            |row| row.get(0),
-        )?;
+        let violations: i64 =
+            connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })?;
         if violations != 0 {
             return Err(rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(1),
@@ -8698,9 +8877,19 @@ fn widen_kernel_host_commands_for_v103(connection: &rusqlite::Connection) -> Res
     if !sqlite_table_exists(connection, "kernel_host_commands")? {
         return Ok(());
     }
-    ensure_column_if_missing(connection, "kernel_host_commands", "policy_version", "INTEGER")?;
+    ensure_column_if_missing(
+        connection,
+        "kernel_host_commands",
+        "policy_version",
+        "INTEGER",
+    )?;
     if sqlite_object_accepts(connection, "kernel_host_commands", "'superseded'")? {
-        ensure_column_if_missing(connection, "kernel_host_commands", "resolution_reason", "TEXT")?;
+        ensure_column_if_missing(
+            connection,
+            "kernel_host_commands",
+            "resolution_reason",
+            "TEXT",
+        )?;
         return Ok(());
     }
     connection.execute_batch(
@@ -8731,11 +8920,10 @@ CREATE INDEX IF NOT EXISTS idx_kernel_host_commands_pending
     ON kernel_host_commands(run_id,status,command_seq);
 "#,
     )?;
-    let violations: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM pragma_foreign_key_check",
-        [],
-        |row| row.get(0),
-    )?;
+    let violations: i64 =
+        connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
     if violations != 0 {
         return Err(rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(1),
@@ -8776,7 +8964,9 @@ VALUES('native','old-native-approval','approval','call-1','denied','pending',1,7
 "#,
         ).unwrap();
         widen_kernel_host_commands_for_v103(&connection).unwrap();
-        assert!(sqlite_object_accepts(&connection, "kernel_host_commands", "'superseded'").unwrap());
+        assert!(
+            sqlite_object_accepts(&connection, "kernel_host_commands", "'superseded'").unwrap()
+        );
         connection.execute(
             "UPDATE kernel_host_commands SET status='superseded',resolution_reason='native route at startup' WHERE run_id='native'",
             [],
@@ -8784,7 +8974,14 @@ VALUES('native','old-native-approval','approval','call-1','denied','pending',1,7
         let row:(String,Option<String>,Option<i64>)=connection.query_row(
             "SELECT status,resolution_reason,policy_version FROM kernel_host_commands WHERE run_id='native'",
             [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
-        assert_eq!(row,(String::from("superseded"),Some("native route at startup".into()),Some(7)));
+        assert_eq!(
+            row,
+            (
+                String::from("superseded"),
+                Some("native route at startup".into()),
+                Some(7)
+            )
+        );
         widen_kernel_host_commands_for_v103(&connection).unwrap();
     }
 }
@@ -8795,24 +8992,46 @@ mod native_model_budget_v102_tests {
 
     #[test]
     fn upgrading_v101_adds_empty_budget_tables_without_rewriting_tool_facts() {
-        let mut connection=Connection::open_in_memory().unwrap();
-        run_with_target(&mut connection,100,MigrationTarget::V101).unwrap();
+        let mut connection = Connection::open_in_memory().unwrap();
+        run_with_target(&mut connection, 100, MigrationTarget::V101).unwrap();
         connection.execute("INSERT INTO kernel_tool_calls(run_id,tool_call_id,batch_id,tool,source_order,
             canonical_input_json,state,result_json,created_at,settled_at)
             VALUES('historical','call','batch','read',0,'{}','completed','{\"proof\":\"retained\"}',1,2)",[]).unwrap();
-        for now in [200,300] {
-            run_with_target(&mut connection,now,MigrationTarget::Latest).unwrap();
-            let fact:(String,String)=connection.query_row("SELECT state,result_json FROM kernel_tool_calls WHERE run_id='historical'",[],
-                |row|Ok((row.get(0)?,row.get(1)?))).unwrap();
-            assert_eq!(fact,("completed".into(),"{\"proof\":\"retained\"}".into()));
-            for table in ["native_model_budget_limits","native_model_requests"] {
-                let count:i64=connection.query_row(&format!("SELECT COUNT(*) FROM {table}"),[],|row|row.get(0)).unwrap();
-                assert_eq!(count,0);
+        for now in [200, 300] {
+            run_with_target(&mut connection, now, MigrationTarget::Latest).unwrap();
+            let fact: (String, String) = connection
+                .query_row(
+                    "SELECT state,result_json FROM kernel_tool_calls WHERE run_id='historical'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                fact,
+                ("completed".into(), "{\"proof\":\"retained\"}".into())
+            );
+            for table in ["native_model_budget_limits", "native_model_requests"] {
+                let count: i64 = connection
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(count, 0);
             }
-            let count:i64=connection.query_row("SELECT COUNT(*) FROM schema_migrations WHERE version=102",[],|row|row.get(0)).unwrap();
-            assert_eq!(count,1);
-            let violations:i64=connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check",[],|row|row.get(0)).unwrap();
-            assert_eq!(violations,0);
+            let count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version=102",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1);
+            let violations: i64 = connection
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(violations, 0);
         }
     }
 }
@@ -8833,7 +9052,9 @@ mod native_tool_ledger_v101_tests {
         assert_eq!(
             connection
                 .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row
-                    .get::<_, i64>(0))
+                    .get::<_, i64>(
+                    0
+                ))
                 .expect("version"),
             DATABASE_SCHEMA_VERSION
         );
@@ -8911,22 +9132,33 @@ DELETE FROM schema_migrations WHERE version = 101;
 
         run(&mut connection, 200).expect("upgrade to v101");
 
-        let (state, generation, idempotency_key, close_reason): (String, i64, Option<String>, Option<String>) =
-            connection
-                .query_row(
-                    "SELECT state, context_generation, dispatch_idempotency_key, close_reason
+        let (state, generation, idempotency_key, close_reason): (
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+        ) = connection
+            .query_row(
+                "SELECT state, context_generation, dispatch_idempotency_key, close_reason
                      FROM kernel_tool_calls WHERE tool_call_id = 'call-1'",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                )
-                .expect("the upgraded row is still there");
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("the upgraded row is still there");
         assert_eq!(
-            (state.as_str(), generation, idempotency_key.as_deref(), close_reason.as_deref()),
+            (
+                state.as_str(),
+                generation,
+                idempotency_key.as_deref(),
+                close_reason.as_deref()
+            ),
             ("running", 1, Some("idem-1"), None),
             "an upgraded position keeps its facts and reads as generation 1"
         );
         let host_actions: i64 = connection
-            .query_row("SELECT COUNT(*) FROM kernel_host_actions", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM kernel_host_actions", [], |row| {
+                row.get(0)
+            })
             .expect("count host actions");
         assert_eq!(host_actions, 1, "the cascade child survives the rebuild");
         let generation_index: i64 = connection
@@ -8984,11 +9216,7 @@ fn sqlite_table_exists(connection: &Connection, table: &str) -> Result<bool> {
 /// compares with all whitespace removed: SQLite stores a migrated table's SQL on
 /// one line while the fixture that created it may have line breaks inside the
 /// CHECK, and a false negative here would rebuild the table on every open.
-fn sqlite_object_accepts(
-    connection: &Connection,
-    table: &str,
-    literal: &str,
-) -> Result<bool> {
+fn sqlite_object_accepts(connection: &Connection, table: &str, literal: &str) -> Result<bool> {
     let sql: Option<String> = connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -9167,22 +9395,44 @@ mod stage_two_runtime_session_migration_tests {
     #[test]
     fn the_native_session_mapping_is_additive_and_defaults_to_the_legacy_format() {
         let upper = super::MIGRATION_98_RUNTIME_SESSION_MAPPING.to_ascii_uppercase();
-        for column in ["NATIVE_SESSION_REF", "NATIVE_SESSION_PATH", "FORMAT_VERSION", "CONTEXT_GENERATION"] {
-            assert!(upper.contains(&format!("ADD COLUMN {column}")), "missing {column}");
+        for column in [
+            "NATIVE_SESSION_REF",
+            "NATIVE_SESSION_PATH",
+            "FORMAT_VERSION",
+            "CONTEXT_GENERATION",
+        ] {
+            assert!(
+                upper.contains(&format!("ADD COLUMN {column}")),
+                "missing {column}"
+            );
         }
-        for forbidden in ["DROP TABLE", "DELETE FROM", "UPDATE RUNTIME_SESSIONS", "RENAME", "NOT NULL DEFAULT '"] {
-            assert!(!upper.contains(forbidden), "the migration must not contain {forbidden}");
+        for forbidden in [
+            "DROP TABLE",
+            "DELETE FROM",
+            "UPDATE RUNTIME_SESSIONS",
+            "RENAME",
+            "NOT NULL DEFAULT '",
+        ] {
+            assert!(
+                !upper.contains(forbidden),
+                "the migration must not contain {forbidden}"
+            );
         }
         assert_eq!(super::RUNTIME_SESSION_MAPPING_SCHEMA_VERSION, 98);
         // 99 only adds the retired-generation ledger; the v98 mapping itself is
         // unchanged. This test still pins the mapping's version and the
         // database's current version, so a version bump is never silent.
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::COMPANION_IDENTITY_SCHEMA_VERSION);
+        assert_eq!(
+            crate::database::DATABASE_SCHEMA_VERSION,
+            super::TYPED_SCHEDULES_SCHEMA_VERSION
+        );
 
-        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
+        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:"))
+            .expect("database");
         let columns: Vec<String> = database
             .with_connection(|connection| {
-                let mut statement = connection.prepare("SELECT name FROM pragma_table_info('runtime_sessions')")?;
+                let mut statement =
+                    connection.prepare("SELECT name FROM pragma_table_info('runtime_sessions')")?;
                 let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
                 let mut names = Vec::new();
                 for row in rows {
@@ -9191,12 +9441,19 @@ mod stage_two_runtime_session_migration_tests {
                 Ok(names)
             })
             .expect("columns");
-        for column in ["native_session_ref", "native_session_path", "format_version", "context_generation"] {
-            assert!(columns.iter().any(|name| name == column), "missing column {column}");
+        for column in [
+            "native_session_ref",
+            "native_session_path",
+            "format_version",
+            "context_generation",
+        ] {
+            assert!(
+                columns.iter().any(|name| name == column),
+                "missing column {column}"
+            );
         }
     }
 }
-
 
 #[cfg(test)]
 mod runtime_session_generation_migration_tests {
@@ -9214,7 +9471,10 @@ mod runtime_session_generation_migration_tests {
             upper.contains("PRIMARY KEY(CONVERSATION_ID, RUNTIME_TYPE, CONTEXT_GENERATION)"),
             "one retired row per generation"
         );
-        assert!(upper.contains("ON DELETE CASCADE"), "a purged conversation takes its ledger");
+        assert!(
+            upper.contains("ON DELETE CASCADE"),
+            "a purged conversation takes its ledger"
+        );
         for forbidden in [
             "DROP TABLE",
             "DELETE FROM",
@@ -9223,10 +9483,16 @@ mod runtime_session_generation_migration_tests {
             "ALTER TABLE",
             "RENAME",
         ] {
-            assert!(!upper.contains(forbidden), "the migration must not contain {forbidden}");
+            assert!(
+                !upper.contains(forbidden),
+                "the migration must not contain {forbidden}"
+            );
         }
         assert_eq!(RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION, 99);
-        assert_eq!(crate::database::DATABASE_SCHEMA_VERSION, super::COMPANION_IDENTITY_SCHEMA_VERSION);
+        assert_eq!(
+            crate::database::DATABASE_SCHEMA_VERSION,
+            super::TYPED_SCHEDULES_SCHEMA_VERSION
+        );
     }
 
     /// A v98 database keeps its single live mapping at generation 1 and gains an
@@ -9251,22 +9517,39 @@ mod runtime_session_generation_migration_tests {
         run_with_target(&mut connection, 200, MigrationTarget::Latest).expect("upgrade to latest");
 
         let generation: i64 = connection
-            .query_row("SELECT context_generation FROM runtime_sessions WHERE id='s'", [], |row| row.get(0))
+            .query_row(
+                "SELECT context_generation FROM runtime_sessions WHERE id='s'",
+                [],
+                |row| row.get(0),
+            )
             .expect("the live mapping survives");
         assert_eq!(generation, 1, "an existing conversation keeps generation 1");
         let retired: i64 = connection
-            .query_row("SELECT COUNT(*) FROM runtime_session_generations", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM runtime_session_generations",
+                [],
+                |row| row.get(0),
+            )
             .expect("the ledger exists");
-        assert_eq!(retired, 0, "the migration must not invent retired generations");
+        assert_eq!(
+            retired, 0,
+            "the migration must not invent retired generations"
+        );
         let version: i64 = connection
-            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
             .expect("version");
         assert_eq!(version, DATABASE_SCHEMA_VERSION);
 
         // Idempotent: a repeat upgrade neither duplicates the version row nor errors.
         run_with_target(&mut connection, 300, MigrationTarget::Latest).expect("repeat upgrade");
         let count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM schema_migrations WHERE version=99", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=99",
+                [],
+                |row| row.get(0),
+            )
             .expect("single version record");
         assert_eq!(count, 1);
     }
@@ -9443,15 +9726,27 @@ mod tests {
             .expect("query")
             .collect::<Result<Vec<_>, _>>()
             .expect("collect");
-        assert!(columns.contains(&"artifact_class".to_owned()), "{columns:?}");
-        assert!(columns.contains(&"artifact_origin".to_owned()), "{columns:?}");
+        assert!(
+            columns.contains(&"artifact_class".to_owned()),
+            "{columns:?}"
+        );
+        assert!(
+            columns.contains(&"artifact_origin".to_owned()),
+            "{columns:?}"
+        );
         let version: i64 = connection
-            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
             .expect("version");
         assert_eq!(version, DATABASE_SCHEMA_VERSION);
         assert_eq!(
             connection
-                .query_row("SELECT COUNT(*) FROM schema_migrations WHERE version=72", [], |row| row.get::<_, i64>(0))
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version=72",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
                 .expect("v72 recorded"),
             1
         );
@@ -9491,8 +9786,14 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("private row");
-        assert_eq!(private.0, "process", "a historical file is never a deliverable");
-        assert_eq!(private.1, "host_private", "the compute workspace is Host-private");
+        assert_eq!(
+            private.0, "process",
+            "a historical file is never a deliverable"
+        );
+        assert_eq!(
+            private.1, "host_private",
+            "the compute workspace is Host-private"
+        );
         let project: (String, String) = connection
             .query_row(
                 "SELECT artifact_class, artifact_origin FROM artifacts WHERE id='project'",
@@ -9516,12 +9817,20 @@ mod tests {
 
         // The row identities the UI and the restore history key on are intact.
         let count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM artifacts WHERE id IN ('private','project','preview')", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM artifacts WHERE id IN ('private','project','preview')",
+                [],
+                |row| row.get(0),
+            )
             .expect("count");
         assert_eq!(count, 3);
         // Idempotent: the migration is recorded, so a second start is a no-op.
         let applied: i64 = connection
-            .query_row("SELECT COUNT(*) FROM schema_migrations WHERE version=72", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=72",
+                [],
+                |row| row.get(0),
+            )
             .expect("applied");
         assert_eq!(applied, 1);
         let repeat = connection.transaction().expect("begin repeat");
@@ -9529,7 +9838,11 @@ mod tests {
         repeat.commit().expect("commit repeat");
         assert_eq!(
             connection
-                .query_row("SELECT artifact_origin FROM artifacts WHERE id='project'", [], |row| row.get::<_, String>(0))
+                .query_row(
+                    "SELECT artifact_origin FROM artifacts WHERE id='project'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
                 .expect("project origin after repeat"),
             "project"
         );
@@ -9565,21 +9878,23 @@ mod tests {
 
         /// Everything about the database that must survive the migration.
         fn snapshot(path: &std::path::Path) -> serde_json::Value {
-            let connection = Connection::open_with_flags(
-                path,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )
-            .expect("open the copy read-only");
+            let connection =
+                Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .expect("open the copy read-only");
             let version: i64 = connection
-                .query_row("SELECT COALESCE(MAX(version),0) FROM schema_migrations", [], |row| {
-                    row.get(0)
-                })
+                .query_row(
+                    "SELECT COALESCE(MAX(version),0) FROM schema_migrations",
+                    [],
+                    |row| row.get(0),
+                )
                 .unwrap();
             let artifacts: i64 = connection
                 .query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
                 .unwrap();
             let versions: i64 = connection
-                .query_row("SELECT COUNT(*) FROM managed_file_versions", [], |row| row.get(0))
+                .query_row("SELECT COUNT(*) FROM managed_file_versions", [], |row| {
+                    row.get(0)
+                })
                 .unwrap();
             let has_class: bool = connection
                 .query_row(
@@ -9645,7 +9960,10 @@ mod tests {
         let after = snapshot(&copy);
 
         let summary = serde_json::json!({ "before": before, "after": after });
-        println!("{}", crate::canonical_json::to_string_pretty(&summary).unwrap());
+        println!(
+            "{}",
+            crate::canonical_json::to_string_pretty(&summary).unwrap()
+        );
 
         assert_eq!(
             before["artifacts"], after["artifacts"],
@@ -9679,7 +9997,8 @@ mod tests {
     }
 
     #[test]
-    fn migrates_plugin_and_knowledge_schema_without_losing_legacy_bindings() {        let mut connection = Connection::open_in_memory().expect("open database");
+    fn migrates_plugin_and_knowledge_schema_without_losing_legacy_bindings() {
+        let mut connection = Connection::open_in_memory().expect("open database");
         run_pre_p0_p2(&mut connection, 1);
         connection
             .execute_batch(
@@ -14442,19 +14761,23 @@ mod tests {
         ).unwrap();
         // A genuine v52 database has neither the v53 checkpoint table nor the
         // v77 trigger that would be rewritten by the v57 outbox table rename.
-        let later_objects: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE name IN
+        let later_objects: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name IN
              ('kernel_shadow_checkpoints', 'execution_policy_invalidate')",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(later_objects, 0);
-        let original_identity: (String, String, String, String) = connection.query_row(
-            "SELECT legacy_run_id, conversation_id, turn_id, frozen_config_json
+        let original_identity: (String, String, String, String) = connection
+            .query_row(
+                "SELECT legacy_run_id, conversation_id, turn_id, frozen_config_json
              FROM kernel_shadow_runs WHERE shadow_run_id='old-shadow'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        ).unwrap();
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
         assert_eq!(
             connection
                 .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row
@@ -14476,12 +14799,14 @@ mod tests {
                 .unwrap(),
             1
         );
-        let upgraded_identity: (String, String, String, String) = connection.query_row(
-            "SELECT legacy_run_id, conversation_id, turn_id, frozen_config_json
+        let upgraded_identity: (String, String, String, String) = connection
+            .query_row(
+                "SELECT legacy_run_id, conversation_id, turn_id, frozen_config_json
              FROM kernel_shadow_runs WHERE shadow_run_id='old-shadow'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        ).unwrap();
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
         assert_eq!(upgraded_identity, original_identity);
         assert_eq!(
             connection
@@ -14502,22 +14827,24 @@ mod tests {
                 .unwrap(),
             crate::database::DATABASE_SCHEMA_VERSION
         );
-        let dangling_outbox_triggers: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger'
+        let dangling_outbox_triggers: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger'
              AND sql LIKE '%kernel_effect_outbox_v56%'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(dangling_outbox_triggers, 0);
-        let foreign_key_violations: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM pragma_foreign_key_check",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let foreign_key_violations: i64 = connection
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert_eq!(foreign_key_violations, 0);
-        let integrity: String = connection.query_row(
-            "PRAGMA integrity_check", [], |row| row.get(0)
-        ).unwrap();
+        let integrity: String = connection
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(integrity, "ok");
     }
 
@@ -14861,7 +15188,13 @@ mod tests {
         "created_at",
         "completed_at",
     ];
-    const APPROVAL_COLUMNS: &[&str] = &["run_id", "tool_call_id", "state", "created_at", "decided_at"];
+    const APPROVAL_COLUMNS: &[&str] = &[
+        "run_id",
+        "tool_call_id",
+        "state",
+        "created_at",
+        "decided_at",
+    ];
 
     /// Populate the narrowed fixture the way a real upgraded database looks:
     /// a running run and a terminal run, tool calls in several states, a frozen
@@ -14875,9 +15208,8 @@ mod tests {
     /// the test asserts afterwards that the guard is present and still refuses a
     /// config for an unknown run — the upgrade must not lose it.
     fn seed_v67_kernel_fixture(connection: &mut Connection) -> Result<()> {
-        let transaction = connection.transaction_with_behavior(
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         transaction.execute_batch(
             r#"
 DROP TRIGGER IF EXISTS kernel_model_config_insert_guard;
@@ -14978,7 +15310,9 @@ BEGIN SELECT RAISE(ABORT, 'Kernel initial input must match frozen configuration 
         order_by: &str,
     ) -> (i64, String) {
         let count: i64 = connection
-            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
             .expect("count rows");
         let projection = columns
             .iter()
@@ -15117,15 +15451,25 @@ CREATE INDEX idx_kernel_tool_calls_state ON kernel_tool_calls(run_id, state);
 
             let watched = [
                 ("kernel_runs", RUN_COLUMNS_V67, "run_id"),
-                ("kernel_tool_calls", TOOL_COLUMNS_V67, "run_id, tool_call_id"),
+                (
+                    "kernel_tool_calls",
+                    TOOL_COLUMNS_V67,
+                    "run_id, tool_call_id",
+                ),
                 ("kernel_model_configs", MODEL_CONFIG_COLUMNS, "run_id"),
                 ("kernel_initial_inputs", INITIAL_INPUT_COLUMNS, "run_id"),
-                ("kernel_host_actions", HOST_ACTION_COLUMNS, "run_id, tool_call_id"),
+                (
+                    "kernel_host_actions",
+                    HOST_ACTION_COLUMNS,
+                    "run_id, tool_call_id",
+                ),
                 ("kernel_approvals", APPROVAL_COLUMNS, "run_id, tool_call_id"),
             ];
             let before: Vec<(i64, String)> = watched
                 .iter()
-                .map(|(table, columns, order)| table_fingerprint(&connection, table, columns, order))
+                .map(|(table, columns, order)| {
+                    table_fingerprint(&connection, table, columns, order)
+                })
                 .collect();
             // A fixture that lost its rows would let this test pass for the wrong
             // reason, so every dependent table must actually be populated.
@@ -15153,7 +15497,10 @@ CREATE INDEX idx_kernel_tool_calls_state ON kernel_tool_calls(run_id, state);
                     |row| row.get(0),
                 )
                 .expect("resume columns before");
-            assert_eq!(resume_before, 0, "the fixture must not already have v68 columns");
+            assert_eq!(
+                resume_before, 0,
+                "the fixture must not already have v68 columns"
+            );
 
             // 4. Upgrade.
             rebuild_v68_for_test(&mut connection).expect("v68 upgrade");
@@ -15161,7 +15508,9 @@ CREATE INDEX idx_kernel_tool_calls_state ON kernel_tool_calls(run_id, state);
             // 4a. Nothing was lost.
             let after: Vec<(i64, String)> = watched
                 .iter()
-                .map(|(table, columns, order)| table_fingerprint(&connection, table, columns, order))
+                .map(|(table, columns, order)| {
+                    table_fingerprint(&connection, table, columns, order)
+                })
                 .collect();
             for (index, (table, _, _)) in watched.iter().enumerate() {
                 assert_eq!(
@@ -15196,7 +15545,10 @@ CREATE INDEX idx_kernel_tool_calls_state ON kernel_tool_calls(run_id, state);
             assert_eq!(action_status, "completed");
             // The frozen-turn trigger still guards the run row.
             assert!(connection
-                .execute("UPDATE kernel_runs SET turn_id='different' WHERE run_id='run-live'", [])
+                .execute(
+                    "UPDATE kernel_runs SET turn_id='different' WHERE run_id='run-live'",
+                    []
+                )
                 .is_err());
             // The model-config insert guard survives too, and still refuses a
             // configuration for a run that never started under it.
@@ -15219,7 +15571,10 @@ CREATE INDEX idx_kernel_tool_calls_state ON kernel_tool_calls(run_id, state);
                     |row| row.get(0),
                 )
                 .expect("resume columns after");
-            assert_eq!(resume_after, 8, "the resume columns must exist exactly once");
+            assert_eq!(
+                resume_after, 8,
+                "the resume columns must exist exactly once"
+            );
 
             // 4c. A repeated upgrade is a no-op, compared against the pre-upgrade
             //     fingerprints (checked before any deliberate state write).
@@ -15231,7 +15586,9 @@ CREATE INDEX idx_kernel_tool_calls_state ON kernel_tool_calls(run_id, state);
             );
             let after_second: Vec<(i64, String)> = watched
                 .iter()
-                .map(|(table, columns, order)| table_fingerprint(&connection, table, columns, order))
+                .map(|(table, columns, order)| {
+                    table_fingerprint(&connection, table, columns, order)
+                })
                 .collect();
             for (index, (table, _, _)) in watched.iter().enumerate() {
                 assert_eq!(
@@ -15300,7 +15657,9 @@ CREATE INDEX idx_kernel_tool_calls_state ON kernel_tool_calls(run_id, state);
             let database = crate::database::Database::open(fresh_path).expect("open fresh");
             let version: i64 = database
                 .with_connection(|c| {
-                    c.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))
+                    c.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
+                        r.get(0)
+                    })
                 })
                 .expect("schema version");
             assert_eq!(version, crate::database::DATABASE_SCHEMA_VERSION);
@@ -15363,25 +15722,39 @@ INSERT INTO kernel_host_observations
 VALUES ('run-old','conv-old','target-old','v-old','read-old',1);
 "#).expect("seed historical v79 rows");
             let version: i64 = connection
-                .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
+                    r.get(0)
+                })
                 .expect("version");
             assert_eq!(version, 79, "the fixture must be a v79 database");
-            let drift: i64 = connection.query_row(
-                "SELECT COUNT(*) FROM conversations c JOIN kernel_execution_policies p
+            let drift: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM conversations c JOIN kernel_execution_policies p
                  ON p.conversation_id=c.id WHERE p.mode<>c.permission_mode",
-                [], |r| r.get(0),
-            ).expect("historical mode drift");
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("historical mode drift");
             assert_eq!(drift, 1, "the fixture must exercise the v80 reconciliation");
-            for table in ["kernel_whole_file_replace_grants", "kernel_restore_requests", "kernel_job_notices"] {
-                let present: i64 = connection.query_row(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-                    [table], |r| r.get(0),
-                ).expect("future table absence");
+            for table in [
+                "kernel_whole_file_replace_grants",
+                "kernel_restore_requests",
+                "kernel_job_notices",
+            ] {
+                let present: i64 = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                        [table],
+                        |r| r.get(0),
+                    )
+                    .expect("future table absence");
                 assert_eq!(present, 0, "{table} must not exist in v79");
             }
-            let violations: i64 = connection.query_row(
-                "SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0),
-            ).expect("v79 foreign keys");
+            let violations: i64 = connection
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+                    r.get(0)
+                })
+                .expect("v79 foreign keys");
             assert_eq!(violations, 0);
         }
 
@@ -15457,7 +15830,9 @@ VALUES ('run-old','conv-old','target-old','v-old','read-old',1);
                 .expect("upgrade assertions");
             let version: i64 = database
                 .with_connection(|c| {
-                    c.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))
+                    c.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
+                        r.get(0)
+                    })
                 })
                 .expect("version after upgrade");
             assert_eq!(version, crate::database::DATABASE_SCHEMA_VERSION);
@@ -15491,7 +15866,9 @@ VALUES ('run-old','conv-old','target-old','v-old','read-old',1);
                 .expect("reopen assertions");
             let version: i64 = database
                 .with_connection(|c| {
-                    c.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))
+                    c.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
+                        r.get(0)
+                    })
                 })
                 .expect("version after reopen");
             assert_eq!(version, crate::database::DATABASE_SCHEMA_VERSION);
@@ -15619,7 +15996,9 @@ DELETE FROM schema_migrations WHERE version=79;
                 .expect("foreign keys on");
 
             let version: i64 = connection
-                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })
                 .expect("v78 version");
             assert_eq!(version, 78);
             assert!(connection
@@ -15633,7 +16012,8 @@ DELETE FROM schema_migrations WHERE version=79;
         assert_eq!(before.0, 1, "the old-database fixture must contain a job");
 
         let after_first = {
-            let database = crate::database::Database::open(path.clone()).expect("upgrade v78 fixture");
+            let database =
+                crate::database::Database::open(path.clone()).expect("upgrade v78 fixture");
             database
                 .with_connection(|connection| {
                     let version: i64 = connection.query_row(
@@ -15650,8 +16030,9 @@ DELETE FROM schema_migrations WHERE version=79;
                     assert_eq!(v79_count, 1);
 
                     let columns = {
-                        let mut statement =
-                            connection.prepare("SELECT name FROM pragma_table_info('kernel_jobs') ORDER BY cid")?;
+                        let mut statement = connection.prepare(
+                            "SELECT name FROM pragma_table_info('kernel_jobs') ORDER BY cid",
+                        )?;
                         let values = statement
                             .query_map([], |row| row.get::<_, String>(0))?
                             .collect::<Result<Vec<_>>>()?;
@@ -15680,7 +16061,10 @@ DELETE FROM schema_migrations WHERE version=79;
                         [],
                         |row| row.get(0),
                     )?;
-                    assert_eq!(foreign_keys, 0, "v69-v78 kernel_jobs declared no foreign keys");
+                    assert_eq!(
+                        foreign_keys, 0,
+                        "v69-v78 kernel_jobs declared no foreign keys"
+                    );
                     let violations: i64 = connection.query_row(
                         "SELECT COUNT(*) FROM pragma_foreign_key_check",
                         [],
@@ -15693,11 +16077,8 @@ DELETE FROM schema_migrations WHERE version=79;
 
                     let host_key = format!(
                         "job:{}",
-                        fox_engine_protocol::encode_dispatch_id(
-                            "run-v79",
-                            &"调用:".repeat(140),
-                        )
-                        .expect("canonical dispatch id")
+                        fox_engine_protocol::encode_dispatch_id("run-v79", &"调用:".repeat(140),)
+                            .expect("canonical dispatch id")
                     );
                     assert!(host_key.chars().count() > 200);
                     connection.execute_batch("SAVEPOINT widened_key_check")?;
@@ -15730,7 +16111,9 @@ DELETE FROM schema_migrations WHERE version=79;
                             ["x".repeat(201)],
                         )
                         .is_err());
-                    connection.execute_batch("ROLLBACK TO widened_key_check; RELEASE widened_key_check")?;
+                    connection.execute_batch(
+                        "ROLLBACK TO widened_key_check; RELEASE widened_key_check",
+                    )?;
                     Ok(fingerprint)
                 })
                 .expect("inspect upgraded database")
@@ -15740,7 +16123,8 @@ DELETE FROM schema_migrations WHERE version=79;
         // A second production reopen must neither rebuild the table nor append
         // another version row.
         {
-            let database = crate::database::Database::open(path.clone()).expect("reopen upgraded database");
+            let database =
+                crate::database::Database::open(path.clone()).expect("reopen upgraded database");
             database
                 .with_connection(|connection| {
                     assert_eq!(
@@ -15767,26 +16151,30 @@ DELETE FROM schema_migrations WHERE version=79;
         let path = root.join("facts.db");
         let conversation = {
             let db = crate::database::Database::open(path.clone()).expect("fresh database");
-            let conversation = db.create_conversation(
-                db.default_agent_id(), Some("v82 restore"), None, None,
-            ).expect("conversation");
+            let conversation = db
+                .create_conversation(db.default_agent_id(), Some("v82 restore"), None, None)
+                .expect("conversation");
             conversation.id
         };
         {
             let connection = Connection::open(&path).expect("synthetic v82 database");
-            connection.execute(
-                "INSERT INTO kernel_restore_requests(
+            connection
+                .execute(
+                    "INSERT INTO kernel_restore_requests(
                     conversation_id,request_id,version_id,target_identity,baseline_version,
                     dispatch_id,state,result_version_id,created_at,settled_at)
                  VALUES (?1,'old-request','old-version','old-target','sha256:old',
                     'restore:old-request','committed','old-result',1,2)",
-                [&conversation],
-            ).expect("v82 request");
-            connection.execute_batch(
-                "ALTER TABLE kernel_restore_requests DROP COLUMN intent_digest;
+                    [&conversation],
+                )
+                .expect("v82 request");
+            connection
+                .execute_batch(
+                    "ALTER TABLE kernel_restore_requests DROP COLUMN intent_digest;
                  ALTER TABLE kernel_restore_requests DROP COLUMN attempt_owner;
                  DELETE FROM schema_migrations WHERE version=83;",
-            ).expect("remove only v83 shape and marker");
+                )
+                .expect("remove only v83 shape and marker");
         }
         for _ in 0..2 {
             let db = crate::database::Database::open(path.clone()).expect("upgrade and reopen");
@@ -15832,68 +16220,89 @@ DELETE FROM schema_migrations WHERE version=79;
                  VALUES ('queued-v83','run-v83','conv-v83','attachment_compute',
                     'queued-key','sha256:queued','{}','queued',0,100000,1,1);",
             ).expect("seed old Run and queued Job");
-            connection.execute(
-                "INSERT INTO tool_call_result_blobs(sha256,body_json,byte_size,created_at)
+            connection
+                .execute(
+                    "INSERT INTO tool_call_result_blobs(sha256,body_json,byte_size,created_at)
                  VALUES(?1,?2,?3,1)",
-                rusqlite::params![&sha,&body,body.len() as i64],
-            ).expect("old result blob");
-            connection.execute(
-                "INSERT INTO kernel_jobs(job_id,run_id,conversation_id,kind,idempotency_key,
+                    rusqlite::params![&sha, &body, body.len() as i64],
+                )
+                .expect("old result blob");
+            connection
+                .execute(
+                    "INSERT INTO kernel_jobs(job_id,run_id,conversation_id,kind,idempotency_key,
                     params_hash,params_json,state,attempts,result_ref,result_bytes,result_sha256,
                     created_at,updated_at,finished_at)
                  VALUES ('completed-v83','run-v83','conv-v83','attachment_compute',
                     'completed-key','sha256:completed','{}','completed',1,
                     'fox-job-result://completed-v83',?1,?2,1,2,2)",
-                rusqlite::params![body.len() as i64,&sha],
-            ).expect("old completed Job");
-            let version: i64 = connection.query_row(
-                "SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0),
-            ).expect("historical version");
+                    rusqlite::params![body.len() as i64, &sha],
+                )
+                .expect("old completed Job");
+            let version: i64 = connection
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })
+                .expect("historical version");
             assert_eq!(version, 83);
             let notice_table: i64 = connection.query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='kernel_job_notices'",
                 [], |row| row.get(0),
             ).expect("historical notice absence");
             assert_eq!(notice_table, 0);
-            let violations: i64 = connection.query_row(
-                "SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0),
-            ).expect("historical FK check");
+            let violations: i64 = connection
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get(0)
+                })
+                .expect("historical FK check");
             assert_eq!(violations, 0);
         }
         for _ in 0..2 {
             let database = crate::database::Database::open(path.clone())
                 .expect("upgrade or reopen v83 fixture");
-            database.with_connection(|connection| {
-                let version: i64 = connection.query_row(
-                    "SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0),
-                )?;
-                let old_run: (String,String) = connection.query_row(
-                    "SELECT conversation_id,status FROM runs WHERE id='run-v83'", [],
-                    |row| Ok((row.get(0)?,row.get(1)?)),
-                )?;
-                let queued: (String,i64) = connection.query_row(
-                    "SELECT state,attempts FROM kernel_jobs WHERE job_id='queued-v83'", [],
-                    |row| Ok((row.get(0)?,row.get(1)?)),
-                )?;
-                let notices: i64 = connection.query_row(
-                    "SELECT COUNT(*) FROM kernel_job_notices", [], |row| row.get(0),
-                )?;
-                let violations: i64 = connection.query_row(
-                    "SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0),
-                )?;
-                let integrity: String = connection.query_row(
-                    "PRAGMA integrity_check", [], |row| row.get(0),
-                )?;
-                assert_eq!(version, DATABASE_SCHEMA_VERSION);
-                assert_eq!(old_run, ("conv-v83".into(),"running".into()));
-                assert_eq!(queued, ("queued".into(),0));
-                assert_eq!(notices, 0, "historical jobs are not retroactively notified");
-                assert_eq!(violations, 0);
-                assert_eq!(integrity, "ok");
-                Ok(())
-            }).expect("preserve old Run/Job data and integrity");
-            assert_eq!(database.kernel_job_result_value("conv-v83","completed-v83").unwrap(),
-                serde_json::json!({"legacy":"result"}));
+            database
+                .with_connection(|connection| {
+                    let version: i64 = connection.query_row(
+                        "SELECT MAX(version) FROM schema_migrations",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    let old_run: (String, String) = connection.query_row(
+                        "SELECT conversation_id,status FROM runs WHERE id='run-v83'",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )?;
+                    let queued: (String, i64) = connection.query_row(
+                        "SELECT state,attempts FROM kernel_jobs WHERE job_id='queued-v83'",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )?;
+                    let notices: i64 = connection.query_row(
+                        "SELECT COUNT(*) FROM kernel_job_notices",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    let violations: i64 = connection.query_row(
+                        "SELECT COUNT(*) FROM pragma_foreign_key_check",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    let integrity: String =
+                        connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+                    assert_eq!(version, DATABASE_SCHEMA_VERSION);
+                    assert_eq!(old_run, ("conv-v83".into(), "running".into()));
+                    assert_eq!(queued, ("queued".into(), 0));
+                    assert_eq!(notices, 0, "historical jobs are not retroactively notified");
+                    assert_eq!(violations, 0);
+                    assert_eq!(integrity, "ok");
+                    Ok(())
+                })
+                .expect("preserve old Run/Job data and integrity");
+            assert_eq!(
+                database
+                    .kernel_job_result_value("conv-v83", "completed-v83")
+                    .unwrap(),
+                serde_json::json!({"legacy":"result"})
+            );
             drop(database);
         }
         std::fs::remove_dir_all(root).expect("remove scratch fixture");
@@ -15901,20 +16310,27 @@ DELETE FROM schema_migrations WHERE version=79;
 
     #[test]
     fn migration_86_upgrades_real_v85_run_twice_with_wait_constraints() {
-        let root=std::env::temp_dir().join(format!("fox-v86-from-v85-{}",uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("fox-v86-from-v85-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let path=root.join("facts.db");
+        let path = root.join("facts.db");
         {
-            let mut connection=Connection::open(&path).unwrap();
-            run_with_target(&mut connection,1,MigrationTarget::V85).unwrap();
-            let version:i64=connection.query_row(
-                "SELECT MAX(version) FROM schema_migrations",[],|row|row.get(0)).unwrap();
-            assert_eq!(version,85);
-            let wait_columns:i64=connection.query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('kernel_runs')
+            let mut connection = Connection::open(&path).unwrap();
+            run_with_target(&mut connection, 1, MigrationTarget::V85).unwrap();
+            let version: i64 = connection
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(version, 85);
+            let wait_columns: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('kernel_runs')
                   WHERE name IN ('wait_deadline_wall_ms','wait_accounted_until_wall_ms')",
-                [],|row|row.get(0)).unwrap();
-            assert_eq!(wait_columns,0);
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(wait_columns, 0);
             connection.execute_batch(
                 "INSERT INTO agents(id,name,description,runtime_type,system_prompt,default_model,created_at,updated_at)
                  VALUES('v85-agent','Old','','pi','','model',1,1);
@@ -15929,35 +16345,69 @@ DELETE FROM schema_migrations WHERE version=79;
             ).unwrap();
         }
         for _ in 0..2 {
-            let db=crate::database::Database::open(path.clone()).unwrap();
+            let db = crate::database::Database::open(path.clone()).unwrap();
             db.with_connection(|conn| {
-                let version:i64=conn.query_row(
-                    "SELECT MAX(version) FROM schema_migrations",[],|row|row.get(0))?;
-                let old:(String,String,Option<i64>,Option<i64>)=conn.query_row(
+                let version: i64 =
+                    conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                        row.get(0)
+                    })?;
+                let old: (String, String, Option<i64>, Option<i64>) = conn.query_row(
                     "SELECT r.conversation_id,k.state,k.wait_deadline_wall_ms,
                             k.wait_accounted_until_wall_ms
                        FROM runs r JOIN kernel_runs k ON k.run_id=r.id WHERE r.id='v85-run'",
-                    [],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
-                let fk:i64=conn.query_row(
-                    "SELECT COUNT(*) FROM pragma_foreign_key_check",[],|row|row.get(0))?;
-                let integrity:String=conn.query_row("PRAGMA integrity_check",[],|row|row.get(0))?;
-                assert_eq!(version,DATABASE_SCHEMA_VERSION);
-                assert_eq!(old,("v85-conv".into(),"running".into(),None,None));
-                assert_eq!((fk,integrity),(0,"ok".into()));
-                assert!(conn.execute("UPDATE kernel_runs SET wait_deadline_wall_ms=-1
-                    WHERE run_id='v85-run'",[]).is_err());
-                assert!(conn.execute("UPDATE kernel_runs SET wait_deadline_wall_ms=5,
-                    wait_accounted_until_wall_ms=6 WHERE run_id='v85-run'",[]).is_err());
-                assert!(conn.execute("UPDATE kernel_runs SET wait_accounted_until_wall_ms=5
-                    WHERE run_id='v85-run'",[]).is_err());
-                assert!(conn.execute("UPDATE kernel_runs SET wait_deadline_wall_ms=5
-                    WHERE run_id='v85-run'",[]).is_err());
-                conn.execute("UPDATE kernel_runs SET wait_deadline_wall_ms=5,
-                    wait_accounted_until_wall_ms=3 WHERE run_id='v85-run'",[])?;
-                conn.execute("UPDATE kernel_runs SET wait_deadline_wall_ms=NULL,
-                    wait_accounted_until_wall_ms=NULL WHERE run_id='v85-run'",[])?;
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )?;
+                let fk: i64 =
+                    conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                        row.get(0)
+                    })?;
+                let integrity: String =
+                    conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+                assert_eq!(version, DATABASE_SCHEMA_VERSION);
+                assert_eq!(old, ("v85-conv".into(), "running".into(), None, None));
+                assert_eq!((fk, integrity), (0, "ok".into()));
+                assert!(conn
+                    .execute(
+                        "UPDATE kernel_runs SET wait_deadline_wall_ms=-1
+                    WHERE run_id='v85-run'",
+                        []
+                    )
+                    .is_err());
+                assert!(conn
+                    .execute(
+                        "UPDATE kernel_runs SET wait_deadline_wall_ms=5,
+                    wait_accounted_until_wall_ms=6 WHERE run_id='v85-run'",
+                        []
+                    )
+                    .is_err());
+                assert!(conn
+                    .execute(
+                        "UPDATE kernel_runs SET wait_accounted_until_wall_ms=5
+                    WHERE run_id='v85-run'",
+                        []
+                    )
+                    .is_err());
+                assert!(conn
+                    .execute(
+                        "UPDATE kernel_runs SET wait_deadline_wall_ms=5
+                    WHERE run_id='v85-run'",
+                        []
+                    )
+                    .is_err());
+                conn.execute(
+                    "UPDATE kernel_runs SET wait_deadline_wall_ms=5,
+                    wait_accounted_until_wall_ms=3 WHERE run_id='v85-run'",
+                    [],
+                )?;
+                conn.execute(
+                    "UPDATE kernel_runs SET wait_deadline_wall_ms=NULL,
+                    wait_accounted_until_wall_ms=NULL WHERE run_id='v85-run'",
+                    [],
+                )?;
                 Ok(())
-            }).unwrap();
+            })
+            .unwrap();
         }
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -15980,7 +16430,9 @@ DELETE FROM schema_migrations WHERE version=79;
             let mut connection = Connection::open(&path).unwrap();
             run_with_target(&mut connection, 1, MigrationTarget::V87).unwrap();
             let version: i64 = connection
-                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })
                 .unwrap();
             assert_eq!(version, 87, "the fixture must stop before migration 88");
             connection
@@ -16011,15 +16463,19 @@ DELETE FROM schema_migrations WHERE version=79;
                     .unwrap();
                 rows
             };
-            assert!(stored.iter().any(|(_, body)| body.contains("sourceStatsUnbound")));
+            assert!(stored
+                .iter()
+                .any(|(_, body)| body.contains("sourceStatsUnbound")));
             assert!(stored.iter().any(|(_, body)| body.contains("\"count\":2")));
         }
 
         // Upgrade to the latest schema — migration 88 rebuilds the table.
         let db = crate::database::Database::open(path.clone()).unwrap();
         db.with_connection(|conn| {
-            let version: i64 = conn.query_row(
-                "SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))?;
+            let version: i64 =
+                conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })?;
             assert_eq!(version, DATABASE_SCHEMA_VERSION);
             let rows: Vec<(String, String, String)> = {
                 let mut statement = conn.prepare(
@@ -16038,16 +16494,34 @@ DELETE FROM schema_migrations WHERE version=79;
                     "{item_key} lost its structured requirements in the v88 rebuild"
                 );
             }
-            let unbound_row = rows.iter().find(|(key, _, _)| key == "file:a.xlsx").unwrap();
-            assert!(unbound_row.2.contains("sourceStatsUnbound"), "{}", unbound_row.2);
-            assert!(unbound_row.2.contains("按问题类型统计频次与比例"), "{}", unbound_row.2);
-            let charts_row = rows.iter().find(|(key, _, _)| key == "slot:docx:1").unwrap();
+            let unbound_row = rows
+                .iter()
+                .find(|(key, _, _)| key == "file:a.xlsx")
+                .unwrap();
+            assert!(
+                unbound_row.2.contains("sourceStatsUnbound"),
+                "{}",
+                unbound_row.2
+            );
+            assert!(
+                unbound_row.2.contains("按问题类型统计频次与比例"),
+                "{}",
+                unbound_row.2
+            );
+            let charts_row = rows
+                .iter()
+                .find(|(key, _, _)| key == "slot:docx:1")
+                .unwrap();
             assert!(charts_row.2.contains("\"count\":2"), "{}", charts_row.2);
             // The rebuild also copies the statuses verbatim, including the new
             // one the migration exists for.
             assert_eq!(charts_row.1, "failed");
-            let fk: i64 = conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0))?;
-            let integrity: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+            let fk: i64 =
+                conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get(0)
+                })?;
+            let integrity: String =
+                conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
             assert_eq!((fk, integrity), (0, "ok".into()));
             Ok(())
         })
@@ -16135,13 +16609,30 @@ mod unified_migration_tests {
                 PRIMARY KEY(run_id,tool_call_id));").unwrap();
         db.execute("INSERT INTO kernel_tool_calls(run_id,tool_call_id,batch_id,tool,source_order,canonical_input_json,state,created_at)
             VALUES(?1,?2,?3,?4,0,?5,?6,1)", rusqlite::params!["r","t","b","read","{}","legacy-state"]).unwrap();
-        let versions: i64 = db.query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0)).unwrap();
+        let versions: i64 = db
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
+            .unwrap();
         assert!(run(&mut db, 2).is_err());
-        assert_eq!(db.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(
+            db.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
         assert!(!sqlite_table_exists(&db, "kernel_tool_calls_v68").unwrap());
-        assert_eq!(db.query_row("SELECT state FROM kernel_tool_calls", [], |r| r.get::<_, String>(0)).unwrap(), "legacy-state");
-        assert_eq!(db.query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get::<_, i64>(0)).unwrap(), versions);
-        db.execute("UPDATE kernel_tool_calls SET state=?1", ["completed"]).unwrap();
+        assert_eq!(
+            db.query_row("SELECT state FROM kernel_tool_calls", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "legacy-state"
+        );
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            versions
+        );
+        db.execute("UPDATE kernel_tool_calls SET state=?1", ["completed"])
+            .unwrap();
         run(&mut db, 3).unwrap();
         assert!(sqlite_object_accepts(&db, "kernel_tool_calls", "'expired'").unwrap());
     }
@@ -16767,10 +17258,15 @@ const MIGRATION_75_ATTEMPTS_COLUMNS: &[(&str, &str, &str)] = &[
     ("kernel_execution_attempts", "parent_generation", "INTEGER"),
 ];
 
-
 fn rebuild_attempts_state_check(transaction: &rusqlite::Transaction<'_>) -> Result<()> {
-    let sql: String = transaction.query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name='kernel_execution_attempts'", [], |r| r.get(0))?;
-    if sql.contains("'completed','unknown'") { return Ok(()); }
+    let sql: String = transaction.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='kernel_execution_attempts'",
+        [],
+        |r| r.get(0),
+    )?;
+    if sql.contains("'completed','unknown'") {
+        return Ok(());
+    }
     transaction.execute_batch("CREATE TABLE kernel_execution_attempts_v76 (
         run_id TEXT NOT NULL, dispatch_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
         params_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('claimed','refused','launched','completed','unknown')),
@@ -16819,7 +17315,6 @@ CREATE TRIGGER IF NOT EXISTS execution_parent_cancel AFTER UPDATE OF status ON r
 END;
 "#;
 
-
 /// Package 2-D U1: migration 93 is additive and idempotent, and a v1 database is
 /// a no-op for it.
 #[cfg(test)]
@@ -16863,7 +17358,9 @@ mod delivery_acceptance_migration_tests {
             .expect("single version record");
         assert_eq!(count, 1);
         let version: i64 = connection
-            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
             .expect("version");
         assert_eq!(version, DATABASE_SCHEMA_VERSION);
         // v95 (agent_backend), v96 (full-access grants + audit log) and v97
@@ -16890,11 +17387,13 @@ mod delivery_acceptance_migration_tests {
         assert_eq!(COMPANION_BACKGROUND_SCHEMA_VERSION, 111);
         assert_eq!(COMPANION_REMINDERS_SCHEMA_VERSION, 112);
         assert_eq!(CONTACT_MESSAGE_MARKS_SCHEMA_VERSION, 113);
-        assert_eq!(DATABASE_SCHEMA_VERSION, COMPANION_IDENTITY_SCHEMA_VERSION);
+        assert_eq!(DATABASE_SCHEMA_VERSION, TYPED_SCHEDULES_SCHEMA_VERSION);
 
         // The old rows are untouched.
         let title: String = connection
-            .query_row("SELECT title FROM conversations WHERE id='c1'", [], |row| row.get(0))
+            .query_row("SELECT title FROM conversations WHERE id='c1'", [], |row| {
+                row.get(0)
+            })
             .expect("conversation survives");
         assert_eq!(title, "Old");
 
@@ -16902,7 +17401,9 @@ mod delivery_acceptance_migration_tests {
         // read rather than a missing-table error.
         for table in ["delivery_acceptances", "delivery_acceptance_audit"] {
             let rows: i64 = connection
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
                 .expect("table exists");
             assert_eq!(rows, 0, "{table}");
         }
@@ -17003,7 +17504,10 @@ mod delivery_acceptance_migration_tests {
                 |row| row.get(0),
             )
             .expect("count");
-        assert_eq!(rows, 3, "all three decisions are retained, none overwritten");
+        assert_eq!(
+            rows, 3,
+            "all three decisions are retained, none overwritten"
+        );
     }
 
     fn digest_of_test() -> String {
@@ -17013,7 +17517,8 @@ mod delivery_acceptance_migration_tests {
 }
 
 #[cfg(test)]
-mod project_pinning_migration_tests {    use super::*;
+mod project_pinning_migration_tests {
+    use super::*;
 
     #[test]
     fn upgrades_v91_projects_without_losing_metadata_and_is_idempotent() {
@@ -17022,19 +17527,33 @@ mod project_pinning_migration_tests {    use super::*;
         connection.execute("INSERT INTO projects(id,name,root_path,permission_mode,status,created_at,updated_at,last_opened_at) VALUES ('old','Old project','D:/old','read_only','active',10,20,30)", []).expect("old project");
         run_with_target(&mut connection, 200, MigrationTarget::Latest).expect("upgrade");
         let result = connection.query_row("SELECT pinned,permission_mode,created_at,last_opened_at FROM projects WHERE id='old'", [], |row| Ok((row.get::<_,bool>(0)?,row.get::<_,String>(1)?,row.get::<_,i64>(2)?,row.get::<_,i64>(3)?))).expect("read old project");
-        assert_eq!(result, (false,"read_only".to_owned(),10,30));
-        connection.execute("UPDATE projects SET pinned=1 WHERE id='old'", []).expect("pin project");
+        assert_eq!(result, (false, "read_only".to_owned(), 10, 30));
+        connection
+            .execute("UPDATE projects SET pinned=1 WHERE id='old'", [])
+            .expect("pin project");
         run_with_target(&mut connection, 300, MigrationTarget::Latest).expect("repeat upgrade");
-        let pinned: bool = connection.query_row("SELECT pinned FROM projects WHERE id='old'", [], |row| row.get(0)).expect("pin survives");
+        let pinned: bool = connection
+            .query_row("SELECT pinned FROM projects WHERE id='old'", [], |row| {
+                row.get(0)
+            })
+            .expect("pin survives");
         assert!(pinned);
-        let count: i64 = connection.query_row("SELECT COUNT(*) FROM schema_migrations WHERE version=92", [], |row| row.get(0)).expect("single version record");
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=92",
+                [],
+                |row| row.get(0),
+            )
+            .expect("single version record");
         assert_eq!(count, 1);
-        let version: i64 = connection.query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0)).expect("version");
+        let version: i64 = connection
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .expect("version");
         assert_eq!(version, DATABASE_SCHEMA_VERSION);
     }
 }
-
-
 
 #[cfg(test)]
 mod agent_backend_migration_tests {
@@ -17076,17 +17595,33 @@ mod agent_backend_migration_tests {
         run_with_target(&mut connection, 200, MigrationTarget::Latest).expect("upgrade");
         run_with_target(&mut connection, 300, MigrationTarget::Latest).expect("repeat upgrade");
         let backend: String = connection
-            .query_row("SELECT agent_backend FROM conversations WHERE id='c-old'", [], |row| row.get(0))
+            .query_row(
+                "SELECT agent_backend FROM conversations WHERE id='c-old'",
+                [],
+                |row| row.get(0),
+            )
             .expect("agent_backend");
         assert_eq!(backend, "fox");
         let records: i64 = connection
-            .query_row("SELECT COUNT(*) FROM schema_migrations WHERE version=95", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=95",
+                [],
+                |row| row.get(0),
+            )
             .expect("version record");
         assert_eq!(records, 1);
         let (title, updated_at): (String, i64) = connection
-            .query_row("SELECT title, updated_at FROM conversations WHERE id='c-old'", [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_row(
+                "SELECT title, updated_at FROM conversations WHERE id='c-old'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .expect("old row");
-        assert_eq!((title.as_str(), updated_at), ("Old", 1), "no historical row is rewritten");
+        assert_eq!(
+            (title.as_str(), updated_at),
+            ("Old", 1),
+            "no historical row is rewritten"
+        );
     }
 
     #[test]
@@ -17094,11 +17629,20 @@ mod agent_backend_migration_tests {
         let mut connection = v94_database();
         run_with_target(&mut connection, 200, MigrationTarget::Latest).expect("upgrade");
         let error = connection
-            .execute("UPDATE conversations SET agent_backend='codex' WHERE id='c-old'", [])
+            .execute(
+                "UPDATE conversations SET agent_backend='codex' WHERE id='c-old'",
+                [],
+            )
             .expect_err("immutable");
-        assert!(error.to_string().contains("agent_backend_immutable"), "{error}");
+        assert!(
+            error.to_string().contains("agent_backend_immutable"),
+            "{error}"
+        );
         connection
-            .execute("UPDATE conversations SET title='Renamed' WHERE id='c-old'", [])
+            .execute(
+                "UPDATE conversations SET title='Renamed' WHERE id='c-old'",
+                [],
+            )
             .expect("unrelated update still works");
         let error = connection
             .execute(
@@ -17107,7 +17651,10 @@ mod agent_backend_migration_tests {
                 [],
             )
             .expect_err("engine ids are not backend ids");
-        assert!(error.to_string().to_ascii_lowercase().contains("check"), "{error}");
+        assert!(
+            error.to_string().to_ascii_lowercase().contains("check"),
+            "{error}"
+        );
     }
 }
 #[cfg(test)]
@@ -17488,8 +18035,10 @@ fn materialize_companion_binding_skills(transaction: &rusqlite::Transaction<'_>)
         let enabled_skills = enabled_json
             .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
             .unwrap_or_default();
-        let mut snapshot: serde_json::Value = serde_json::from_str(&snapshot_json)
-            .map_err(|error| schema_version_error(format!("database.invalid_binding_snapshot: {error}")))?;
+        let mut snapshot: serde_json::Value =
+            serde_json::from_str(&snapshot_json).map_err(|error| {
+                schema_version_error(format!("database.invalid_binding_snapshot: {error}"))
+            })?;
         snapshot["enabledSkills"] = json!(enabled_skills);
         let package_hash = package_snapshot_hash(&snapshot);
         transaction.execute(
@@ -17499,4 +18048,222 @@ fn materialize_companion_binding_skills(transaction: &rusqlite::Transaction<'_>)
         )?;
     }
     Ok(())
+}
+
+pub(crate) const TYPED_SCHEDULES_SCHEMA_VERSION: i64 = 115;
+const _: () = assert!(DATABASE_SCHEMA_VERSION >= TYPED_SCHEDULES_SCHEMA_VERSION);
+
+const MIGRATION_115_TYPED_SCHEDULES: &str = r#"
+CREATE TABLE digital_colleagues_v115 (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    expert_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+    expert_binding_id TEXT REFERENCES conversation_expert_bindings(id) ON DELETE SET NULL,
+    package_hash TEXT,
+    package_snapshot_json TEXT DEFAULT '{}',
+    conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id) ON DELETE CASCADE,
+    objective TEXT NOT NULL,
+    project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    project_root TEXT,
+    knowledge_references_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL CHECK(status IN ('active', 'paused', 'revoked')),
+    max_runs_per_day INTEGER NOT NULL CHECK(max_runs_per_day BETWEEN 1 AND 100),
+    max_tokens_per_day INTEGER NOT NULL CHECK(max_tokens_per_day BETWEEN 256 AND 2000000),
+    max_duration_ms INTEGER NOT NULL CHECK(max_duration_ms BETWEEN 1000 AND 900000),
+    max_output_tokens INTEGER NOT NULL CHECK(max_output_tokens BETWEEN 64 AND 32768),
+    max_tool_calls INTEGER NOT NULL CHECK(max_tool_calls BETWEEN 0 AND 100),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    revoked_at INTEGER,
+    companion_id TEXT REFERENCES companion_profiles(id) ON DELETE RESTRICT,
+    report_conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+    companion_bound INTEGER NOT NULL DEFAULT 0 CHECK(companion_bound IN (0, 1))
+);
+INSERT INTO digital_colleagues_v115(
+    id, name, expert_id, expert_binding_id, package_hash, package_snapshot_json,
+    conversation_id, objective, project_id, project_root, knowledge_references_json,
+    status, max_runs_per_day, max_tokens_per_day, max_duration_ms, max_output_tokens,
+    max_tool_calls, created_at, updated_at, revoked_at, companion_id,
+    report_conversation_id, companion_bound
+)
+SELECT id, name, expert_id, expert_binding_id, package_hash, package_snapshot_json,
+    conversation_id, objective, project_id, project_root, knowledge_references_json,
+    status, max_runs_per_day, max_tokens_per_day, max_duration_ms, max_output_tokens,
+    max_tool_calls, created_at, updated_at, revoked_at, companion_id,
+    report_conversation_id, companion_bound
+FROM digital_colleagues;
+DROP TABLE digital_colleagues;
+ALTER TABLE digital_colleagues_v115 RENAME TO digital_colleagues;
+CREATE INDEX idx_digital_colleagues_status_updated
+    ON digital_colleagues(status, updated_at DESC, id);
+CREATE INDEX idx_digital_colleagues_companion
+    ON digital_colleagues(companion_id) WHERE companion_id IS NOT NULL;
+
+CREATE TABLE digital_colleague_schedules_v115 (
+    id TEXT PRIMARY KEY,
+    colleague_id TEXT NOT NULL REFERENCES digital_colleagues(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    schedule_kind TEXT NOT NULL CHECK(schedule_kind IN ('once', 'interval', 'daily', 'weekly')),
+    interval_seconds INTEGER CHECK(interval_seconds BETWEEN 60 AND 2592000),
+    once_at INTEGER,
+    weekdays_json TEXT CHECK(weekdays_json IS NULL OR json_valid(weekdays_json)),
+    local_time TEXT CHECK(local_time IS NULL OR (
+        local_time GLOB '[0-9][0-9]:[0-9][0-9]'
+        AND CAST(substr(local_time, 1, 2) AS INTEGER) BETWEEN 0 AND 23
+        AND CAST(substr(local_time, 4, 2) AS INTEGER) BETWEEN 0 AND 59)),
+    timezone TEXT NOT NULL,
+    anchor_at INTEGER,
+    catchup_window_seconds INTEGER NOT NULL DEFAULT 3600
+        CHECK(catchup_window_seconds BETWEEN 60 AND 86400),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+    next_due_at INTEGER NOT NULL,
+    last_scheduled_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    CHECK(
+        (schedule_kind = 'once' AND once_at IS NOT NULL AND interval_seconds IS NULL
+            AND weekdays_json IS NULL AND local_time IS NULL AND anchor_at IS NULL)
+        OR (schedule_kind = 'interval' AND interval_seconds IS NOT NULL AND once_at IS NULL
+            AND weekdays_json IS NULL AND local_time IS NULL AND anchor_at IS NOT NULL)
+        OR (schedule_kind IN ('daily', 'weekly') AND interval_seconds IS NULL AND once_at IS NULL
+            AND weekdays_json IS NOT NULL AND local_time IS NOT NULL AND anchor_at IS NULL)
+    )
+);
+INSERT INTO digital_colleague_schedules_v115(
+    id, colleague_id, name, schedule_kind, interval_seconds, once_at,
+    weekdays_json, local_time, timezone, anchor_at, catchup_window_seconds,
+    enabled, next_due_at, last_scheduled_at, created_at, updated_at
+)
+SELECT id, colleague_id, name, schedule_kind, interval_seconds, NULL,
+    NULL, NULL, 'UTC', next_due_at - interval_seconds * 1000, catchup_window_seconds,
+    enabled, next_due_at, last_scheduled_at, created_at, updated_at
+FROM digital_colleague_schedules;
+DROP TABLE digital_colleague_schedules;
+ALTER TABLE digital_colleague_schedules_v115 RENAME TO digital_colleague_schedules;
+CREATE INDEX idx_digital_colleague_schedules_due
+    ON digital_colleague_schedules(enabled, next_due_at, id);
+"#;
+
+#[cfg(test)]
+mod typed_schedule_migration_tests {
+    use super::*;
+
+    #[test]
+    fn populated_v114_upgrade_preserves_task_schedule_and_trigger_links() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        run_with_target(&mut connection, 100, MigrationTarget::V114).unwrap();
+        connection.execute_batch(r#"
+            INSERT INTO agents(id,name,description,runtime_type,system_prompt,default_model,created_at,updated_at)
+            VALUES ('source-agent','Source','','local','','',1,1),
+                ('runtime-agent','Runtime','','local','','',1,1);
+            INSERT INTO conversations(id,agent_id,title,permission_mode,status,created_at,updated_at)
+            VALUES ('execution-conversation','source-agent','Task','read_only','active',1,1),
+                ('report-conversation','runtime-agent','Report','read_only','active',1,1);
+            INSERT INTO companion_profiles(
+                id,template_agent_id,display_name,workspace_dir,notes_dir,created_at,updated_at)
+            VALUES ('cmp_task','runtime-agent','Task Fox','/tmp/task-workspace','/tmp/task-notes',1,1);
+            INSERT INTO conversation_expert_bindings(
+                id,conversation_id,expert_id,state,activation_source,expert_version,
+                package_hash,package_snapshot_json,display_snapshot_json,activated_at)
+            VALUES ('source-binding','execution-conversation','source-agent','active','digital_colleague','1',
+                'hash','{}','{}',1);
+            INSERT INTO digital_colleagues(
+                id,name,expert_id,expert_binding_id,package_hash,package_snapshot_json,
+                conversation_id,objective,project_id,project_root,knowledge_references_json,
+                status,max_runs_per_day,max_tokens_per_day,max_duration_ms,max_output_tokens,
+                max_tool_calls,created_at,updated_at,revoked_at,companion_id,
+                report_conversation_id,companion_bound)
+            VALUES ('task-id','Task','source-agent','source-binding','hash','{"source":true}',
+                'execution-conversation','objective',NULL,NULL,'[]','active',8,128000,300000,
+                4096,16,10,10,NULL,'cmp_task','report-conversation',1);
+            INSERT INTO digital_colleague_schedules(
+                id,colleague_id,name,schedule_kind,interval_seconds,catchup_window_seconds,
+                enabled,next_due_at,last_scheduled_at,created_at,updated_at)
+            VALUES ('schedule-id','task-id','Interval','interval',60,120,1,100000,40000,10,10);
+            INSERT INTO digital_colleague_triggers(
+                id,colleague_id,source_type,source_id,idempotency_key,status,payload_json,
+                scheduled_for,created_at,updated_at)
+            VALUES ('trigger-id','task-id','schedule','schedule-id','schedule:schedule-id:40000',
+                'completed','{}',40000,40000,40000);
+        "#).unwrap();
+
+        run_with_target(&mut connection, 200, MigrationTarget::Latest).unwrap();
+        let task = connection.query_row(
+            "SELECT id, conversation_id, package_snapshot_json, companion_id,
+                    report_conversation_id, companion_bound
+             FROM digital_colleagues WHERE id='task-id'",
+            [], |row| Ok((row.get::<_,String>(0).unwrap(), row.get::<_,String>(1).unwrap(),
+                row.get::<_,String>(2).unwrap(), row.get::<_,String>(3).unwrap(),
+                row.get::<_,String>(4).unwrap(), row.get::<_,i64>(5).unwrap())),
+        ).unwrap();
+        assert_eq!(
+            task,
+            (
+                "task-id".to_owned(),
+                "execution-conversation".to_owned(),
+                "{\"source\":true}".to_owned(),
+                "cmp_task".to_owned(),
+                "report-conversation".to_owned(),
+                1
+            )
+        );
+        let schedule = connection.query_row(
+            "SELECT schedule_kind, interval_seconds, timezone, anchor_at, catchup_window_seconds,
+                    enabled, next_due_at, last_scheduled_at
+             FROM digital_colleague_schedules WHERE id='schedule-id'", [],
+            |row| Ok((row.get::<_,String>(0).unwrap(), row.get::<_,i64>(1).unwrap(), row.get::<_,String>(2).unwrap(),
+                row.get::<_,i64>(3).unwrap(), row.get::<_,i64>(4).unwrap(), row.get::<_,i64>(5).unwrap(),
+                row.get::<_,i64>(6).unwrap(), row.get::<_,i64>(7).unwrap())),
+        ).unwrap();
+        assert_eq!(
+            schedule,
+            (
+                "interval".to_owned(),
+                60,
+                "UTC".to_owned(),
+                40000,
+                120,
+                1,
+                100000,
+                40000
+            )
+        );
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM digital_colleague_triggers WHERE id='trigger-id' AND colleague_id='task-id'", [], |row| row.get::<_,i64>(0)).unwrap(), 1);
+        for column in [
+            "expert_id",
+            "expert_binding_id",
+            "package_hash",
+            "package_snapshot_json",
+        ] {
+            assert_eq!(connection.query_row("SELECT \"notnull\" FROM pragma_table_info('digital_colleagues') WHERE name=?1", [column], |row| row.get::<_,i64>(0)).unwrap(), 0, "{column}");
+        }
+        assert!(connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='memory_companion_notes_owner')", [], |row| row.get::<_,bool>(0)).unwrap());
+        let violations: i64 = connection
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(violations, 0);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE name='digital_colleagues'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap()
+                .contains("package_snapshot_json TEXT DEFAULT '{}'"),
+            true
+        );
+        connection.execute("DELETE FROM conversation_expert_bindings WHERE id='source-binding'", []).unwrap();
+        connection.execute("UPDATE conversations SET agent_id='runtime-agent' WHERE id='execution-conversation'", []).unwrap();
+        connection.execute("DELETE FROM agents WHERE id='source-agent'", []).unwrap();
+        let surviving_task = connection.query_row(
+            "SELECT id, expert_id, expert_binding_id FROM digital_colleagues WHERE id='task-id'",
+            [], |row| Ok((row.get::<_,String>(0).unwrap(), row.get::<_,Option<String>>(1).unwrap(), row.get::<_,Option<String>>(2).unwrap())),
+        ).unwrap();
+        assert_eq!(surviving_task, ("task-id".to_owned(), None, None));
+        let violations: i64 = connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0)).unwrap();
+        assert_eq!(violations, 0);
+    }
 }
