@@ -1,6 +1,7 @@
 // Isolated Vite acceptance entry. Nothing in the desktop build imports this file.
 import { resolve, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { xiaofoxUi } from './contacts-xiaofox-ui.mjs'
 
 const desktop = process.cwd()
 const {createServer} = await import(pathToFileURL(resolve(desktop,'node_modules/vite/dist/node/index.js')))
@@ -78,7 +79,9 @@ const bridge = {
         if (own?.workspaceDir?.replaceAll('\\\\','/').toLowerCase().startsWith(${JSON.stringify(expected)})) {
           hot.on('contacts:invoke',async ({id,command,args}) => {
             try {
-              const value = command === 'acceptance.read_xiaofox_profile'
+              const value = command === 'acceptance.xiaofox_ui'
+                ? {ok:true, data:await (${xiaofoxUi.toString()})(args.action, args)}
+                : command === 'acceptance.read_xiaofox_profile'
                 ? {ok:true, data:await (${readXiaoFoxProfile.toString()})(args.displayName)}
                 : command === 'acceptance.open_contact_notes'
                 ? {ok:true, data:await (${openContactNotes.toString()})(args.displayName)}

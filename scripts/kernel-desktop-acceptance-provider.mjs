@@ -27,6 +27,10 @@ function responseFor(messages) {
   const userIndex = messages.findLastIndex(message => message.role === 'user')
   const user = content(messages[userIndex]?.content)
   const results = messages.slice(userIndex + 1).filter(message => message.role === 'tool')
+  if ((user.includes('[XIAOFOX_') || user.includes('[KERNEL_CANCEL]'))
+    && messages.some(message => message.role === 'system' && content(message.content).includes('You are Fox Planner'))) {
+    return { text: '{"summary":"执行验收","steps":["执行指定操作","核对结果"],"risks":[],"needsGoal":false}' }
+  }
   const seed = user.match(/^\[CONTACTS_M1_SEED_NOTE\]\r?\n([^\r\n]+)$/)
   if (process.env.FOX_CONTACTS_ACCEPTANCE === '1' && seed) {
     if (!results.length) return { tool: 'memory_write', input: {
@@ -60,6 +64,23 @@ function responseFor(messages) {
     return results.length ? { text: '子任务已读取 proof.txt，独立执行完成。' }
       : { tool: 'read', input: { path: 'proof.txt' } }
   }
+  if (user.includes('[XIAOFOX_ARTIFACT]')) {
+    if (!results.length) return { tool: 'present_files', input: { files: [{ path: 'acceptance-artifact.txt' }] } }
+    return { text: '验收产物已呈现，请从资料库打开并查看来源。' }
+  }
+  if (user.includes('[XIAOFOX_A18]')) {
+    if (!results.length) return { tool: 'child_run_start', input: {
+      mode: 'worker', agentId: 'fox-general', objective: '[KERNEL_CANCEL] 持续输出验收进度，等待父任务取消。',
+      context: '只输出虚构验收内容，不修改文件。',
+      budget: { maxDurationMs: 120000, maxTotalTokens: 8000, maxOutputTokens: 2048, maxToolCalls: 2 },
+    } }
+    if (results.length === 1) {
+      const id = findChildId(results[0].content)
+      return id ? { tool: 'child_run_collect', input: { childRunIds: [id], waitMs: 60000 } }
+        : { text: '验收失败：子任务结果没有有效标识。' }
+    }
+    return { text: '子任务停止结果已返回。' }
+  }
   if (user.includes('[KERNEL_CHILD]')) {
     if (!results.length) return { tool: 'child_run_start', input: {
       mode: 'worker', agentId: 'fox-general', objective: '[KERNEL_CHILD_WORKER] 读取 proof.txt 并报告。',
@@ -79,6 +100,7 @@ function responseFor(messages) {
     } }
     return { text: '审批步骤已返回；请以工具结果和验收文件核对是否执行。' }
   }
+  if (user.includes('[XIAOFOX_A24_PRIVATE]')) return { text: '私聊正在逐步完成，请等待后台计划排队。'.repeat(9), slow: true }
   if (user.includes('[KERNEL_CANCEL]')) return { text: '这是等待取消的临时流式内容。'.repeat(80), slow: true }
   // Package-2-E: the drift fixture. It writes the correct merge, then streams a
   // long final response. That stretch of wall clock is the window the driver uses

@@ -21,12 +21,15 @@ if (dev) argv.pop()
 const devPort = Number(process.env.FOX_CONTACTS_DEV_PORT || 1421)
 const m2 = argv.at(-1) === '--m2'
 const xiaofox = argv.at(-1) === '--xiaofox'
-if (m2 || xiaofox) {
+const xiaofoxAcceptance = argv.at(-1) === '--xiaofox-acceptance'
+const xiaofoxUi = argv.at(-1) === '--xiaofox-ui'
+const xiaofoxLifecycle = argv.at(-1) === '--xiaofox-lifecycle'
+if (m2 || xiaofox || xiaofoxAcceptance || xiaofoxUi || xiaofoxLifecycle) {
   argv.pop()
   assert.ok(dev && liveProfile && argv[0] === '--exe', 'M2 and Xiao Fox require --exe, --dev and --live-profile')
 }
 if (argv.length && !(argv.length === 2 && argv[0] === '--exe') && !(argv.length === 4 && argv[0] === '--exe' && argv[2] === '--sidecar')) {
-  throw new Error('Usage: node scripts/windows-test/Run-ContactsM1.mjs [--exe candidate.exe [--sidecar candidate-runtime.exe] [--m2|--xiaofox] [--dev] [--live-profile model-config-snapshot.db]]')
+  throw new Error('Usage: node scripts/windows-test/Run-ContactsM1.mjs [--exe candidate.exe [--sidecar candidate-runtime.exe] [--m2|--xiaofox|--xiaofox-acceptance|--xiaofox-lifecycle|--xiaofox-ui] [--dev] [--live-profile model-config-snapshot.db]]')
 }
 const directory = await mkdtemp(join(tmpdir(), 'fox-contacts-m1-'))
 const evidence = { revision: spawnSync('git', ['rev-parse', 'HEAD'], {cwd:repo,encoding:'utf8'}).stdout?.trim(), started: new Date().toISOString(), checks: [] }
@@ -35,8 +38,15 @@ const children = []
 let socket, db
 const timeout = 90000
 const check = async (name, action) => {
-  try { const facts = await action(); evidence.checks.push({name, status:'passed', facts}) }
-  catch (error) { evidence.checks.push({name, status:'failed', error:error.message}); throw error }
+  try {
+    const facts = await action()
+    evidence.checks.push({name, status:'passed', facts})
+    console.log('[通过] ' + name)
+  } catch (error) {
+    evidence.checks.push({name, status:'failed', error:error.message})
+    console.log('[失败] ' + name + ': ' + error.message)
+    throw error
+  }
 }
 
 async function poll(label, action, waitMs = timeout) {
@@ -175,6 +185,37 @@ async function desktop() {
     bridge.ready = 0
     app = start(exe, [], appEnv, 'desktop-restart-' + ++restartCount, repo)
     await poll('restarted WebView', () => bridge.ready && Date.now() - bridge.ready >= 1000)
+  }
+  if (xiaofoxLifecycle) {
+    const { checkXiaoFoxLifecycle } = await import('./contacts-xiaofox-lifecycle.mjs')
+    evidence.xiaofoxLifecycle = await checkXiaoFoxLifecycle({ invoke, db, check, poll, restartDesktop, directory, endpoint })
+    return
+  }
+  if (xiaofoxUi) {
+    const { checkXiaoFoxUi } = await import('./contacts-xiaofox-ui-check.mjs')
+    evidence.xiaofoxUi = await checkXiaoFoxUi({ source: liveProfile, invoke, db, check, poll, restartDesktop, directory, endpoint })
+    return
+  }
+  if (xiaofoxAcceptance) {
+    const context = { source: liveProfile, invoke, db, check, poll, restartDesktop, directory, endpoint }
+    const suites = [
+      ['./contacts-live-xiaofox.mjs', 'checkXiaoFox'],
+      ['./contacts-xiaofox-behavior.mjs', 'checkXiaoFoxBehavior'],
+      ['./contacts-xiaofox-lifecycle.mjs', 'checkXiaoFoxLifecycle'],
+    ]
+    const failures = []
+    evidence.xiaofoxAcceptance = []
+    for (const [path, name] of suites) {
+      try {
+        const suite = await import(path)
+        evidence.xiaofoxAcceptance.push({ name, result: await suite[name](context) })
+      } catch (error) {
+        failures.push(error)
+        evidence.xiaofoxAcceptance.push({ name, error: error.message })
+      }
+    }
+    if (failures.length) throw new AggregateError(failures, '小 Fox 验收存在失败，请查看逐项结果')
+    return
   }
   if (xiaofox) {
     const { checkXiaoFox } = await import('./contacts-live-xiaofox.mjs')
