@@ -11,7 +11,8 @@ import { ContactSideCard } from '../src/features/companions/contact-side-card'
 import { ContactsContext, type ContactsContextValue } from '../src/features/companions/context'
 import type { ContactChatSearch } from '../src/features/companions/chat-search'
 import type { Companion } from '../src/features/companions/api'
-import type { ConversationDetail, ProjectRecord } from '../src/features/conversations/model/types'
+import type { ConversationDetail, DigitalColleagueTriggerRecord, ProjectRecord } from '../src/features/conversations/model/types'
+import type { OwnedCompanionTask } from '../src/features/companions/tasks'
 
 type Call = { command: string; request: Record<string, unknown> }
 let calls: Call[] = []
@@ -39,6 +40,33 @@ const permissionChoices: string[] = []
 const sharedMemory = { count: 0 }
 const searchOpens = { count: 0 }
 const searchStub = { open: () => { searchOpens.count += 1 } } as ContactChatSearch
+let taskList: OwnedCompanionTask[] = []
+let taskRuns: DigitalColleagueTriggerRecord[] = []
+
+function taskFixture(): { owned: OwnedCompanionTask; trigger: DigitalColleagueTriggerRecord } {
+  const owned = {
+    task: {
+      id: 'task_one', name: '整理日报', expertId: null, expertBindingId: null, packageHash: null,
+      packageSnapshot: null, conversationId: 'chat', objective: '汇总今天的工作', projectId: null,
+      projectRoot: null, knowledgeReferences: [], status: 'active', maxRunsPerDay: 8,
+      maxTokensPerDay: 128000, maxDurationMs: 300000, maxOutputTokens: 4096, maxToolCalls: 16,
+      createdAt: 1, updatedAt: 1, revokedAt: null,
+    },
+    schedule: {
+      id: 'schedule_one', colleagueId: 'task_one', name: '整理日报', scheduleKind: 'interval',
+      intervalSeconds: 7200, onceAt: null, weekdays: null, localTime: null, timezone: 'Asia/Shanghai',
+      anchorAt: 1, catchupWindowSeconds: 3600, enabled: true, nextDueAt: Date.now() - 1000,
+      lastScheduledAt: null, createdAt: 1, updatedAt: 1,
+    },
+  } as OwnedCompanionTask
+  const trigger = {
+    id: 'trigger_one', colleagueId: 'task_one', sourceType: 'schedule', sourceId: null,
+    idempotencyKey: 'key', status: 'queued', payload: {}, scheduledFor: 1, runId: null,
+    inputTokens: 0, outputTokens: 0, totalTokens: 0, toolCallCount: 0, errorCode: null,
+    errorMessage: null, createdAt: 1, updatedAt: 1, completedAt: null,
+  } as DigitalColleagueTriggerRecord
+  return { owned, trigger }
+}
 
 function contextValue(overrides: Partial<ContactsContextValue> = {}): ContactsContextValue {
   return {
@@ -95,10 +123,15 @@ function host() {
   searchOpens.count = 0
   workspaceState = 'ready'
   workspaceError = null
+  taskList = []
+  taskRuns = []
   answer = (command, args) => {
     // direct() 传扁平参数，command() 传 { request }；两种形状都记录下来。
     const request = recordCommand(command, args)
     if (command === 'model_providers_list') return ok([])
+    if (command === 'companion_task_list') return ok(taskList)
+    if (command === 'companion_task_history') return ok(taskRuns)
+    if (command.startsWith('companion_task_')) return ok(taskList[0] ?? null)
     if (command === 'companion_set_reminder_mode') return ok(contact({ reminderMode: request.mode as Companion['reminderMode'] }))
     if (command === 'project_folder_open') return ok(true)
     // 资料卡挂载时会订阅共享的文件版本仓库（与右侧边栏同一 store）。
@@ -587,4 +620,196 @@ describe('旧资料页的功能仍然可达（缺口 E）', () => {
     fireEvent.click(view.getByRole('button', { name: /打开文件夹/ }))
     await waitFor(() => expect(toasted('error', 'host said no')).toBe(true))
   })
+
+  test('定时任务详情入口显示数量与待处理状态，并嵌入原有返回视图', async () => {
+    host()
+    const { owned, trigger } = taskFixture()
+    taskList = [owned]
+    taskRuns = [trigger]
+    const view = renderCard()
+    await waitFor(() => expect(view.getByText('1 个任务 · 1 个待处理')).toBeDefined())
+    expect(view.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['详情', '资料库', '工作目录'])
+    fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
+    await waitFor(() => expect(view.getByRole('heading', { level: 2 }).textContent).toBe('定时任务'))
+    expect(view.queryByRole('tab')).toBeNull()
+    expect(view.getByText('最近结果：排队中')).toBeDefined()
+    fireEvent.click(view.getByRole('button', { name: '运行记录' }))
+    expect(view.getByRole('region', { name: '整理日报 运行记录' }).textContent).toContain('排队中')
+    fireEvent.click(view.getByRole('button', { name: '返回详情' }))
+    expect(view.getByRole('heading', { level: 2 }).textContent).toBe('联系人资料')
+  })
+
+  test('定时任务编辑器只有支持的频率，不提供专家或技术预算字段', async () => {
+    host()
+    const view = renderCard()
+    await waitFor(() => expect(view.getByText('暂无任务')).toBeDefined())
+    fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
+    fireEvent.click(view.getByRole('button', { name: '添加任务' }))
+    expect(Array.from((view.getByLabelText('执行频率') as HTMLSelectElement).options).map(option => option.value))
+      .toEqual(['once', 'interval', 'daily', 'weekly'])
+    for (const absent of ['专家', '模板', '最大运行次数', 'Token 预算', '最大时长', '工具预算', 'Cron', '每月', '节假日'])
+      expect(view.queryByText(absent, { exact: false })).toBeNull()
+    expect(view.getByText(/设备时区/)).toBeDefined()
+  })
+
+  test('添加任务发送类型化间隔和设备时区，不发送技术预算', async () => {
+    host()
+    const view = renderCard()
+    await waitFor(() => expect(view.getByText('暂无任务')).toBeDefined())
+    fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
+    fireEvent.click(view.getByRole('button', { name: '添加任务' }))
+    fireEvent.change(view.getByLabelText('任务名称'), { target: { value: '两小时整理' } })
+    fireEvent.change(view.getByLabelText('执行要求'), { target: { value: '整理新增资料' } })
+    fireEvent.click(view.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(commandNames()).toContain('companion_task_create'))
+    expect(requestOf('companion_task_create')).toEqual({
+      companionId: 'cmp_one', name: '两小时整理', objective: '整理新增资料', enabled: true,
+      schedule: { kind: 'interval', intervalSeconds: 7200, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
+    })
+  })
+
+  test('定时任务控件复用语义命令，并保留创建默认值在 Host 端', async () => {
+    host()
+    const { owned, trigger } = taskFixture()
+    taskList = [owned]
+    taskRuns = [trigger]
+    const view = renderCard()
+    await waitFor(() => expect(view.getByText('1 个任务 · 1 个待处理')).toBeDefined())
+    fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
+    fireEvent.click(view.getByRole('button', { name: '暂停' }))
+    await waitFor(() => expect(requestOf('companion_task_pause')).toEqual({ companionId: 'cmp_one', taskId: 'task_one' }))
+    fireEvent.click(view.getByRole('button', { name: '立即执行' }))
+    await waitFor(() => expect(requestOf('companion_task_run_now')).toEqual({ companionId: 'cmp_one', taskId: 'task_one' }))
+    fireEvent.click(view.getByRole('button', { name: '删除' }))
+    expect(commandNames()).not.toContain('companion_task_delete')
+    fireEvent.click(view.getByRole('button', { name: '确认删除' }))
+    await waitFor(() => expect(requestOf('companion_task_delete')).toEqual({ companionId: 'cmp_one', taskId: 'task_one' }))
+  })
+
+  test('编辑整天间隔任务只改名称时保留原间隔', async () => {
+    host()
+    const { owned, trigger } = taskFixture()
+    owned.schedule.intervalSeconds = 86_400
+    taskList = [owned]
+    taskRuns = [trigger]
+    const view = renderCard()
+    await waitFor(() => expect(view.getByText('1 个任务 · 1 个待处理')).toBeDefined())
+    fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
+    fireEvent.click(view.getByRole('button', { name: '编辑' }))
+    expect((view.getByLabelText('间隔数值') as HTMLInputElement).value).toBe('1')
+    expect((view.getByLabelText('间隔单位') as HTMLSelectElement).value).toBe('86400')
+    fireEvent.change(view.getByLabelText('任务名称'), { target: { value: '改名日报' } })
+    fireEvent.click(view.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(commandNames()).toContain('companion_task_update'))
+    expect(requestOf('companion_task_update')).toEqual({
+      companionId: 'cmp_one', taskId: 'task_one', name: '改名日报', objective: '汇总今天的工作', enabled: true,
+      schedule: { kind: 'interval', intervalSeconds: 86_400, timezone: 'Asia/Shanghai' },
+    })
+  })
+
+  test('较新的跳过记录不遮蔽仍在排队的任务', async () => {
+    host()
+    const { owned, trigger } = taskFixture()
+    const skipped = {
+      ...trigger, id: 'trigger_two', status: 'skipped', scheduledFor: 2, createdAt: 2, updatedAt: 2,
+      errorMessage: '与进行中的私聊重叠',
+    } as DigitalColleagueTriggerRecord
+    taskList = [owned]
+    taskRuns = [skipped, trigger]
+    const view = renderCard()
+    await waitFor(() => expect(view.getByText('1 个任务 · 1 个待处理')).toBeDefined())
+    fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
+    expect(view.getByText('当前状态：排队中')).toBeDefined()
+    expect(view.getByText('最近结果：已跳过 · 与进行中的私聊重叠')).toBeDefined()
+    fireEvent.click(view.getByRole('button', { name: '运行记录' }))
+    const history = view.getByRole('region', { name: '整理日报 运行记录' }).textContent ?? ''
+    expect(history).toContain('已跳过')
+    expect(history).toContain('排队中')
+  })
+
+  test('保存失败时保留编辑器草稿', async () => {
+    host()
+    const previous = answer
+    answer = (command, args) => {
+      if (command === 'companion_task_create') {
+        recordCommand(command, args)
+        return { ok: false, error: { code: 'conflict', message: '名称已被使用', retryable: false } }
+      }
+      return previous!(command, args)
+    }
+    const view = renderCard()
+    await waitFor(() => expect(view.getByText('暂无任务')).toBeDefined())
+    fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
+    fireEvent.click(view.getByRole('button', { name: '添加任务' }))
+    fireEvent.change(view.getByLabelText('任务名称'), { target: { value: '两小时整理' } })
+    fireEvent.change(view.getByLabelText('执行要求'), { target: { value: '整理新增资料' } })
+    fireEvent.click(view.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(view.getByRole('alert').textContent).toContain('名称已被使用'))
+    expect(view.getByRole('heading', { level: 3 }).textContent).toBe('添加任务')
+    expect((view.getByLabelText('任务名称') as HTMLInputElement).value).toBe('两小时整理')
+    expect((view.getByLabelText('执行要求') as HTMLTextAreaElement).value).toBe('整理新增资料')
+    expect(toasted('error', '名称已被使用')).toBe(true)
+  })
+
+  test('编辑非整分钟间隔只改名称时保留原秒数，并按秒展示', async () => {
+    host()
+    const { owned, trigger } = taskFixture()
+    owned.schedule.intervalSeconds = 90
+    taskList = [owned]
+    taskRuns = [trigger]
+    const view = renderCard()
+    await waitFor(() => expect(view.getByText('1 个任务 · 1 个待处理')).toBeDefined())
+    fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
+    expect(view.getByText(/每 90 秒/)).toBeDefined()
+    fireEvent.click(view.getByRole('button', { name: '编辑' }))
+    expect((view.getByLabelText('间隔数值') as HTMLInputElement).value).toBe('90')
+    expect((view.getByLabelText('间隔单位') as HTMLSelectElement).value).toBe('1')
+    fireEvent.change(view.getByLabelText('任务名称'), { target: { value: '改名秒级' } })
+    fireEvent.click(view.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(commandNames()).toContain('companion_task_update'))
+    expect(requestOf('companion_task_update')).toEqual({
+      companionId: 'cmp_one', taskId: 'task_one', name: '改名秒级', objective: '汇总今天的工作', enabled: true,
+      schedule: { kind: 'interval', intervalSeconds: 90, timezone: 'Asia/Shanghai' },
+    })
+  })
+
+  test('任务子页展示刷新错误', async () => {
+    host()
+    const previous = answer
+    answer = (command, args) => {
+      if (command === 'companion_task_list') {
+        recordCommand(command, args)
+        return { ok: false, error: { code: 'unavailable', message: '列表暂时不可用', retryable: true } }
+      }
+      return previous!(command, args)
+    }
+    const view = renderCard()
+    await waitFor(() => expect(view.getByText('列表暂时不可用')).toBeDefined())
+    fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
+    expect(view.getAllByRole('alert').some(node => node.textContent?.includes('列表暂时不可用'))).toBe(true)
+  })
+
+  test('编辑一次性任务只改名称时保留原秒和毫秒', async () => {
+    host()
+    const { owned, trigger } = taskFixture()
+    const onceAt = Date.UTC(2027, 5, 15, 6, 30, 45, 250)
+    owned.schedule.scheduleKind = 'once'
+    owned.schedule.onceAt = onceAt
+    owned.schedule.intervalSeconds = null
+    taskList = [owned]
+    taskRuns = [trigger]
+    const view = renderCard()
+    await waitFor(() => expect(view.getByText('1 个任务 · 1 个待处理')).toBeDefined())
+    fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
+    fireEvent.click(view.getByRole('button', { name: '编辑' }))
+    expect((view.getByLabelText('执行时间') as HTMLInputElement).value).toBe('2027-06-15T14:30')
+    fireEvent.change(view.getByLabelText('任务名称'), { target: { value: '改名一次性' } })
+    fireEvent.click(view.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(commandNames()).toContain('companion_task_update'))
+    expect(requestOf('companion_task_update')).toEqual({
+      companionId: 'cmp_one', taskId: 'task_one', name: '改名一次性', objective: '汇总今天的工作', enabled: true,
+      schedule: { kind: 'once', atMs: onceAt, timezone: 'Asia/Shanghai' },
+    })
+  })
+
 })

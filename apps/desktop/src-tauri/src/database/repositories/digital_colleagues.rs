@@ -155,6 +155,10 @@ impl Database {
             .collect()
     }
 
+    /// Latest `limit` triggers for an owned task, union any still-active
+    /// (`accepted` / `queued` / `running`) rows so a long skip tail cannot hide
+    /// work that is still pending. The combined result is not truncated, so
+    /// the returned length may exceed `limit`.
     pub fn list_owned_companion_task_history(
         &self,
         companion_id: &str,
@@ -163,7 +167,26 @@ impl Database {
     ) -> Result<Vec<DigitalColleagueTriggerRecord>, String> {
         self.owned_companion_task(companion_id, task_id)?
             .ok_or_else(|| "digital_colleague.not_found".to_owned())?;
-        self.list_digital_colleague_triggers(task_id, limit.min(i64::MAX as usize) as i64)
+        let limit = limit.max(1).min(i64::MAX as usize) as i64;
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(&format!(
+                "{select} WHERE colleague_id = ?1 AND (
+                    id IN (
+                        SELECT id FROM digital_colleague_triggers
+                        WHERE colleague_id = ?1
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT ?2
+                    )
+                    OR status IN ('accepted', 'queued', 'running')
+                 )
+                 ORDER BY created_at DESC, id DESC",
+                select = trigger_select(),
+            ))?;
+            let records = statement
+                .query_map(params![task_id, limit], map_trigger)?
+                .collect();
+            records
+        })
     }
 
     pub fn list_digital_colleagues(&self) -> Result<Vec<DigitalColleagueRecord>, String> {
@@ -2527,6 +2550,55 @@ mod tests {
             colleague.max_tokens_per_day - 150
         );
 
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn owned_task_history_keeps_active_triggers_outside_recent_limit() {
+        let (database, path) = test_database();
+        let root = std::env::temp_dir().join(format!("fox-owned-history-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let owner = database.add_companion(&root, "fox-debugger").unwrap();
+        let owned = database.create_owned_companion_task(
+            &owned_task_input(&owner.profile.id),
+            DigitalColleagueScheduleSpec::Interval { interval_seconds: 3_600, timezone: "UTC".to_owned() },
+            true,
+        ).unwrap();
+        let queued_id = "trigger_queued_old".to_owned();
+        database.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO digital_colleague_triggers(
+                    id, colleague_id, source_type, source_id, idempotency_key, status,
+                    payload_json, scheduled_for, run_id, error_code, error_message,
+                    created_at, updated_at, completed_at
+                 ) VALUES (?1, ?2, 'manual', NULL, ?3, 'queued', '{}', 1000, NULL, NULL, NULL, 1000, 1000, NULL)",
+                params![queued_id, owned.task.id, "owned:queued"],
+            )?;
+            for index in 0..20 {
+                let at = 2_000 + i64::from(index);
+                connection.execute(
+                    "INSERT INTO digital_colleague_triggers(
+                        id, colleague_id, source_type, source_id, idempotency_key, status,
+                        payload_json, scheduled_for, run_id, error_code, error_message,
+                        created_at, updated_at, completed_at
+                     ) VALUES (?1, ?2, 'manual', NULL, ?3, 'skipped', '{}', ?4, NULL, 'digital_colleague.overlap_skipped', 'overlap', ?4, ?4, ?4)",
+                    params![format!("trigger_skipped_{index}"), owned.task.id, format!("owned:skipped:{index}"), at],
+                )?;
+            }
+            Ok(())
+        }).unwrap();
+        let generic = database.list_digital_colleague_triggers(&owned.task.id, 20).unwrap();
+        assert_eq!(generic.len(), 20);
+        assert!(generic.iter().all(|trigger| trigger.status == "skipped"));
+        assert!(!generic.iter().any(|trigger| trigger.id == queued_id));
+        let history = database.list_owned_companion_task_history(&owner.profile.id, &owned.task.id, 20).unwrap();
+        assert_eq!(history.len(), 21, "active rows union the latest limit, never truncated");
+        assert_eq!(history[0].status, "skipped");
+        assert_eq!(history[20].id, queued_id);
+        assert_eq!(history[20].status, "queued");
+        assert!(database.list_owned_companion_task_history(&owner.profile.id, &owned.task.id, 20).unwrap()
+            .iter().filter(|trigger| trigger.status == "queued").count() == 1);
         drop(database);
         let _ = std::fs::remove_file(path);
     }

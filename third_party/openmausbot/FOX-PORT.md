@@ -33,3 +33,16 @@ only disables future work, and run-now never advances the plan cursor.
 
 Rejected: host-local `Date` arithmetic, cron, webhooks, Cloud VM behavior,
 independent daemons, arbitrary companion targeting, and `enterprise/`.
+
+## Phase 3c contact scheduled-task surface
+
+Confirmed source revision: `1a4e4da9f380804ad98c7fd1b141bb0dbfafced4`.
+Fox adapts the task-list status, next-due display, and pause/run-now/delete
+control ideas into the existing ContactSideCard embedded view. Host commands
+reuse the owned task repository and trigger acceptance/dispatch services; the
+UI reads persisted trigger status rather than maintaining a queue.
+
+Rejected: host-local `Date` arithmetic, cron expressions and cron editors,
+expert/template selectors, technical budget forms, independent schedulers or
+panels, Cloud VM behavior, and `enterprise/`. No complete source file is
+vendored.

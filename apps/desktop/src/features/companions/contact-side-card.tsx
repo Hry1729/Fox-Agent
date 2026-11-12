@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowLeft, Bell, BookOpen, ChevronRight, Cpu, FileOutput, Folder, FolderOpen, FolderPlus, FolderSearch, NotebookPen, Plug, RotateCcw, Search, Settings2, ShieldCheck, Star, X } from 'lucide-react'
+import { ArrowLeft, Bell, CalendarClock, BookOpen, ChevronRight, Cpu, FileOutput, Folder, FolderOpen, FolderPlus, FolderSearch, NotebookPen, Plug, RotateCcw, Search, Settings2, ShieldCheck, Star, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { notify as toast } from '@/features/notifications'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
@@ -18,6 +18,7 @@ import { ContactCapabilities } from './capabilities'
 import { ContactFavorites } from './marks'
 import { ContactNotes } from './notes'
 import { ContactDelete } from './delete'
+import { ContactTaskSummary, ContactTasks, useCompanionTasks } from './tasks'
 import { ContactGrants } from './profile'
 import type { ContactChatSearch } from './chat-search'
 import { useContacts, showContactError } from './context'
@@ -58,7 +59,7 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
 }) {
   const ctx = useContacts()
   const [tab, setTab] = useState<ContactSideCardTab>('details')
-  const [view, setView] = useState<'main' | 'capabilities' | 'favorites' | 'notes' | 'settings'>('main')
+  const [view, setView] = useState<'main' | 'capabilities' | 'favorites' | 'notes' | 'settings' | 'tasks'>('main')
   const [renaming, setRenaming] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
   const [busy, setBusy] = useState(false)
@@ -73,6 +74,7 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
     activeProfile.current = { id: contact.id, generation: activeProfile.current.generation + 1 }
   }
   const [deleting, setDeleting] = useState(false)
+  const scheduledTasks = useCompanionTasks(contact.id, view === 'tasks' || (view === 'main' && tab === 'details'))
   useEffect(() => {
     const persisted = { id: contact.id, avatar: contact.avatarRef, duty: contact.duty, persona: contact.personaOverride ?? '' }
     const previous = profileBaseline.current
@@ -115,7 +117,7 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
       setFilesOpen(true)
     } catch (error) { showContactError(error) } finally { setBusy(false) }
   }, [contact.conversationId])
-  const heading = view === 'capabilities' ? '可用能力' : view === 'favorites' ? '收藏' : view === 'notes' ? '笔记' : view === 'settings' ? '联系人设置' : '联系人资料'
+  const heading = view === 'capabilities' ? '可用能力' : view === 'favorites' ? '收藏' : view === 'notes' ? '笔记' : view === 'settings' ? '联系人设置' : view === 'tasks' ? '定时任务' : '联系人资料'
   const resetBlocked = Boolean(detail?.contextResetBlockedReason || contact.activeRunStatus)
   return <aside className="fox-contact-side-card" role="complementary" aria-label={`${contact.displayName} 资料卡`}>
     <header className={`fox-contact-side-card-head${view === 'main' ? ' is-main' : ''}`}>
@@ -130,6 +132,7 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
             {view === 'capabilities' && <ContactCapabilities key={contact.id} contact={contact} />}
             {view === 'favorites' && <ContactFavorites key={contact.id} contact={contact} />}
             {view === 'notes' && <ContactNotes key={contact.id} contact={contact} />}
+            {view === 'tasks' && <ContactTasks companionId={contact.id} tasks={scheduledTasks.tasks} history={scheduledTasks.history} refresh={scheduledTasks.refresh} error={scheduledTasks.error} />}
             {view === 'settings' && <div className="fox-contact-panel fox-contact-side-settings"><ContactSideSettings
               contact={contact}
               busy={busy}
@@ -193,6 +196,17 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
                 className={tab === value ? 'is-selected' : undefined} onClick={() => setTab(value)}>{label}{value === 'files' && versionsUnseen && <span className="fox-tab-dot" aria-hidden="true" />}</button>)}
             </div>
             {tab === 'details' && <div className="fox-contact-side-details">
+              <section className="fox-contact-side-group" aria-label="定时任务">
+                <h3>定时任务</h3>
+                <div className="fox-library-card">
+                  <button type="button" className="fox-contact-side-item" onClick={() => setView('tasks')}>
+                    <CalendarClock size={16} aria-hidden="true" /><span className="fox-contact-side-lab">定时任务</span>
+                    <ContactTaskSummary count={scheduledTasks.tasks.length} pending={scheduledTasks.pending} due={scheduledTasks.due} loaded={scheduledTasks.loaded} />
+                    <ChevronRight size={14} className="fox-contact-side-chev" aria-hidden="true" />
+                  </button>
+                  {scheduledTasks.error && <p className="fox-contact-side-sub" role="alert">{scheduledTasks.error}</p>}
+                </div>
+              </section>
               <section className="fox-contact-side-group" aria-label="模型">
                 <h3>模型</h3>
                 <div className="fox-library-card">
