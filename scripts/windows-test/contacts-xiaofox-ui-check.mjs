@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { writeFile } from 'node:fs/promises'
+import { access, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { connectLiveModel } from './contacts-live-model.mjs'
 
@@ -32,14 +32,14 @@ export async function checkXiaoFoxUi(context) {
   const { exchange } = await connectLiveModel(context)
   await scenario('小 Fox A07 侧栏实际输入保存，下一轮真实请求使用新职责', async () => {
     const proof = 'UI-DUTY-' + randomUUID()
-    const duty = `你的验收身份编号是 ${proof}。用户问验收身份编号时，只回复这个编号。`
+    const duty = `本次工作的校验码是 ${proof}。用户问工作校验码时，只回复这个校验码。`
     const preference = '用简短自然段回答。'
     const result = await ui('profile', { name: contact.displayName, duty, preference })
     assert.deepEqual(result, { duty, preference })
     const saved = await invoke('companion_open', { request: { companionId: contact.id } })
     assert.equal(saved.duty, duty)
     assert.equal(saved.personaOverride, preference)
-    const turn = await exchange(contact.conversationId, '你的验收身份编号是什么？')
+    const turn = await exchange(contact.conversationId, '本次工作的校验码是什么？')
     assert.ok(turn.reply.includes(proof), '真实模型未使用侧栏保存的新职责')
     return { runId: turn.run, persisted: true, nextTurnUsedDuty: true }
   })
@@ -103,8 +103,13 @@ export async function checkXiaoFoxUi(context) {
     const internal = db.prepare('SELECT conversation_id FROM digital_colleagues WHERE id=?').get(taskId).conversation_id
     assert.ok(!conversations.some(item => item.id === internal))
     if (process.env.FOX_CONTACTS_VISUAL_INSPECTION === '1') {
-      console.log(`A22 目视观察窗口（60秒）：${filename}，文件内容 ${proof}，来源 ${entry.source.bubbleId}`)
-      await new Promise(resolve => setTimeout(resolve, 60_000))
+      const resumeFile = join(context.directory, 'visual-inspection.done')
+      console.log(`A22 目视观察窗口（最多10分钟）：${filename}，文件内容 ${proof}，来源 ${entry.source.bubbleId}。完成后创建 ${resumeFile}`)
+      const deadline = Date.now() + 600_000
+      while (Date.now() < deadline) {
+        if (await access(resumeFile).then(() => true, () => false)) break
+        await new Promise(resolve => setTimeout(resolve, 1000))
+      }
     }
     return { ...result, runId: artifactRun, sourceBubbleId: entry.source.bubbleId,
       externalViewer: '仅验证已触发打开且桌面没有报告错误，外部查看器内容未目视确认' }
