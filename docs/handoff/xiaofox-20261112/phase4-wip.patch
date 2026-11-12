@@ -1,0 +1,200 @@
+diff --git a/apps/desktop/src-tauri/src/database/repositories/companion_ownership.rs b/apps/desktop/src-tauri/src/database/repositories/companion_ownership.rs
+index 6a3b9f5f..80782b0a 100644
+--- a/apps/desktop/src-tauri/src/database/repositories/companion_ownership.rs
++++ b/apps/desktop/src-tauri/src/database/repositories/companion_ownership.rs
+@@ -33,13 +33,16 @@ pub(crate) struct CompanionScope {
+     pub colleague_id: Option<String>,
+     /// The fixed private chat results and decision cards are reported to.
+     pub report_conversation_id: Option<String>,
++    /// Child work shares its root task's identity, but never its queue slot.
++    pub is_child: bool,
+ }
+ 
+ impl CompanionScope {
+     /// The companion execution position: a foreground chat keeps it while
+-    /// waiting for an answer, a background task releases it (K2).
+-    pub fn queue_slot(&self) -> (String, bool) {
+-        (self.companion_id.clone(), self.background)
++    /// waiting for an answer, a background task releases it (K2). Child Runs
++    /// are work inside the parent task and therefore take no position.
++    pub fn queue_slot(&self) -> Option<(String, bool)> {
++        (!self.is_child).then(|| (self.companion_id.clone(), self.background))
+     }
+ }
+ 
+@@ -86,7 +89,7 @@ fn missing(reason: &str) -> String {
+ /// Resolve the effective companion of an execution conversation. `Ok(None)`
+ /// means an ordinary conversation or a legacy colleague that was never bound to
+ /// a contact; those keep their existing unrestricted behaviour.
+-pub(crate) fn resolve_conversation_on(
++fn resolve_root_conversation_on(
+     connection: &Connection,
+     conversation_id: &str,
+ ) -> Result<Option<CompanionScope>, String> {
+@@ -106,6 +109,7 @@ pub(crate) fn resolve_conversation_on(
+             background: false,
+             colleague_id: None,
+             report_conversation_id: None,
++            is_child: false,
+         }));
+     }
+     let Some(link) = background_link(connection, conversation_id)? else {
+@@ -152,24 +156,96 @@ pub(crate) fn resolve_conversation_on(
+         background: true,
+         colleague_id: Some(link.colleague_id),
+         report_conversation_id: Some(report_conversation_id),
++        is_child: false,
+     }))
+ }
+ 
+-pub(crate) fn resolve_run_on(
++/// Resolve the effective companion of an execution conversation. `Ok(None)`
++/// means an ordinary conversation or a legacy colleague that was never bound to
++/// a contact; those keep their existing unrestricted behaviour. A child uses
++/// its root Run's identity and a broken child chain is always an error.
++pub(crate) fn resolve_conversation_on(
+     connection: &Connection,
+-    run_id: &str,
++    conversation_id: &str,
+ ) -> Result<Option<CompanionScope>, String> {
+-    let conversation: Option<String> = connection
++    let child_run: Option<String> = connection
++        .query_row(
++            "SELECT child_run_id FROM child_run_delegations WHERE child_conversation_id = ?1",
++            [conversation_id],
++            |row| row.get(0),
++        )
++        .optional()
++        .map_err(|error| error.to_string())?;
++    if let Some(run_id) = child_run {
++        return resolve_run_on(connection, &run_id);
++    }
++    let kind: Option<String> = connection
+         .query_row(
+-            "SELECT conversation_id FROM runs WHERE id = ?1",
+-            [run_id],
++            "SELECT conversation_kind FROM conversations WHERE id = ?1",
++            [conversation_id],
+             |row| row.get(0),
+         )
+         .optional()
+         .map_err(|error| error.to_string())?;
+-    match conversation {
+-        Some(conversation) => resolve_conversation_on(connection, &conversation),
+-        None => Ok(None),
++    if kind.as_deref() == Some("child") {
++        let run_id: Option<String> = connection
++            .query_row(
++                "SELECT id FROM runs WHERE conversation_id = ?1 ORDER BY created_at DESC, id DESC LIMIT 1",
++                [conversation_id],
++                |row| row.get(0),
++            )
++            .optional()
++            .map_err(|error| error.to_string())?;
++        return match run_id {
++            Some(run_id) => resolve_run_on(connection, &run_id),
++            None => Err(missing("子运行缺少 Run 归属，已停止执行")),
++        };
++    }
++    resolve_root_conversation_on(connection, conversation_id)
++}
++
++pub(crate) fn resolve_run_on(
++    connection: &Connection,
++    run_id: &str,
++) -> Result<Option<CompanionScope>, String> {
++    let mut current_run_id = run_id.to_owned();
++    let mut visited = std::collections::HashSet::new();
++    loop {
++        if !visited.insert(current_run_id.clone()) {
++            return Err(missing("子运行的父 Run 链存在循环，已停止执行"));
++        }
++        let identity: Option<(String, Option<String>, String)> = connection
++            .query_row(
++                "SELECT conversation_id, parent_run_id, run_kind FROM runs WHERE id = ?1",
++                [&current_run_id],
++                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
++            )
++            .optional()
++            .map_err(|error| error.to_string())?;
++        let Some((conversation_id, parent_run_id, run_kind)) = identity else {
++            if current_run_id == run_id {
++                return Ok(None);
++            }
++            return Err(missing("子运行的父 Run 已不存在，已停止执行"));
++        };
++        let Some(parent_run_id) = parent_run_id else {
++            if run_kind == "child" {
++                return Err(missing("子运行缺少父 Run，已停止执行"));
++            }
++            let mut scope = resolve_root_conversation_on(connection, &conversation_id)?;
++            if let Some(scope) = scope.as_mut() {
++                scope.conversation_id = connection
++                    .query_row(
++                        "SELECT conversation_id FROM runs WHERE id = ?1",
++                        [run_id],
++                        |row| row.get(0),
++                    )
++                    .map_err(|error| error.to_string())?;
++                scope.is_child = current_run_id != run_id;
++            }
++            return Ok(scope);
++        };
++        current_run_id = parent_run_id;
+     }
+ }
+ 
+@@ -205,11 +281,18 @@ pub(crate) fn active_run_ids_on(
+ ) -> Result<Vec<String>, String> {
+     let mut statement = connection
+         .prepare(
+-            "SELECT r.id FROM runs r
++            "WITH RECURSIVE owned_runs(id) AS (
++                 SELECT r.id FROM runs r
++                 WHERE r.conversation_id IN (SELECT id FROM conversations WHERE companion_id = ?1)
++                    OR r.conversation_id IN (SELECT conversation_id FROM digital_colleagues
++                                             WHERE companion_id = ?1 AND companion_bound = 1)
++                 UNION
++                 SELECT child.id FROM runs child
++                 JOIN owned_runs parent ON child.parent_run_id = parent.id
++             )
++             SELECT r.id FROM runs r
++             JOIN owned_runs owned ON owned.id = r.id
+              WHERE r.status IN ('queued', 'running', 'cancelling', 'awaiting_confirmation')
+-               AND (r.conversation_id IN (SELECT id FROM conversations WHERE companion_id = ?1)
+-                 OR r.conversation_id IN (SELECT conversation_id FROM digital_colleagues
+-                                          WHERE companion_id = ?1 AND companion_bound = 1))
+              ORDER BY r.created_at, r.id",
+         )
+         .map_err(|error| error.to_string())?;
+@@ -337,7 +420,7 @@ impl Database {
+         &self,
+         run_id: &str,
+     ) -> Result<Option<(String, bool)>, String> {
+-        Ok(self.run_companion_scope(run_id)?.map(|scope| scope.queue_slot()))
++        Ok(self.run_companion_scope(run_id)?.and_then(|scope| scope.queue_slot()))
+     }
+ 
+     pub(crate) fn companion_background_conversations(
+@@ -370,10 +453,18 @@ impl Database {
+     pub(crate) fn companion_session_conversations(&self, companion_id: &str) -> Result<Vec<String>, String> {
+         self.with_connection(|connection| {
+             let mut statement = connection.prepare(
+-                "SELECT id FROM conversations WHERE companion_id = ?1
++                "WITH RECURSIVE owned_runs(id) AS (
++                     SELECT r.id FROM runs r
++                     WHERE r.conversation_id IN (SELECT id FROM conversations WHERE companion_id = ?1)
++                        OR r.conversation_id IN (SELECT conversation_id FROM digital_colleagues
++                                                 WHERE companion_id = ?1 AND companion_bound = 1)
++                     UNION
++                     SELECT child.id FROM runs child
++                     JOIN owned_runs parent ON child.parent_run_id = parent.id
++                 )
++                 SELECT id FROM conversations WHERE companion_id = ?1
+                  UNION
+-                 SELECT conversation_id FROM digital_colleagues
+-                 WHERE companion_id = ?1 AND companion_bound = 1",
++                 SELECT r.conversation_id FROM runs r JOIN owned_runs owned ON owned.id = r.id",
+             )?;
+             let rows = statement.query_map([companion_id], |row| row.get::<_, String>(0))?;
+             rows.collect()
