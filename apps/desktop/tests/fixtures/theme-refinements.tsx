@@ -27,7 +27,7 @@ const expert = {
 }
 desktopClient.listAgents = async () => [expert] as any
 desktopClient.syncYuxiAgents = async () => [] as any
-for (const name of ['listProjects', 'listKnowledgeBases', 'listSkills', 'listMcpServers', 'listConversations', 'listExpertPackageVersions', 'listDigitalColleagues', 'listDigitalColleagueSchedules', 'listDigitalColleagueChannels', 'listDigitalColleagueTriggers', 'listDigitalColleagueAudit']) (desktopClient as any)[name] = async () => []
+for (const name of ['listProjects', 'listKnowledgeBases', 'listSkills', 'listMcpServers', 'listConversations', 'listExpertPackageVersions']) (desktopClient as any)[name] = async () => []
 const plugin = { id: 'fixture-tool', kind: 'tool', origin: 'builtin', category: '文件', name: '文件读取', description: '读取已授权文件中的文字。', icon: 'file-text', version: '1.0.0', installStatus: 'installed', activation: { mode: 'not_applicable' }, permissions: [], compatible: true }
 const pluginGateway: any = { catalogList: async () => ({ items: [plugin], total: 1, categories: ['文件'] }), installationsList: async () => ({ items: [plugin], total: 1 }), operationsList: async () => [], agentScopeList: async () => [] }
 

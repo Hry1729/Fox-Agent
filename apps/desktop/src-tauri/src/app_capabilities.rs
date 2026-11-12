@@ -3,7 +3,7 @@ use crate::canonical_json::CanonicalJson;
 use crate::{
     app_state::AppState,
     database::{
-        ApiResponse, AppNotificationRecord, AppNotificationUpsert, ConversationDetail,
+        ApiResponse, AppNotificationRecord, AppNotificationUpsert,
         GlobalSearchRecord, MessageFeedbackRecord, NotificationPreferencesRecord,
         ProjectManagementRecord,
     },
@@ -80,12 +80,6 @@ pub struct ProjectPathUpdateRequest {
 pub struct ProjectArchiveRequest {
     pub project_id: String,
     pub archived: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DigitalColleagueRunDetailRequest {
-    pub run_id: String,
 }
 
 fn failure<T: serde::Serialize>(
@@ -499,31 +493,6 @@ pub fn project_root_open(
     match open_folder(Path::new(&project.root_path)) {
         Ok(()) => ApiResponse::success(true),
         Err(error) => failure("project.open_failed", error, true),
-    }
-}
-
-#[tauri::command]
-pub fn digital_colleague_run_detail(
-    state: State<'_, AppState>,
-    request: DigitalColleagueRunDetailRequest,
-) -> ApiResponse<ConversationDetail> {
-    let conversation_id = match state
-        .database
-        .digital_colleague_run_conversation_id(&request.run_id)
-    {
-        Ok(Some(value)) => value,
-        Ok(None) => {
-            return failure(
-                "digital_colleague.run_not_found",
-                "未找到对应的数字同事运行",
-                false,
-            )
-        }
-        Err(error) => return failure("digital_colleague.run_detail_failed", error, true),
-    };
-    match state.database.load_conversation(&conversation_id) {
-        Ok(value) => ApiResponse::success(value),
-        Err(error) => failure("digital_colleague.run_detail_failed", error, true),
     }
 }
 

@@ -20,12 +20,13 @@ const dev = argv.at(-1) === '--dev'
 if (dev) argv.pop()
 const devPort = Number(process.env.FOX_CONTACTS_DEV_PORT || 1421)
 const m2 = argv.at(-1) === '--m2'
-if (m2) {
+const xiaofox = argv.at(-1) === '--xiaofox'
+if (m2 || xiaofox) {
   argv.pop()
-  assert.ok(dev && liveProfile, 'M2 requires --dev and an installed --live-profile')
+  assert.ok(dev && liveProfile && argv[0] === '--exe', 'M2 and Xiao Fox require --exe, --dev and --live-profile')
 }
 if (argv.length && !(argv.length === 2 && argv[0] === '--exe') && !(argv.length === 4 && argv[0] === '--exe' && argv[2] === '--sidecar')) {
-  throw new Error('Usage: node scripts/windows-test/Run-ContactsM1.mjs [--exe candidate.exe [--sidecar candidate-runtime.exe] [--m2] [--dev] [--live-profile installed-fox.db]]')
+  throw new Error('Usage: node scripts/windows-test/Run-ContactsM1.mjs [--exe candidate.exe [--sidecar candidate-runtime.exe] [--m2|--xiaofox] [--dev] [--live-profile model-config-snapshot.db]]')
 }
 const directory = await mkdtemp(join(tmpdir(), 'fox-contacts-m1-'))
 const evidence = { revision: spawnSync('git', ['rev-parse', 'HEAD'], {cwd:repo,encoding:'utf8'}).stdout?.trim(), started: new Date().toISOString(), checks: [] }
@@ -174,6 +175,11 @@ async function desktop() {
     bridge.ready = 0
     app = start(exe, [], appEnv, 'desktop-restart-' + ++restartCount, repo)
     await poll('restarted WebView', () => bridge.ready && Date.now() - bridge.ready >= 1000)
+  }
+  if (xiaofox) {
+    const { checkXiaoFox } = await import('./contacts-live-xiaofox.mjs')
+    evidence.liveModel = await checkXiaoFox({ source: liveProfile, invoke, db, check, poll, restartDesktop, directory })
+    return
   }
   if (m2) {
     const { checkM2 } = await import('./contacts-m2.mjs')

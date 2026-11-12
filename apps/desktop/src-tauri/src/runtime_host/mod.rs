@@ -1,4 +1,6 @@
 mod capability_tools;
+#[cfg(test)]
+mod companion_child_lifecycle_tests;
 pub(crate) mod artifact_store;
 pub(crate) mod attachment_compute;
 pub(crate) mod background_jobs;
@@ -872,6 +874,7 @@ struct RuntimeHostState {
     /// K2: contacts whose archive/delete stop sweep is in flight. No Run of
     /// such a contact may be dispatched or submitted until the sweep finishes.
     stopping_companions: HashSet<String>,
+    finishing_runs: HashSet<String>,
     recovery_attempts: u8,
     last_recovery_at: Option<i64>,
 }
@@ -1174,7 +1177,7 @@ impl RuntimeHost {
         let token=self.state.lock().map_err(|_| "runtime state poisoned")?.cancellation.run_token(run_id).ok();
         let budget=std::time::Duration::from_millis(binding.budgets.limit_operation_ms(binding.budgets.tool_execution_ms, elapsed).max(0) as u64);
         let wait = if tool == "compute_job_status" && input["waitMs"].as_u64().unwrap_or(0) > 0 {
-            Some(SidecarExecutionWait::begin(&self.state, run_id)?)
+            Some(SidecarExecutionWait::begin(&self.database, &self.state, run_id)?)
         } else { None };
         let result = background_jobs::execute(&self.database,&self.attachments_dir,&self.sessions_dir,run_id,tool,input,token,budget,None);
         if let Some(wait) = wait { wait.resume()?; }
@@ -1318,6 +1321,7 @@ impl RuntimeHost {
                 dispatching_runs: HashMap::new(),
                 cancelled_dispatches: HashSet::new(),
                 stopping_companions: HashSet::new(),
+                finishing_runs: HashSet::new(),
                 recovery_attempts: 0,
                 last_recovery_at: None,
             })),
@@ -1913,7 +1917,9 @@ impl RuntimeHost {
             &started.run.conversation_id,
             &started.run.id,
         );
-        let run_kind = if self.database.is_digital_colleague_run(&started.run.id)? {
+        let run_kind = if self.database.child_run(&started.run.id)?.is_some() {
+            "child"
+        } else if self.database.is_digital_colleague_run(&started.run.id)? {
             "digital_colleague"
         } else if self.run_budget_override.is_some() {
             "child"
@@ -1924,6 +1930,7 @@ impl RuntimeHost {
         // chain. A contact background task with a broken chain refuses to start
         // instead of running without contact restrictions.
         let companion_slot = self.database.run_companion_slot(&started.run.id)?;
+        let companion_scope = self.database.run_companion_scope(&started.run.id)?;
         let frozen_binding = self.database.run_control_binding(&started.run.id)?;
         if matches!(kernel_authority::resolve_run_route(frozen_binding.as_ref()), kernel_authority::RunRoute::Reject) {
             return Err(format!("{}: unsupported frozen executor", crate::database::EXECUTOR_ROUTE_UNKNOWN));
@@ -2089,18 +2096,23 @@ impl RuntimeHost {
             let snapshot = match self.database.run_companion_tools_snapshot(&started.run.id)? {
                 Some(ids) => ids,
                 None => {
-                    let ids = match self.database.conversation_companion_id(&started.run.conversation_id)? {
+                    let mut ids = match self.database.conversation_companion_id(&started.run.conversation_id)? {
                         Some(companion) => self.database.companion_capability_ids(&companion)?,
                         None => Vec::new(),
                     };
-                    self.database.freeze_run_companion_tools(&started.run.id, &ids)?;
+                    let mcp_scope = intersect_optional_scopes(
+                        package_string_scope(&assistant_package["packageManifest"], "mcpServers"),
+                        expert_package.as_ref().and_then(|package| package_string_scope(&package["packageManifest"], "mcpServers")),
+                    );
+                    ids.retain(|id| id.strip_prefix("mcp:").and_then(|rest| rest.split_once(':'))
+                        .is_none_or(|(server, _)| mcp_scope.as_ref().is_none_or(|scope| scope.contains(server))));
                     ids
                 }
             };
             let mut allowed: Vec<&str> = fox_engine_protocol::TOOL_CONTRACTS.iter()
                 .map(|contract| contract.0)
                 .filter(|name| crate::companion_workspace::allows_tool(name))
-                .filter(|name| (*name != "companion_profile_update" && !name.starts_with("companion_task_")) || can_update_profile)
+                .filter(|name| (!matches!(*name, "companion_profile_update" | "memory_write" | "note_organize") && !name.starts_with("companion_task_")) || can_update_profile)
                 .collect();
             for tool in crate::database::WEB_TOOLS {
                 if snapshot.iter().any(|id| id == tool) {
@@ -2111,6 +2123,17 @@ impl RuntimeHost {
                 allowed.push("list_mcp_tools");
                 allowed.push("call_mcp_tool");
             }
+            let package_scope = intersect_optional_scopes(runtime_package_tool_scope(&assistant_package),
+                expert_package.as_ref().and_then(runtime_package_tool_scope));
+            allowed.retain(|name| matches!(*name, "companion_profile_update" | "memory_write" | "note_organize" | "note_read" | "note_search")
+                || name.starts_with("companion_task_")
+                || package_scope.as_ref().is_none_or(|scope| scope.contains(*name)));
+            allowed.retain(|name| self.tool_allowlist_override.as_ref().is_none_or(|scope| scope.contains(*name)));
+            if let Some(frozen) = self.database.run_companion_tool_catalog(&started.run.id)? {
+                allowed.retain(|name| frozen.iter().any(|tool| tool == name));
+            }
+            self.database.freeze_run_companion_catalog(&started.run.id, &snapshot,
+                &allowed.iter().map(|tool| (*tool).to_owned()).collect::<Vec<_>>())?;
             context["allowedTools"] = json!(allowed);
         }
 
@@ -2141,11 +2164,20 @@ impl RuntimeHost {
             // K2: the stop sweep and the archived/deleting contact both refuse
             // submission here, under the same transition lock the archive takes,
             // so a Run queued before the sweep cannot start after it.
-            if let Some((companion, _)) = companion_slot.as_ref() {
+            if let Some(scope) = companion_scope.as_ref() {
+                let companion = &scope.companion_id;
                 if state.stopping_companions.contains(companion) {
                     return Err("companion.stopping: 正在停止这个联系人的执行".to_owned());
                 }
                 self.database.ensure_companion_executable(companion)?;
+            }
+            if let Some(child) = self.database.child_run(&started.run.id)? {
+                let parent_status: String = self.database.with_connection(|connection| connection.query_row(
+                    "SELECT status FROM runs WHERE id=?1", [&child.parent_run_id], |row| row.get(0),
+                ))?;
+                if parent_status != "running" || state.finishing_runs.contains(&child.parent_run_id) {
+                    return Err("child_run.parent_not_running: 父任务已停止接收子任务".into());
+                }
             }
             state.cancellation.register_run(&started.run.id)?;
             if let Some(worker) = state.worker.as_mut() {
@@ -2683,6 +2715,9 @@ impl RuntimeHost {
         graph_review_request_id: Option<String>,
     ) -> Result<(), String> {
         let child_run_id = child_run.child_run_id.clone();
+        if self.database.run_companion_scope(&child_run_id)?.is_some() {
+            self.database.freeze_child_companion_tools(&child_run_id, &child_run.parent_run_id)?;
+        }
         let enforce_count_budget_override = graph_review_request_id.is_some()
             || self
                 .database
@@ -2741,7 +2776,7 @@ impl RuntimeHost {
             )
         } else {
             let (mut tool_scope, mcp_scope) =
-                effective_conversation_delegation_scope(&self.database, &parent_conversation_id)?;
+                effective_child_delegation_scope(&self.database, &child_run.parent_run_id, &parent_conversation_id)?;
             tool_scope = intersect_optional_scopes(
                 tool_scope,
                 child_run
@@ -2749,7 +2784,10 @@ impl RuntimeHost {
                     .as_ref()
                     .map(|tools| tools.iter().cloned().collect()),
             );
-            (tool_scope, mcp_scope)
+            (
+                intersect_optional_scopes(tool_scope, self.tool_allowlist_override.clone()),
+                intersect_optional_scopes(mcp_scope, self.mcp_server_scope_override.clone()),
+            )
         };
         child_host.tool_allowlist_override = tool_scope;
         child_host.mcp_server_scope_override = mcp_scope;
@@ -3027,6 +3065,25 @@ impl RuntimeHost {
             ));
         }
         Ok(())
+    }
+
+    fn reject_owned_task_budget(&self, run_id: &str, message: &str) {
+        if !message.contains("digital_colleague.budget_exceeded")
+            && !message.contains("digital_colleague.tool_budget_exceeded")
+            && !message.contains("digital_colleague.output_budget_exceeded") { return; }
+        let root = self.database.with_connection(|connection| {
+            use rusqlite::OptionalExtension;
+            connection.query_row(
+                "SELECT t.run_id FROM runs r JOIN digital_colleague_triggers t
+                 ON t.run_id = CASE WHEN r.run_kind = 'child' THEN r.root_run_id ELSE r.id END
+                 WHERE r.id = ?1", [run_id], |row| row.get::<_, String>(0),
+            ).optional()
+        });
+        match root {
+            Ok(Some(root)) => self.reject_runtime_run_event(&root, "digital_colleague.budget_exceeded", message),
+            Ok(None) => {},
+            Err(error) => eprintln!("[digital_colleague.budget_lookup_failed] {run_id}: {error}"),
+        }
     }
 
     fn ensure_active_envelope_identity(
@@ -3825,7 +3882,66 @@ impl RuntimeHost {
     }
 
     fn mark_run_ready(&self, run_id: &str) {
+        let descendants = match self.descendant_run_ids(run_id) {
+            Ok(ids) => ids,
+            Err(error) => { eprintln!("[child_run.release_blocked] {run_id}: {error}"); return; }
+        };
+        if descendants.is_empty() {
+            self.finish_run_release(run_id);
+            return;
+        }
+        let Ok(mut state) = self.state.lock() else { return; };
+        if !state.finishing_runs.insert(run_id.to_owned()) { return; }
+        if let Some(worker) = state.worker.as_mut() {
+            worker.sessions.preserve_waiting_companion(run_id);
+        }
+        drop(state);
+        // The stdout reader must keep consuming child cancellation and release events.
+        let host = self.clone();
+        let run_id = run_id.to_owned();
+        thread::spawn(move || match host.stop_child_runs_before_release(&run_id) {
+            Ok(()) => host.finish_run_release(&run_id),
+            Err(error) => {
+                if let Ok(mut state) = host.state.lock() { state.finishing_runs.remove(&run_id); }
+                eprintln!("[child_run.release_blocked] {run_id}: {error}");
+            }
+        });
+    }
+
+    fn descendant_run_ids(&self, run_id: &str) -> Result<Vec<String>, String> {
+        self.database.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "WITH RECURSIVE descendants(id) AS (
+                    SELECT id FROM runs WHERE parent_run_id = ?1
+                    UNION SELECT r.id FROM runs r JOIN descendants d ON r.parent_run_id = d.id
+                 ) SELECT id FROM descendants",
+            )?;
+            let ids = statement.query_map([run_id], |row| row.get(0))?.collect();
+            ids
+        })
+    }
+
+    fn stop_child_runs_before_release(&self, run_id: &str) -> Result<(), String> {
+        let mut signalled = HashSet::new();
+        loop {
+            let active = self.database.active_child_run_ids(run_id)?;
+            for child in &active {
+                if signalled.insert(child.clone()) { self.cancel_child_runtime(child)?; }
+            }
+            let descendants = self.descendant_run_ids(run_id)?;
+            let owner_present = {
+                let state = self.state.lock().map_err(|_| "runtime state lock is poisoned")?;
+                descendants.iter().any(|child| state.dispatching_runs.contains_key(child)
+                    || state.worker.as_ref().is_some_and(|worker| worker.sessions.by_run(child).is_some()))
+            };
+            if active.is_empty() && !owner_present { return Ok(()); }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn finish_run_release(&self, run_id: &str) {
         let should_dispatch = if let Ok(mut state) = self.state.lock() {
+            state.finishing_runs.remove(run_id);
             state.cancellation.retire_run(run_id);
             state.native_run_leases.remove(run_id);
             state.queue_changed.1.notify_all();
@@ -4431,6 +4547,7 @@ impl RuntimeHost {
                             }
                         }
                         if let Err(error) = database.enforce_digital_colleague_tool_budget(run_id) {
+                            runtime_host.reject_owned_task_budget(run_id, &error);
                             let response = HostResponse::for_request(
                                 &envelope,
                                 "tool.execute_failed",
@@ -4624,6 +4741,15 @@ impl RuntimeHost {
                             if !applied {
                                 continue;
                             }
+                            if payload["type"] == "usage.updated" {
+                                match database.digital_colleague_budget_exceeded(&run_id) {
+                                    Ok(true) => runtime_host.reject_owned_task_budget(&run_id,
+                                        "[digital_colleague.budget_exceeded] 父子任务累计用量已超过任务预算"),
+                                    Ok(false) => {},
+                                    Err(error) => runtime_host.reject_runtime_run_event(&run_id,
+                                        "digital_colleague.budget_check_failed", &error),
+                                }
+                            }
                             if payload.get("type").and_then(Value::as_str).is_some_and(
                                 |event_type| {
                                     crate::database::WORK_EVENT_TYPES.contains(&event_type)
@@ -4691,6 +4817,7 @@ impl RuntimeHost {
                             // 13.38（R1-3 / B4-2）：被拒的是 run.failed / run.interrupted 时，失败终态沿用它自己的
                             // code 和 message（例如 provider.request_failed），投影错误只进日志。
                             let projection_code = event_projection_failure_code(&error);
+                            runtime_host.reject_owned_task_budget(&run_id, &error);
                             let (code, message) = rejected_terminal_outcome(&payload)
                                 .filter(|_| projection_code == "storage.event_projection_failed")
                                 .unwrap_or_else(|| (projection_code.to_owned(), error.clone()));
@@ -4772,7 +4899,9 @@ impl RuntimeHost {
                     eprintln!("native transport cleanup failed for {run}: {error}");
                 }
             }
-            if native && self.database.native_run_waiting_approval(&run).unwrap_or(false) {
+            let companion_child = self.database.run_companion_scope(&run)
+                .is_ok_and(|scope| scope.is_some_and(|scope| scope.is_child));
+            if native && !companion_child && self.database.native_run_waiting_approval(&run).unwrap_or(false) {
                 // The live Host handler still owns the pending approval and may commit its result after the pipe closes.
                 continue;
             }
@@ -5053,6 +5182,23 @@ fn retire_disconnected_native_run(database: &Database, state: &Arc<Mutex<Runtime
     let terminal = database.with_connection(|connection| connection.query_row("SELECT status FROM runs WHERE id=?1", [run], |row| row.get::<_,String>(0)))
         .is_ok_and(|status| run_status_is_terminal(&status));
     if terminal { if let Ok(mut state) = state.lock() {
+        let descendants = database.with_connection(|connection| {
+            let mut query = connection.prepare("WITH RECURSIVE children(id,status) AS (
+                SELECT id,status FROM runs WHERE parent_run_id=?1
+                UNION SELECT r.id,r.status FROM runs r JOIN children c ON r.parent_run_id=c.id
+            ) SELECT id,status FROM children")?;
+            let rows = query.query_map([run], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?)))?.collect::<Result<Vec<_>,_>>();
+            rows
+        });
+        let Ok(descendants) = descendants else { return; };
+        if descendants.iter().any(|(child, status)| !run_status_is_terminal(status)
+            || state.worker.as_ref().is_some_and(|worker| worker.sessions.by_run(child).is_some())) {
+            for (child, _) in descendants { state.cancellation.request_run_cancel(&child); }
+            // Release/transport-crash processing owns the remaining child sessions.
+            // A committed tool receipt alone cannot release their parent's workspace.
+            if let Some(worker) = state.worker.as_mut() { worker.sessions.preserve_waiting_companion(run); }
+            return;
+        }
         state.native_run_leases.remove(run);
         state.cancellation.retire_run(run);
         if let Some(worker) = state.worker.as_mut() { worker.sessions.finish(run); }
@@ -6186,38 +6332,7 @@ fn execute_child_run_tool_request(
                     .and_then(Value::as_i64)
                     .unwrap_or(0)
                     .clamp(0, 60_000) as u64;
-                let deadline = Instant::now() + Duration::from_millis(wait_ms);
-                let token = state.lock().map_err(|_| "runtime state lock is poisoned")?
-                    .cancellation.run_token(run_id).ok();
-                let mut execution_wait = None;
-                let collected = (|| -> Result<Vec<ChildRunRecord>, String> { loop {
-                    if let Some(token) = token.as_ref() { token.check()?; }
-                    let records = database
-                        .child_runs_for_parent(run_id)?
-                        .into_iter()
-                        .filter(|record| requested.contains(&record.child_run_id))
-                        .collect::<Vec<_>>();
-                    if records.len() != requested.len() {
-                        return Err(
-                            "one or more Child Runs do not belong to the current parent Run"
-                                .to_owned(),
-                        );
-                    }
-                    if records
-                        .iter()
-                        .all(|record| run_status_is_terminal(&record.status))
-                        || wait_ms == 0
-                        || Instant::now() >= deadline
-                    {
-                        return Ok(records);
-                    }
-                    if execution_wait.is_none() {
-                        execution_wait = Some(SidecarExecutionWait::begin(state, run_id)?);
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                } })();
-                if let Some(wait) = execution_wait { wait.resume()?; }
-                let records = collected?;
+                let records = wait_for_child_runs(database, state, run_id, &requested, wait_ms)?;
                 let all_terminal = records
                     .iter()
                     .all(|record| run_status_is_terminal(&record.status));
@@ -6249,6 +6364,50 @@ fn execute_child_run_tool_request(
         hook_decision.annotations,
         outcome,
     )
+}
+
+fn wait_for_child_runs(
+    database: &Database,
+    state: &Arc<Mutex<RuntimeHostState>>,
+    run_id: &str,
+    requested: &HashSet<String>,
+    wait_ms: u64,
+) -> Result<Vec<ChildRunRecord>, String> {
+    let deadline = Instant::now() + Duration::from_millis(wait_ms);
+    let token = state
+        .lock()
+        .map_err(|_| "runtime state lock is poisoned")?
+        .cancellation
+        .run_token(run_id)
+        .ok();
+    let mut execution_wait = None;
+    let collected = (|| loop {
+        if let Some(token) = token.as_ref() {
+            token.check()?;
+        }
+        let records = database
+            .child_runs_for_parent(run_id)?
+            .into_iter()
+            .filter(|record| requested.contains(&record.child_run_id))
+            .collect::<Vec<_>>();
+        if records.len() != requested.len() {
+            return Err("one or more Child Runs do not belong to the current parent Run".to_owned());
+        }
+        if records.iter().all(|record| run_status_is_terminal(&record.status))
+            || wait_ms == 0
+            || Instant::now() >= deadline
+        {
+            return Ok(records);
+        }
+        if execution_wait.is_none() {
+            execution_wait = Some(SidecarExecutionWait::begin(database, state, run_id)?);
+        }
+        thread::sleep(Duration::from_millis(100));
+    })();
+    if let Some(wait) = execution_wait {
+        wait.resume()?;
+    }
+    collected
 }
 
 fn required_bounded_text<'a>(
@@ -6346,6 +6505,9 @@ fn start_isolated_child_run(
         .ok_or_else(|| "model service is not configured".to_owned())?
         .max_output_tokens;
     let budget = normalized_child_budget(budget_input, model_max_output)?;
+    let (tool_scope, _) = effective_child_delegation_scope(database, parent_run_id, parent_conversation_id)?;
+    let allowed_tools = intersect_optional_scopes(tool_scope, runtime_host.tool_allowlist_override.clone())
+        .map(|tools| { let mut tools: Vec<_> = tools.into_iter().collect(); tools.sort(); tools });
     let (started, child_run, created) = database
         .create_child_run(crate::database::CreateChildRunInput {
             parent_run_id,
@@ -6356,7 +6518,7 @@ fn start_isolated_child_run(
             budget: &budget,
             team_run_id: None,
             team_member_id: None,
-            allowed_tools: None,
+            allowed_tools: allowed_tools.as_deref(),
         })
         .map_err(|error| {
             format!(
@@ -7124,6 +7286,25 @@ fn effective_conversation_delegation_scope(
     Ok((tool_scope, mcp_scope))
 }
 
+fn effective_child_delegation_scope(
+    database: &Database,
+    parent_run_id: &str,
+    conversation_id: &str,
+) -> Result<(Option<HashSet<String>>, Option<HashSet<String>>), String> {
+    if database.run_companion_scope(parent_run_id)?.is_none() {
+        return effective_conversation_delegation_scope(database, conversation_id);
+    }
+    let snapshot = database.run_companion_tools_snapshot(parent_run_id)?
+        .ok_or("companion.parent_snapshot_missing: 父任务缺少冻结的能力集合")?;
+    let allowed = database.run_companion_tool_catalog(parent_run_id)?
+        .ok_or("companion.parent_snapshot_missing: 父任务缺少冻结的工具目录，请重新发起任务")?
+        .into_iter()
+        .filter(|tool| !matches!(tool.as_str(), "memory_write" | "note_organize" | "companion_profile_update") && !tool.starts_with("companion_task_"))
+        .collect();
+    let servers = snapshot.iter().filter_map(|id| id.strip_prefix("mcp:")?.split_once(':').map(|(server, _)| server.to_owned())).collect();
+    Ok((Some(allowed), Some(servers)))
+}
+
 fn ensure_expert_tool_allowed(
     database: &Database,
     conversation_id: &str,
@@ -7380,9 +7561,30 @@ struct SidecarExecutionWait {
 }
 
 impl SidecarExecutionWait {
-    fn begin(state: &Arc<Mutex<RuntimeHostState>>, run_id: &str) -> Result<Self, String> {
+    fn begin(
+        database: &Database,
+        state: &Arc<Mutex<RuntimeHostState>>,
+        run_id: &str,
+    ) -> Result<Self, String> {
+        let children = if database.run_companion_slot(run_id)?.is_some_and(|(_, background)| background) {
+            database.child_runs_for_parent(run_id)?
+        } else {
+            Vec::new()
+        };
         let mut locked = state.lock().map_err(|_| "runtime state lock is poisoned")?;
-        if let Some(worker) = locked.worker.as_mut() { worker.sessions.set_waiting(run_id, true)?; }
+        let preserve_companion = children.iter().any(|child| {
+            !run_status_is_terminal(&child.status)
+                || locked.dispatching_runs.contains_key(&child.child_run_id)
+                || locked.worker.as_ref().is_some_and(|worker| {
+                    worker.sessions.by_run(&child.child_run_id).is_some()
+                })
+        });
+        if let Some(worker) = locked.worker.as_mut() {
+            if preserve_companion {
+                worker.sessions.preserve_waiting_companion(run_id);
+            }
+            worker.sessions.set_waiting(run_id, true)?;
+        }
         locked.queue_changed.1.notify_all();
         Ok(Self { state: state.clone(), run_id: run_id.to_owned() })
     }
@@ -7443,7 +7645,7 @@ fn report_chat_approval_mirror(database: &Database, approval: &ApprovalRecord) -
 
 fn receive_sidecar_run_approval(database: &Database, state: &Arc<Mutex<RuntimeHostState>>,
     run_id: &str, approval_id: &str, receiver: &mpsc::Receiver<bool>) -> Result<bool, String> {
-    let wait = SidecarExecutionWait::begin(state, run_id)?;
+    let wait = SidecarExecutionWait::begin(database, state, run_id)?;
     let result = receive_run_approval(database, run_id, approval_id, receiver);
     wait.resume()?;
     result
@@ -13694,11 +13896,10 @@ mod attachment_tests {
         }).unwrap();
         database.set_agent_skill_enabled(&source.id, "frozen-skill", true).unwrap();
         let companion = database.add_companion(&root, &source.id).unwrap();
-        let task_expert = database.copy_agent("fox-debugger", Some("Distinct task expert")).unwrap();
         let task_reference = KnowledgeReference::local("a04-task-local-knowledge");
-        let task = database.create_digital_colleague(&CreateDigitalColleagueInput {
+        let task = database.create_owned_companion_task(&CreateDigitalColleagueInput {
             name: "A04 companion background task".into(),
-            expert_id: task_expert.id.clone(),
+            expert_id: String::new(),
             objective: "Preserve the private frozen package and task-local knowledge".into(),
             project_id: None,
             project_root: None,
@@ -13709,7 +13910,14 @@ mod attachment_tests {
             max_output_tokens: 2_000,
             max_tool_calls: 20,
             companion_id: Some(companion.profile.id.clone()),
-        }).unwrap();
+        }, crate::database::DigitalColleagueScheduleSpec::Interval {
+            interval_seconds: 3600,
+            timezone: "UTC".into(),
+        }, false).unwrap().task;
+        assert!(task.expert_id.is_none());
+        assert!(task.expert_binding_id.is_none());
+        assert!(task.package_hash.is_none());
+        assert!(task.package_snapshot.is_null());
         let context = |database: &Database, conversation_id: &str, run_kind: &str| {
             conversation_prompt_context(
                 database,
@@ -13750,10 +13958,8 @@ mod attachment_tests {
         );
         let private_binding = database.current_conversation_expert_binding(&companion.conversation_id)
             .unwrap().unwrap();
-        let task_own_binding = database.current_conversation_expert_binding(&task.conversation_id)
-            .unwrap().unwrap();
-        assert_eq!(task_own_binding.expert_id.as_deref(), Some(task_expert.id.as_str()));
-        assert_ne!(task_own_binding.package_snapshot["name"], private_binding.package_snapshot["name"]);
+        assert!(database.current_conversation_expert_binding(&task.conversation_id)
+            .unwrap().is_none());
         assert_eq!(
             database.runtime_conversation_expert_binding(&task.conversation_id).unwrap().unwrap().id,
             private_binding.id
@@ -13789,7 +13995,7 @@ mod attachment_tests {
         assert_unchanged(&database, &companion.conversation_id, "user", &initial_private);
         assert_unchanged(&database, &task.conversation_id, "digital_colleague", &initial_task);
         assert!(database.current_conversation_expert_binding(&task.conversation_id)
-            .unwrap().unwrap().expert_id.as_deref() == Some(task_expert.id.as_str()));
+            .unwrap().is_none());
         database.with_connection(|connection| {
             connection.execute(
                 "UPDATE conversation_expert_bindings SET package_hash = 'corrupt-active-snapshot'
@@ -13822,30 +14028,30 @@ mod attachment_tests {
         let database = Database::open(root.join("test.db")).unwrap();
         let companion = database.create_blank_companion(&root).unwrap();
         let other = database.create_blank_companion(&root).unwrap();
-        database.with_connection(|connection| {
-            connection.execute_batch(&format!(
-                "INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES
-                 ('root','{}','running','fox',1),
-                 ('child','{}','running','fox',2),
-                 ('other','{}','running','fox',1);
-                 UPDATE runs SET parent_run_id='root',root_run_id='root' WHERE id='child';",
-                companion.conversation_id, companion.conversation_id, other.conversation_id,
-            ))
+        let root_run = database.create_run(&companion.conversation_id, "更新资料", None).unwrap();
+        let other_run = database.create_run(&other.conversation_id, "更新资料", None).unwrap();
+        database.apply_runtime_event(&root_run.run.id, 1, &json!({"type":"run.started"})).unwrap();
+        database.apply_runtime_event(&other_run.run.id, 1, &json!({"type":"run.started"})).unwrap();
+        database.create_host_tool_call(&root_run.run.id, "spawn-profile-child", "child_run_start", &json!({}), "running", false).unwrap();
+        let (child, _, _) = database.create_child_run(crate::database::CreateChildRunInput {
+            parent_run_id: &root_run.run.id, tool_call_id: "spawn-profile-child", worker_agent_id: "fox-general",
+            objective: "核对资料", context: "", budget: &normalized_child_budget(None, 4096).unwrap(),
+            team_run_id: None, team_member_id: None, allowed_tools: None,
         }).unwrap();
-        let updated = execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({
+        let updated = execute_memory_operation(&database, &companion.conversation_id, &root_run.run.id, "companion_profile_update", &json!({
             "display_name": "小周", "duty": "准备党群汇报", "persona_override": "先给结论"
         })).unwrap();
         assert_eq!(updated["displayName"], "小周");
         assert_eq!(updated["personaOverride"], "先给结论");
         assert_eq!(updated["changes"], json!(["displayName", "duty", "personaOverride"]));
-        let renamed = execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({"name":"小周 2"})).unwrap();
+        let renamed = execute_memory_operation(&database, &companion.conversation_id, &root_run.run.id, "companion_profile_update", &json!({"name":"小周 2"})).unwrap();
         assert_eq!(renamed["duty"], "准备党群汇报");
         assert_eq!(renamed["personaOverride"], "先给结论");
-        assert!(execute_memory_operation(&database, &companion.conversation_id, "child", "companion_profile_update", &json!({"name":"伪造子运行"})).is_err());
-        assert!(execute_memory_operation(&database, &companion.conversation_id, "child", "memory_write", &json!({"target":"notes","action":"add","content":"非法"})).is_err());
-        assert!(execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({"name":"小 Fox","targetId":other.profile.id})).is_err());
-        assert!(execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({"name":42,"duty":"不应保存"})).is_err());
-        assert!(execute_memory_operation(&database, &other.conversation_id, "other", "companion_profile_update", &json!({"name":"小周 2"})).is_err());
+        assert!(execute_memory_operation(&database, &child.run.conversation_id, &child.run.id, "companion_profile_update", &json!({"name":"伪造子运行"})).is_err());
+        assert!(execute_memory_operation(&database, &child.run.conversation_id, &child.run.id, "memory_write", &json!({"target":"notes","action":"add","content":"非法"})).is_err());
+        assert!(execute_memory_operation(&database, &companion.conversation_id, &root_run.run.id, "companion_profile_update", &json!({"name":"小 Fox","targetId":other.profile.id})).is_err());
+        assert!(execute_memory_operation(&database, &companion.conversation_id, &root_run.run.id, "companion_profile_update", &json!({"name":42,"duty":"不应保存"})).is_err());
+        assert!(execute_memory_operation(&database, &other.conversation_id, &other_run.run.id, "companion_profile_update", &json!({"name":"小周 2"})).is_err());
         let saved = database.companion_runtime_notes(&companion.conversation_id, "").unwrap().unwrap();
         assert_eq!(saved["displayName"], "小周 2");
         assert_eq!(saved["duty"], "准备党群汇报");
@@ -13880,12 +14086,12 @@ mod attachment_tests {
         }).unwrap();
         let background_saved = execute_memory_operation(&database, &background.conversation_id, "background", "companion_profile_update", &json!({"persona_override":"尽量简短"})).unwrap();
         assert_eq!(background_saved["personaOverride"], "先给结论\n尽量简短");
-        let replaced = execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({"persona_override":"完整替换", "preferenceOperation":"replace"})).unwrap();
+        let replaced = execute_memory_operation(&database, &companion.conversation_id, &root_run.run.id, "companion_profile_update", &json!({"persona_override":"完整替换", "preferenceOperation":"replace"})).unwrap();
         assert_eq!(replaced["personaOverride"], "完整替换");
-        let cleared = execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({"preferenceOperation":"clear"})).unwrap();
+        let cleared = execute_memory_operation(&database, &companion.conversation_id, &root_run.run.id, "companion_profile_update", &json!({"preferenceOperation":"clear"})).unwrap();
         assert_eq!(cleared["personaOverride"], Value::Null);
         assert_eq!(cleared["duty"], "准备党群汇报");
-        let cleared_duty = execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({"duty":"   "})).unwrap();
+        let cleared_duty = execute_memory_operation(&database, &companion.conversation_id, &root_run.run.id, "companion_profile_update", &json!({"duty":"   "})).unwrap();
         assert_eq!(cleared_duty["duty"], "");
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
@@ -14064,9 +14270,9 @@ mod attachment_tests {
         assert!(ordinary_context.skill_prompt.contains("CUSTOM_DEFAULT_SKILL_INSTRUCTIONS"));
 
         let create_task = |name: &str, companion_id: String, reference: KnowledgeReference| {
-            database.create_digital_colleague(&CreateDigitalColleagueInput {
+            database.create_owned_companion_task(&CreateDigitalColleagueInput {
                 name: name.into(),
-                expert_id: "fox-debugger".into(),
+                expert_id: String::new(),
                 objective: "Task binding must not reclassify the base assistant".into(),
                 project_id: None,
                 project_root: None,
@@ -14077,7 +14283,10 @@ mod attachment_tests {
                 max_output_tokens: 2_000,
                 max_tool_calls: 20,
                 companion_id: Some(companion_id),
-            }).unwrap()
+            }, crate::database::DigitalColleagueScheduleSpec::Interval {
+                interval_seconds: 3600,
+                timezone: "UTC".into(),
+            }, false).unwrap().task
         };
         let blank_reference = KnowledgeReference::local("blank-task-local-knowledge");
         let blank_task = create_task(
@@ -14102,7 +14311,7 @@ mod attachment_tests {
         );
         assert!(blank_task_context.expert_package.is_none());
         assert!(database.current_conversation_expert_binding(&blank_task.conversation_id)
-            .unwrap().is_some());
+            .unwrap().is_none());
 
         let default_reference = KnowledgeReference::local("default-task-local-knowledge");
         let default_task = create_task(
@@ -14127,6 +14336,8 @@ mod attachment_tests {
             json!([default_reference])
         );
         assert!(default_task_context.expert_package.is_none());
+        assert!(database.current_conversation_expert_binding(&default_task.conversation_id)
+            .unwrap().is_none());
         drop(database);
         fs::remove_dir_all(root).unwrap();
     }

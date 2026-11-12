@@ -9,7 +9,6 @@ mod companion_notes_files;
 mod companion_workspace;
 mod data_compute;
 mod report_pdf;
-mod digital_colleagues;
 mod expert_packages;
 mod expert_teams;
 mod expert_workflows;
@@ -389,20 +388,6 @@ pub fn run() {
             expert_workflows::expert_workflow_cancel,
             expert_teams::expert_team_get,
             expert_teams::expert_team_cancel,
-            digital_colleagues::digital_colleagues_list,
-            digital_colleagues::digital_colleague_create,
-            digital_colleagues::digital_colleague_update,
-            digital_colleagues::digital_colleague_set_paused,
-            digital_colleagues::digital_colleague_revoke,
-            digital_colleagues::digital_colleague_schedules_list,
-            digital_colleagues::digital_colleague_schedule_save,
-            digital_colleagues::digital_colleague_channels_list,
-            digital_colleagues::digital_colleague_channel_create,
-            digital_colleagues::digital_colleague_channel_revoke,
-            digital_colleagues::digital_colleague_trigger_manual,
-            digital_colleagues::digital_colleague_trigger_channel,
-            digital_colleagues::digital_colleague_triggers_list,
-            digital_colleagues::digital_colleague_audit_list,
             commands::skills_list,
             commands::skill_set_enabled,
             commands::mcp_servers_list,
@@ -476,7 +461,6 @@ pub fn run() {
             commands::companion_deletions::companion_retained_list,
             commands::companion_deletions::companion_retained_open,
             commands::companion_deletions::companion_retained_dismiss,
-            app_capabilities::digital_colleague_run_detail,
             app_capabilities::app_notifications_list,
             app_capabilities::app_notification_read,
             app_capabilities::app_notification_publish,

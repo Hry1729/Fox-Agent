@@ -292,7 +292,7 @@ export interface MessageFeedbackRecord {
 
 export interface GlobalSearchRecord {
   id: string
-  kind: 'conversation' | 'project' | 'agent' | 'digital_colleague' | 'knowledge_base' | 'knowledge_document' | 'task' | 'artifact'
+  kind: 'conversation' | 'project' | 'agent' | 'knowledge_base' | 'knowledge_document' | 'task' | 'artifact'
   title: string
   subtitle: string
   workspaceView: string
@@ -1431,25 +1431,6 @@ export interface DigitalColleagueScheduleRecord {
   updatedAt: number
 }
 
-export interface DigitalColleagueChannelRecord {
-  id: string
-  colleagueId: string
-  name: string
-  channelKind: 'webhook' | 'im_bridge'
-  externalIdentity: string
-  secretPrefix: string
-  rateLimitPerMinute: number
-  status: 'active' | 'revoked'
-  createdAt: number
-  updatedAt: number
-  revokedAt: number | null
-}
-
-export interface DigitalColleagueChannelCreated {
-  channel: DigitalColleagueChannelRecord
-  secret: string
-}
-
 export interface DigitalColleagueTriggerRecord {
   id: string
   colleagueId: string
@@ -1469,32 +1450,6 @@ export interface DigitalColleagueTriggerRecord {
   createdAt: number
   updatedAt: number
   completedAt: number | null
-}
-
-export interface DigitalColleagueAuditRecord {
-  id: string
-  colleagueId: string | null
-  channelId: string | null
-  triggerId: string | null
-  event: string
-  outcome: 'accepted' | 'applied' | 'rejected' | 'skipped' | 'failed'
-  actor: string
-  details: unknown
-  createdAt: number
-}
-
-export interface CreateDigitalColleagueInput {
-  name: string
-  expertId: string
-  objective: string
-  projectId?: string | null
-  projectRoot?: string | null
-  knowledgeReferences?: KnowledgeReference[]
-  maxRunsPerDay?: number
-  maxTokensPerDay?: number
-  maxDurationMs?: number
-  maxOutputTokens?: number
-  maxToolCalls?: number
 }
 
 // A0 Work Loop Types

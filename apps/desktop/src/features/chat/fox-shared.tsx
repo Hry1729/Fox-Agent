@@ -196,7 +196,7 @@ export function IconButton({
 
 export function globalSearchKindLabel(kind: GlobalSearchRecord['kind']): string {
   return ({
-    conversation: '对话', project: '项目', agent: '专家', digital_colleague: '数字同事',
+    conversation: '对话', project: '项目', agent: '专家',
     knowledge_base: '资料库', knowledge_document: '文档', task: '任务', artifact: '生成文件',
   })[kind]
 }

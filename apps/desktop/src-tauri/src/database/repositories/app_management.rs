@@ -247,7 +247,7 @@ impl Database {
 
         let colleague_items = self.with_connection(|connection| {
             let mut statement = connection.prepare(
-                "SELECT t.id, t.status, t.error_message, t.colleague_id, d.name,
+                "SELECT t.id, t.status, t.error_message, d.name,
                         d.companion_id, p.reminder_mode
                  FROM digital_colleague_triggers t
                  JOIN digital_colleagues d ON d.id = t.colleague_id
@@ -262,31 +262,30 @@ impl Database {
                         row.get::<_, String>(1)?,
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(4)?,
                         row.get::<_, Option<String>>(5)?,
-                        row.get::<_, Option<String>>(6)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(records)
         })?;
-        for (id, status, error, colleague_id, name, companion_id, reminder_mode) in colleague_items {
+        for (id, status, error, name, companion_id, reminder_mode) in colleague_items {
             let (kind, severity, body) = match status.as_str() {
                 "accepted" | "queued" | "running" => {
-                    ("progress", "quiet", "数字同事正在执行".to_owned())
+                    ("progress", "quiet", "小 Fox 正在执行定时任务".to_owned())
                 }
-                "completed" => ("completed", "normal", "数字同事已完成本次运行".to_owned()),
+                "completed" => ("completed", "normal", "小 Fox 已完成定时任务".to_owned()),
                 "failed" | "rejected" => (
                     "failed",
                     "high",
-                    error.unwrap_or_else(|| "数字同事运行失败".to_owned()),
+                    error.unwrap_or_else(|| "小 Fox 定时任务运行失败".to_owned()),
                 ),
                 "cancelled" | "skipped" => ("completed", "normal", format!("运行已{status}")),
                 _ => continue,
             };
             // K6: a bound contact's background task follows the contact's reminder
             // preference — muted/action-only must not popup or sound for it.
-            let mut action = json!({"open": "digital_colleague"});
+            let mut action = json!({});
             if let (Some(companion_id), Some(mode)) = (companion_id, reminder_mode) {
                 if let Some(object) = action.as_object_mut() {
                     object.insert("companionId".to_owned(), json!(companion_id));
@@ -301,8 +300,8 @@ impl Database {
                 body,
                 source_type: "digital_colleague".to_owned(),
                 source_id: id,
-                workspace_view: Some("agent-detail".to_owned()),
-                entity_id: Some(colleague_id),
+                workspace_view: None,
+                entity_id: None,
                 progress: None,
                 status,
                 action,
@@ -830,12 +829,17 @@ impl Database {
             }
             {
                 let mut statement = connection.prepare(
-                    "SELECT id, name, objective, updated_at FROM digital_colleagues
-                     WHERE status <> 'revoked' AND (name LIKE ?1 ESCAPE '\\' OR objective LIKE ?1 ESCAPE '\\')
-                     ORDER BY updated_at DESC LIMIT ?2")?;
+                    "SELECT d.id, d.name, d.objective, d.updated_at, c.id
+                     FROM digital_colleagues d
+                     JOIN companion_profiles p ON p.id = d.companion_id
+                     JOIN conversations c ON c.companion_id = p.id AND c.id = d.report_conversation_id
+                     WHERE d.companion_bound = 1 AND d.status <> 'revoked'
+                       AND p.archived_at IS NULL AND p.deleting_at IS NULL
+                       AND (d.name LIKE ?1 ESCAPE '\\' OR d.objective LIKE ?1 ESCAPE '\\')
+                     ORDER BY d.updated_at DESC LIMIT ?2")?;
                 results.extend(statement.query_map(params![pattern, limit as i64], |row| Ok(GlobalSearchRecord {
-                    id: row.get(0)?, kind: "digital_colleague".to_owned(), title: row.get(1)?, subtitle: row.get(2)?,
-                    workspace_view: "agents".to_owned(), entity_id: Some(row.get(0)?), document_id: None, updated_at: row.get(3)?,
+                    id: row.get(0)?, kind: "task".to_owned(), title: row.get(1)?, subtitle: row.get(2)?,
+                    workspace_view: "chat".to_owned(), entity_id: Some(row.get(4)?), document_id: None, updated_at: row.get(3)?,
                 }))?.collect::<Result<Vec<_>, _>>()?);
             }
             {
@@ -1008,23 +1012,6 @@ impl Database {
         })
     }
 
-    pub fn digital_colleague_run_conversation_id(
-        &self,
-        run_id: &str,
-    ) -> Result<Option<String>, String> {
-        self.with_connection(|connection| {
-            connection
-                .query_row(
-                    "SELECT runs.conversation_id
-                     FROM runs
-                     JOIN digital_colleague_triggers AS trigger ON trigger.run_id = runs.id
-                     WHERE runs.id = ?1",
-                    [run_id],
-                    |row| row.get(0),
-                )
-                .optional()
-        })
-    }
 }
 
 fn read_git_branch(root: &Path) -> Option<String> {

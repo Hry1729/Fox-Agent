@@ -130,6 +130,9 @@ pub(crate) fn allows_tool(tool: &str) -> bool {
             | "companion_task_resume"
             | "companion_task_run_now"
             | "companion_task_delete"
+            | "child_run_start"
+            | "child_run_collect"
+            | "child_run_cancel"
             | "note_read"
             | "note_search"
             | "note_organize"
@@ -399,6 +402,50 @@ pub(crate) async fn companion_export_file(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn child_inherits_frozen_grants_and_workspace_boundary() {
+        use crate::database::{ChildRunBudget, CreateChildRunInput};
+
+        let data = std::env::temp_dir().join(format!("fox-child-boundary-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&data).unwrap();
+        let db = Database::open(data.join("fox.db")).unwrap();
+        let companion = db.add_companion(&data, "fox-debugger").unwrap();
+        repair(&db, &data, &companion.profile.id).unwrap();
+        db.set_companion_tool_grant(&companion.profile.id, "@web", "web_search", true).unwrap();
+        let parent = db.create_run(&companion.conversation_id, "检查", None).unwrap().run.id;
+        db.apply_runtime_event(&parent, 1, &json!({"type":"run.started"})).unwrap();
+        db.create_host_tool_call(&parent, "delegate", "child_run_start", &json!({}), "running", false).unwrap();
+        let budget = ChildRunBudget { max_duration_ms: 30_000, max_total_tokens: 4_000, max_output_tokens: 1_000, max_tool_calls: 16 };
+        let (child, _, _) = db.create_child_run(CreateChildRunInput {
+            parent_run_id: &parent, tool_call_id: "delegate", worker_agent_id: "fox-general",
+            objective: "检查", context: "检查", budget: &budget,
+            team_run_id: None, team_member_id: None, allowed_tools: None,
+        }).unwrap();
+        let child = child.run.id;
+        assert!(db.freeze_child_companion_tools(&child, &parent).is_err());
+        assert!(db.ensure_companion_tool_granted(&child, "write_file", Some(&json!({"path":"报告.txt"})))
+            .unwrap_err().contains("快照缺失"));
+        assert_eq!(check_run_tool(&db, &data, &child, "write_file", Some(&json!({"path":"报告.txt"})), None)
+            .unwrap_err().0, "companion.tool_not_available");
+        db.freeze_run_companion_tools(&parent, &["web_search".to_owned()]).unwrap();
+        db.freeze_child_companion_tools(&child, &parent).unwrap();
+        db.set_companion_tool_grant(&companion.profile.id, "@web", "web_read", true).unwrap();
+        db.freeze_child_companion_tools(&child, &parent).unwrap();
+        assert_eq!(db.run_companion_tools_snapshot(&child).unwrap().unwrap(), vec!["web_search"]);
+        let gate = |tool: &str, input: serde_json::Value| check_run_tool(&db, &data, &child, tool, Some(&input), None);
+        assert_eq!(gate("write_file", json!({"path":"../outside.txt"})).unwrap_err().0, "companion.path_blocked");
+        assert_eq!(gate("web_read", json!({})).unwrap_err().0, "companion.tool_not_available");
+        gate("web_search", json!({})).unwrap();
+        db.set_companion_tool_grant(&companion.profile.id, "@web", "web_search", false).unwrap();
+        assert_eq!(gate("web_search", json!({})).unwrap_err().0, "companion.tool_not_available");
+        for tool in ["companion_profile_update", "companion_task_create", "companion_task_update", "companion_task_pause", "companion_task_resume", "companion_task_run_now", "companion_task_delete", "memory_write", "note_organize"] {
+            assert!(db.ensure_companion_tool_granted(&child, tool, None).is_err(), "{tool}");
+            assert_eq!(gate(tool, json!({})).unwrap_err().0, "companion.tool_not_available", "{tool}");
+        }
+        drop(db);
+        fs::remove_dir_all(data).unwrap();
+    }
 
     #[test]
     fn companion_workspace_copies_repairs_and_blocks_other_contacts_before_approval() {

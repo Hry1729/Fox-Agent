@@ -14,6 +14,7 @@ pub(super) struct Session {
     /// A background task releases the contact position while waiting for an
     /// answer; the private chat keeps it because the user is right there.
     pub companion_background: bool,
+    preserve_waiting_companion: bool,
 }
 
 #[derive(Default)]
@@ -36,6 +37,7 @@ impl Sessions {
         self.by_conversation.insert(conversation.to_owned(), Session {
             conversation_id: conversation.to_owned(), runtime_session_id: runtime.to_owned(),
             generation, run_id: None, waiting: false, companion_id: None, companion_background: false,
+            preserve_waiting_companion: false,
         });
         Ok(())
     }
@@ -105,18 +107,26 @@ impl Sessions {
     }
 
     /// K2: one Run per contact at a time, across the private chat and every
-    /// background execution conversation. A background Run waiting for an
-    /// answer has released the position; a private chat Run keeps it.
+    /// background execution conversation. A background Run can release the
+    /// position while waiting if it has no child still using the workspace.
     pub fn holds_companion(&self, companion: &str) -> bool {
         self.by_conversation.values().any(|session| {
             session.run_id.is_some()
                 && session.companion_id.as_deref() == Some(companion)
-                && (!session.waiting || !session.companion_background)
+                && (!session.waiting || !session.companion_background || session.preserve_waiting_companion)
         })
     }
 
     pub fn set_waiting(&mut self, run: &str, waiting: bool) -> Result<bool, String> {
         self.set_waiting_with_dispatch(run, waiting, &[])
+    }
+
+    pub fn preserve_waiting_companion(&mut self, run: &str) {
+        if let Some(session) = self.by_conversation.values_mut()
+            .find(|session| session.run_id.as_deref() == Some(run))
+        {
+            session.preserve_waiting_companion = true;
+        }
     }
 
     /// `dispatching` lists the Runs that already won a dispatch grant but have
@@ -131,11 +141,15 @@ impl Sessions {
         dispatching: &[(&str, Option<&str>)],
     ) -> Result<bool, String> {
         let occupied = self.occupied();
-        let Some((was_waiting, background, companion)) = self
+        let Some((was_waiting, reacquire_companion, companion)) = self
             .by_conversation
             .values()
             .find(|session| session.run_id.as_deref() == Some(run))
-            .map(|session| (session.waiting, session.companion_background, session.companion_id.clone()))
+            .map(|session| (
+                session.waiting,
+                session.companion_background && !session.preserve_waiting_companion,
+                session.companion_id.clone(),
+            ))
         else {
             return Ok(false);
         };
@@ -144,7 +158,7 @@ impl Sessions {
                 .iter()
                 .filter(|(id, _)| *id != run && self.by_run(id).is_none())
                 .count();
-            if background {
+            if reacquire_companion {
                 // Re-enter the contact queue rather than the global resume
                 // FIFO: other contacts keep their concurrency while this Run
                 // waits for the contact's position, and an answered approval
@@ -180,6 +194,9 @@ impl Sessions {
             .ok_or("sidecar session disappeared")?;
         let changed = session.waiting != waiting;
         session.waiting = waiting;
+        if !waiting {
+            session.preserve_waiting_companion = false;
+        }
         Ok(changed)
     }
 
@@ -192,6 +209,7 @@ impl Sessions {
         session.waiting = false;
         session.companion_id = None;
         session.companion_background = false;
+        session.preserve_waiting_companion = false;
         true
     }
 
@@ -212,6 +230,23 @@ impl Sessions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_wait_with_children_keeps_the_companion_slot() {
+        let mut sessions = Sessions::default();
+        sessions.start("task", "task-session", 1, "parent", Some(("fox", true))).unwrap();
+        sessions.start("other", "other-session", 1, "sibling", None).unwrap();
+
+        sessions.preserve_waiting_companion("parent");
+        sessions.set_waiting("parent", true).unwrap();
+        assert!(!sessions.can_admit("private", Some("fox")));
+        sessions.start("child", "child-session", 1, "child", None).unwrap();
+        assert!(sessions.finish("child"));
+        assert!(sessions.set_waiting("parent", false).unwrap());
+
+        sessions.set_waiting("parent", true).unwrap();
+        assert!(sessions.can_admit("private", Some("fox")));
+    }
 
     #[test]
     fn conversations_are_independent_but_a_native_file_has_one_writer() {

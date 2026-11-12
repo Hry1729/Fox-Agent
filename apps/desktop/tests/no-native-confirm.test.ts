@@ -94,7 +94,7 @@ describe('no native confirm box in app code', () => {
     expect(app).toContain('<ConfirmDialogProvider />')
   })
 
-  test('the 12 former call sites use confirmDialog with Chinese titles', () => {
+  test('the 11 former call sites use confirmDialog with Chinese titles', () => {
     const read = (path: string) => readFileSync(join(SRC, path), 'utf8')
     const sites: Array<[string, string[]]> = [
       ['features/settings/model-agent/model-agent-page.tsx', ['删除服务']],
@@ -106,7 +106,6 @@ describe('no native confirm box in app code', () => {
       // connector settings page and the plugin center「策略」tab.
       ['features/settings/lifecycle-hooks-section.tsx', ['删除 Hook']],
       ['features/agents/agent-pages.tsx', ['删除专家', '恢复专家版本']],
-      ['features/agents/digital-colleague-manager.tsx', ['撤销数字同事']],
       ['features/chat/components/managed-files/store.ts', ['强制恢复文件']],
       ['features/local-knowledge/local-knowledge-pages.tsx', ['放弃修改', '放弃修改']],
     ]
@@ -118,7 +117,7 @@ describe('no native confirm box in app code', () => {
       total += calls.length
       for (const title of titles) expect(source).toContain(`title: '${title}'`)
     }
-    expect(total).toBe(12)
+    expect(total).toBe(11)
     // Destructive actions use the destructive confirm button.
     const destructive: Array<[string, string]> = [
       ['features/settings/model-agent/model-agent-page.tsx', '删除服务'],

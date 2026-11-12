@@ -178,13 +178,8 @@ try {
   await screenshot('05-expert-management')
   await client.send('Page.navigate',{url:`http://127.0.0.1:${port}/tests/fixtures/theme-refinements.html?theme=paper`})
   await waitFor('!!document.querySelector(".fox-shadcn-agent-card")','专家列表')
-  await clickText('数字同事')
-  await waitFor('!!document.querySelector(".fox-agent-editor-dialog")','数字同事弹窗')
-  const colleagueThemes=[]
-  for(const name of palette){await theme(name);colleagueThemes.push({name,...await sample({icon:'.fox-agent-editor-resources > section > header svg',dialog:'.fox-agent-editor-dialog'})})}
-  if(new Set(colleagueThemes.map(x=>x.icon.color)).size!==3)throw Error('数字同事图标未切换')
-  await theme('paper');await screenshot('06-colleagues-paper')
-  results.push({check:'colleague-icon-theme',samples:colleagueThemes,passed:true})
+  if (await client.evaluate('Array.from(document.querySelectorAll(".fox-agent-toolbar button")).some(button => button.textContent.includes("数字同事"))')) throw Error('专家页仍有数字同事入口')
+  results.push({check:'expert-list-hides-digital-colleague-entry',passed:true})
   }
   }
   if (!process.env.INTERACTIONS_ONLY) {

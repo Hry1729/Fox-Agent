@@ -540,7 +540,7 @@ fn response<T: Serialize>(value: Result<T, String>) -> ApiResponse<T> {
             let (code, message) = match e.as_str() {
                 "companion.default_not_deletable" => (e.as_str(), "小狐不能删除"),
                 "companion.run_active" => (e.as_str(), "请先停止当前生成"),
-                "companion.in_use" => (e.as_str(), "数字同事或工作图仍在使用这个私聊"),
+                "companion.in_use" => (e.as_str(), "定时任务或工作图仍在使用这个私聊"),
                 "companion.plan_changed" => (e.as_str(), "删除清单已变化，请重新查看"),
                 _ => ("companion.delete_failed", e.as_str()),
             };

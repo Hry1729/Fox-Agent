@@ -826,6 +826,7 @@ fn validate_tool_policy(host: &super::RuntimeHost, envelope: &RuntimeEnvelope,
 fn execution_refusal(host: &super::RuntimeHost, envelope: &RuntimeEnvelope,
     request: &ToolCallExecuteRequest, diagnostic: &str) -> Option<Value> {
     eprintln!("[native.execution_refused] run={} call={} error={diagnostic}",request.run_id,request.call_id);
+    host.reject_owned_task_budget(&request.run_id, diagnostic);
     match host.native_batches.refusal_receipt(&host.database,envelope,request,diagnostic) {
         Ok(receipt)=>Some(receipt),
         Err(error)=>{
@@ -943,6 +944,7 @@ pub(super) fn dispatch(host: &super::RuntimeHost, stdin: &Arc<Mutex<std::process
                                     let outcome = host.state.lock().map_err(|_| "runtime state poisoned".to_owned())
                                         .and_then(|state|state.cancellation.tool_token(&request.run_id,&request.call_id))
                                         .and_then(|token|execute_native_reader(&host.database,&binding,&request,&token));
+                                    if let Err(error) = &outcome { host.reject_owned_task_budget(&request.run_id, error); }
                                     match record_result(&host.database,&request,&outcome.unwrap_or_else(failure)) {
                                         Ok(response) => answer(&host,&stdin,&envelope,Ok(response)),
                                         Err(error) => host.handle_worker_transport_crash(&stdin,error),
@@ -957,12 +959,19 @@ pub(super) fn dispatch(host: &super::RuntimeHost, stdin: &Arc<Mutex<std::process
                                     &host.yuxi_client, execute);
                                 let committed = host.database.with_connection(|connection| {
                                     let rows = positions(connection, &request.run_id, &request.batch_id)?;
-                                    if position(&rows, &request.call_id)?.result.is_none() {
-                                        return Err(invalid("native executor returned without a committed result"));
-                                    }
-                                    Ok(())
+                                    position(&rows, &request.call_id)?.result.clone()
+                                        .ok_or_else(|| invalid("native executor returned without a committed result"))
                                 });
-                                if let Err(error) = committed { host.handle_worker_transport_crash(&stdin,error); }
+                                match committed {
+                                    Ok(result) => {
+                                        if let Ok(body) = serde_json::from_str::<Value>(&result) {
+                                            if body["isError"] == true {
+                                                host.reject_owned_task_budget(&request.run_id, &result);
+                                            }
+                                        }
+                                    }
+                                    Err(error) => host.handle_worker_transport_crash(&stdin,error),
+                                }
                             }
                         }
                         Ok(Claim::Replay(response)) => answer(&host, &stdin, &envelope, Ok(response)),
@@ -990,6 +999,9 @@ pub(super) fn dispatch(host: &super::RuntimeHost, stdin: &Arc<Mutex<std::process
 fn answer(host: &super::RuntimeHost, stdin: &Arc<Mutex<std::process::ChildStdin>>, envelope: &RuntimeEnvelope,
     response: Result<Value, String>) {
     let body = response.unwrap_or_else(failure);
+    if let (Some(run), Some(error)) = (envelope.run_id.as_deref(), body.get("error").and_then(Value::as_str)) {
+        host.reject_owned_task_budget(run, error);
+    }
     let kind = if body["isError"] == true { "native_batch.refused" } else {
         match envelope.r#type.as_str() {
             TOOL_BATCH_REGISTER => "tool_batch.registered", TOOL_CALL_CLOSE => "tool_call.closed",

@@ -10311,17 +10311,17 @@ fn validate_managed_tool_acquisition_with_clock(
         .optional()?;
     if let Some((started_at, max_duration)) = child_duration {
         if wall_clock { enforce_completion_deadline(transaction, run_id, "child_run", started_at, max_duration, now)?; }
-        return Ok(());
     }
 
     let digital_budget = transaction
         .query_row(
             "SELECT r.started_at, r.budget_json, t.colleague_id,
                     t.total_tokens, t.output_tokens,
-                    (SELECT COUNT(*) FROM tool_calls calls WHERE calls.run_id = t.run_id)
+                    (SELECT COUNT(*) FROM tool_calls calls JOIN runs member ON member.id = calls.run_id
+                     WHERE member.id = t.run_id OR (member.root_run_id = t.run_id AND member.run_kind = 'child'))
              FROM digital_colleague_triggers t
              JOIN runs r ON r.id = t.run_id
-             WHERE t.run_id = ?1",
+             WHERE t.run_id = (SELECT CASE WHEN run_kind = 'child' THEN root_run_id ELSE id END FROM runs WHERE id = ?1)",
             [run_id],
             |row| {
                 Ok((
@@ -10431,17 +10431,17 @@ fn enforce_managed_run_completion_budget(
         .optional()?;
     if let Some((started_at, max_duration)) = child_duration {
         enforce_completion_deadline(transaction, run_id, "child_run", started_at, max_duration, now)?;
-        return Ok(());
     }
 
     let digital_budget = transaction
         .query_row(
             "SELECT r.started_at, r.budget_json, t.colleague_id,
                     t.total_tokens, t.output_tokens,
-                    (SELECT COUNT(*) FROM tool_calls calls WHERE calls.run_id = t.run_id)
+                    (SELECT COUNT(*) FROM tool_calls calls JOIN runs member ON member.id = calls.run_id
+                     WHERE member.id = t.run_id OR (member.root_run_id = t.run_id AND member.run_kind = 'child'))
              FROM digital_colleague_triggers t
              JOIN runs r ON r.id = t.run_id
-             WHERE t.run_id = ?1",
+             WHERE t.run_id = (SELECT CASE WHEN run_kind = 'child' THEN root_run_id ELSE id END FROM runs WHERE id = ?1)",
             [run_id],
             |row| {
                 Ok((

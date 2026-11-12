@@ -101,12 +101,26 @@ fn ensure_granted_inner(
     let Some(scope) = super::companion_ownership::resolve_run_on(connection, run_id)? else {
         return Ok(());
     };
+    if scope.is_child && matches!(tool,
+        "companion_profile_update" | "companion_task_create" | "companion_task_update"
+        | "companion_task_pause" | "companion_task_resume" | "companion_task_run_now"
+        | "companion_task_delete" | "memory_write" | "note_organize") {
+        return Err(format!("子任务不可使用工具 {tool}"));
+    }
+    let frozen = run_snapshot_on(connection, run_id)?;
+    if scope.is_child && frozen.is_none() {
+        return Err(format!("工具 {tool} 的本轮能力快照缺失，无法按原授权恢复此批准；请重新发起对话"));
+    }
+    if frozen.as_ref().and_then(|snapshot| snapshot.allowed_tools.as_ref())
+        .is_some_and(|tools| !tools.iter().any(|name| name == tool)) {
+        return Err(format!("工具 {tool} 不在本轮冻结的工具目录中"));
+    }
     let companion = scope.companion_id;
     let Some(required) = required_capability(tool, input)? else { return Ok(()) };
     let current = current_capability_ids_on(connection, &companion)?;
-    let snapshot = match run_snapshot_on(connection, run_id)? {
-        Some(snapshot) => snapshot,
-        None if strict_snapshot => {
+    let snapshot = match frozen {
+        Some(snapshot) => snapshot.capabilities,
+        None if strict_snapshot || scope.is_child => {
             return Err(format!("工具 {tool} 的本轮能力快照缺失，无法按原授权恢复此批准；请重新发起对话"));
         }
         None => current.clone(),
@@ -169,6 +183,13 @@ pub(crate) fn invalidate_companion_capability_in_tx(
                UNION ALL
                SELECT 1 FROM digital_colleagues dc WHERE dc.conversation_id = t.conversation_id AND dc.companion_bound = 1
                  AND (?1 IS NULL OR dc.companion_id = ?1)
+               UNION ALL
+               SELECT 1 FROM runs root
+               JOIN conversations c ON c.id = root.conversation_id
+               LEFT JOIN digital_colleagues dc ON dc.conversation_id = c.id AND dc.companion_bound = 1
+               WHERE r.run_kind = 'child' AND root.id = r.root_run_id
+                 AND COALESCE(c.companion_id, dc.companion_id) IS NOT NULL
+                 AND (?1 IS NULL OR COALESCE(c.companion_id, dc.companion_id) = ?1)
            )",
     )?;
     let rows = query.query_map(params![companion_id], |row| Ok((
@@ -205,16 +226,35 @@ fn current_capability_ids_on(connection: &Connection, companion_id: &str) -> Res
     rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
 }
 
-fn run_snapshot_on(connection: &Connection, run_id: &str) -> Result<Option<Vec<String>>, String> {
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum StoredSnapshot {
+    Legacy(Vec<String>),
+    Catalog { capabilities: Vec<String>, #[serde(rename = "allowedTools")] allowed_tools: Vec<String> },
+}
+
+struct CompanionSnapshot {
+    capabilities: Vec<String>,
+    allowed_tools: Option<Vec<String>>,
+}
+
+fn parse_snapshot(json: &str) -> Result<CompanionSnapshot, String> {
+    let stored: StoredSnapshot = serde_json::from_str(json)
+        .map_err(|error| format!("运行的能力快照无法读取: {error}"))?;
+    Ok(match stored {
+        StoredSnapshot::Legacy(capabilities) => CompanionSnapshot { capabilities, allowed_tools: None },
+        StoredSnapshot::Catalog { capabilities, allowed_tools } => CompanionSnapshot { capabilities, allowed_tools: Some(allowed_tools) },
+    })
+}
+
+fn run_snapshot_on(connection: &Connection, run_id: &str) -> Result<Option<CompanionSnapshot>, String> {
     let raw: Option<Option<String>> = connection.query_row(
         "SELECT companion_tools_snapshot FROM runs WHERE id = ?1",
         [run_id],
         |row| row.get(0),
     ).optional().map_err(|error| error.to_string())?;
     match raw.flatten() {
-        Some(json) => serde_json::from_str(&json)
-            .map(Some)
-            .map_err(|error| format!("运行的能力快照无法读取: {error}")),
+        Some(json) => parse_snapshot(&json).map(Some),
         None => Ok(None),
     }
 }
@@ -316,9 +356,53 @@ impl Database {
         })
     }
 
+    pub fn freeze_run_companion_catalog(&self, run_id: &str, capability_ids: &[String], allowed_tools: &[String]) -> Result<(), String> {
+        let json = crate::canonical_json::to_string(&serde_json::json!({
+            "capabilities": capability_ids, "allowedTools": allowed_tools,
+        })).map_err(|error| error.to_string())?;
+        self.with_connection(|connection| {
+            connection.execute(
+                "UPDATE runs SET companion_tools_snapshot = ?2 WHERE id = ?1 AND companion_tools_snapshot IS NULL",
+                params![run_id, json],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn freeze_child_companion_tools(&self, child_run_id: &str, parent_run_id: &str) -> Result<(), String> {
+        self.with_connection(|connection| {
+            let snapshot: Option<String> = connection.query_row(
+                "SELECT companion_tools_snapshot FROM runs WHERE id = ?1", [parent_run_id], |row| row.get(0),
+            ).optional()?.flatten();
+            let snapshot = snapshot.ok_or_else(|| grant_rejection("父任务的能力快照缺失"))?;
+            parse_snapshot(&snapshot)
+                .map_err(|_| grant_rejection("父任务的能力快照无法读取"))?;
+            let changed = connection.execute(
+                "UPDATE runs SET companion_tools_snapshot = ?3
+                 WHERE id = ?1 AND parent_run_id = ?2 AND run_kind = 'child' AND companion_tools_snapshot IS NULL",
+                params![child_run_id, parent_run_id, snapshot],
+            )?;
+            if changed == 0 {
+                let existing: Option<String> = connection.query_row(
+                    "SELECT companion_tools_snapshot FROM runs WHERE id = ?1 AND parent_run_id = ?2 AND run_kind = 'child'",
+                    params![child_run_id, parent_run_id], |row| row.get(0),
+                ).optional()?.flatten();
+                if existing.as_deref() != Some(snapshot.as_str()) {
+                    return Err(grant_rejection("子任务的能力快照与父任务不一致"));
+                }
+            }
+            Ok(())
+        })
+    }
+
     pub fn run_companion_tools_snapshot(&self, run_id: &str) -> Result<Option<Vec<String>>, String> {
         let connection = self.connection.lock().map_err(|_| "database lock is poisoned".to_owned())?;
-        run_snapshot_on(&connection, run_id)
+        Ok(run_snapshot_on(&connection, run_id)?.map(|snapshot| snapshot.capabilities))
+    }
+
+    pub fn run_companion_tool_catalog(&self, run_id: &str) -> Result<Option<Vec<String>>, String> {
+        let connection = self.connection.lock().map_err(|_| "database lock is poisoned".to_owned())?;
+        Ok(run_snapshot_on(&connection, run_id)?.and_then(|snapshot| snapshot.allowed_tools))
     }
 
     pub fn ensure_companion_tool_granted(&self, run_id: &str, tool: &str, input: Option<&Value>) -> Result<(), String> {
@@ -362,6 +446,43 @@ mod tests {
             self.db.apply_runtime_event(&started.run.id, 1, &json!({"type":"run.started"})).unwrap();
             started.run.id
         }
+    }
+
+    #[test]
+    fn frozen_catalog_is_write_once_and_legacy_snapshots_remain_readable() {
+        use crate::database::{ChildRunBudget, CreateChildRunInput};
+        let f = Fixture::new();
+        f.db.set_companion_tool_grant(&f.companion, WEB_SERVER_ID, "web_search", true).unwrap();
+        let run = f.running_run();
+        let capabilities = vec!["web_search".to_owned()];
+        let allowed = vec!["read".to_owned(), "web_search".to_owned()];
+        f.db.freeze_run_companion_catalog(&run, &capabilities, &allowed).unwrap();
+        f.db.freeze_run_companion_catalog(&run, &[], &["write_file".to_owned()]).unwrap();
+        assert_eq!(f.db.run_companion_tools_snapshot(&run).unwrap(), Some(capabilities));
+        assert_eq!(f.db.run_companion_tool_catalog(&run).unwrap(), Some(allowed));
+        f.db.ensure_companion_tool_granted(&run, "read", None).unwrap();
+        f.db.ensure_companion_tool_granted(&run, "web_search", None).unwrap();
+        assert!(f.db.ensure_companion_tool_granted(&run, "write_file", None).unwrap_err().contains("工具目录"));
+        f.db.create_host_tool_call(&run, "delegate", "child_run_start", &json!({}), "running", false).unwrap();
+        let budget = ChildRunBudget { max_duration_ms: 30_000, max_total_tokens: 4_000, max_output_tokens: 1_000, max_tool_calls: 4 };
+        let (child, _, _) = f.db.create_child_run(CreateChildRunInput {
+            parent_run_id: &run, tool_call_id: "delegate", worker_agent_id: "fox-general",
+            objective: "Inspect", context: "Inspect", budget: &budget,
+            team_run_id: None, team_member_id: None, allowed_tools: None,
+        }).unwrap();
+        f.db.freeze_child_companion_tools(&child.run.id, &run).unwrap();
+        f.db.freeze_child_companion_tools(&child.run.id, &run).unwrap();
+        assert_eq!(f.db.run_companion_tool_catalog(&child.run.id).unwrap(), Some(vec!["read".to_owned(), "web_search".to_owned()]));
+        assert!(f.db.ensure_companion_tool_granted(&child.run.id, "write_file", None).is_err());
+        f.db.apply_runtime_event(&run, 2, &json!({"type":"run.completed"})).unwrap();
+        let legacy = f.running_run();
+        f.db.freeze_run_companion_tools(&legacy, &["web_search".to_owned()]).unwrap();
+        f.db.freeze_run_companion_catalog(&legacy, &[], &[]).unwrap();
+        assert_eq!(f.db.run_companion_tools_snapshot(&legacy).unwrap(), Some(vec!["web_search".to_owned()]));
+        assert_eq!(f.db.run_companion_tool_catalog(&legacy).unwrap(), None);
+        f.db.ensure_companion_tool_granted(&legacy, "write_file", None).unwrap();
+        drop(f.db);
+        std::fs::remove_dir_all(f.root).unwrap();
     }
 
     #[test]

@@ -77,13 +77,6 @@ import type {
   ExpertPackageVersionRecord,
   ExpertWorkflowSnapshot,
   ExpertTeamSnapshot,
-  CreateDigitalColleagueInput,
-  DigitalColleagueAuditRecord,
-  DigitalColleagueChannelCreated,
-  DigitalColleagueChannelRecord,
-  DigitalColleagueRecord,
-  DigitalColleagueScheduleRecord,
-  DigitalColleagueTriggerRecord,
   AppNotificationRecord,
   GlobalSearchRecord,
   MessageFeedbackRecord,
@@ -536,36 +529,6 @@ export const desktopClient = {
     command<ExpertTeamSnapshot | null>('expert_team_get', { conversationId }),
   cancelExpertTeam: (teamRunId: string, reason = '') =>
     command<ExpertTeamSnapshot>('expert_team_cancel', { teamRunId, reason }),
-  listDigitalColleagues: () =>
-    command<DigitalColleagueRecord[]>('digital_colleagues_list'),
-  createDigitalColleague: (request: CreateDigitalColleagueInput) =>
-    command<DigitalColleagueRecord>('digital_colleague_create', request),
-  updateDigitalColleague: (request: { colleagueId: string; name: string; objective: string; maxRunsPerDay: number; maxTokensPerDay: number; maxDurationMs: number; maxOutputTokens: number; maxToolCalls: number }) =>
-    command<DigitalColleagueRecord>('digital_colleague_update', request),
-  setDigitalColleaguePaused: (colleagueId: string, paused: boolean) =>
-    command<DigitalColleagueRecord>('digital_colleague_set_paused', { colleagueId, paused }),
-  revokeDigitalColleague: (colleagueId: string, reason = '') =>
-    command<DigitalColleagueRecord>('digital_colleague_revoke', { colleagueId, reason }),
-  listDigitalColleagueSchedules: (colleagueId: string) =>
-    command<DigitalColleagueScheduleRecord[]>('digital_colleague_schedules_list', { colleagueId }),
-  saveDigitalColleagueSchedule: (request: { scheduleId?: string; colleagueId: string; name: string; intervalSeconds: number; catchupWindowSeconds?: number; enabled?: boolean }) =>
-    command<DigitalColleagueScheduleRecord>('digital_colleague_schedule_save', request),
-  listDigitalColleagueChannels: (colleagueId: string) =>
-    command<DigitalColleagueChannelRecord[]>('digital_colleague_channels_list', { colleagueId }),
-  createDigitalColleagueChannel: (request: { colleagueId: string; name: string; channelKind: 'webhook' | 'im_bridge'; externalIdentity: string; rateLimitPerMinute?: number }) =>
-    command<DigitalColleagueChannelCreated>('digital_colleague_channel_create', request),
-  revokeDigitalColleagueChannel: (channelId: string) =>
-    command<DigitalColleagueChannelRecord>('digital_colleague_channel_revoke', { channelId }),
-  triggerDigitalColleague: (colleagueId: string, payload: unknown = {}, idempotencyKey?: string) =>
-    command<DigitalColleagueTriggerRecord>('digital_colleague_trigger_manual', { colleagueId, payload, idempotencyKey }),
-  triggerDigitalColleagueChannel: (request: { channelId: string; senderId: string; timestamp: number; idempotencyKey: string; signature: string; payload?: unknown }) =>
-    command<DigitalColleagueTriggerRecord>('digital_colleague_trigger_channel', request),
-  listDigitalColleagueTriggers: (colleagueId: string) =>
-    command<DigitalColleagueTriggerRecord[]>('digital_colleague_triggers_list', { colleagueId }),
-  getDigitalColleagueRunDetail: (runId: string) =>
-    command<ConversationDetail>('digital_colleague_run_detail', { runId }),
-  listDigitalColleagueAudit: (colleagueId: string) =>
-    command<DigitalColleagueAuditRecord[]>('digital_colleague_audit_list', { colleagueId }),
   listSkills: (agentId: string) => command<SkillRecord[]>('skills_list', { agentId }),
   setSkillEnabled: (agentId: string, skillId: string, enabled: boolean) =>
     command<SkillRecord[]>('skill_set_enabled', { agentId, skillId, enabled }),

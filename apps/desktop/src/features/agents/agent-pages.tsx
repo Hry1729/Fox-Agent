@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Brain, CalendarDays, CheckCircle2, Clock3, Code2, Copy, Database, Download, FileUp, Folder, Globe2, History, Images, Info, LoaderCircle, MessageSquareText, Pencil, Plus, Puzzle, RefreshCw, RotateCcw, Search, Settings2, Sparkles, Trash2, Wrench } from 'lucide-react'
+import { Brain, CalendarDays, CheckCircle2, Code2, Copy, Database, Download, FileUp, Folder, Globe2, History, Images, Info, LoaderCircle, MessageSquareText, Pencil, Plus, Puzzle, RefreshCw, RotateCcw, Search, Settings2, Sparkles, Trash2, Wrench } from 'lucide-react'
 import { notify as toast } from '@/features/notifications'
 import { readDeveloperUi } from '@/features/chat/developer-ui'
 import { Badge } from '@/components/ui/badge'
@@ -23,7 +23,6 @@ import { useAgents } from './use-agents'
 import { asAgentCard as asCard } from './agent-card-data'
 import { expertCatalogAgents } from './agent-classification'
 import { useExpertIcons } from './use-expert-icons'
-import { DigitalColleagueManager } from './digital-colleague-manager'
 import { useMcpServers } from '@/features/settings/use-mcp-servers'
 import { useSkills } from '@/features/settings/use-skills'
 import { useKnowledgeBases } from '@/features/knowledge/use-knowledge'
@@ -1129,7 +1128,6 @@ export function AgentListPage({ sidebarCollapsed, onSidebar, navigate }: { sideb
   const [packagePreview, setPackagePreview] = useState<ExpertPackagePreview | null>(null)
   const [pendingPackage, setPendingPackage] = useState<Record<string, unknown> | null>(null)
   const [packageBusy, setPackageBusy] = useState(false)
-  const [digitalColleaguesOpen, setDigitalColleaguesOpen] = useState(false)
   const normalizedQuery = query.trim().toLocaleLowerCase()
   const filteredCards = cards.filter((agent) => {
     if (availability === 'available' && !agent.available) return false
@@ -1214,14 +1212,12 @@ export function AgentListPage({ sidebarCollapsed, onSidebar, navigate }: { sideb
             <Button variant="outline" size="icon" className="fox-agent-refresh" disabled={resource.syncing} title="刷新" aria-label="刷新" onClick={() => void resource.refresh()}>{resource.syncing ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}</Button>
             <input ref={packageInputRef} hidden type="file" accept=".foxexpert,.json,application/json" onChange={(event) => void inspectPackageFile(event.target.files?.[0])} />
             <Button variant="outline" disabled={packageBusy || !desktopRuntimeAvailable} onClick={() => packageInputRef.current?.click()}>{packageBusy ? <LoaderCircle className="animate-spin" /> : <FileUp />}导入能力包</Button>
-            <Button variant="outline" disabled={!desktopRuntimeAvailable} onClick={() => setDigitalColleaguesOpen(true)}><Clock3 />数字同事</Button>
             <Button onClick={openCreate}><Plus />新建专家</Button>
           </div>
         </div>
         {resource.error && <FoxEmptyState variant="error" title="专家加载失败" description={resource.error} action={<Button variant="outline" size="sm" onClick={() => void resource.refresh()}>重试</Button>} />}
         {resource.loading && cards.length === 0 ? <SkeletonContent label="正在加载专家…" lines={4} avatar /> : filteredCards.length ? <div className="fox-entity-grid fox-shadcn-entity-grid">{filteredCards.map((agent) => <AgentCard key={agent.id} agent={agent} onUse={() => navigate('chat', agent.id)} onViewDetail={() => openView(agent)} />)}</div> : !resource.error && <FoxEmptyState className="fox-page-empty" variant={cards.length ? 'search' : 'empty'} title={cards.length ? '没有符合当前筛选条件的专家' : '暂无可用专家'} description={cards.length ? '调整关键词、状态、环境或分类后再试。' : '新建专家，或导入专家能力包后开始使用。'} action={<Button onClick={openCreate}><Plus />新建专家</Button>} />}
       </section>
-      <DigitalColleagueManager open={digitalColleaguesOpen} onOpenChange={setDigitalColleaguesOpen} experts={resource.agents} />
       <AgentDetailDialog agent={detailAgent} open={detailOpen} onOpenChange={setDetailOpen} onManage={enterManage} onUse={(agent) => { setDetailOpen(false); navigate('chat', agent.id) }} />
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent className="fox-agent-editor-dialog">

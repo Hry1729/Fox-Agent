@@ -265,22 +265,6 @@ pub struct DigitalColleagueScheduleRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DigitalColleagueChannelRecord {
-    pub id: String,
-    pub colleague_id: String,
-    pub name: String,
-    pub channel_kind: String,
-    pub external_identity: String,
-    pub secret_prefix: String,
-    pub rate_limit_per_minute: i64,
-    pub status: String,
-    pub created_at: i64,
-    pub updated_at: i64,
-    pub revoked_at: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct DigitalColleagueTriggerRecord {
     pub id: String,
     pub colleague_id: String,
@@ -302,6 +286,7 @@ pub struct DigitalColleagueTriggerRecord {
     pub completed_at: Option<i64>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DigitalColleagueAuditRecord {

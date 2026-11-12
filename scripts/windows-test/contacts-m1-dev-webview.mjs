@@ -37,6 +37,33 @@ async function openContactNotes(displayName) {
   return { name, workspace, usage: title.textContent.trim() }
 }
 
+async function readXiaoFoxProfile(displayName) {
+  const until = Date.now() + 25_000
+  async function visible(label, select) {
+    while (Date.now() < until) {
+      const element = select()
+      if (element?.getClientRects().length) return element
+      await new Promise(done => setTimeout(done, 100))
+    }
+    throw new Error('联系人界面未显示' + label)
+  }
+  const contact = () => Array.from(document.querySelectorAll('.fox-contact-link'))
+    .find(button => button.querySelector('.fox-contact-row-name')?.textContent === displayName)
+  const entry = await visible('联系人或引导入口', () => contact() || document.querySelector('.fox-onboarding-skip'))
+  if (entry.matches('.fox-onboarding-skip')) entry.click()
+  const link = await visible('已改名的联系人', contact)
+  link.click()
+  const heading = await visible('私聊名称', () => Array.from(document.querySelectorAll('.fox-contact-heading'))
+    .find(button => button.title === displayName))
+  const panelSelector = '.fox-contact-side-card'
+  if (!document.querySelector(panelSelector)) heading.click()
+  const settings = await visible('联系人设置按钮', () => document.querySelector(panelSelector + ' button[aria-label="设置"]'))
+  settings.click()
+  const duty = await visible('职责', () => document.querySelector(panelSelector + ' textarea[aria-label="职责"]'))
+  const preference = await visible('沟通偏好', () => document.querySelector(panelSelector + ' textarea[aria-label="沟通偏好"]'))
+  return { displayName: heading.title, duty: duty.value, personaOverride: preference.value }
+}
+
 const bridge = {
   name:'fox-contacts-isolated-acceptance',
   apply:'serve',
@@ -51,7 +78,9 @@ const bridge = {
         if (own?.workspaceDir?.replaceAll('\\\\','/').toLowerCase().startsWith(${JSON.stringify(expected)})) {
           hot.on('contacts:invoke',async ({id,command,args}) => {
             try {
-              const value = command === 'acceptance.open_contact_notes'
+              const value = command === 'acceptance.read_xiaofox_profile'
+                ? {ok:true, data:await (${readXiaoFoxProfile.toString()})(args.displayName)}
+                : command === 'acceptance.open_contact_notes'
                 ? {ok:true, data:await (${openContactNotes.toString()})(args.displayName)}
                 : await ipc.invoke(command,args)
               hot.send('contacts:reply',{id,value})

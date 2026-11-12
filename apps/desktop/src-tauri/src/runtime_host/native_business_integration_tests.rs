@@ -16,6 +16,7 @@ use tauri::Manager;
 const TEST: &str = "runtime_host::native_business_integration_tests::native_worker_child_collect_inherits_binding_and_preserves_sibling";
 const CHILD_ENV: &str = "FOX_TEST_NATIVE_BUSINESS_CHILD";
 const PARENT: &str = "[FOX_U09_PARENT]";
+const COMPANION_PARENT: &str = "[FOX_A23_COMPANION_PARENT]";
 const NEXT: &str = "[FOX_U09_PARENT_NEXT]";
 const CHILD: &str = "[FOX_U09_CHILD]";
 const SIBLING: &str = "[FOX_U09_SIBLING]";
@@ -50,13 +51,17 @@ fn receipt(database: &Database, run: &str, call: &str) -> Value {
 
 fn native_run(database: &Database, conversation: &str, prompt: &str) -> StartRunResult {
     let started = database.create_run(conversation, prompt, None).unwrap();
+    freeze_native_run(database, &started.run.id);
+    started
+}
+
+fn freeze_native_run(database: &Database, run_id: &str) {
     let mut budgets = TimeBudgets::continuous();
     budgets.restrict_execution_ms(60_000);
-    let binding = database.freeze_default_run_control_for_engine(&started.run.id, "legacy", budgets, "pi").unwrap();
+    let binding = database.freeze_default_run_control_for_engine(run_id, "legacy", budgets, "pi").unwrap();
     assert_eq!(binding.authority, ExecutionAuthority::Authoritative);
     assert_eq!(binding.executor_route, Some(ExecutorRoute::PiNative));
     assert_eq!(binding.read_only_executor, ResourceExecutor::Rust);
-    started
 }
 
 fn start(host: &RuntimeHost, started: &StartRunResult, prompt: &str, root: &Path) {
@@ -108,7 +113,7 @@ fn marker(body: &Value) -> Result<&'static str, String> {
     let latest = body["messages"].as_array().ok_or("provider request has no messages")?.iter().rev()
         .find(|message| message["role"] == "user").ok_or("provider request has no user message")?;
     let latest = text(&latest["content"])?;
-    [NEXT, CHILD, SIBLING, PARENT, JOB].into_iter().find(|marker| latest.contains(*marker))
+    [NEXT, CHILD, SIBLING, PARENT, COMPANION_PARENT, JOB].into_iter().find(|marker| latest.contains(*marker))
         .ok_or_else(|| "provider request has no isolated business marker".into())
 }
 
@@ -192,6 +197,11 @@ impl ProviderShared {
 
     fn reply(&self, body: &Value) -> Result<Reply, String> {
         let marker = marker(body)?;
+        if marker == COMPANION_PARENT {
+            self.record(marker, "parent-started", body)?;
+            self.wait_gate("companion-parent-final")?;
+            return Ok(Reply::Text("Companion finished collecting its child".into()));
+        }
         if marker == JOB {
             let Some(started) = tool_json(body, "u09-job-start")? else {
                 self.record(marker, "job-start-requested", body)?;
@@ -364,6 +374,100 @@ impl Drop for Provider {
 
 struct HostCleanup(RuntimeHost);
 impl Drop for HostCleanup { fn drop(&mut self) { let _ = self.0.shutdown(); } }
+
+fn assert_companion_child_collects_on_shared_sidecar(
+    host: &RuntimeHost,
+    database: &Database,
+    provider: &Provider,
+    root: &Path,
+    sibling_conversation: &str,
+) {
+    let companion = database.create_blank_companion(root).unwrap();
+    let workspace = Path::new(&companion.profile.workspace_dir);
+    crate::companion_workspace::repair(database, root, &companion.profile.id).unwrap();
+    std::fs::write(workspace.join("child-proof.txt"), CHILD_PROOF).unwrap();
+    let task = database.create_digital_colleague(&crate::database::CreateDigitalColleagueInput {
+        name: "Companion evidence review".into(),
+        expert_id: String::new(),
+        objective: COMPANION_PARENT.into(),
+        project_id: None,
+        project_root: None,
+        knowledge_references: Vec::new(),
+        max_runs_per_day: 8,
+        max_tokens_per_day: 100_000,
+        max_duration_ms: 60_000,
+        max_output_tokens: 512,
+        max_tool_calls: 16,
+        companion_id: Some(companion.profile.id.clone()),
+    }).unwrap();
+    provider.shared.gates.lock().unwrap().remove("sibling-final");
+    provider.shared.state.lock().unwrap().events.clear();
+    let sibling = native_run(database, sibling_conversation, SIBLING);
+    start(host, &sibling, SIBLING, root);
+    wait_for("companion test sibling holds one global execution slot", || provider.observed(SIBLING, "sibling-read"));
+
+    for background in [false, true] {
+        provider.shared.gates.lock().unwrap().remove("child-final");
+        provider.shared.gates.lock().unwrap().remove("companion-parent-final");
+        provider.shared.state.lock().unwrap().events.clear();
+        let parent = if background {
+            let parent = database.accept_digital_colleague_trigger(
+                &task.id, "manual", None, "manual:a23-delegate", &json!({}), None, "user",
+            ).unwrap().prepared.expect("dispatch companion task").started;
+            freeze_native_run(database, &parent.run.id);
+            parent
+        } else {
+            native_run(database, &companion.conversation_id, COMPANION_PARENT)
+        };
+        start(host, &parent, &parent.user_message.content, root);
+        wait_for("companion parent holds its slot", || provider.observed(COMPANION_PARENT, "parent-started"));
+        let (started, child, created) = database.create_child_run(crate::database::CreateChildRunInput {
+            parent_run_id: &parent.run.id,
+            tool_call_id: "a23-fixture-start",
+            worker_agent_id: "fox-general",
+            objective: &format!("{CHILD} Read child-proof.txt and report only its actual proof."),
+            context: "Use the workspace inherited from the parent.",
+            budget: &normalized_child_budget(Some(&json!({"maxDurationMs":30_000})), 512).unwrap(),
+            team_run_id: None,
+            team_member_id: None,
+            allowed_tools: None,
+        }).unwrap();
+        assert!(created);
+        let child_id = child.child_run_id.clone();
+        host.start_child_runtime(started, child, parent.run.conversation_id.clone()).unwrap();
+        wait_for("companion child queues behind the two occupied slots", || host.state.lock().unwrap()
+            .queued_runs.iter().any(|queued| queued.started.run.id == child_id));
+        assert_eq!(status(database, &child_id), "queued");
+
+        let database_for_collect = database.clone();
+        let state_for_collect = host.state.clone();
+        let parent_id = parent.run.id.clone();
+        let requested = HashSet::from([child_id.clone()]);
+        let collect = thread::spawn(move || wait_for_child_runs(
+            &database_for_collect, &state_for_collect, &parent_id, &requested, 30_000,
+        ));
+        wait_for("real child sidecar reads while its companion parent waits", || provider.observed(CHILD, "child-read"));
+        {
+            let state = host.state.lock().unwrap();
+            let worker = state.worker.as_ref().unwrap();
+            assert!(worker.sessions.by_run(&parent.run.id).unwrap().waiting);
+            assert_eq!(worker.sessions.by_run(&child_id).unwrap().companion_id, None);
+            assert!(worker.sessions.holds_companion(&companion.profile.id));
+        }
+        provider.release("child-final");
+        let records = collect.join().unwrap().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].child_run_id, child_id);
+        assert_eq!(records[0].status, "completed");
+        assert!(records[0].result_text.as_deref().unwrap().contains(CHILD_PROOF));
+        assert!(!host.state.lock().unwrap().worker.as_ref().unwrap().sessions.by_run(&parent.run.id).unwrap().waiting);
+        provider.release("companion-parent-final");
+        wait_for("companion parent releases after collect", || status(database, &parent.run.id) == "completed"
+            && host.state.lock().unwrap().worker.as_ref().unwrap().sessions.by_run(&parent.run.id).is_none());
+    }
+    provider.release("sibling-final");
+    wait_for("companion test sibling completes", || status(database, &sibling.run.id) == "completed");
+}
 
 #[test]
 fn native_worker_child_collect_inherits_binding_and_preserves_sibling() {
@@ -542,6 +646,7 @@ fn native_worker_child_collect_inherits_binding_and_preserves_sibling() {
         params![parent_run.run.id,child_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
     )).unwrap();
     assert_eq!(counts,(1,1,1,1));
+    assert_companion_child_collects_on_shared_sidecar(&host, &database, &provider, &root, &sibling_conversation.id);
     let provider_state = provider.shared.state.lock().unwrap();
     std::fs::write(root.join("business-result.json"),crate::canonical_json::to_string(&json!({
         "parentRunId":parent_run.run.id,"childRunId":child_id,"siblingRunId":sibling.run.id,"continuationRunId":next.run.id,

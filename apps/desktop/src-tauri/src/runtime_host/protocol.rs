@@ -32,9 +32,6 @@ fn host_tool_is_supported(tool: &str) -> bool {
             | "query_knowledge_graph"
             | "list_mcp_tools"
             | "call_mcp_tool"
-            | "memory_search"
-            | "memory_propose"
-            | "memory_write" | "note_organize" | "note_search" | "note_read"
             | "child_agent_list"
             | "child_run_start"
             | "child_run_collect"
@@ -45,7 +42,8 @@ fn host_tool_is_supported(tool: &str) -> bool {
             | "team_collect"
             | "team_cancel"
             | "present_files"
-    ) || super::capability_tools::is_capability_tool(tool)
+    ) || super::is_memory_tool(tool)
+        || super::capability_tools::is_capability_tool(tool)
         || super::work_tools::is_work_tool(tool)
 }
 

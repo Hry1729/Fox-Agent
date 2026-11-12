@@ -150,6 +150,8 @@ pub(super) fn create_child_run_in_transaction(
     if parent_depth >= MAX_CHILD_DEPTH {
         return Err(rusqlite::Error::InvalidQuery);
     }
+    super::companion_ownership::resolve_run_on(transaction, input.parent_run_id)
+        .map_err(rusqlite::Error::InvalidParameterName)?;
     let worker_name: String = transaction.query_row(
                 "SELECT name FROM agents
                  WHERE id = ?1 AND runtime_type = 'pi'
@@ -929,6 +931,16 @@ mod tests {
         assert_eq!(child.depth, 1);
         assert_eq!(child.status, "queued");
         assert_ne!(started.run.conversation_id, parent.run.conversation_id);
+        assert_eq!(
+            database.run_companion_scope(&child.child_run_id).unwrap(),
+            None
+        );
+        assert_eq!(
+            database
+                .conversation_companion_scope(&started.run.conversation_id)
+                .unwrap(),
+            None
+        );
         assert!(started
             .user_message
             .content
@@ -1012,6 +1024,161 @@ mod tests {
 
         drop(database);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn companion_child_run_inherits_private_chat_scope_without_taking_its_slot() {
+        let (database, path, _) = test_database();
+        let workspace = path.with_extension("workspace");
+        let companion = database.create_blank_companion(&workspace).unwrap();
+        let parent = database
+            .create_run(
+                &companion.conversation_id,
+                "Coordinate independent research",
+                None,
+            )
+            .unwrap();
+        database
+            .apply_runtime_event(&parent.run.id, 1, &json!({"type": "run.started"}))
+            .unwrap();
+        let (started, child, _) = create_child(&database, &parent.run.id, "companion-delegation");
+        let scope = database
+            .run_companion_scope(&child.child_run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(scope.companion_id, companion.profile.id);
+        assert_eq!(scope.conversation_id, started.run.conversation_id);
+        assert!(scope.is_child);
+        assert!(!scope.background);
+        assert_eq!(
+            database
+                .conversation_companion_scope(&scope.conversation_id)
+                .unwrap(),
+            Some(scope.clone())
+        );
+        assert_eq!(
+            database.run_companion_slot(&parent.run.id).unwrap(),
+            Some((companion.profile.id.clone(), false))
+        );
+        assert_eq!(
+            database.run_companion_slot(&child.child_run_id).unwrap(),
+            None
+        );
+        assert_eq!(
+            database
+                .run_companion_profile_update_scope(&child.child_run_id)
+                .unwrap(),
+            None
+        );
+
+        database
+            .apply_runtime_event(&parent.run.id, 2, &json!({"type": "run.completed"}))
+            .unwrap();
+        assert_eq!(
+            database
+                .companion_active_run_ids(&companion.profile.id)
+                .unwrap(),
+            vec![child.child_run_id.clone()]
+        );
+        assert!(database
+            .companion_session_conversations(&companion.profile.id)
+            .unwrap()
+            .contains(&scope.conversation_id));
+
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE conversations SET parent_conversation_id = NULL WHERE id = ?1",
+                    [&scope.conversation_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let ownership_missing = super::super::companion_ownership::OWNERSHIP_MISSING;
+        assert!(database
+            .run_companion_slot(&child.child_run_id)
+            .unwrap_err()
+            .contains(ownership_missing));
+        assert!(database
+            .conversation_companion_scope(&scope.conversation_id)
+            .unwrap_err()
+            .contains(ownership_missing));
+        assert_eq!(
+            database
+                .companion_active_run_ids(&companion.profile.id)
+                .unwrap(),
+            vec![child.child_run_id]
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn companion_child_run_inherits_background_task_and_report_chat() {
+        let (database, path, _) = test_database();
+        let workspace = path.with_extension("workspace");
+        let companion = database.create_blank_companion(&workspace).unwrap();
+        let task = database
+            .create_digital_colleague(&crate::database::CreateDigitalColleagueInput {
+                name: "Release guardian".into(),
+                expert_id: String::new(),
+                objective: "Review the release".into(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: Vec::new(),
+                max_runs_per_day: 8,
+                max_tokens_per_day: 10_000,
+                max_duration_ms: 60_000,
+                max_output_tokens: 2_000,
+                max_tool_calls: 20,
+                companion_id: Some(companion.profile.id.clone()),
+            })
+            .unwrap();
+        let parent_run_id = database
+            .accept_digital_colleague_trigger(
+                &task.id,
+                "manual",
+                None,
+                "manual:delegate",
+                &json!({}),
+                None,
+                "user",
+            )
+            .unwrap()
+            .trigger
+            .run_id
+            .unwrap();
+        database
+            .apply_runtime_event(&parent_run_id, 1, &json!({"type": "run.started"}))
+            .unwrap();
+        let (_, child, _) = create_child(&database, &parent_run_id, "background-delegation");
+        let scope = database
+            .run_companion_scope(&child.child_run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(scope.companion_id, companion.profile.id);
+        assert_eq!(scope.conversation_id, child.child_conversation_id);
+        assert!(scope.is_child);
+        assert!(scope.background);
+        assert_eq!(scope.colleague_id.as_deref(), Some(task.id.as_str()));
+        assert_eq!(
+            scope.report_conversation_id.as_deref(),
+            Some(companion.conversation_id.as_str())
+        );
+        assert_eq!(
+            database.run_companion_slot(&child.child_run_id).unwrap(),
+            None
+        );
+        assert!(database
+            .companion_active_run_ids(&companion.profile.id)
+            .unwrap()
+            .contains(&child.child_run_id));
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[test]

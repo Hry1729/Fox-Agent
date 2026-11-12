@@ -735,10 +735,31 @@ pub(super) fn protect_restart_owners(transaction: &Transaction<'_>, now: i64, re
             [&run_id],
             |row| row.get(0),
         )?;
-        if !companion_stopped
-            && ((route == WriterRoute::Kernel && !retired_kernel)
-                || (route == WriterRoute::PiNative && waiting_approval(transaction, &run_id)?))
-        {
+        let native_waiting = !companion_stopped
+            && route == WriterRoute::PiNative
+            && waiting_approval(transaction, &run_id)?;
+        if native_waiting {
+            let scope = super::companion_ownership::resolve_run_on(transaction, &run_id);
+            if scope.is_err() || scope.is_ok_and(|scope| scope.is_some_and(|scope| scope.is_child)) {
+                // A companion child cannot recover an approval without its parent's workspace slot.
+                let active: bool = transaction.query_row(
+                    "SELECT status IN ('queued', 'running', 'cancelling') FROM runs WHERE id = ?1",
+                    [&run_id],
+                    |row| row.get(0),
+                )?;
+                if active {
+                    super::mark_run_interrupted_in_tx(
+                        transaction,
+                        &run_id,
+                        "runtime.application_restarted",
+                        "Fox closed before the run reached a terminal state.",
+                        now,
+                    )?;
+                }
+                continue;
+            }
+        }
+        if !companion_stopped && ((route == WriterRoute::Kernel && !retired_kernel) || native_waiting) {
             transaction.execute("INSERT INTO fox_restart_protected_runs(run_id) VALUES(?1)", [&run_id])?;
         }
     }

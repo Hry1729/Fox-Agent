@@ -54,7 +54,7 @@ test('the prompt distinguishes the read-only project view from a private profile
     usedChars: 4, notes: [{ id: 'a', author: 'user', content: '先看结论' }],
     topics: [{ id: 'b', title: '十月报价' }], snippets: [{ topicId: 'b', text: '由用户核对' }],
   }
-  const owner = companionMemoryPrompt({ ...facts, role: 'owner' })
+  const owner = companionMemoryPrompt({ ...facts, role: 'owner', canUpdateProfile: true, canWriteNotes: true })
   const reader = companionMemoryPrompt({ ...facts, role: 'reader' })
   assert.ok(owner.required.includes(facts.duty) && owner.required.includes('4/4000'))
   assert.match(owner.required, /私聊默认采用自然对话/)
@@ -74,6 +74,21 @@ test('the prompt distinguishes the read-only project view from a private profile
   assert.ok(!reader.required.includes(facts.duty) && !reader.required.includes(facts.personaOverride))
   assert.ok(!reader.required.includes('定时任务'))
   assert.equal(companionMemoryPrompt(null), null)
+})
+
+test('child prompt and catalog respect the parent tool subset', () => {
+  const allowedTools = ['read', 'note_read', 'web_search']
+  const context = { role: 'owner', canUpdateProfile: false, canWriteNotes: false, allowedTools,
+    displayName: '小狐', usedChars: 0, notes: [], topics: [], snippets: [] }
+  const selected = names(context)
+  assert.ok(selected.includes('read'))
+  assert.ok(selected.includes('note_read'))
+  for (const name of [...ownerReserved, 'memory_write', 'note_organize', 'note_search', 'write_file', 'web_read']) {
+    assert.ok(!selected.includes(name), name)
+  }
+  const prompt = companionMemoryPrompt(context).required
+  assert.doesNotMatch(prompt, /memory_write|note_organize|companion_profile_update|companion_task_/)
+  assert.match(prompt, /根运行处理/)
 })
 
 

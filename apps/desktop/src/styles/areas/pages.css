@@ -241,8 +241,7 @@
   transition: opacity var(--fox-duration-fast) var(--fox-ease-out);
 }
 
-.fox-agent-detail-page .fox-agent-work-list time,
-.fox-colleague-run-facts b {
+.fox-agent-detail-page .fox-agent-work-list time {
   font-variant-numeric: tabular-nums;
 }
 

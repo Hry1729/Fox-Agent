@@ -126,17 +126,7 @@ mod tests {
         }
 
         fn edit_input_in(&self, run: &str, call: &str, root: &Path) -> Value {
-            let path=format!("{call}.txt");
-            let before=format!("before-{call}");
-            std::fs::write(root.join(&path),&before).unwrap();
-            let binding=self.database().run_control_binding(run).unwrap().unwrap();
-            let cancellation=crate::kernel::CancellationRegistry::default();
-            cancellation.register_run(run).unwrap();
-            let token=cancellation.tool_token(run,&format!("observe-{call}")).unwrap();
-            super::super::managed_files::execute_observed_reader(self.database(),&binding,"read",&json!({"path":path}),
-                &format!("observe-{call}"),&token,Duration::from_secs(5)).unwrap();
-            json!({"path":path,"oldText":before,"newText":format!("after-{call}"),
-                "expectedVersion":crate::tool_host::file_version(before.as_bytes())})
+            observed_edit_input(self.database(), run, call, root)
         }
 
         fn wait(&self, complete: impl Fn()->bool) {
@@ -146,6 +136,20 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
+    }
+
+    fn observed_edit_input(database: &Database, run: &str, call: &str, root: &Path) -> Value {
+        let path=format!("{call}.txt");
+        let before=format!("before-{call}");
+        std::fs::write(root.join(&path),&before).unwrap();
+        let binding=database.run_control_binding(run).unwrap().unwrap();
+        let cancellation=crate::kernel::CancellationRegistry::default();
+        cancellation.register_run(run).unwrap();
+        let token=cancellation.tool_token(run,&format!("observe-{call}")).unwrap();
+        super::super::managed_files::execute_observed_reader(database,&binding,"read",&json!({"path":path}),
+            &format!("observe-{call}"),&token,Duration::from_secs(5)).unwrap();
+        json!({"path":path,"oldText":before,"newText":format!("after-{call}"),
+            "expectedVersion":crate::tool_host::file_version(before.as_bytes())})
     }
 
     impl Drop for Fixture {
@@ -486,6 +490,74 @@ mod tests {
         let denied:String=database.with_connection(|connection|connection.query_row(
             "SELECT status FROM approvals WHERE id=?1",[&approval_id],|row|row.get(0))).unwrap();
         assert_eq!(denied,"denied");
+    }
+
+    #[test]
+    fn companion_child_restart_interrupts_waiting_approval_without_changing_ordinary_children() {
+        let database = Database::open(":memory:".into()).unwrap();
+        let root = std::env::temp_dir().join(format!("fox-child-restart-{}", uuid::Uuid::new_v4()));
+        let contact = database.create_blank_companion(&root).unwrap();
+        let companion_workspace = Path::new(&contact.profile.workspace_dir);
+        let ordinary_workspace = root.join("ordinary");
+        std::fs::create_dir_all(companion_workspace).unwrap();
+        std::fs::create_dir_all(&ordinary_workspace).unwrap();
+        let ordinary = database.create_conversation(
+            database.default_agent_id(), None, ordinary_workspace.to_str(), Some("ask"),
+        ).unwrap();
+
+        let mut children = Vec::new();
+        for (conversation, workspace) in [
+            (&contact.conversation_id, companion_workspace), (&ordinary.id, ordinary_workspace.as_path()),
+        ] {
+            let parent = database.create_run(conversation, "Delegate an investigation", None).unwrap();
+            let (_, child, _) = database.create_child_run(CreateChildRunInput {
+                parent_run_id: &parent.run.id,
+                tool_call_id: "restart-delegation",
+                worker_agent_id: "fox-general",
+                objective: "Gather evidence",
+                context: "",
+                budget: &ChildRunBudget {
+                    max_duration_ms: 30_000,
+                    max_total_tokens: 4_000,
+                    max_output_tokens: 1_000,
+                    max_tool_calls: 4,
+                },
+                team_run_id: None,
+                team_member_id: None,
+                allowed_tools: None,
+            }).unwrap();
+            if conversation == &contact.conversation_id {
+                database.freeze_run_companion_catalog(
+                    &parent.run.id, &[], &["read".into(), "write_file".into()],
+                ).unwrap();
+                database.freeze_child_companion_tools(&child.child_run_id, &parent.run.id).unwrap();
+            }
+            make_native(&database, &child.child_run_id, &child.child_conversation_id, Some(workspace), "legacy");
+            let observed = observed_edit_input(&database, &child.child_run_id, "restart-child", workspace);
+            let call_id = format!("restart-child-approval-{}", child.child_run_id);
+            let approval_id = approval(
+                &database, &child.child_run_id, &call_id, "write_file",
+                &json!({"path":observed["path"],"content":observed["newText"],"expectedVersion":observed["expectedVersion"]}),
+                "tool_execution", "pending", false,
+            );
+            assert!(database.native_run_waiting_approval(&child.child_run_id).unwrap());
+            children.push((child.child_run_id, approval_id));
+        }
+
+        database.repair_interrupted_runs().unwrap();
+        let (companion_run, companion_approval) = &children[0];
+        assert_eq!(run_terminal(&database, companion_run), (
+            "interrupted".into(), Some("runtime.application_restarted".into()),
+        ));
+        assert_eq!(database.child_run(companion_run).unwrap().unwrap().status, "interrupted");
+        assert_eq!(database.approval_record(companion_approval).unwrap().status, "expired");
+        assert!(database.companion_active_run_ids(&contact.profile.id).unwrap().is_empty());
+
+        let (ordinary_run, ordinary_approval) = &children[1];
+        assert_eq!(run_terminal(&database, ordinary_run).0, "running");
+        assert_eq!(database.approval_record(ordinary_approval).unwrap().status, "pending");
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
