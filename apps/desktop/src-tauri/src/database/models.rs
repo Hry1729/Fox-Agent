@@ -5,7 +5,7 @@ use serde_json::Value;
 #[serde(rename_all = "camelCase")]
 pub struct CompanionProfile {
     pub id: String,
-    pub template_agent_id: String,
+    pub template_agent_id: Option<String>,
     pub display_name: String,
     pub avatar_ref: String,
     pub duty: String,
@@ -213,9 +213,9 @@ pub struct StartExpertTeamInput {
 pub struct DigitalColleagueRecord {
     pub id: String,
     pub name: String,
-    pub expert_id: String,
-    pub expert_binding_id: String,
-    pub package_hash: String,
+    pub expert_id: Option<String>,
+    pub expert_binding_id: Option<String>,
+    pub package_hash: Option<String>,
     pub package_snapshot: Value,
     pub conversation_id: String,
     pub objective: String,
@@ -248,7 +248,13 @@ pub struct DigitalColleagueScheduleRecord {
     pub colleague_id: String,
     pub name: String,
     pub schedule_kind: String,
-    pub interval_seconds: i64,
+    pub interval_seconds: Option<i64>,
+    pub once_at: Option<i64>,
+    #[serde(default)]
+    pub weekdays: Option<Vec<u8>>,
+    pub local_time: Option<String>,
+    pub timezone: String,
+    pub anchor_at: Option<i64>,
     pub catchup_window_seconds: i64,
     pub enabled: bool,
     pub next_due_at: i64,
@@ -322,6 +328,22 @@ pub struct PreparedDigitalColleagueTrigger {
 pub struct DigitalColleagueTriggerAcceptance {
     pub trigger: DigitalColleagueTriggerRecord,
     pub prepared: Option<PreparedDigitalColleagueTrigger>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnedCompanionTask {
+    pub task: DigitalColleagueRecord,
+    pub schedule: DigitalColleagueScheduleRecord,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OwnedCompanionTaskUpdate {
+    pub name: Option<String>,
+    pub objective: Option<String>,
+    pub knowledge_references: Option<Vec<KnowledgeReference>>,
+    pub schedule: Option<crate::database::DigitalColleagueScheduleSpec>,
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -1149,7 +1171,7 @@ pub struct DeliveryChecklistView {
 pub struct ConversationExpertBinding {
     pub id: String,
     pub conversation_id: String,
-    pub expert_id: String,
+    pub expert_id: Option<String>,
     pub state: String,
     pub activation_source: String,
     pub expert_version: String,

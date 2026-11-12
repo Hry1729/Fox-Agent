@@ -162,7 +162,6 @@ describe('联系人可用能力', () => {
   test('资料页入口打开可用能力，并可返回资料', async () => {
     const harness: Harness = { gets: 0, calls: [] }
     mockIPC(command => {
-      if (command === 'companion_template_status') return { ok: true, data: { latestHash: null, boundSnapshot: null, latestSnapshot: null, updateAvailable: false, dismissed: false } }
       if (command === 'model_providers_list') return { ok: true, data: [] }
       if (command === 'companion_capabilities_get') { harness.gets += 1; return { ok: true, data: capabilities() } }
       if (command === 'companion_capability_set') { harness.calls.push({}); return { ok: true, data: null } }

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import { ArrowLeft, Bell, BellDot, BellOff, BellRing, BookOpen, ChevronRight, Eye, FileOutput, Folder, FolderOpen, FolderPlus, FolderSearch, MessageSquare, NotebookPen, Pencil, Plug, RotateCcw, Search, Settings2, ShieldCheck, SlidersHorizontal, Star, X, type LucideIcon } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { ArrowLeft, Bell, BellDot, BellOff, BellRing, CalendarClock, BookOpen, ChevronRight, Eye, FileOutput, Folder, FolderOpen, FolderPlus, FolderSearch, MessageSquare, NotebookPen, Pencil, Plug, RotateCcw, Search, Settings2, ShieldCheck, SlidersHorizontal, Star, X, type LucideIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -13,7 +13,7 @@ import {
 } from '@/features/chat/components/managed-files/use-managed-files'
 import { useManagedFileUnseen } from '@/features/chat/components/managed-files/use-managed-file-unseen'
 import { managedFilesRefreshKey } from '@/features/chat/components/managed-files/model'
-import { contacts, type Companion, type ReminderMode, type TemplateStatus } from './api'
+import { contacts, type Companion, type ReminderMode } from './api'
 import { ContactAvatar } from './chat-controls'
 import { ContactModelSelect } from './model-select'
 import { ContactFiles } from './files'
@@ -21,7 +21,8 @@ import { ContactCapabilities } from './capabilities'
 import { ContactFavorites } from './marks'
 import { ContactNotes } from './notes'
 import { ContactDelete } from './delete'
-import { ContactGrants, TemplateChanges } from './profile'
+import { ContactTaskSummary, ContactTasks, useCompanionTasks } from './tasks'
+import { ContactGrants } from './profile'
 import type { ContactChatSearch } from './chat-search'
 import { useContacts, showContactError } from './context'
 import './contact-side-card.css'
@@ -61,7 +62,7 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
 }) {
   const ctx = useContacts()
   const [tab, setTab] = useState<ContactSideCardTab>('details')
-  const [view, setView] = useState<'main' | 'capabilities' | 'favorites' | 'notes' | 'settings'>('main')
+  const [view, setView] = useState<'main' | 'capabilities' | 'favorites' | 'notes' | 'settings' | 'tasks'>('main')
   const [renaming, setRenaming] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
   const [busy, setBusy] = useState(false)
@@ -70,8 +71,23 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
   const [files, setFiles] = useState<ProjectFileEntry[]>([])
   const [filesOpen, setFilesOpen] = useState(false)
   const [profileDraft, setProfileDraft] = useState({ avatar: contact.avatarRef, duty: contact.duty, persona: contact.personaOverride ?? '' })
-  const [template, setTemplate] = useState<TemplateStatus | null>(null)
+  const profileBaseline = useRef({ id: contact.id, avatar: contact.avatarRef, duty: contact.duty, persona: contact.personaOverride ?? '' })
+  const activeProfile = useRef({ id: contact.id, generation: 0 })
+  if (activeProfile.current.id !== contact.id) {
+    activeProfile.current = { id: contact.id, generation: activeProfile.current.generation + 1 }
+  }
   const [deleting, setDeleting] = useState(false)
+  const scheduledTasks = useCompanionTasks(contact.id, view === 'tasks' || (view === 'main' && tab === 'details'))
+  useEffect(() => {
+    const persisted = { id: contact.id, avatar: contact.avatarRef, duty: contact.duty, persona: contact.personaOverride ?? '' }
+    const previous = profileBaseline.current
+    setProfileDraft(current => persisted.id !== previous.id ? persisted : {
+      avatar: current.avatar === previous.avatar ? persisted.avatar : current.avatar,
+      duty: current.duty === previous.duty ? persisted.duty : current.duty,
+      persona: current.persona === previous.persona ? persisted.persona : current.persona,
+    })
+    profileBaseline.current = persisted
+  }, [contact.id, contact.avatarRef, contact.duty, contact.personaOverride])
   const managed = useManagedFiles(contact.conversationId, `${managedFilesRefreshKey(detail)}:${contact.activeRunStatus ?? ''}`)
   const [versionsUnseen] = useManagedFileUnseen({
     surface: 'library',
@@ -85,16 +101,17 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
       await action()
       await ctx?.refresh()
       if (ok) toast.success(ok)
-    } catch (error) { showContactError(error) } finally { setBusy(false) }
+      return true
+    } catch (error) { showContactError(error); return false } finally { setBusy(false) }
   }
   const commitRename = async () => {
     const next = nameDraft.trim()
-    setRenaming(false)
-    if (!next || next === contact.displayName) return
-    await run(
-      () => contacts.profile(contact.id, { displayName: next, avatarRef: contact.avatarRef, duty: contact.duty, personaOverride: contact.personaOverride }),
+    if (!next || next === contact.displayName) { setRenaming(false); return }
+    const saved = await run(
+      () => contacts.profile(contact.id, { displayName: next }),
       '已保存联系人资料',
     )
+    if (saved) setRenaming(false)
   }
   const loadFiles = useCallback(async () => {
     setBusy(true)
@@ -103,26 +120,7 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
       setFilesOpen(true)
     } catch (error) { showContactError(error) } finally { setBusy(false) }
   }, [contact.conversationId])
-  const loadTemplate = useCallback(async () => {
-    const next = await contacts.template(contact.id)
-    setTemplate(next)
-    return next
-  }, [contact.id])
-  // The template diff is only needed in the settings subview, so the card does not
-  // spend an IPC round trip on every open.
-  useEffect(() => { if (view === 'settings' && template === null) void loadTemplate().catch(showContactError) }, [view, template, loadTemplate])
-  const decideTemplate = async (adopt: boolean) => {
-    if (!template?.latestHash) return
-    setBusy(true)
-    try {
-      await contacts.decideTemplate(contact.id, template.latestHash, adopt)
-      // Re-read the status so the card shows the Host's post-decision state instead
-      // of the stale diff it acted on.
-      await loadTemplate()
-      if (adopt) await ctx?.refreshConversation()
-    } catch (error) { showContactError(error) } finally { setBusy(false) }
-  }
-  const heading = view === 'capabilities' ? '可用能力' : view === 'favorites' ? '收藏' : view === 'notes' ? '笔记' : view === 'settings' ? '联系人设置' : '联系人资料'
+  const heading = view === 'capabilities' ? '可用能力' : view === 'favorites' ? '收藏' : view === 'notes' ? '笔记' : view === 'settings' ? '联系人设置' : view === 'tasks' ? '定时任务' : '联系人资料'
   const resetBlocked = Boolean(detail?.contextResetBlockedReason || contact.activeRunStatus)
   const permission = ctx?.permission ?? 'ask'
   return <aside className="fox-contact-side-card" role="complementary" aria-label={`${contact.displayName} 资料卡`}>
@@ -138,14 +136,40 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
             {view === 'capabilities' && <ContactCapabilities key={contact.id} contact={contact} />}
             {view === 'favorites' && <ContactFavorites key={contact.id} contact={contact} />}
             {view === 'notes' && <ContactNotes key={contact.id} contact={contact} />}
+            {view === 'tasks' && <ContactTasks companionId={contact.id} tasks={scheduledTasks.tasks} history={scheduledTasks.history} refresh={scheduledTasks.refresh} error={scheduledTasks.error} />}
             {view === 'settings' && <div className="fox-contact-panel fox-contact-side-settings"><ContactSideSettings
               contact={contact}
               busy={busy}
               draft={profileDraft}
               onDraft={setProfileDraft}
-              onSave={fields => void run(() => contacts.profile(contact.id, { displayName: contact.displayName, ...fields }), '已保存联系人资料')}
-              template={template}
-              onTemplate={decideTemplate}
+              onSave={fields => void run(async () => {
+                const contactId = contact.id
+                const generation = activeProfile.current.generation
+                const submitted = { avatar: fields.avatarRef, duty: fields.duty, persona: fields.personaOverride }
+                const baseline = profileBaseline.current
+                const changedKeys = (Object.keys(submitted) as Array<keyof typeof submitted>)
+                  .filter(key => submitted[key] !== baseline[key])
+                const saved = await contacts.profile(contactId, {
+                  displayName: contact.displayName,
+                  ...(changedKeys.includes('avatar') ? { avatarRef: submitted.avatar } : {}),
+                  ...(changedKeys.includes('duty') ? { duty: submitted.duty } : {}),
+                  ...(changedKeys.includes('persona') ? { personaOverride: submitted.persona } : {}),
+                })
+                if (activeProfile.current.id !== contactId || activeProfile.current.generation !== generation || profileBaseline.current.id !== contactId) return
+                const savedValues = { avatar: saved.avatarRef, duty: saved.duty, persona: saved.personaOverride ?? '' }
+                const acknowledged = { ...profileBaseline.current }
+                for (const key of changedKeys) acknowledged[key] = savedValues[key]
+                profileBaseline.current = acknowledged
+                setProfileDraft(current => {
+                  if (activeProfile.current.id !== contactId || activeProfile.current.generation !== generation) return current
+                  const next = { ...current }
+                  for (const key of changedKeys) {
+                    if (next[key] === submitted[key]) next[key] = savedValues[key]
+                  }
+                  return next
+                })
+              }, '已保存联系人资料')}
+              source={detail?.expertBindings?.[0]?.displaySnapshot}
               onPin={() => void run(() => contacts.pin(contact.id, !contact.pinnedAt))}
               onArchive={() => void run(async () => { await contacts.archive(contact.id); ctx?.leave(contact) })}
               onDelete={() => setDeleting(true)}
@@ -178,6 +202,17 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
                 className={tab === value ? 'is-selected' : undefined} onClick={() => setTab(value)}>{label}{value === 'files' && versionsUnseen && <span className="fox-tab-dot" aria-hidden="true" />}</button>)}
             </div>
             {tab === 'details' && <div className="fox-contact-side-details">
+              <section className="fox-contact-side-group" aria-label="定时任务">
+                <h3>定时任务</h3>
+                <div className="fox-library-card">
+                  <button type="button" className="fox-contact-side-item" onClick={() => setView('tasks')}>
+                    <CalendarClock size={16} aria-hidden="true" /><span className="fox-contact-side-lab">定时任务</span>
+                    <ContactTaskSummary count={scheduledTasks.tasks.length} pending={scheduledTasks.pending} due={scheduledTasks.due} loaded={scheduledTasks.loaded} />
+                    <ChevronRight size={14} className="fox-contact-side-chev" aria-hidden="true" />
+                  </button>
+                  {scheduledTasks.error && <p className="fox-contact-side-sub" role="alert">{scheduledTasks.error}</p>}
+                </div>
+              </section>
               <section className="fox-contact-side-group" aria-label="模型">
                 <h3>模型</h3>
                 <div className="fox-contact-list-card">
@@ -315,14 +350,13 @@ function ContactAvatarEditor({ contact, onSaved }: { contact: Companion; onSaved
 /** The settings subview: the fields and actions the old profile page owned, in
  *  smaller reused blocks. `ContactProfile` itself is the whole old page layout and
  *  cannot be embedded here without re-introducing the page the SPEC replaces. */
-function ContactSideSettings({ contact, busy, draft, onDraft, onSave, template, onTemplate, onPin, onArchive, onDelete }: {
+function ContactSideSettings({ contact, busy, draft, onDraft, onSave, source, onPin, onArchive, onDelete }: {
   contact: Companion
   busy: boolean
   draft: { avatar: string; duty: string; persona: string }
   onDraft: (next: { avatar: string; duty: string; persona: string }) => void
   onSave: (fields: { avatarRef: string; duty: string; personaOverride: string }) => void
-  template: TemplateStatus | null
-  onTemplate: (adopt: boolean) => void
+  source?: { name: string; packageVersion?: string }
   onPin: () => void
   onArchive: () => void
   onDelete: () => void
@@ -330,21 +364,11 @@ function ContactSideSettings({ contact, busy, draft, onDraft, onSave, template, 
   return <>
     <form className="fox-contact-section" onSubmit={event => { event.preventDefault(); onSave({ avatarRef: draft.avatar, duty: draft.duty, personaOverride: draft.persona }) }}>
       <label><span>头像</span><input aria-label="头像" value={draft.avatar} placeholder="输入表情或头像资源路径" onChange={event => onDraft({ ...draft, avatar: event.target.value })} /></label>
-      <label><span>职责</span><textarea aria-label="职责" value={draft.duty} onChange={event => onDraft({ ...draft, duty: event.target.value })} /></label>
-      <label><span>自定义人设</span><textarea aria-label="自定义人设" value={draft.persona} placeholder="留空时使用模板人设" onChange={event => onDraft({ ...draft, persona: event.target.value })} /></label>
-      <Button type="submit" size="sm" disabled={busy}>保存资料</Button>
+      <fieldset><legend>职责与偏好</legend><label><span>职责</span><textarea aria-label="职责" value={draft.duty} onChange={event => onDraft({ ...draft, duty: event.target.value })} /></label>
+      <label><span>沟通偏好</span><textarea aria-label="沟通偏好" value={draft.persona} placeholder="填写沟通偏好" onChange={event => onDraft({ ...draft, persona: event.target.value })} /></label>
+      </fieldset><Button type="submit" size="sm" disabled={busy}>保存资料</Button>
     </form>
-    <section className="fox-contact-section">
-      <h3>专家模板</h3>
-      {template?.boundSnapshot?.packageVersion != null && <small>当前版本 {String(template.boundSnapshot.packageVersion)}</small>}
-      <p>{contact.isDefault ? '小狐的模板随 Fox 更新' : template?.updateAvailable ? '专家模板有新版' : '正在使用当前模板'}</p>
-      {template?.updateAvailable && <details open={!template.dismissed}><summary>查看变化</summary>
-        <TemplateChanges template={template} />
-        <div className="fox-contact-actions">
-          <Button size="sm" disabled={busy || Boolean(contact.activeRunStatus)} onClick={() => onTemplate(true)}>采用新版</Button>
-          <Button size="sm" variant="ghost" disabled={busy || template.dismissed} onClick={() => onTemplate(false)}>暂不更新</Button>
-        </div></details>}
-    </section>
+    {source && <section className="fox-contact-section"><h3>创建来源</h3><p>{source.name}{source.packageVersion ? ` · v${source.packageVersion}` : ''}</p></section>}
     {!contact.isDefault && <ContactGrants key={contact.id} contact={contact} />}
     <section className="fox-contact-section">
       <div className="fox-contact-actions">

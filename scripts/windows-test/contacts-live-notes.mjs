@@ -59,31 +59,21 @@ export async function checkLiveNoteOrganization({ invoke, expert, exchange, proj
     liveTurns: [organized.run, requested.run, turn.run] }
 }
 
-export async function checkLiveTemplateChange({ invoke, exchange, model }) {
+export async function checkLiveFrozenTemplate({ invoke, exchange, model }) {
   const prompt = token => '你的内部工牌编号是 ' + token + '。用户询问当前工牌时，只返回当前专家说明中写的编号。'
   const previous = 'TPL-' + randomUUID().slice(0, 8)
   const next = 'TPL-' + randomUUID().slice(0, 8)
-  const request = { name: '版本验收专家', description: '验收模板更新', category: '自定义',
+  const request = { name: '版本验收专家', description: '验收冻结模板', category: '自定义',
     defaultModel: model, systemPrompt: prompt(previous) }
   const agent = await invoke('agent_save', { request })
   const contact = await invoke('companion_add_from_expert', { request: { expertId: agent.id } })
   await invoke('agent_save', { request: { ...request, id: agent.id, systemPrompt: prompt(next) } })
-  const owner = { companionId: contact.id }
-  const template = await invoke('companion_template_status', { request: owner })
-  assert.equal(template.updateAvailable, true)
-  assert.equal(template.boundSnapshot.systemPrompt, prompt(previous))
-  assert.equal(template.latestSnapshot.systemPrompt, prompt(next))
   const question = '只回复当前专家说明中生效的内部工牌编号。'
   const before = await exchange(contact.conversationId, question)
   assert.equal(answeredBadge(before.reply), previous, JSON.stringify(before))
-  await invoke('companion_template_update', { request: { ...owner, expectedHash: template.latestHash } })
-  const adopted = await invoke('companion_template_status', { request: owner })
-  assert.equal(adopted.boundHash, template.latestHash)
-  assert.equal(adopted.boundSnapshot.systemPrompt, prompt(next))
   const after = await exchange(contact.conversationId, question)
-  assert.equal(answeredBadge(after.reply), next, JSON.stringify(after))
-  return { before: { run: before.run, badge: previous, hash: template.boundHash },
-    after: { run: after.run, badge: next, hash: adopted.boundHash } }
+  assert.equal(answeredBadge(after.reply), previous, JSON.stringify(after))
+  return { before: { run: before.run, badge: previous }, after: { run: after.run, badge: previous } }
 }
 
 function answeredBadge(reply) {

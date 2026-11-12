@@ -1454,8 +1454,9 @@ mod tests {
             companion_id,
         };
         let colleague = database.create_digital_colleague(&input("绑定后台", Some(id.clone()))).unwrap();
-        let unbound = database.create_digital_colleague(&input("普通同事", None)).unwrap();
+        let unbound = database.create_digital_colleague(&input("普通同事", Some(id.clone()))).unwrap();
         database.with_connection(|c| {
+            c.execute("UPDATE digital_colleagues SET companion_id=NULL,report_conversation_id=NULL,companion_bound=0 WHERE id=?1", [&unbound.id])?;
             c.execute("INSERT INTO digital_colleague_triggers(id,colleague_id,source_type,idempotency_key,status,payload_json,created_at,updated_at)
                 VALUES ('dt1',?1,'manual','k1','completed','{}',1,1)", [&colleague.id])?;
             c.execute("INSERT INTO digital_colleague_triggers(id,colleague_id,source_type,idempotency_key,status,payload_json,created_at,updated_at)

@@ -2851,6 +2851,60 @@ export const SCHEMA_BUNDLE = {
       "approval": "none",
       "category": "memory",
       "execution": "host",
+      "name": "companion_profile_update"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "companion_task_create"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "companion_task_update"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "companion_task_list"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "companion_task_history"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "companion_task_pause"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "companion_task_resume"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "companion_task_run_now"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "companion_task_delete"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
       "name": "note_organize"
     },
     {

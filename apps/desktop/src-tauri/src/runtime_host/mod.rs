@@ -76,7 +76,7 @@ use crate::{
         AgentRecord, ApprovalDecision, ApprovalRecord, ApprovalRefusal,
         AttachmentRecord, ChildRunBudget,
         ChildRunRecord, Database, EvaluationRunSummary, HostToolCallDisposition,
-        KnowledgeReference, MemoryProposalInput, PreparedDigitalColleagueTrigger,
+        KnowledgeReference, MemoryProposalInput, PreparedDigitalColleagueTrigger, resolved_device_timezone,
         SkillActivationRecord, StartRunResult, ToolCallRecord,
         MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS,
     },
@@ -557,7 +557,12 @@ fn apply_bound_knowledge_declaration(
         manifest.insert("manifestSchemaVersion".to_owned(), json!(2));
         manifest.insert("knowledgeReferences".to_owned(), Value::Array(effective));
         manifest.remove("knowledge");
-    } else if strict && manifest.contains_key("knowledge") {
+    } else if strict
+        && manifest.contains_key("knowledge")
+        && bound_knowledge.iter().all(|reference| {
+            reference.source == "remote" && reference.connection_id.as_deref() == Some("yuxi")
+        })
+    {
         let declared = manifest
             .get("knowledge")
             .and_then(Value::as_array)
@@ -963,13 +968,13 @@ pub(crate) fn conversation_prompt_context(
     overrides: PromptScopeOverrides<'_>,
 ) -> Result<AgentPromptContext, String> {
     {
-        let system_prompt = database
-            .conversation_system_prompt(conversation_id)?;
-        let agent_id = database
-            .conversation_agent_id(conversation_id)?;
         let assistant = database
-            .get_agent(&agent_id)?
-            .ok_or_else(|| "conversation assistant was not found".to_owned())?;
+            .conversation_runtime_assistant(conversation_id)?;
+        let system_prompt = if assistant.runtime_type == "pi" {
+            assistant.system_prompt.clone()
+        } else {
+            database.conversation_system_prompt(conversation_id)?
+        };
         // Single source of truth: every entry point (the app, the Kernel payload constructor
         // and non-UI callers) builds its prompt here, so the diagram guidance is attached
         // exactly once — and only when Fox owns the prompt.
@@ -986,12 +991,27 @@ pub(crate) fn conversation_prompt_context(
             "isUserFacingLead": run_role == "user_facing_lead",
         });
         let expert_binding = database
-            .current_conversation_expert_binding(conversation_id)?;
-        let private_expert = expert_binding.is_some() && database.companion_chat_state(conversation_id)?.is_some();
-        let assistant_skills = if private_expert { Vec::new() } else { database.enabled_agent_skills(&assistant.id)? };
+            .runtime_conversation_expert_binding(conversation_id)?;
+        let private_expert = expert_binding.is_some()
+            && database.conversation_companion_scope(conversation_id)?.is_some();
+        let assistant_skills = if private_expert {
+            Vec::new()
+        } else {
+            database.conversation_runtime_assistant_skills(conversation_id)?
+        };
         let mut configured_expert_skills = expert_binding
             .as_ref()
-            .map(|binding| database.enabled_agent_skills(&binding.expert_id))
+            .map(|binding| {
+                if binding.package_snapshot.get("enabledSkills").is_some() {
+                    Ok(package_string_list(&binding.package_snapshot, "enabledSkills"))
+                } else if private_expert {
+                    Ok(Vec::new())
+                } else if let Some(expert_id) = binding.expert_id.as_deref() {
+                    database.enabled_agent_skills(expert_id)
+                } else {
+                    Ok(Vec::new())
+                }
+            })
             .transpose()?
             .unwrap_or_default();
         if private_expert && !configured_expert_skills.is_empty() {
@@ -1010,8 +1030,7 @@ pub(crate) fn conversation_prompt_context(
                     .is_none_or(|scope| scope.contains(server_id))
             })
             .collect::<Vec<_>>();
-        let bound_knowledge = database
-            .conversation_knowledge_references(conversation_id)?;
+        let bound_knowledge = database.conversation_knowledge_references(conversation_id)?;
         let mut assistant_package = runtime_agent_package(
             &assistant,
             &assistant_skills,
@@ -2058,7 +2077,11 @@ impl RuntimeHost {
         )?;
 
         let mut companion_context = self.database.companion_runtime_notes(&started.run.conversation_id, text)?;
+        let can_update_profile = self.database.run_companion_profile_update_scope(&started.run.id)?
+            .is_some_and(|scope| scope.conversation_id == started.run.conversation_id);
         if let Some(context) = companion_context.as_mut().filter(|ctx| ctx["role"] == "owner") {
+            context["canUpdateProfile"] = json!(can_update_profile);
+            context["canWriteNotes"] = json!(can_update_profile);
             // K4: freeze this run's capability snapshot (write-once) and show
             // the model exactly that set. A grant added mid-run only appears
             // in the next run; a revocation still stops execution via the
@@ -2077,6 +2100,7 @@ impl RuntimeHost {
             let mut allowed: Vec<&str> = fox_engine_protocol::TOOL_CONTRACTS.iter()
                 .map(|contract| contract.0)
                 .filter(|name| crate::companion_workspace::allows_tool(name))
+                .filter(|name| (*name != "companion_profile_update" && !name.starts_with("companion_task_")) || can_update_profile)
                 .collect();
             for tool in crate::database::WEB_TOOLS {
                 if snapshot.iter().any(|id| id == tool) {
@@ -5423,28 +5447,45 @@ fn handle_tool_result_read_request(
 /// so on-demand enablement can never exceed the initial one.
 pub(super) fn conversation_enabled_skill_ids(
     database: &Database,
+    skills_dir: &std::path::Path,
     conversation_id: &str,
 ) -> Result<Vec<String>, String> {
-    let agent_id = database.conversation_agent_id(conversation_id)?;
     let assistant = database
-        .get_agent(&agent_id)?
-        .ok_or_else(|| "conversation assistant was not found".to_owned())?;
-    let expert_binding = database.current_conversation_expert_binding(conversation_id)?;
-    let private_expert = expert_binding.is_some() && database.companion_chat_state(conversation_id)?.is_some();
-    let assistant_skills = if private_expert { Vec::new() } else { database.enabled_agent_skills(&assistant.id)? };
+        .conversation_runtime_assistant(conversation_id)?;
+    let expert_binding = database.runtime_conversation_expert_binding(conversation_id)?;
+    let private_expert = expert_binding.is_some()
+        && database.conversation_companion_scope(conversation_id)?.is_some();
+    let assistant_skills = if private_expert {
+        Vec::new()
+    } else {
+        database.conversation_runtime_assistant_skills(conversation_id)?
+    };
     let enabled_mcps = database
         .list_mcp_servers()?
         .into_iter()
         .filter(|server| server.enabled)
         .map(|server| server.id)
         .collect::<Vec<_>>();
-    let bound_knowledge = database.conversation_knowledge_references(conversation_id)?;
+        let bound_knowledge = database.conversation_knowledge_references(conversation_id)?;
     let assistant_package =
         runtime_agent_package(&assistant, &assistant_skills, &enabled_mcps, &bound_knowledge)?;
     let effective_expert_skills = expert_binding
         .as_ref()
         .map(|binding| {
-            let skills = database.enabled_agent_skills(&binding.expert_id)?;
+            let mut skills = package_string_list(&binding.package_snapshot, "enabledSkills");
+            if private_expert {
+                let installed: HashSet<_> = crate::skills::scan_skills(skills_dir, &skills)?
+                    .into_iter()
+                    .filter(|skill| skill.record.valid)
+                    .map(|skill| skill.record.id)
+                    .collect();
+                skills.retain(|id| installed.contains(id));
+            } else if binding.package_snapshot.get("enabledSkills").is_none() {
+                skills = match binding.expert_id.as_deref() {
+                    Some(expert_id) => database.enabled_agent_skills(expert_id)?,
+                    None => Vec::new(),
+                };
+            }
             let package = runtime_expert_package(
                 &binding.package_snapshot,
                 &binding.package_hash,
@@ -5516,7 +5557,7 @@ fn execute_skill_load_request(
             // The legacy path has no frozen scope: availability was validated
             // structurally when the skill was scanned (unknown tools fail), and
             // actual tool calls remain gated by legacy permissions.
-            let enabled = conversation_enabled_skill_ids(database, &conversation_id)?;
+            let enabled = conversation_enabled_skill_ids(database, skills_dir, &conversation_id)?;
             let outcome = skill_load::execute(
                 database,
                 skills_dir,
@@ -6337,7 +6378,7 @@ fn run_status_is_terminal(status: &str) -> bool {
 }
 
 fn is_memory_tool(tool: &str) -> bool {
-    matches!(tool, "memory_search" | "memory_propose" | "memory_write" | "note_organize" | "note_search" | "note_read")
+    matches!(tool, "memory_search" | "memory_propose" | "memory_write" | "companion_profile_update" | "companion_task_create" | "companion_task_update" | "companion_task_list" | "companion_task_history" | "companion_task_pause" | "companion_task_resume" | "companion_task_run_now" | "companion_task_delete" | "note_organize" | "note_search" | "note_read")
 }
 
 fn is_child_run_tool(tool: &str) -> bool {
@@ -6445,7 +6486,11 @@ fn execute_memory_tool_request(
                 hook_decision.approval_reason.as_deref(),
             )?;
         }
-        execute_memory_operation(database,conversation_id,run_id,tool,&input)
+        if tool == "companion_task_run_now" {
+            execute_companion_task_run_now(app, database, conversation_id, run_id, &input)
+        } else {
+            execute_memory_operation(database,conversation_id,run_id,tool,&input)
+        }
     })();
     finalize_host_tool_execution(
         database,run_id,tool_call_id,tool,&input,hook_decision.annotations,outcome,
@@ -6454,9 +6499,187 @@ fn execute_memory_tool_request(
 
 // Shared operation only: execution authority, approvals and result commits
 // remain with the calling Legacy or Kernel owner.
+fn companion_task_owner_scope(
+    database: &Database,
+    conversation_id: &str,
+    run_id: &str,
+) -> Result<String, String> {
+    database.run_companion_profile_update_scope(run_id)?
+        .filter(|scope| scope.conversation_id == conversation_id)
+        .map(|scope| scope.companion_id)
+        .ok_or_else(|| "[companion.tool_not_available] 只有该联系人的根运行可以管理任务。".to_owned())
+}
+
+fn companion_task_id(input: &Value) -> Result<&str, String> {
+    input.get("taskId").and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "companion.task_id_required".to_owned())
+}
+
+fn companion_task_spec(input: &Value, timezone: Option<&str>) -> Result<crate::database::DigitalColleagueScheduleSpec, String> {
+    let mut value = input.clone();
+    let fields = value.as_object_mut().ok_or_else(|| "companion.schedule_invalid".to_owned())?;
+    if !fields.contains_key("timezone") {
+        fields.insert("timezone".to_owned(), json!(timezone.ok_or_else(|| "companion.schedule_timezone_required".to_owned())?));
+    }
+    serde_json::from_value(value).map_err(|_| "companion.schedule_invalid: 仅支持明确的单次、间隔、每日或每周时间".to_owned())
+}
+
+fn execute_companion_task_run_now(
+    app: &AppHandle,
+    database: &Database,
+    conversation_id: &str,
+    run_id: &str,
+    input: &Value,
+) -> Result<Value, String> {
+    let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
+    let task_id = companion_task_id(input)?;
+    let before = database.owned_companion_task(&scope, task_id)?
+        .ok_or_else(|| "digital_colleague.not_found".to_owned())?;
+    let acceptance = database.accept_digital_colleague_trigger(
+        task_id, "manual", None, &format!("companion-task:{}", Uuid::new_v4()),
+        &json!({"objective": before.task.objective, "source": "companion_task_run_now"}),
+        None, "user",
+    )?;
+    let trigger = acceptance.trigger.clone();
+    if let Some(prepared) = acceptance.prepared {
+        app.state::<AppState>().runtime_host.dispatch_digital_colleague_trigger(prepared)?;
+    }
+    let after = database.owned_companion_task(&scope, task_id)?
+        .ok_or_else(|| "digital_colleague.not_found".to_owned())?;
+    Ok(json!({"task": after, "trigger": trigger, "runId": trigger.run_id}))
+}
+
 fn execute_memory_operation(database: &Database, conversation_id: &str, run_id: &str,
     tool: &str, input: &Value) -> Result<Value,String> {
         match tool {
+            "memory_write" | "note_organize" if database.run_companion_profile_update_scope(run_id)?.is_none() => {
+                Err("[companion.tool_not_available] 子运行不能写入联系人配置或笔记。".into())
+            }
+            "companion_task_create" => {
+                let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
+                let allowed: HashSet<&str> = ["name", "objective", "schedule", "enabled", "knowledgeReferences"].into_iter().collect();
+                if input.as_object().is_none_or(|fields| fields.keys().any(|key| !allowed.contains(key.as_str()))) {
+                    return Err("companion.task_invalid_fields".into());
+                }
+                let required = |name: &str| input.get(name).and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty()).map(str::to_owned)
+                    .ok_or_else(|| format!("companion.task_{name}_required"));
+                let schedule_input = input.get("schedule").ok_or_else(|| "companion.schedule_required".to_owned())?;
+                let timezone = schedule_input.get("timezone").and_then(Value::as_str)
+                    .map(crate::database::canonical_timezone)
+                    .transpose()?
+                    .map_or_else(resolved_device_timezone, Ok)?;
+                let spec = companion_task_spec(schedule_input, Some(&timezone))?;
+                let enabled = input.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+                let input = crate::database::CreateDigitalColleagueInput {
+                    name: required("name")?, objective: required("objective")?, expert_id: String::new(),
+                    project_id: None, project_root: None,
+                    knowledge_references: serde_json::from_value(input.get("knowledgeReferences").cloned().unwrap_or_else(|| json!([])))
+                        .map_err(|_| "companion.task_knowledge_invalid".to_owned())?,
+                    max_runs_per_day: 8, max_tokens_per_day: 128_000, max_duration_ms: 300_000,
+                    max_output_tokens: 4_096, max_tool_calls: 16,
+                    companion_id: Some(scope),
+                };
+                serde_json::to_value(database.create_owned_companion_task(&input, spec, enabled)?)
+                    .map_err(|error| error.to_string())
+            }
+            "companion_task_update" => {
+                let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
+                let allowed: HashSet<&str> = ["taskId", "name", "objective", "schedule", "enabled", "knowledgeReferences"].into_iter().collect();
+                if input.as_object().is_none_or(|fields| fields.keys().any(|key| !allowed.contains(key.as_str()))) {
+                    return Err("companion.task_invalid_fields".into());
+                }
+                let task_id = companion_task_id(input)?;
+                let existing = database.owned_companion_task(&scope, task_id)?
+                    .ok_or_else(|| "digital_colleague.not_found".to_owned())?;
+                let schedule = input.get("schedule").map(|value| {
+                    if let Some(zone) = value.get("timezone").and_then(Value::as_str) {
+                        if crate::database::canonical_timezone(zone)? != existing.schedule.timezone {
+                            return Err("companion.schedule_timezone_immutable: 现有计划必须保留原时区".to_owned());
+                        }
+                    }
+                    companion_task_spec(value, Some(&existing.schedule.timezone))
+                }).transpose()?;
+                let update = crate::database::OwnedCompanionTaskUpdate {
+                    name: input.get("name").and_then(Value::as_str).map(str::to_owned),
+                    objective: input.get("objective").and_then(Value::as_str).map(str::to_owned),
+                    knowledge_references: input.get("knowledgeReferences").map(|value| serde_json::from_value(value.clone())
+                        .map_err(|_| "companion.task_knowledge_invalid".to_owned())).transpose()?,
+                    schedule, enabled: input.get("enabled").and_then(Value::as_bool),
+                };
+                serde_json::to_value(database.update_owned_companion_task(&scope, task_id, update)?)
+                    .map_err(|error| error.to_string())
+            }
+            "companion_task_list" => {
+                let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
+                serde_json::to_value(database.list_owned_companion_tasks(&scope)?)
+                    .map_err(|error| error.to_string())
+            }
+            "companion_task_history" => {
+                let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
+                let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(20).clamp(1, 100) as usize;
+                serde_json::to_value(database.list_owned_companion_task_history(&scope, companion_task_id(input)?, limit)?)
+                    .map_err(|error| error.to_string())
+            }
+            "companion_task_pause" | "companion_task_resume" => {
+                let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
+                let enabled = tool == "companion_task_resume";
+                let update = crate::database::OwnedCompanionTaskUpdate { enabled: Some(enabled), ..Default::default() };
+                serde_json::to_value(database.update_owned_companion_task(&scope, companion_task_id(input)?, update)?)
+                    .map_err(|error| error.to_string())
+            }
+            "companion_task_delete" => {
+                let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
+                let task_id = companion_task_id(input)?;
+                database.owned_companion_task(&scope, task_id)?
+                    .ok_or_else(|| "digital_colleague.not_found".to_owned())?;
+                serde_json::to_value(database.revoke_digital_colleague(task_id, "companion_task_delete")?)
+                    .map_err(|error| error.to_string())
+            }
+            "companion_profile_update" => {
+                let scope = database.run_companion_profile_update_scope(run_id)?
+                    .filter(|scope| scope.conversation_id == conversation_id)
+                    .ok_or_else(|| "[companion.tool_not_available] 只有该联系人的根运行可以修改配置。".to_owned())?;
+                let allowed: std::collections::HashSet<&str> = [
+                    "name", "display_name", "duty", "persona_override", "preferenceOperation",
+                ].into_iter().collect();
+                if input.as_object().is_none_or(|fields| fields.keys().any(|key| !allowed.contains(key.as_str()))) {
+                    return Err("companion.profile_invalid_fields: 只允许修改名称、职责和沟通偏好".into());
+                }
+                if allowed.iter().any(|field| input.get(*field).is_some_and(|value| !value.is_string())) {
+                    return Err("companion.profile_invalid_field_types: 名称、职责和沟通偏好必须是字符串".into());
+                }
+                let name = input.get("name").and_then(Value::as_str);
+                let display_name = input.get("display_name").and_then(Value::as_str);
+                if name.is_some() && display_name.is_some() {
+                    return Err("companion.profile_name_ambiguous: name 和 display_name 只能提供一个".into());
+                }
+                let operation = input.get("preferenceOperation").and_then(Value::as_str).unwrap_or("add");
+                let preference = input.get("persona_override").and_then(Value::as_str);
+                if operation == "clear" && preference.is_some() || operation != "clear" && preference.is_none() && input.get("preferenceOperation").is_some() {
+                    return Err("companion.profile_preference_operation_invalid".into());
+                }
+                let preference = match (operation, preference) {
+                    (_, Some(value)) if operation == "add" => crate::database::companions::CompanionPreferenceEdit::Add(value.to_owned()),
+                    (_, Some(value)) if operation == "replace" => crate::database::companions::CompanionPreferenceEdit::Replace(value.to_owned()),
+                    ("clear", None) => crate::database::companions::CompanionPreferenceEdit::Clear,
+                    _ if preference.is_none() => crate::database::companions::CompanionPreferenceEdit::Preserve,
+                    _ => return Err("companion.profile_preference_operation_invalid".into()),
+                };
+                let display_name = name.or(display_name).map(str::to_owned);
+                let duty = input.get("duty").and_then(Value::as_str).map(str::to_owned);
+                if display_name.is_none() && duty.is_none() && matches!(preference, crate::database::companions::CompanionPreferenceEdit::Preserve) {
+                    return Err("companion.profile_empty_update".into());
+                }
+                let saved = database.save_companion_profile(&scope.companion_id, crate::database::companions::CompanionProfileSaveInput {
+                    display_name,
+                    avatar_ref: None,
+                    duty,
+                    preference,
+                }).map_err(|error| error.response().1.to_owned())?;
+                serde_json::to_value(saved).map_err(|error| error.to_string())
+            }
             "memory_write" | "note_organize" | "note_search" | "note_read" =>
                 database.companion_notes_tool(conversation_id, run_id, tool, input),
             "memory_search" => {
@@ -6884,13 +7107,11 @@ fn effective_conversation_delegation_scope(
     database: &Database,
     conversation_id: &str,
 ) -> Result<(Option<HashSet<String>>, Option<HashSet<String>>), String> {
-    let agent_id = database.conversation_agent_id(conversation_id)?;
     let assistant = database
-        .get_agent(&agent_id)?
-        .ok_or_else(|| "conversation assistant was not found".to_owned())?;
+        .conversation_runtime_assistant(conversation_id)?;
     let mut tool_scope = package_string_scope(&assistant.package_manifest, "allowedTools");
     let mut mcp_scope = agent_mcp_server_scope(&assistant);
-    if let Some(binding) = database.current_conversation_expert_binding(conversation_id)? {
+    if let Some(binding) = database.runtime_conversation_expert_binding(conversation_id)? {
         validate_expert_package_snapshot(&binding.package_snapshot, &binding.package_hash)?;
         let manifest = expert_package_manifest(&binding.package_snapshot)?;
         tool_scope =
@@ -6908,6 +7129,9 @@ fn ensure_expert_tool_allowed(
     conversation_id: &str,
     tool: &str,
 ) -> Result<(), String> {
+    if tool == "companion_profile_update" || tool.starts_with("companion_task_") {
+        return Ok(());
+    }
     if matches!(tool, "memory_write" | "note_organize" | "note_search" | "note_read") {
         let access = database.companion_note_access(conversation_id)?;
         if access.is_some_and(|(_, owner)| owner || matches!(tool, "note_read" | "note_search")) {
@@ -6915,12 +7139,10 @@ fn ensure_expert_tool_allowed(
         }
         return Err("[companion.tool_not_available] 当前会话没有使用此笔记工具的权限。".into());
     }
-    let agent_id = database.conversation_agent_id(conversation_id)?;
     let assistant = database
-        .get_agent(&agent_id)?
-        .ok_or_else(|| "conversation assistant was not found".to_owned())?;
+        .conversation_runtime_assistant(conversation_id)?;
     ensure_agent_tool_allowed(&assistant, "assistant", tool)?;
-    if let Some(binding) = database.current_conversation_expert_binding(conversation_id)? {
+    if let Some(binding) = database.runtime_conversation_expert_binding(conversation_id)? {
         validate_expert_package_snapshot(&binding.package_snapshot, &binding.package_hash)?;
         let manifest = expert_package_manifest(&binding.package_snapshot)?;
         let name = binding
@@ -8217,12 +8439,10 @@ fn execute_mcp_tool_request(
         .conversation_id
         .as_deref()
         .ok_or_else(|| "MCP tool request is missing conversationId".to_owned())?;
-    let agent_id = database.conversation_agent_id(conversation_id)?;
     let assistant = database
-        .get_agent(&agent_id)?
-        .ok_or_else(|| "conversation assistant was not found".to_owned())?;
+        .conversation_runtime_assistant(conversation_id)?;
     let expert_scope = database
-        .current_conversation_expert_binding(conversation_id)?
+        .runtime_conversation_expert_binding(conversation_id)?
         .map(|binding| {
             validate_expert_package_snapshot(&binding.package_snapshot, &binding.package_hash)?;
             expert_package_mcp_server_scope(&binding.package_snapshot)
@@ -8352,7 +8572,7 @@ fn execute_mcp_tool_request(
                 }
             }
         }
-        if let Some(binding) = database.current_conversation_expert_binding(conversation_id)? {
+        if let Some(binding) = database.runtime_conversation_expert_binding(conversation_id)? {
             let manifest = expert_package_manifest(&binding.package_snapshot)?;
             if let Some(allowed) = manifest.get("officeTools").and_then(Value::as_array) {
                 if !allowed.iter().any(|value| value == remote_tool) {
@@ -11011,12 +11231,13 @@ fn record_runtime_crash(
 #[cfg(test)]
 mod attachment_tests {
     use crate::canonical_json::CanonicalJson;
-    use super::{apply_delegated_package_scope, attachment_image_media_type, attachment_is_docx, attachment_is_text, attachment_looks_like_image, bounded_knowledge_tool_result, create_fresh_host_tool_call, dispatch_created_work_child, effective_digital_colleague_output_limit, ensure_plan_approved_before_mutation, event_projection_failure_code, extract_docx_text, finalize_host_tool_execution, inspect_existing_host_tool_call, intersect_mcp_server_scopes, intersect_optional_scopes, node_dependency_is_available, normalized_child_budget, parse_runtime_ready_payload, pending_approval_ids_for_run, redact_diagnostic_line, runtime_expert_package, structured_runtime_error, validate_envelope_identity_scope, validate_runtime_tool_authority, HostToolCallExecution, PendingApproval, RuntimeToolIngress};
+    use super::{conversation_prompt_context, conversation_enabled_skill_ids, PromptScopeOverrides, apply_delegated_package_scope, attachment_image_media_type, attachment_is_docx, attachment_is_text, attachment_looks_like_image, bounded_knowledge_tool_result, execute_bound_knowledge_tool, create_fresh_host_tool_call, dispatch_created_work_child, effective_conversation_delegation_scope, effective_digital_colleague_output_limit, ensure_expert_tool_allowed, ensure_plan_approved_before_mutation, event_projection_failure_code, execute_memory_operation, extract_docx_text, finalize_host_tool_execution, inspect_existing_host_tool_call, intersect_mcp_server_scopes, intersect_optional_scopes, node_dependency_is_available, normalized_child_budget, parse_runtime_ready_payload, pending_approval_ids_for_run, redact_diagnostic_line, runtime_expert_package, structured_runtime_error, validate_envelope_identity_scope, validate_runtime_tool_authority, HostToolCallExecution, PendingApproval, RuntimeToolIngress};
     use crate::database::{
-        AddEvidenceInput, AttachmentRecord, CreateGoalInput, CreateTaskInput, Database,
-        EvidenceReferenceKind, EvidenceType, EvidenceValidityStatus, GoalStatus,
-        KnowledgeReference,
+        AddEvidenceInput, AttachmentRecord, CreateDigitalColleagueInput,
+        CreateGoalInput, CreateTaskInput, Database, EvidenceReferenceKind, EvidenceType,
+        EvidenceValidityStatus, GoalStatus, KnowledgeReference, SaveAgentRequest,
     };
+    use crate::database::companions::CompanionProfileEdit;
     use crate::runtime_host::protocol::{
         RuntimeCapabilityManifest, RuntimeEnvelope, RuntimeToolCapability,
         CAPABILITY_MANIFEST_VERSION,
@@ -13428,6 +13649,567 @@ mod attachment_tests {
             ]))
         );
         assert!(package.pointer("/packageManifest/knowledge").is_none());
+    }
+
+    #[test]
+    fn a04_companion_prompt_and_skill_loading_stay_on_the_frozen_snapshot() {
+        let root = std::env::temp_dir().join(format!("fox-a04-snapshot-{}", Uuid::new_v4()));
+        let skills_dir = root.join("skills");
+        std::fs::create_dir_all(skills_dir.join("frozen-skill")).unwrap();
+        std::fs::write(
+            skills_dir.join("frozen-skill/SKILL.md"),
+            "---\nid: frozen-skill\nname: Frozen skill\nversion: 1.0\n---\nUse the frozen instructions.",
+        )
+        .unwrap();
+        let database = Database::open(root.join("test.db")).unwrap();
+        let customize_default = |database: &Database| {
+            let customized = database.get_agent("fox-general").unwrap().unwrap();
+            database.save_agent(&SaveAgentRequest {
+                id: Some(customized.id),
+                name: customized.name,
+                description: customized.description,
+                icon: customized.icon,
+                category: customized.category,
+                system_prompt: "CUSTOMIZED_BASE_ASSISTANT_PROMPT".into(),
+                default_model: "customized-base-model".into(),
+                opening_suggestions: customized.opening_suggestions,
+                package_manifest: json!({ "skills": [], "allowedTools": ["read"] }),
+            }).unwrap();
+        };
+        customize_default(&database);
+        let source = database.copy_agent("fox-debugger", Some("Snapshot source")).unwrap();
+        let source = database.save_agent(&crate::database::SaveAgentRequest {
+            id: Some(source.id),
+            name: source.name,
+            description: source.description,
+            icon: source.icon,
+            category: source.category,
+            system_prompt: "frozen persona and duty".into(),
+            default_model: source.default_model,
+            opening_suggestions: source.opening_suggestions,
+            package_manifest: json!({
+                "skills": ["frozen-skill"],
+                "allowedTools": ["read", "write_file"]
+            }),
+        }).unwrap();
+        database.set_agent_skill_enabled(&source.id, "frozen-skill", true).unwrap();
+        let companion = database.add_companion(&root, &source.id).unwrap();
+        let task_expert = database.copy_agent("fox-debugger", Some("Distinct task expert")).unwrap();
+        let task_reference = KnowledgeReference::local("a04-task-local-knowledge");
+        let task = database.create_digital_colleague(&CreateDigitalColleagueInput {
+            name: "A04 companion background task".into(),
+            expert_id: task_expert.id.clone(),
+            objective: "Preserve the private frozen package and task-local knowledge".into(),
+            project_id: None,
+            project_root: None,
+            knowledge_references: vec![task_reference.clone()],
+            max_runs_per_day: 8,
+            max_tokens_per_day: 10_000,
+            max_duration_ms: 60_000,
+            max_output_tokens: 2_000,
+            max_tool_calls: 20,
+            companion_id: Some(companion.profile.id.clone()),
+        }).unwrap();
+        let context = |database: &Database, conversation_id: &str, run_kind: &str| {
+            conversation_prompt_context(
+                database,
+                &skills_dir,
+                conversation_id,
+                "next run",
+                run_kind,
+                PromptScopeOverrides { tool_allowlist: None, mcp_server_scope: None },
+            )
+            .unwrap()
+        };
+        let snapshot = |database: &Database, conversation_id: &str, run_kind: &str| {
+            let current = context(database, conversation_id, run_kind);
+            let skills = conversation_enabled_skill_ids(database, &skills_dir, conversation_id).unwrap();
+            (current.assistant_package, current.expert_package, current.system_prompt, current.skill_prompt, skills)
+        };
+        let assert_unchanged = |database: &Database,
+                                conversation_id: &str,
+                                run_kind: &str,
+                                expected: &(Value, Option<Value>, String, String, Vec<String>)| {
+            assert_eq!(snapshot(database, conversation_id, run_kind), *expected);
+            let (tools, _) = effective_conversation_delegation_scope(database, conversation_id).unwrap();
+            assert_eq!(tools, Some(HashSet::from(["read".to_owned()])));
+            ensure_expert_tool_allowed(database, conversation_id, "read").unwrap();
+            assert!(ensure_expert_tool_allowed(database, conversation_id, "write_file").is_err());
+        };
+        let initial_private = snapshot(&database, &companion.conversation_id, "user");
+        let initial_task = snapshot(&database, &task.conversation_id, "digital_colleague");
+        assert_eq!(initial_private.0["defaultModel"], "customized-base-model");
+        assert!(initial_private.2.starts_with("CUSTOMIZED_BASE_ASSISTANT_PROMPT"));
+        assert_eq!(initial_private.1.as_ref().unwrap()["enabledSkills"], json!(["frozen-skill"]));
+        assert!(initial_private.3.contains("Use the frozen instructions."));
+        assert_eq!(initial_private.4, vec!["frozen-skill"]);
+        assert_ne!(initial_private.1, initial_task.1);
+        assert_eq!(
+            initial_task.1.as_ref().unwrap()["packageManifest"]["knowledgeReferences"],
+            json!([task_reference.clone()])
+        );
+        let private_binding = database.current_conversation_expert_binding(&companion.conversation_id)
+            .unwrap().unwrap();
+        let task_own_binding = database.current_conversation_expert_binding(&task.conversation_id)
+            .unwrap().unwrap();
+        assert_eq!(task_own_binding.expert_id.as_deref(), Some(task_expert.id.as_str()));
+        assert_ne!(task_own_binding.package_snapshot["name"], private_binding.package_snapshot["name"]);
+        assert_eq!(
+            database.runtime_conversation_expert_binding(&task.conversation_id).unwrap().unwrap().id,
+            private_binding.id
+        );
+
+        database.save_agent(&crate::database::SaveAgentRequest {
+            id: Some(source.id.clone()),
+            name: "renamed live source".into(),
+            description: "changed live description".into(),
+            icon: source.icon.clone(),
+            category: source.category.clone(),
+            system_prompt: "changed live persona and duty".into(),
+            default_model: "changed-live-model".into(),
+            opening_suggestions: source.opening_suggestions.clone(),
+            package_manifest: json!({ "skills": [] }),
+        }).unwrap();
+        database.set_agent_skill_enabled(&source.id, "frozen-skill", false).unwrap();
+        assert_unchanged(&database, &companion.conversation_id, "user", &initial_private);
+        assert_unchanged(&database, &task.conversation_id, "digital_colleague", &initial_task);
+
+        assert!(database.delete_agent(&source.id).unwrap());
+        assert!(database.companion_profile(&companion.profile.id).unwrap().profile.template_agent_id.is_none());
+        let surviving = database.current_conversation_expert_binding(&companion.conversation_id)
+            .unwrap().unwrap();
+        assert!(surviving.expert_id.is_none());
+        assert_eq!(surviving.state, "active");
+        assert_unchanged(&database, &companion.conversation_id, "user", &initial_private);
+        assert_unchanged(&database, &task.conversation_id, "digital_colleague", &initial_task);
+        drop(database);
+
+        let database = Database::open(root.join("test.db")).unwrap();
+        customize_default(&database);
+        assert_unchanged(&database, &companion.conversation_id, "user", &initial_private);
+        assert_unchanged(&database, &task.conversation_id, "digital_colleague", &initial_task);
+        assert!(database.current_conversation_expert_binding(&task.conversation_id)
+            .unwrap().unwrap().expert_id.as_deref() == Some(task_expert.id.as_str()));
+        database.with_connection(|connection| {
+            connection.execute(
+                "UPDATE conversation_expert_bindings SET package_hash = 'corrupt-active-snapshot'
+                 WHERE conversation_id = ?1 AND state = 'active'",
+                [&companion.conversation_id],
+            )?;
+            Ok(())
+        }).unwrap();
+        for conversation_id in [&companion.conversation_id, &task.conversation_id] {
+            assert!(conversation_prompt_context(
+                &database,
+                &skills_dir,
+                conversation_id,
+                "corrupt snapshot",
+                "user",
+                PromptScopeOverrides { tool_allowlist: None, mcp_server_scope: None },
+            ).is_err());
+            assert!(conversation_enabled_skill_ids(&database, &skills_dir, conversation_id).is_err());
+            assert!(effective_conversation_delegation_scope(&database, conversation_id).is_err());
+            assert!(ensure_expert_tool_allowed(&database, conversation_id, "read").is_err());
+        }
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn companion_profile_update_enforces_root_run_and_persists_actual_values() {
+        let root = std::env::temp_dir().join(format!("fox-profile-host-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let database = Database::open(root.join("test.db")).unwrap();
+        let companion = database.create_blank_companion(&root).unwrap();
+        let other = database.create_blank_companion(&root).unwrap();
+        database.with_connection(|connection| {
+            connection.execute_batch(&format!(
+                "INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES
+                 ('root','{}','running','fox',1),
+                 ('child','{}','running','fox',2),
+                 ('other','{}','running','fox',1);
+                 UPDATE runs SET parent_run_id='root',root_run_id='root' WHERE id='child';",
+                companion.conversation_id, companion.conversation_id, other.conversation_id,
+            ))
+        }).unwrap();
+        let updated = execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({
+            "display_name": "小周", "duty": "准备党群汇报", "persona_override": "先给结论"
+        })).unwrap();
+        assert_eq!(updated["displayName"], "小周");
+        assert_eq!(updated["personaOverride"], "先给结论");
+        assert_eq!(updated["changes"], json!(["displayName", "duty", "personaOverride"]));
+        let renamed = execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({"name":"小周 2"})).unwrap();
+        assert_eq!(renamed["duty"], "准备党群汇报");
+        assert_eq!(renamed["personaOverride"], "先给结论");
+        assert!(execute_memory_operation(&database, &companion.conversation_id, "child", "companion_profile_update", &json!({"name":"伪造子运行"})).is_err());
+        assert!(execute_memory_operation(&database, &companion.conversation_id, "child", "memory_write", &json!({"target":"notes","action":"add","content":"非法"})).is_err());
+        assert!(execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({"name":"小 Fox","targetId":other.profile.id})).is_err());
+        assert!(execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({"name":42,"duty":"不应保存"})).is_err());
+        assert!(execute_memory_operation(&database, &other.conversation_id, "other", "companion_profile_update", &json!({"name":"小周 2"})).is_err());
+        let saved = database.companion_runtime_notes(&companion.conversation_id, "").unwrap().unwrap();
+        assert_eq!(saved["displayName"], "小周 2");
+        assert_eq!(saved["duty"], "准备党群汇报");
+        assert_eq!(saved["personaOverride"], "先给结论");
+
+        let ordinary = database.create_conversation("fox-general", None, None, None).unwrap();
+        database.with_connection(|connection| {
+            connection.execute("INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES ('ordinary',?1,'running','fox',1)", [&ordinary.id])
+        }).unwrap();
+        assert!(execute_memory_operation(&database, &ordinary.id, "ordinary", "companion_profile_update", &json!({"name":"普通对话"})).is_err());
+
+        database.with_connection(|connection| {
+            connection.execute_batch(
+                "INSERT INTO projects(id,name,root_path,created_at,updated_at) VALUES ('reader-project','reader','reader-root',1,1);
+                 INSERT INTO conversations(id,agent_id,title,project_id,status,created_at,updated_at)
+                 VALUES ('reader-chat','fox-general','reader','reader-project','active',1,1);
+                 INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES ('reader-run','reader-chat','running','fox',1);",
+            )
+        }).unwrap();
+        database.companion_grant_project(&companion.profile.id, "reader-project", true).unwrap();
+        database.companion_project_note_reference_set("reader-chat", Some(&companion.profile.id)).unwrap();
+        assert!(execute_memory_operation(&database, "reader-chat", "reader-run", "companion_profile_update", &json!({"name":"项目读者越权"})).is_err());
+
+        let background = database.create_digital_colleague(&crate::database::CreateDigitalColleagueInput {
+            name: "Background profile".into(), expert_id: "fox-security".into(), objective: "profile".into(),
+            project_id: None, project_root: None, knowledge_references: Vec::new(), max_runs_per_day: 1,
+            max_tokens_per_day: 1000, max_duration_ms: 1000, max_output_tokens: 100, max_tool_calls: 1,
+            companion_id: Some(companion.profile.id.clone()),
+        }).unwrap();
+        database.with_connection(|connection| {
+            connection.execute("INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES ('background',?1,'running','fox',1)", [&background.conversation_id])
+        }).unwrap();
+        let background_saved = execute_memory_operation(&database, &background.conversation_id, "background", "companion_profile_update", &json!({"persona_override":"尽量简短"})).unwrap();
+        assert_eq!(background_saved["personaOverride"], "先给结论\n尽量简短");
+        let replaced = execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({"persona_override":"完整替换", "preferenceOperation":"replace"})).unwrap();
+        assert_eq!(replaced["personaOverride"], "完整替换");
+        let cleared = execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({"preferenceOperation":"clear"})).unwrap();
+        assert_eq!(cleared["personaOverride"], Value::Null);
+        assert_eq!(cleared["duty"], "准备党群汇报");
+        let cleared_duty = execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({"duty":"   "})).unwrap();
+        assert_eq!(cleared_duty["duty"], "");
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn companion_task_tools_enforce_root_owner_and_return_saved_values() {
+        let root = std::env::temp_dir().join(format!("fox-task-host-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let database = Database::open(root.join("test.db")).unwrap();
+        let companion = database.create_blank_companion(&root).unwrap();
+        let other = database.create_blank_companion(&root).unwrap();
+        database.with_connection(|connection| {
+            connection.execute_batch(&format!(
+                "INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES
+                 ('task-root','{}','running','fox',1),
+                 ('task-child','{}','running','fox',2),
+                 ('task-other','{}','running','fox',1);
+                 UPDATE runs SET parent_run_id='task-root',root_run_id='task-root' WHERE id='task-child';",
+                companion.conversation_id, companion.conversation_id, other.conversation_id,
+            ))
+        }).unwrap();
+        let schedule = json!({"kind":"weekly","weekdays":[5],"localTime":"15:00","timezone":"Asia/Shanghai"});
+        let created = execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_create", &json!({
+            "name":"Friday review", "objective":"Review the saved evidence", "schedule":schedule,
+        })).unwrap();
+        let task_id = created["task"]["id"].as_str().unwrap();
+        assert_eq!(created["task"]["companionId"], companion.profile.id);
+        assert_eq!(created["task"]["reportConversationId"], companion.conversation_id);
+        assert_eq!(created["task"]["expertId"], Value::Null);
+        assert_eq!(created["task"]["expertBindingId"], Value::Null);
+        assert_eq!(created["task"]["packageHash"], Value::Null);
+        assert_eq!(created["task"]["packageSnapshot"], Value::Null);
+        assert_eq!(created["task"]["maxRunsPerDay"], 8);
+        assert_eq!(created["task"]["maxTokensPerDay"], 128_000);
+        assert_eq!(created["task"]["maxDurationMs"], 300_000);
+        assert_eq!(created["task"]["maxOutputTokens"], 4_096);
+        assert_eq!(created["task"]["maxToolCalls"], 16);
+        assert_eq!(created["schedule"]["catchupWindowSeconds"], 3_600);
+        assert_eq!(created["schedule"]["timezone"], "Asia/Shanghai");
+        assert!(created["schedule"]["nextDueAt"].as_i64().unwrap() > crate::database::now_ms());
+        assert!(execute_memory_operation(&database, &companion.conversation_id, "task-child", "companion_task_list", &json!({})).is_err());
+        assert!(execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_create", &json!({
+            "name":"Wrong owner", "objective":"Reject", "schedule":schedule, "companionId":other.profile.id,
+        })).is_err());
+        assert!(execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_create", &json!({
+            "name":"Approximation", "objective":"Reject", "schedule":{"kind":"monthly","localTime":"15:00","timezone":"UTC"},
+        })).is_err());
+        assert!(execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_create", &json!({
+            "name":"Ambiguous", "objective":"Reject", "schedule":{"kind":"once","timezone":"UTC"},
+        })).is_err());
+        assert!(execute_memory_operation(&database, &other.conversation_id, "task-other", "companion_task_update", &json!({
+            "taskId":task_id, "objective":"Cross-owner write",
+        })).is_err());
+        assert!(execute_memory_operation(&database, &other.conversation_id, "task-other", "companion_task_history", &json!({"taskId":task_id})).is_err());
+        let updated = execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_update", &json!({
+            "taskId":task_id, "objective":"Use the revised objective",
+        })).unwrap();
+        assert_eq!(updated["task"]["objective"], "Use the revised objective");
+        assert_eq!(updated["schedule"]["timezone"], "Asia/Shanghai");
+        assert!(execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_update", &json!({
+            "taskId":task_id, "schedule":{"kind":"weekly","weekdays":[5],"localTime":"15:00","timezone":"UTC"},
+        })).is_err());
+        let paused = execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_pause", &json!({"taskId":task_id})).unwrap();
+        assert_eq!(paused["schedule"]["enabled"], false);
+        let resumed = execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_resume", &json!({"taskId":task_id})).unwrap();
+        assert_eq!(resumed["schedule"]["enabled"], true);
+        let listed = execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_list", &json!({})).unwrap();
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert!(execute_memory_operation(&database, &other.conversation_id, "task-other", "companion_task_list", &json!({})).unwrap().as_array().unwrap().is_empty());
+        let accepted = database.accept_digital_colleague_trigger(task_id, "manual", None, "host-history", &json!({}), None, "user").unwrap();
+        assert!(accepted.prepared.is_some());
+        let history = execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_history", &json!({"taskId":task_id})).unwrap();
+        assert_eq!(history.as_array().unwrap().len(), 1);
+        database.apply_runtime_event(accepted.trigger.run_id.as_deref().unwrap(), 1, &json!({"type":"run.started"})).unwrap();
+        database.apply_runtime_event(accepted.trigger.run_id.as_deref().unwrap(), 2, &json!({"type":"run.completed"})).unwrap();
+        execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_delete", &json!({"taskId":task_id})).unwrap();
+        assert_eq!(database.get_digital_colleague(task_id).unwrap().unwrap().status, "revoked");
+        assert_eq!(database.list_digital_colleague_triggers(task_id, 20).unwrap().len(), 1);
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn blank_companion_uses_shipped_assistant_not_customized_default_agent() {
+        let root = std::env::temp_dir().join(format!("fox-blank-shipped-assistant-{}", Uuid::new_v4()));
+        let skills_dir = root.join("skills");
+        fs::create_dir_all(skills_dir.join("custom-default-skill")).unwrap();
+        fs::write(
+            skills_dir.join("custom-default-skill/SKILL.md"),
+            "---\nid: custom-default-skill\nname: Custom default skill\nversion: 1.0\n---\nCUSTOM_DEFAULT_SKILL_INSTRUCTIONS",
+        )
+        .unwrap();
+        let database = Database::open(root.join("test.db")).unwrap();
+        let default_companion = database.seed_default_companion(&root).unwrap();
+        database.edit_companion(&default_companion.profile.id, &CompanionProfileEdit {
+            display_name: None,
+            avatar_ref: None,
+            duty: Some("DEFAULT_COMPANION_ONLY_DUTY".into()),
+            persona_override: Some("DEFAULT_COMPANION_ONLY_PERSONA".into()),
+        }).unwrap();
+        let customized = database.get_agent("fox-general").unwrap().unwrap();
+        database.save_agent(&SaveAgentRequest {
+            id: Some(customized.id),
+            name: customized.name,
+            description: customized.description,
+            icon: customized.icon,
+            category: customized.category,
+            system_prompt: "CUSTOMIZED_DEFAULT_AGENT_PROMPT".into(),
+            default_model: "user-default-model".into(),
+            opening_suggestions: customized.opening_suggestions,
+            package_manifest: json!({
+                "skills": ["custom-default-skill"],
+                "allowedTools": ["read"]
+            }),
+        }).unwrap();
+        database.set_agent_skill_enabled("fox-general", "custom-default-skill", true).unwrap();
+
+        let blank = database.create_blank_companion(&root).unwrap();
+        let context = conversation_prompt_context(
+            &database,
+            &skills_dir,
+            &blank.conversation_id,
+            "blank companion",
+            "user",
+            PromptScopeOverrides { tool_allowlist: None, mcp_server_scope: None },
+        ).unwrap();
+        let serialized = context.assistant_package.to_string();
+        for marker in [
+            "CUSTOMIZED_DEFAULT_AGENT_PROMPT",
+            "custom-default-skill",
+            "CUSTOM_DEFAULT_SKILL_INSTRUCTIONS",
+            "DEFAULT_COMPANION_ONLY_DUTY",
+            "DEFAULT_COMPANION_ONLY_PERSONA",
+        ] {
+            assert!(!serialized.contains(marker), "blank assistant inherited {marker}");
+            assert!(!context.system_prompt.contains(marker), "blank prompt inherited {marker}");
+            assert!(!context.skill_prompt.contains(marker), "blank skills inherited {marker}");
+        }
+        assert!(context.system_prompt.starts_with("You are Fox, a careful general-purpose desktop assistant."));
+        assert_eq!(context.assistant_package["defaultModel"], "configured-model");
+        assert_eq!(context.assistant_package["enabledSkills"], json!([]));
+        assert_eq!(context.assistant_package["packageManifest"]["skills"], json!([]));
+        assert!(context.assistant_package["packageManifest"]["allowedTools"]
+            .as_array().unwrap().contains(&json!("skill_load")));
+        assert!(conversation_enabled_skill_ids(&database, &skills_dir, &blank.conversation_id)
+            .unwrap().is_empty());
+
+        let default_context = conversation_prompt_context(
+            &database,
+            &skills_dir,
+            &default_companion.conversation_id,
+            "seeded default companion",
+            "user",
+            PromptScopeOverrides { tool_allowlist: None, mcp_server_scope: None },
+        ).unwrap();
+        assert!(default_context.system_prompt.starts_with("CUSTOMIZED_DEFAULT_AGENT_PROMPT"));
+        assert_eq!(default_context.assistant_package["defaultModel"], "user-default-model");
+        assert_eq!(default_context.assistant_package["enabledSkills"], json!(["custom-default-skill"]));
+        assert!(default_context.skill_prompt.contains("CUSTOM_DEFAULT_SKILL_INSTRUCTIONS"));
+        let default_profile = database.companion_profile(&default_companion.profile.id).unwrap();
+        assert_eq!(default_profile.profile.duty, "DEFAULT_COMPANION_ONLY_DUTY");
+        assert_eq!(default_profile.profile.persona_override.as_deref(), Some("DEFAULT_COMPANION_ONLY_PERSONA"));
+        let ordinary = database.create_conversation("fox-general", Some("ordinary"), None, None).unwrap();
+        let ordinary_context = conversation_prompt_context(
+            &database,
+            &skills_dir,
+            &ordinary.id,
+            "ordinary chat",
+            "user",
+            PromptScopeOverrides { tool_allowlist: None, mcp_server_scope: None },
+        ).unwrap();
+        assert!(ordinary_context.system_prompt.starts_with("CUSTOMIZED_DEFAULT_AGENT_PROMPT"));
+        assert_eq!(ordinary_context.assistant_package["defaultModel"], "user-default-model");
+        assert_eq!(ordinary_context.assistant_package["enabledSkills"], json!(["custom-default-skill"]));
+        assert!(ordinary_context.skill_prompt.contains("CUSTOM_DEFAULT_SKILL_INSTRUCTIONS"));
+
+        let create_task = |name: &str, companion_id: String, reference: KnowledgeReference| {
+            database.create_digital_colleague(&CreateDigitalColleagueInput {
+                name: name.into(),
+                expert_id: "fox-debugger".into(),
+                objective: "Task binding must not reclassify the base assistant".into(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: vec![reference],
+                max_runs_per_day: 8,
+                max_tokens_per_day: 10_000,
+                max_duration_ms: 60_000,
+                max_output_tokens: 2_000,
+                max_tool_calls: 20,
+                companion_id: Some(companion_id),
+            }).unwrap()
+        };
+        let blank_reference = KnowledgeReference::local("blank-task-local-knowledge");
+        let blank_task = create_task(
+            "Blank companion task",
+            blank.profile.id.clone(),
+            blank_reference.clone(),
+        );
+        let blank_task_context = conversation_prompt_context(
+            &database,
+            &skills_dir,
+            &blank_task.conversation_id,
+            "blank companion task",
+            "digital_colleague",
+            PromptScopeOverrides { tool_allowlist: None, mcp_server_scope: None },
+        ).unwrap();
+        assert!(blank_task_context.system_prompt.starts_with("You are Fox, a careful general-purpose desktop assistant."));
+        assert_eq!(blank_task_context.assistant_package["defaultModel"], "configured-model");
+        assert_eq!(blank_task_context.assistant_package["enabledSkills"], json!([]));
+        assert_eq!(
+            blank_task_context.assistant_package["packageManifest"]["knowledgeReferences"],
+            json!([blank_reference])
+        );
+        assert!(blank_task_context.expert_package.is_none());
+        assert!(database.current_conversation_expert_binding(&blank_task.conversation_id)
+            .unwrap().is_some());
+
+        let default_reference = KnowledgeReference::local("default-task-local-knowledge");
+        let default_task = create_task(
+            "Seeded default companion task",
+            default_companion.profile.id.clone(),
+            default_reference.clone(),
+        );
+        let default_task_context = conversation_prompt_context(
+            &database,
+            &skills_dir,
+            &default_task.conversation_id,
+            "seeded default companion task",
+            "digital_colleague",
+            PromptScopeOverrides { tool_allowlist: None, mcp_server_scope: None },
+        ).unwrap();
+        assert!(default_task_context.system_prompt.starts_with("CUSTOMIZED_DEFAULT_AGENT_PROMPT"));
+        assert_eq!(default_task_context.assistant_package["defaultModel"], "user-default-model");
+        assert_eq!(default_task_context.assistant_package["enabledSkills"], json!(["custom-default-skill"]));
+        assert!(default_task_context.skill_prompt.contains("CUSTOM_DEFAULT_SKILL_INSTRUCTIONS"));
+        assert_eq!(
+            default_task_context.assistant_package["packageManifest"]["knowledgeReferences"],
+            json!([default_reference])
+        );
+        assert!(default_task_context.expert_package.is_none());
+        drop(database);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn background_task_package_and_host_share_task_knowledge_scope() {
+        let root = std::env::temp_dir().join(format!("fox-task-knowledge-scope-{}", Uuid::new_v4()));
+        let skills_dir = root.join("skills");
+        fs::create_dir_all(&skills_dir).unwrap();
+        let database = Database::open(root.join("test.db")).unwrap();
+        let private = database.add_companion(&root, "fox-debugger").unwrap();
+        let local_knowledge = crate::local_knowledge::LocalKnowledgeStore::open(root.join("knowledge")).unwrap();
+        let task_base = local_knowledge.create_base(crate::local_knowledge::CreateLocalKnowledgeBaseRequest {
+            name: "Task knowledge A".into(),
+            description: None,
+            embedding_model_id: None,
+            chunk_size: None,
+            chunk_overlap: None,
+            search_mode: None,
+        }).unwrap();
+        let task_reference = KnowledgeReference::local(&task_base.id);
+        let private_reference = KnowledgeReference::local("private-knowledge-b");
+        database.set_knowledge_references(
+            &private.conversation_id,
+            &[(private_reference.clone(), "Private B".into())],
+        ).unwrap();
+        let task = database.create_digital_colleague(&CreateDigitalColleagueInput {
+            name: "Scoped task".into(),
+            expert_id: "fox-debugger".into(),
+            objective: "Use only task-selected knowledge".into(),
+            project_id: None,
+            project_root: None,
+            knowledge_references: vec![task_reference.clone()],
+            max_runs_per_day: 8,
+            max_tokens_per_day: 10_000,
+            max_duration_ms: 60_000,
+            max_output_tokens: 2_000,
+            max_tool_calls: 20,
+            companion_id: Some(private.profile.id.clone()),
+        }).unwrap();
+
+        let context = conversation_prompt_context(
+            &database,
+            &skills_dir,
+            &task.conversation_id,
+            "scoped task",
+            "digital_colleague",
+            PromptScopeOverrides { tool_allowlist: None, mcp_server_scope: None },
+        ).unwrap();
+        assert_eq!(
+            context.expert_package.as_ref().unwrap()["packageManifest"]["knowledgeReferences"],
+            json!([task_reference.clone()])
+        );
+        let bindings = database.conversation_knowledge_reference_bindings(&task.conversation_id).unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(json!(bindings[0].reference), json!(task_reference));
+
+        let client = crate::yuxi::YuxiClient::new().unwrap();
+        let control = crate::local_knowledge_vector::RetrievalControl::new(None, None);
+        let allowed = tauri::async_runtime::block_on(execute_bound_knowledge_tool(
+            None,
+            &client,
+            &local_knowledge,
+            &bindings,
+            "list_knowledge_bases",
+            &json!({"reference": task_reference}),
+            control.clone(),
+        ));
+        assert!(allowed.is_ok(), "task knowledge was rejected: {allowed:?}");
+        let rejected = tauri::async_runtime::block_on(execute_bound_knowledge_tool(
+            None,
+            &client,
+            &local_knowledge,
+            &bindings,
+            "list_knowledge_bases",
+            &json!({"reference": private_reference}),
+            control,
+        ))
+        .unwrap_err();
+        assert!(rejected.contains("local_knowledge.binding_invalid"), "{rejected}");
+        drop(local_knowledge);
+        drop(database);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -4,9 +4,12 @@ import { Check } from 'typebox/value'
 import {
   createHostTools,
   createKnowledgeTools,
+  createMcpTools,
   KNOWLEDGE_REFERENCE_SCHEMA,
 } from '../src/host-tools.mjs'
 import { diagnoseToolsForAgentContext } from '../src/expert-package.mjs'
+import { createReadOnlyTools } from '../src/read-only-tools.mjs'
+import { createGraphReadonlyTools } from '../src/graph-readonly-tools.mjs'
 import {
   KNOWLEDGE_TOOL_NAMES,
   runtimeToolNames,
@@ -23,6 +26,37 @@ function objectProperties(schema) {
   assert.equal(schema.type, 'object')
   return schema.properties
 }
+
+test('assembled Host tools exactly match the protocol capability catalog order', () => {
+  const tools = [
+    ...createReadOnlyTools(() => {}),
+    ...createGraphReadonlyTools({}),
+    ...createHostTools(() => {}),
+    ...createKnowledgeTools(() => {}),
+    ...createMcpTools(() => {}),
+  ]
+  assert.deepEqual(tools.map(tool => tool.name), runtimeToolNames())
+  const names = tools.map(tool => tool.name)
+  assert.deepEqual(names.slice(names.indexOf('companion_profile_update') + 1, names.indexOf('note_organize')), [
+    'companion_task_create', 'companion_task_update', 'companion_task_list', 'companion_task_history',
+    'companion_task_pause', 'companion_task_resume', 'companion_task_run_now', 'companion_task_delete',
+  ])
+})
+
+test('companion profile updates accept and forward an explicitly cleared duty', async () => {
+  const requests = []
+  const tool = toolByName(createHostTools(async (type, payload) => {
+    requests.push({ type, payload })
+    return { payload: { result: { duty: '', changedFields: ['duty'] } } }
+  }), 'companion_profile_update')
+  const input = { duty: '' }
+  assert.equal(Check(tool.parameters, input), true)
+  await tool.execute('profile-clear-duty', input, new AbortController().signal)
+  assert.deepEqual(requests, [{
+    type: 'tool.execute',
+    payload: { toolCallId: 'profile-clear-duty', tool: 'companion_profile_update', input },
+  }])
+})
 
 test('project compute and artifact publication preserve explicit Host inputs', async () => {
   const requests = []

@@ -1,6 +1,6 @@
 use super::{
-    activate_expert_binding, agent_package_snapshot, now_ms, package_snapshot_hash,
-    query_agent_record, query_conversation_expert_binding_by_state, Database, DEFAULT_AGENT_ID,
+    activate_expert_binding, now_ms,
+    query_agent_record, Database, DEFAULT_AGENT_ID,
 };
 use crate::data_paths::{companion_notes_dir, companion_workspace};
 use crate::database::{
@@ -8,7 +8,6 @@ use crate::database::{
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::path::Path;
 use uuid::Uuid;
 
@@ -20,9 +19,8 @@ pub(crate) enum CompanionError {
     Deleting,
     RunActive,
     InvalidName,
+    InvalidInput(&'static str),
     NameTaken,
-    TemplateChanged,
-    BuiltinTemplate,
     ModelUnavailable(String),
     ReminderModeInvalid,
     BubbleNotFound,
@@ -44,9 +42,8 @@ impl CompanionError {
             Self::Deleting => ("companion.deleting", "联系人正在删除"),
             Self::RunActive => ("companion.run_active", "请先停止当前生成"),
             Self::InvalidName => ("companion.invalid_name", "名字需要包含 1 至 40 个字符"),
+            Self::InvalidInput(message) => ("companion.invalid_profile", message),
             Self::NameTaken => ("companion.name_conflict", "已有联系人使用这个名字"),
-            Self::TemplateChanged => ("companion.template_changed", "专家模板已变化，请重新查看"),
-            Self::BuiltinTemplate => ("companion.builtin_template", "小狐的模板随 Fox 更新"),
             Self::ModelUnavailable(message) => ("companion.model_unavailable", message.as_str()),
             Self::ReminderModeInvalid => ("companion.reminder_mode_invalid", "未知的提醒模式"),
             Self::BubbleNotFound => ("companion.bubble_not_found", "这条消息还不能标为未读"),
@@ -107,22 +104,31 @@ pub(crate) struct CompanionProfileEdit {
     pub persona_override: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct CompanionTemplateStatus {
-    pub bound_hash: Option<String>,
-    pub latest_hash: Option<String>,
-    pub bound_snapshot: Option<Value>,
-    pub latest_snapshot: Option<Value>,
-    pub update_available: bool,
-    pub dismissed: bool,
+#[derive(Debug)]
+pub(crate) enum CompanionPreferenceEdit {
+    Preserve,
+    Add(String),
+    Replace(String),
+    Clear,
 }
 
-/// K6: the unread unit is the K1-persisted companion bubble, not the settled
-/// assistant message. The effective read position is the converted delivery
-/// cursor; before the chat backfill completes (cursor still NULL) it falls back
-/// to the legacy ordinal mapped onto bubble delivery order, so a contact never
-/// shows a wrong unread count while its history is still being organised.
+#[derive(Debug)]
+pub(crate) struct CompanionProfileSaveInput {
+    pub display_name: Option<String>,
+    pub avatar_ref: Option<String>,
+    pub duty: Option<String>,
+    pub preference: CompanionPreferenceEdit,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CompanionProfileSaved {
+    pub display_name: String,
+    pub duty: String,
+    pub persona_override: Option<String>,
+    pub changes: Vec<&'static str>,
+}
+
 const EFFECTIVE_READ: &str = "coalesce(p.last_read_delivery_order,
         (SELECT max(b.delivery_order) FROM contact_bubbles b
             WHERE b.conversation_id=c.id AND b.source_ordinal<=p.last_read_ordinal), 0)";
@@ -324,6 +330,21 @@ fn available_name(conn: &Connection, desired: &str, id: &str) -> rusqlite::Resul
     Ok(name)
 }
 
+fn available_blank_name(conn: &Connection, id: &str) -> rusqlite::Result<String> {
+    let mut index = 1;
+    loop {
+        let name = if index == 1 {
+            "小 Fox".to_owned()
+        } else {
+            format!("小 Fox {index}")
+        };
+        if !name_taken(conn, &name, id)? {
+            return Ok(name);
+        }
+        index += 1;
+    }
+}
+
 fn require_idle(record: &CompanionView) -> Result<()> {
     if record.active_run_status.is_some() {
         Err(CompanionError::RunActive)
@@ -426,28 +447,13 @@ impl Database {
 
     pub(crate) fn add_companion(&self, root: &Path, expert_id: &str) -> Result<CompanionView> {
         self.companion_transaction(|tx| {
-            let deleting = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM companion_deletions
-                WHERE template_agent_id=?1 AND state='deleting')",
-                [expert_id],
-                |r| r.get::<_, bool>(0),
-            )?;
-            if deleting {
-                return Err(CompanionError::Deleting);
-            }
             let expert = local_expert(tx, expert_id)?;
-            let existing = tx
-                .query_row(
-                    "SELECT id FROM companion_profiles WHERE template_agent_id=?1",
-                    [expert_id],
-                    |r| r.get::<_, String>(0),
-                )
-                .optional()?;
-            if let Some(id) = existing {
-                return restore(tx, profile(tx, &id)?);
-            }
             create_companion(tx, root, Some(&expert))
         })
+    }
+
+    pub(crate) fn create_blank_companion(&self, root: &Path) -> Result<CompanionView> {
+        self.companion_transaction(|tx| create_companion(tx, root, None))
     }
 
     pub(crate) fn seed_default_companion(&self, root: &Path) -> Result<CompanionView> {
@@ -472,7 +478,7 @@ impl Database {
                         "小狐的初始化标记已有记录，但身份缺失".into(),
                     ))
                 }
-                None => create_companion(tx, root, None)?,
+                None => create_default_companion(tx, root)?,
             };
             if !seeded {
                 tx.execute(
@@ -490,6 +496,24 @@ impl Database {
         id: &str,
         edit: &CompanionProfileEdit,
     ) -> Result<CompanionView> {
+        self.save_companion_profile(id, CompanionProfileSaveInput {
+            display_name: edit.display_name.clone(),
+            avatar_ref: edit.avatar_ref.clone(),
+            duty: edit.duty.clone(),
+            preference: match &edit.persona_override {
+                None => CompanionPreferenceEdit::Preserve,
+                Some(value) if value.is_empty() => CompanionPreferenceEdit::Clear,
+                Some(value) => CompanionPreferenceEdit::Replace(value.clone()),
+            },
+        })?;
+        self.companion_profile(id)
+    }
+
+    pub(crate) fn save_companion_profile(
+        &self,
+        id: &str,
+        edit: CompanionProfileSaveInput,
+    ) -> Result<CompanionProfileSaved> {
         self.companion_transaction(|tx| {
             let current = profile(tx, id)?;
             let name = edit.display_name.as_deref().map(str::trim);
@@ -505,21 +529,56 @@ impl Database {
                     params![current.conversation_id, name],
                 )?;
             }
+            let duty = edit.duty.as_deref().map(str::trim);
+            let existing_persona = current.profile.persona_override.as_deref();
+            let persona = match edit.preference {
+                CompanionPreferenceEdit::Preserve => None,
+                CompanionPreferenceEdit::Add(value) => {
+                    let value = value.trim();
+                    if value.is_empty() {
+                        return Err(CompanionError::InvalidInput("沟通偏好不能为空"));
+                    }
+                    Some(match existing_persona {
+                        Some(existing) if !existing.is_empty() => Some(format!("{existing}\n{value}")),
+                        _ => Some(value.to_owned()),
+                    })
+                }
+                CompanionPreferenceEdit::Replace(value) => {
+                    let value = value.trim();
+                    if value.is_empty() {
+                        return Err(CompanionError::InvalidInput("沟通偏好不能为空；如需清空请使用 clear"));
+                    }
+                    Some(Some(value.to_owned()))
+                }
+                CompanionPreferenceEdit::Clear => Some(None),
+            };
+            let persona_sql = persona.as_ref().map(|value| value.as_deref());
             tx.execute(
                 "UPDATE companion_profiles SET display_name=coalesce(?2,display_name),
                 avatar_ref=coalesce(?3,avatar_ref), duty=coalesce(?4,duty),
-                persona_override=CASE WHEN ?5 IS NULL THEN persona_override ELSE nullif(?5,'') END,
-                updated_at=?6 WHERE id=?1",
+                persona_override=CASE WHEN ?5 THEN ?6 ELSE persona_override END,
+                updated_at=?7 WHERE id=?1",
                 params![
                     id,
                     name,
                     edit.avatar_ref,
-                    edit.duty,
-                    edit.persona_override,
+                    duty,
+                    persona.is_some(),
+                    persona_sql.flatten(),
                     now_ms()
                 ],
             )?;
-            profile(tx, id)
+            let saved = profile(tx, id)?;
+            let mut changes = Vec::new();
+            if saved.profile.display_name != current.profile.display_name { changes.push("displayName"); }
+            if saved.profile.duty != current.profile.duty { changes.push("duty"); }
+            if saved.profile.persona_override != current.profile.persona_override { changes.push("personaOverride"); }
+            Ok(CompanionProfileSaved {
+                display_name: saved.profile.display_name,
+                duty: saved.profile.duty,
+                persona_override: saved.profile.persona_override,
+                changes,
+            })
         })
     }
 
@@ -726,81 +785,20 @@ impl Database {
     pub(crate) fn restore_companion(&self, id: &str) -> Result<CompanionView> {
         self.companion_transaction(|tx| restore(tx, profile(tx, id)?))
     }
+}
 
-    pub(crate) fn companion_template_status(&self, id: &str) -> Result<CompanionTemplateStatus> {
-        let conn = self
-            .connection
-            .lock()
-            .map_err(|_| CompanionError::Storage("数据库锁已损坏".into()))?;
-        let record = profile(&conn, id)?;
-        if record.profile.is_default {
-            return Ok(CompanionTemplateStatus {
-                bound_hash: None,
-                latest_hash: None,
-                bound_snapshot: None,
-                latest_snapshot: None,
-                update_available: false,
-                dismissed: false,
-            });
-        }
-        let binding =
-            query_conversation_expert_binding_by_state(&conn, &record.conversation_id, "active")
-                .optional()?
-                .ok_or_else(|| CompanionError::Storage("私聊的专家绑定缺失".into()))?;
-        let expert = local_expert(&conn, &record.profile.template_agent_id)?;
-        let latest = agent_package_snapshot(&expert);
-        let hash = package_snapshot_hash(&latest);
-        Ok(CompanionTemplateStatus {
-            update_available: hash != binding.package_hash,
-            dismissed: record.profile.template_notice_dismissed_hash.as_ref() == Some(&hash),
-            latest_hash: Some(hash),
-            bound_hash: Some(binding.package_hash),
-            latest_snapshot: Some(latest),
-            bound_snapshot: Some(binding.package_snapshot),
-        })
-    }
+fn activate_companion_binding(
+    tx: &Transaction<'_>,
+    conversation_id: &str,
+    expert: &AgentRecord,
+    activation_source: &str,
+) -> Result<()> {
+    activate_expert_binding(tx, conversation_id, expert, activation_source)?;
+    Ok(())
+}
 
-    pub(crate) fn apply_companion_template(
-        &self,
-        id: &str,
-        expected: &str,
-        dismiss: bool,
-    ) -> Result<()> {
-        self.companion_transaction(|tx| {
-            let record = profile(tx, id)?;
-            if record.profile.is_default {
-                return Err(CompanionError::BuiltinTemplate);
-            }
-            let expert = local_expert(tx, &record.profile.template_agent_id)?;
-            let hash = package_snapshot_hash(&agent_package_snapshot(&expert));
-            if hash != expected {
-                return Err(CompanionError::TemplateChanged);
-            }
-            if !dismiss {
-                require_idle(&record)?;
-                let bound = query_conversation_expert_binding_by_state(
-                    tx,
-                    &record.conversation_id,
-                    "active",
-                )
-                .optional()?
-                .ok_or_else(|| CompanionError::Storage("私聊的专家绑定缺失".into()))?;
-                if bound.package_hash != hash {
-                    activate_expert_binding(
-                        tx,
-                        &record.conversation_id,
-                        &expert,
-                        "companion_template_update",
-                    )?;
-                }
-            }
-            tx.execute(
-                "UPDATE companion_profiles SET template_notice_dismissed_hash=?2 WHERE id=?1",
-                params![id, dismiss.then_some(hash)],
-            )?;
-            Ok(())
-        })
-    }
+fn create_default_companion(tx: &Transaction<'_>, root: &Path) -> Result<CompanionView> {
+    create_companion_inner(tx, root, None, true)
 }
 
 fn create_companion(
@@ -808,14 +806,28 @@ fn create_companion(
     root: &Path,
     expert: Option<&AgentRecord>,
 ) -> Result<CompanionView> {
+    create_companion_inner(tx, root, expert, false)
+}
+
+fn create_companion_inner(
+    tx: &Transaction<'_>,
+    root: &Path,
+    expert: Option<&AgentRecord>,
+    is_default: bool,
+) -> Result<CompanionView> {
     let id = format!("cmp_{}", Uuid::new_v4());
     let conversation_id = Uuid::new_v4().to_string();
-    let name = available_name(tx, expert.map_or("小狐", |e| &e.name), &id)?;
+    let name = match (expert, is_default) {
+        (Some(expert), _) => available_name(tx, &expert.name, &id)?,
+        (None, true) => available_name(tx, "小狐", &id)?,
+        (None, false) => available_blank_name(tx, &id)?,
+    };
     let workspace = companion_workspace(root, &id);
     let notes = companion_notes_dir(root, &id);
     let (template, avatar) = match expert {
-        Some(e) => (e.id.as_str(), e.icon.as_deref().unwrap_or("")),
-        None => (DEFAULT_AGENT_ID, "/avatars/fox-assistant.png"),
+        Some(e) => (Some(e.id.as_str()), e.icon.as_deref().unwrap_or("")),
+        None if is_default => (Some(DEFAULT_AGENT_ID), "/avatars/fox-assistant.png"),
+        None => (None, "/avatars/fox-assistant.png"),
     };
     let now = now_ms();
     tx.execute(
@@ -829,7 +841,7 @@ fn create_companion(
             avatar,
             workspace.to_string_lossy(),
             notes.to_string_lossy(),
-            expert.is_none(),
+            is_default,
             now
         ],
     )?;
@@ -847,7 +859,7 @@ fn create_companion(
         ],
     )?;
     if let Some(expert) = expert {
-        activate_expert_binding(tx, &conversation_id, expert, "companion_create")?;
+        activate_companion_binding(tx, &conversation_id, expert, "companion_create")?;
     }
     let greeting_id = Uuid::new_v4().to_string();
     let introduction = match expert {
@@ -1016,7 +1028,7 @@ mod tests {
     }
 
     #[test]
-    fn companions_binding_failure_rolls_back_and_concurrent_adds_share_one_private_chat() {
+    fn companions_binding_failure_rolls_back_and_concurrent_adds_create_independent_private_chats() {
         let f = Fixture::new();
         f.db.execute_raw_sql(
             "CREATE TRIGGER reject_companion_binding BEFORE INSERT ON conversation_expert_bindings
@@ -1045,10 +1057,9 @@ mod tests {
         barrier.wait();
         let record = f.add("fox-debugger");
         let other = join.join().unwrap();
-        assert_eq!(record.profile.id, other.profile.id);
-        assert_eq!(record.conversation_id, other.conversation_id);
-        // C06/D2: concurrent adds share one creation transaction outcome —
-        // exactly one backfill marker and one initialized read cursor.
+        assert_ne!(record.profile.id, other.profile.id);
+        assert_ne!(record.conversation_id, other.conversation_id);
+        // Each creation transaction initializes its own backfill marker and read cursor.
         let (markers, cursors): (i64, i64) = f.db.with_connection(|c| {
             c.query_row(
                 "SELECT (SELECT count(*) FROM contact_bubble_backfills WHERE conversation_id=?1),
@@ -1073,6 +1084,114 @@ mod tests {
                 .len(),
             1
         );
+        drop(f.db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    #[test]
+    fn a02_a03_repeated_creation_freezes_skills_and_survives_source_deletion() {
+        let f = Fixture::new();
+        let expert = f.db.copy_agent("fox-debugger", Some("Independent expert")).unwrap();
+        f.db.set_agent_skill_enabled(&expert.id, "frozen-skill", true).unwrap();
+        let first = f.add(&expert.id);
+        let second = f.add(&expert.id);
+        assert_ne!(first.profile.id, second.profile.id);
+        assert_ne!(first.conversation_id, second.conversation_id);
+        assert_eq!(first.profile.template_agent_id.as_deref(), Some(expert.id.as_str()));
+        let binding = f.db.current_conversation_expert_binding(&first.conversation_id)
+            .unwrap().unwrap();
+        assert_eq!(binding.expert_id.as_deref(), Some(expert.id.as_str()));
+        assert_eq!(binding.package_snapshot["enabledSkills"], serde_json::json!(["frozen-skill"]));
+        assert_eq!(binding.package_snapshot["name"], expert.name);
+        assert_eq!(binding.expert_version, expert.package_version);
+        assert!(binding.package_snapshot["systemPrompt"].is_string());
+        assert!(binding.package_snapshot["resources"].is_object());
+        let frozen = binding.package_snapshot.clone();
+        assert!(f.db.delete_agent(&expert.id).unwrap());
+        for record in [&first, &second] {
+            let current = f.db.companion_profile(&record.profile.id).unwrap();
+            assert_eq!(current.profile.template_agent_id, None);
+            let binding = f.db.current_conversation_expert_binding(&record.conversation_id)
+                .unwrap().unwrap();
+            assert_eq!(binding.expert_id, None);
+            assert_eq!(binding.package_snapshot, frozen);
+        }
+        drop(f.db);
+        let reopened = Database::open(f.root.join("fox.db")).unwrap();
+        for record in [&first, &second] {
+            let binding = reopened.current_conversation_expert_binding(&record.conversation_id)
+                .unwrap().unwrap();
+            assert_eq!(binding.expert_id, None);
+            assert_eq!(binding.package_snapshot, frozen);
+        }
+        drop(reopened);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    #[test]
+    fn a04_blank_creation_is_nondefault_empty_and_uses_incrementing_names() {
+        let f = Fixture::new();
+        let default = f.db.seed_default_companion(&f.root).unwrap();
+        f.db.edit_companion(&default.profile.id, &CompanionProfileEdit {
+            display_name: None,
+            avatar_ref: None,
+            duty: Some("customized default duty".into()),
+            persona_override: Some("customized default persona".into()),
+        }).unwrap();
+        let first = f.db.create_blank_companion(&f.root).unwrap();
+        let second = f.db.create_blank_companion(&f.root).unwrap();
+        assert_eq!(first.profile.display_name, "小 Fox");
+        assert_eq!(second.profile.display_name, "小 Fox 2");
+        assert_ne!(first.profile.id, second.profile.id);
+        assert_ne!(first.conversation_id, second.conversation_id);
+        assert_ne!(first.profile.workspace_dir, second.profile.workspace_dir);
+        for record in [&first, &second] {
+            assert!(!record.profile.is_default);
+            assert_eq!(record.profile.template_agent_id, None);
+            assert_eq!(record.profile.duty, "");
+            assert_eq!(record.profile.persona_override, None);
+            assert!(f.db.current_conversation_expert_binding(&record.conversation_id).unwrap().is_none());
+            let messages = f.db.load_conversation(&record.conversation_id).unwrap().messages;
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].role, "assistant");
+            assert!(messages[0].run_id.is_none());
+            assert!(messages[0].content.contains(&record.profile.display_name));
+            assert!(!messages[0].content.contains("customized default"));
+        }
+        let default = f.db.companion_profile(&default.profile.id).unwrap();
+        assert!(default.profile.is_default);
+        assert_eq!(default.profile.duty, "customized default duty");
+        drop(f.db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    #[test]
+    fn blank_companion_allows_empty_duty_when_saving_avatar_and_preferences() {
+        let f = Fixture::new();
+        let record = f.db.create_blank_companion(&f.root).unwrap();
+        let saved = f.db.edit_companion(&record.profile.id, &CompanionProfileEdit {
+            display_name: None,
+            avatar_ref: Some("🦊".into()),
+            duty: Some("   ".into()),
+            persona_override: Some("先给结论".into()),
+        }).unwrap();
+        assert_eq!(saved.profile.duty, "");
+        assert_eq!(saved.profile.avatar_ref, "🦊");
+        assert_eq!(saved.profile.persona_override.as_deref(), Some("先给结论"));
+        let cleared = f.db.edit_companion(&record.profile.id, &CompanionProfileEdit {
+            display_name: None,
+            avatar_ref: None,
+            duty: Some("职责".into()),
+            persona_override: None,
+        }).unwrap();
+        assert_eq!(cleared.profile.duty, "职责");
+        let cleared = f.db.edit_companion(&record.profile.id, &CompanionProfileEdit {
+            display_name: None,
+            avatar_ref: None,
+            duty: Some("".into()),
+            persona_override: None,
+        }).unwrap();
+        assert_eq!(cleared.profile.duty, "");
         drop(f.db);
         std::fs::remove_dir_all(f.root).unwrap();
     }
@@ -1322,63 +1441,26 @@ mod tests {
     }
 
     #[test]
-    fn companions_template_adoption_checks_reviewed_hash_and_keeps_user_fields() {
+    fn companion_source_changes_keep_frozen_binding_and_user_fields() {
         let f = Fixture::new();
         let record = f.add("fox-debugger");
         let id = &record.profile.id;
-        let initial = f.db.companion_template_status(id).unwrap();
-        assert!(!initial.update_available);
-        f.db.edit_companion(
-            id,
-            &CompanionProfileEdit {
-                display_name: None,
-                avatar_ref: None,
-                duty: Some("用户职责".into()),
-                persona_override: Some("用户人设".into()),
-            },
-        )
-        .unwrap();
+        f.db.edit_companion(id, &CompanionProfileEdit {
+            display_name: None,
+            avatar_ref: None,
+            duty: Some("用户职责".into()),
+            persona_override: Some("用户人设".into()),
+        }).unwrap();
+        let frozen = f.db.current_conversation_expert_binding(&record.conversation_id)
+            .unwrap().unwrap().package_snapshot;
         f.db.execute_raw_sql("UPDATE agents SET system_prompt='新版专家' WHERE id='fox-debugger'")
             .unwrap();
-        let changed = f.db.companion_template_status(id).unwrap();
-        assert!(changed.update_available);
-        let latest = changed.latest_hash.unwrap();
-        assert!(matches!(
-            f.db.apply_companion_template(id, &initial.bound_hash.unwrap(), false),
-            Err(CompanionError::TemplateChanged)
-        ));
-        f.db.apply_companion_template(id, &latest, true).unwrap();
-        assert!(f.db.companion_template_status(id).unwrap().dismissed);
-        f.db.with_connection(|c| {
-            c.execute(
-                "INSERT INTO runs(id,conversation_id,status,model,created_at)
-            VALUES ('test-active',?1,'queued','fox',1)",
-                [&record.conversation_id],
-            )
-        })
-        .unwrap();
-        assert!(matches!(
-            f.db.apply_companion_template(id, &latest, false),
-            Err(CompanionError::RunActive)
-        ));
-        f.db.execute_raw_sql("UPDATE runs SET status='completed' WHERE id='test-active'")
-            .unwrap();
-        f.db.apply_companion_template(id, &latest, false).unwrap();
-        f.db.apply_companion_template(id, &latest, false).unwrap();
-        let history =
-            f.db.list_conversation_expert_bindings(&record.conversation_id)
-                .unwrap();
-        assert_eq!(history.len(), 2);
-        assert_eq!(history[0].state, "replaced");
-        assert_eq!(history[1].activation_source, "companion_template_update");
-        assert_eq!(history[1].package_snapshot["systemPrompt"], "新版专家");
+        let history = f.db.list_conversation_expert_bindings(&record.conversation_id).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].package_snapshot, frozen);
         let updated = f.db.companion_profile(id).unwrap();
         assert_eq!(updated.profile.duty, "用户职责");
-        assert_eq!(
-            updated.profile.persona_override.as_deref(),
-            Some("用户人设")
-        );
-        assert!(!f.db.companion_template_status(id).unwrap().update_available);
+        assert_eq!(updated.profile.persona_override.as_deref(), Some("用户人设"));
         drop(f.db);
         std::fs::remove_dir_all(f.root).unwrap();
     }
@@ -1787,8 +1869,8 @@ mod tests {
         f.reset_backfill(&chat);
         f.bubble(&chat, 1, "companion", 1000, "旧回复");
         f.db.archive_companion(&id).unwrap();
-        let restored = f.add("fox-debugger");
-        assert_eq!(restored.conversation_id, chat, "重复添加走 restore，不是真新建");
+        let restored = f.db.restore_companion(&id).unwrap();
+        assert_eq!(restored.conversation_id, chat, "显式恢复保留原固定私聊");
         assert_eq!(marker_count(&f, &chat), 0, "restore 不得补历史完成标记");
         assert!(matches!(f.db.mark_companion_unread(&id, "bubble-1000"), Err(CompanionError::BackfillPending)));
         assert!(matches!(f.db.quote_companion_bubble(&id, "bubble-1000"), Err(CompanionError::BackfillPending)));
@@ -1822,7 +1904,7 @@ mod tests {
             c.query_row("SELECT completed_at FROM contact_bubble_backfills WHERE conversation_id=?1", [&chat], |r| r.get(0))
         }).unwrap();
         f.db.archive_companion(&id).unwrap();
-        let restored = f.add("fox-debugger");
+        let restored = f.db.restore_companion(&id).unwrap();
         assert_eq!(restored.conversation_id, chat);
         assert_eq!(restored.profile.last_read_delivery_order, Some(2000));
         assert_eq!(restored.profile.manual_unread_from_order, Some(1000));

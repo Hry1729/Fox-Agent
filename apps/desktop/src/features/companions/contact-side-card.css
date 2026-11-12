@@ -294,3 +294,40 @@ button.fox-contact-side-item:hover:not(:disabled),
   white-space: nowrap;
 }
 .fox-contact-side-export-list button:hover { background: color-mix(in oklch, var(--foreground) 6%, transparent); color: var(--foreground); }
+
+/* Phase 3c: scheduled tasks stay inside the existing details/back-view card. */
+.fox-contact-tasks { display: grid; gap: 10px; min-width: 0; }
+.fox-contact-task, .fox-contact-task-editor {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--background);
+  font-size: 12px;
+}
+.fox-contact-task > p, .fox-contact-task-editor > p { margin: 0; overflow-wrap: anywhere; }
+.fox-contact-task-title { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.fox-contact-task-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fox-contact-task-meta { color: var(--muted-foreground); line-height: 1.5; }
+.fox-contact-task-result.is-queued { color: var(--fox-accent); font-weight: 600; }
+.fox-contact-task-actions { display: flex; flex-wrap: wrap; gap: 3px; }
+.fox-contact-task-actions > button { height: 28px; padding-inline: 7px; font-size: 11px; }
+.fox-contact-task-editor > label, .fox-contact-task-interval > label { display: grid; gap: 4px; color: var(--muted-foreground); }
+.fox-contact-task-editor input, .fox-contact-task-editor textarea, .fox-contact-task-editor select {
+  width: 100%; min-width: 0; padding: 5px 7px; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--background); color: var(--foreground); font-size: 12px;
+}
+.fox-contact-task-editor textarea { min-height: 64px; resize: vertical; }
+.fox-contact-task-editor .fox-contact-task-enabled { display: flex; align-items: center; gap: 6px; }
+.fox-contact-task-editor .fox-contact-task-enabled input, .fox-contact-task-weekdays input { width: auto; }
+.fox-contact-task-interval { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.fox-contact-task-weekdays { display: flex; flex-wrap: wrap; gap: 7px; }
+.fox-contact-task-weekdays label { display: flex; align-items: center; gap: 3px; }
+.fox-contact-task-empty { color: var(--muted-foreground); text-align: center; }
+.fox-contact-task-runs { display: grid; gap: 6px; border-top: 1px solid var(--border); padding-top: 8px; }
+.fox-contact-task-runs h3 { margin: 0; font-size: 12px; }
+.fox-contact-task-runs > p { color: var(--muted-foreground); }
+.fox-contact-task-run { display: grid; grid-template-columns: 1fr auto; gap: 3px; color: var(--muted-foreground); }
+.fox-contact-task-run p { grid-column: 1 / -1; margin: 0; color: var(--destructive); overflow-wrap: anywhere; }

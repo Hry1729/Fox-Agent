@@ -224,7 +224,7 @@ fn file_entries(
 }
 
 fn plan(conn: &Connection, data: &Path, id: &str) -> DeletionResult<Plan> {
-    let (template, name, conversation, default, stored): (String, String, String, bool, String) =
+    let (template, name, conversation, default, stored): (Option<String>, String, String, bool, String) =
         conn.query_row(
             "SELECT p.template_agent_id,p.display_name,c.id,p.is_default,p.workspace_dir
          FROM companion_profiles p JOIN conversations c ON c.companion_id=p.id WHERE p.id=?1",
@@ -298,7 +298,7 @@ fn plan(conn: &Connection, data: &Path, id: &str) -> DeletionResult<Plan> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(Plan {
         companion_id: id.into(),
-        template_agent_id: template,
+        template_agent_id: template.unwrap_or_default(),
         display_name: name,
         messages: count(
             "SELECT count(*) FROM messages WHERE conversation_id=?1",

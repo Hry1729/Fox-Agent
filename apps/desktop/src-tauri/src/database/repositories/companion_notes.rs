@@ -63,8 +63,9 @@ fn access(db: &Connection, conversation: &str) -> DbResult<Option<(String, bool)
         JOIN companion_profiles p ON p.archived_at IS NULL AND p.deleting_at IS NULL AND (
             p.id=c.companion_id OR (c.companion_id IS NULL
               AND EXISTS(SELECT 1 FROM projects pr WHERE pr.id=c.project_id AND pr.status='active')
-              AND EXISTS(SELECT 1 FROM companion_project_grants g WHERE g.project_id=c.project_id AND g.companion_id=p.id AND g.revoked_at IS NULL)
-              AND EXISTS(SELECT 1 FROM conversation_expert_bindings b WHERE b.conversation_id=c.id AND b.expert_id=p.template_agent_id AND b.state='active')))
+              AND EXISTS(SELECT 1 FROM conversation_companion_note_refs r
+                JOIN companion_project_grants g ON g.project_id=c.project_id AND g.companion_id=r.companion_id AND g.revoked_at IS NULL
+                WHERE r.conversation_id=c.id AND r.companion_id=p.id)))
         WHERE c.id=? AND c.trashed_at IS NULL", [conversation], |r| Ok((r.get(0)?,r.get(1)?))).optional()
 }
 
@@ -432,6 +433,70 @@ impl Database {
             if grant {tx.execute("INSERT INTO companion_project_grants(id,project_id,companion_id,granted_at)
                 VALUES (?,?,?,?) ON CONFLICT(project_id,companion_id) WHERE revoked_at IS NULL DO NOTHING",params![Uuid::new_v4().to_string(),project,id,now_ms()])?;}
             else {tx.execute("UPDATE companion_project_grants SET revoked_at=? WHERE project_id=? AND companion_id=? AND revoked_at IS NULL",params![now_ms(),project,id])?;}
+            Ok(())
+        })
+    }
+
+    pub(crate) fn companion_project_note_options(&self, conversation: &str) -> Result<Value, String> {
+        self.with_connection(|db| {
+            let project: String = db.query_row(
+                "SELECT c.project_id FROM conversations c
+                 JOIN projects p ON p.id=c.project_id AND p.status='active'
+                 WHERE c.id=? AND c.companion_id IS NULL AND c.parent_conversation_id IS NULL AND c.trashed_at IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM digital_colleagues dc WHERE dc.conversation_id=c.id AND dc.companion_bound=1)",
+                [conversation], |row| row.get(0),
+            ).map_err(|_| denied("companion.project_note_reference_invalid_conversation"))?;
+            let options = json_rows(db,
+                "SELECT json_object('id',p.id,'displayName',p.display_name) FROM companion_profiles p
+                 JOIN companion_project_grants g ON g.companion_id=p.id AND g.revoked_at IS NULL
+                 WHERE g.project_id=? AND p.archived_at IS NULL AND p.deleting_at IS NULL ORDER BY p.display_name,p.id",
+                [&project])?;
+            let selected = db.query_row(
+                "SELECT r.companion_id FROM conversation_companion_note_refs r
+                 JOIN companion_profiles p ON p.id=r.companion_id AND p.archived_at IS NULL AND p.deleting_at IS NULL
+                 JOIN companion_project_grants g ON g.companion_id=p.id AND g.project_id=?2 AND g.revoked_at IS NULL
+                 WHERE r.conversation_id=?1",
+                params![conversation, project], |row| row.get::<_,String>(0)).optional()?;
+            Ok(json!({"selectedCompanionId":selected,"options":options}))
+        })
+    }
+
+    pub(crate) fn companion_project_note_reference_set(
+        &self,
+        conversation: &str,
+        companion: Option<&str>,
+    ) -> Result<(), String> {
+        self.note_tx(|tx| {
+            let project: String = tx.query_row(
+                "SELECT c.project_id FROM conversations c
+                 JOIN projects p ON p.id=c.project_id AND p.status='active'
+                 WHERE c.id=? AND c.companion_id IS NULL AND c.parent_conversation_id IS NULL AND c.trashed_at IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM digital_colleagues dc WHERE dc.conversation_id=c.id AND dc.companion_bound=1)",
+                [conversation],
+                |row| row.get(0),
+            ).map_err(|_| denied("companion.project_note_reference_invalid_conversation"))?;
+            if let Some(companion) = companion {
+                let valid: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM companion_profiles p
+                     JOIN companion_project_grants g ON g.companion_id=p.id AND g.revoked_at IS NULL
+                     WHERE p.id=?1 AND g.project_id=?2 AND p.archived_at IS NULL AND p.deleting_at IS NULL)",
+                    params![companion, project],
+                    |row| row.get(0),
+                )?;
+                if !valid {
+                    return Err(denied("companion.project_note_reference_invalid_companion"));
+                }
+                tx.execute(
+                    "INSERT INTO conversation_companion_note_refs(conversation_id,companion_id,updated_at) VALUES (?1,?2,?3)
+                     ON CONFLICT(conversation_id) DO UPDATE SET companion_id=excluded.companion_id,updated_at=excluded.updated_at",
+                    params![conversation, companion, now_ms()],
+                )?;
+            } else {
+                tx.execute(
+                    "DELETE FROM conversation_companion_note_refs WHERE conversation_id=?",
+                    [conversation],
+                )?;
+            }
             Ok(())
         })
     }

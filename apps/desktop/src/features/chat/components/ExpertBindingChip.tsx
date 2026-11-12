@@ -102,7 +102,7 @@ export function ExpertActivationCard({ binding, expert, onView }: {
           {time && <time>{time}</time>}
         </footer>
       </div>
-      <button type="button" onClick={() => onView(binding.expertId)}>查看详情</button>
+      {binding.expertId && <button type="button" onClick={() => { if (binding.expertId) onView(binding.expertId) }}>查看详情</button>}
     </aside>
   )
 }

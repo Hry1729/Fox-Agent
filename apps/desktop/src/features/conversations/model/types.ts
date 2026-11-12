@@ -506,7 +506,7 @@ export type ExpertPackageSnapshot = Record<string, unknown>
 export interface ConversationExpertBinding {
   id: string
   conversationId: string
-  expertId: string
+  expertId: string | null
   state: 'active' | 'replaced' | 'removed'
   activationSource: string
   expertVersion?: string
@@ -1392,10 +1392,10 @@ export interface ExpertTeamSnapshot {
 export interface DigitalColleagueRecord {
   id: string
   name: string
-  expertId: string
-  expertBindingId: string
-  packageHash: string
-  packageSnapshot: Record<string, unknown>
+  expertId: string | null
+  expertBindingId: string | null
+  packageHash: string | null
+  packageSnapshot: Record<string, unknown> | null
   conversationId: string
   objective: string
   projectId: string | null
@@ -1416,8 +1416,13 @@ export interface DigitalColleagueScheduleRecord {
   id: string
   colleagueId: string
   name: string
-  scheduleKind: 'interval'
-  intervalSeconds: number
+  scheduleKind: 'once' | 'interval' | 'daily' | 'weekly'
+  intervalSeconds: number | null
+  onceAt: number | null
+  weekdays: number[] | null
+  localTime: string | null
+  timezone: string
+  anchorAt: number | null
   catchupWindowSeconds: number
   enabled: boolean
   nextDueAt: number

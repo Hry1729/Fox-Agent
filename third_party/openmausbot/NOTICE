@@ -91,3 +91,8 @@ The iOS companion app bundles a prebuilt WebRTC library for Live calls
 (stasel/WebRTC), built from the WebRTC project, Copyright (c) 2011, The WebRTC
 project authors, used under the BSD 3-Clause License. WebRTC includes
 third-party components under their own licenses, listed with the library.
+
+Phase 3a Rust scheduling algorithms adapt OpenMausBot revision
+1a4e4da9f380804ad98c7fd1b141bb0dbfafced4, Copyright 2026 Milind Soni and
+OpenMausBot contributors, under Apache-2.0. See FOX-PORT.md for the bounded
+adapted/rejected surface. No enterprise/ code is included.

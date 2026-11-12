@@ -3,7 +3,7 @@
 // 缺口 D 曾是真实的坏控件：权限下拉用了不存在的值、打开文件夹传了目录而不是
 // **会话 id**、导出传的是整个工作目录而不是**某个文件的相对路径**、导入的成功
 // 提示和工作目录错误都丢了。缺口 E 是旧资料页被删掉后无处可去的头像/职责/人设
-// 编辑、模板采用/暂不更新、项目笔记授权、置顶/归档/删除。这里用真 DOM 交互 +
+// 编辑、冻结来源、项目笔记授权、置顶/归档/删除。这里用真 DOM 交互 +
 // 真 IPC 边界断言它们都在、参数都对、失败不被吞掉。
 import { afterAll, afterEach, describe, expect, mock, test } from 'bun:test'
 import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/react'
@@ -11,7 +11,8 @@ import { ContactSideCard } from '../src/features/companions/contact-side-card'
 import { ContactsContext, type ContactsContextValue } from '../src/features/companions/context'
 import type { ContactChatSearch } from '../src/features/companions/chat-search'
 import type { Companion } from '../src/features/companions/api'
-import type { ConversationDetail, ProjectRecord } from '../src/features/conversations/model/types'
+import type { ConversationDetail, DigitalColleagueTriggerRecord, ProjectRecord } from '../src/features/conversations/model/types'
+import type { OwnedCompanionTask } from '../src/features/companions/tasks'
 
 type Call = { command: string; request: Record<string, unknown> }
 let calls: Call[] = []
@@ -39,6 +40,33 @@ const permissionChoices: string[] = []
 const sharedMemory = { count: 0 }
 const searchOpens = { count: 0 }
 const searchStub = { open: () => { searchOpens.count += 1 } } as ContactChatSearch
+let taskList: OwnedCompanionTask[] = []
+let taskRuns: DigitalColleagueTriggerRecord[] = []
+
+function taskFixture(): { owned: OwnedCompanionTask; trigger: DigitalColleagueTriggerRecord } {
+  const owned = {
+    task: {
+      id: 'task_one', name: '整理日报', expertId: null, expertBindingId: null, packageHash: null,
+      packageSnapshot: null, conversationId: 'chat', objective: '汇总今天的工作', projectId: null,
+      projectRoot: null, knowledgeReferences: [], status: 'active', maxRunsPerDay: 8,
+      maxTokensPerDay: 128000, maxDurationMs: 300000, maxOutputTokens: 4096, maxToolCalls: 16,
+      createdAt: 1, updatedAt: 1, revokedAt: null,
+    },
+    schedule: {
+      id: 'schedule_one', colleagueId: 'task_one', name: '整理日报', scheduleKind: 'interval',
+      intervalSeconds: 7200, onceAt: null, weekdays: null, localTime: null, timezone: 'Asia/Shanghai',
+      anchorAt: 1, catchupWindowSeconds: 3600, enabled: true, nextDueAt: Date.now() - 1000,
+      lastScheduledAt: null, createdAt: 1, updatedAt: 1,
+    },
+  } as OwnedCompanionTask
+  const trigger = {
+    id: 'trigger_one', colleagueId: 'task_one', sourceType: 'schedule', sourceId: null,
+    idempotencyKey: 'key', status: 'queued', payload: {}, scheduledFor: 1, runId: null,
+    inputTokens: 0, outputTokens: 0, totalTokens: 0, toolCallCount: 0, errorCode: null,
+    errorMessage: null, createdAt: 1, updatedAt: 1, completedAt: null,
+  } as DigitalColleagueTriggerRecord
+  return { owned, trigger }
+}
 
 function contextValue(overrides: Partial<ContactsContextValue> = {}): ContactsContextValue {
   return {
@@ -82,9 +110,11 @@ afterAll(() => {
 })
 
 const ok = (data: unknown = true) => ({ ok: true, data })
-/** 模板状态必须随决策改变：Host 在 adopt/dismiss 之后返回的就是新状态，卡片要
- *  重新读一次并显示它，而不是停留在旧 diff 上。 */
-let templateStatus = { latestHash: 'hash-2', updateAvailable: true, dismissed: false }
+const recordCommand = (command: string, args: unknown) => {
+  const request = ((args as { request?: Record<string, unknown> })?.request ?? args) as Record<string, unknown>
+  calls.push({ command, request })
+  return request
+}
 function host() {
   calls = []
   toasts.length = 0
@@ -93,12 +123,15 @@ function host() {
   searchOpens.count = 0
   workspaceState = 'ready'
   workspaceError = null
-  templateStatus = { latestHash: 'hash-2', updateAvailable: true, dismissed: false }
+  taskList = []
+  taskRuns = []
   answer = (command, args) => {
     // direct() 传扁平参数，command() 传 { request }；两种形状都记录下来。
-    const request = ((args as { request?: Record<string, unknown> })?.request ?? args) as Record<string, unknown>
-    calls.push({ command, request })
+    const request = recordCommand(command, args)
     if (command === 'model_providers_list') return ok([])
+    if (command === 'companion_task_list') return ok(taskList)
+    if (command === 'companion_task_history') return ok(taskRuns)
+    if (command.startsWith('companion_task_')) return ok(taskList[0] ?? null)
     if (command === 'companion_set_reminder_mode') return ok(contact({ reminderMode: request.mode as Companion['reminderMode'] }))
     if (command === 'project_folder_open') return ok(true)
     // 资料卡挂载时会订阅共享的文件版本仓库（与右侧边栏同一 store）。
@@ -111,14 +144,6 @@ function host() {
     if (command === 'companion_import_files') return ok(['a.pdf', 'b.pdf', 'c.pdf'])
     if (command === 'companion_workspace_repair') return ok('C:/fox/contact')
     if (command === 'companion_update_profile') return ok(contact(request as Partial<Companion>))
-    if (command === 'companion_template_status') return ok({
-      latestHash: templateStatus.latestHash,
-      boundSnapshot: { name: '资料伙伴', packageVersion: '1.0', systemPrompt: '旧工作要求' },
-      latestSnapshot: { name: '资料伙伴', packageVersion: '1.1', systemPrompt: '新工作要求' },
-      updateAvailable: templateStatus.updateAvailable, dismissed: templateStatus.dismissed,
-    })
-    if (command === 'companion_template_update') { templateStatus.updateAvailable = false; return ok(null) }
-    if (command === 'companion_template_dismiss') { templateStatus.dismissed = true; return ok(null) }
     if (command === 'companion_grants_list') return ok([{ companionId: 'cmp_one', projectId: 'proj_a', grantedAt: 1 }])
     if (command === 'companion_grant_project' || command === 'companion_revoke_project') return ok(null)
     if (command === 'companion_set_pinned' || command === 'companion_archive') return ok(contact({ pinnedAt: command === 'companion_set_pinned' ? null : 1, archivedAt: command === 'companion_archive' ? 1 : null }))
@@ -142,6 +167,13 @@ const openSettings = (view: ReturnType<typeof renderCard>) => {
 }
 const commandNames = () => calls.map((call) => call.command)
 const requestOf = (command: string) => calls.find((call) => call.command === command)!.request
+const profileRequests = () => calls.filter(call => call.command === 'companion_update_profile').map(call => call.request)
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
 const toasted = (type: string, text: string) => toasts.some((item) => item.type === type && item.message.includes(text))
 
 afterEach(cleanup)
@@ -251,7 +283,6 @@ describe('旧资料页的功能仍然可达（缺口 E）', () => {
     expect(view.getByRole('button', { name: '设置' }).closest('header')).not.toBeNull()
     openTab(view, '工作目录')
     openSettings(view)
-    await waitFor(() => expect(view.getByText('专家模板有新版')).toBeDefined())
     expect(view.queryByRole('button', { name: '设置' })).toBeNull()
     expect(view.getByRole('button', { name: '返回详情' }).closest('header')).not.toBeNull()
     fireEvent.click(view.getByRole('button', { name: '返回详情' }))
@@ -283,12 +314,12 @@ describe('旧资料页的功能仍然可达（缺口 E）', () => {
     expect(view.getByRole('button', { name: '在对话中查找' })).toBeDefined()
   })
 
-  test('设置子视图：头像 / 职责 / 自定义人设可编辑并保存', async () => {
+  test('设置子视图：头像 / 职责 / 沟通偏好可编辑并保存', async () => {
     host()
     const view = renderCard()
     openSettings(view)
     fireEvent.change(view.getByLabelText('职责'), { target: { value: '负责归档' } })
-    fireEvent.change(view.getByLabelText('自定义人设'), { target: { value: '只用一句话回答' } })
+    fireEvent.change(view.getByLabelText('沟通偏好'), { target: { value: '只用一句话回答' } })
     fireEvent.change(view.getByLabelText('头像'), { target: { value: '🗂' } })
     fireEvent.submit(view.container.querySelector('form')!)
     await waitFor(() => expect(commandNames()).toContain('companion_update_profile'))
@@ -316,38 +347,247 @@ describe('旧资料页的功能仍然可达（缺口 E）', () => {
     await waitFor(() => expect(view.queryByRole('dialog')).toBeNull())
   })
 
-  test('设置子视图：模板变化逐字段可见，采用与暂不更新各走一条命令并刷新状态', async () => {
+  test('设置子视图：工具刷新同步未编辑字段，头像保存不覆盖新职责和偏好', async () => {
     host()
+    const renderContact = (value: Companion) => <ContactsContext.Provider value={contextValue()}>
+      <ContactSideCard contact={value} detail={detail} onClose={() => undefined} onResetContext={() => undefined} search={searchStub} />
+    </ContactsContext.Provider>
+    const view = render(renderContact(contact()))
+    openSettings(view)
+    view.rerender(renderContact(contact({ duty: '工具更新的职责', personaOverride: '工具更新的偏好' })))
+    await waitFor(() => {
+      expect((view.getByLabelText('职责') as HTMLTextAreaElement).value).toBe('工具更新的职责')
+      expect((view.getByLabelText('沟通偏好') as HTMLTextAreaElement).value).toBe('工具更新的偏好')
+    })
+    fireEvent.change(view.getByLabelText('头像'), { target: { value: '🗂' } })
+    fireEvent.submit(view.container.querySelector('form')!)
+    await waitFor(() => expect(commandNames()).toContain('companion_update_profile'))
+    expect(requestOf('companion_update_profile')).toEqual({
+      companionId: 'cmp_one', displayName: '资料伙伴', avatarRef: '🗂',
+    })
+  })
+
+  test('设置子视图：刷新保留本地未保存编辑，保存只提交当前有变化的字段', async () => {
+    host()
+    const renderContact = (value: Companion) => <ContactsContext.Provider value={contextValue()}>
+      <ContactSideCard contact={value} detail={detail} onClose={() => undefined} onResetContext={() => undefined} search={searchStub} />
+    </ContactsContext.Provider>
+    const view = render(renderContact(contact()))
+    openSettings(view)
+    fireEvent.change(view.getByLabelText('职责'), { target: { value: '本地未保存职责' } })
+    view.rerender(renderContact(contact({ duty: '另一份工具职责', personaOverride: '工具更新的偏好' })))
+    await waitFor(() => {
+      expect((view.getByLabelText('职责') as HTMLTextAreaElement).value).toBe('本地未保存职责')
+      expect((view.getByLabelText('沟通偏好') as HTMLTextAreaElement).value).toBe('工具更新的偏好')
+    })
+    fireEvent.change(view.getByLabelText('头像'), { target: { value: '🗂' } })
+    fireEvent.submit(view.container.querySelector('form')!)
+    await waitFor(() => expect(commandNames()).toContain('companion_update_profile'))
+    expect(requestOf('companion_update_profile')).toEqual({
+      companionId: 'cmp_one', displayName: '资料伙伴', avatarRef: '🗂', duty: '本地未保存职责',
+    })
+  })
+
+  test('设置子视图：保存采用归一化返回值，后续工具更新可见且头像保存不覆盖', async () => {
+    host()
+    const original = answer
+    answer = (command, args) => {
+      if (command !== 'companion_update_profile') return original!(command, args)
+      recordCommand(command, args)
+      return ok(contact({ duty: '归档' }))
+    }
+    const renderContact = (value: Companion) => <ContactsContext.Provider value={contextValue()}>
+      <ContactSideCard contact={value} detail={detail} onClose={() => undefined} onResetContext={() => undefined} search={searchStub} />
+    </ContactsContext.Provider>
+    const view = render(renderContact(contact()))
+    openSettings(view)
+    fireEvent.change(view.getByLabelText('职责'), { target: { value: '归档 ' } })
+    fireEvent.submit(view.container.querySelector('form')!)
+    await waitFor(() => expect((view.getByLabelText('职责') as HTMLTextAreaElement).value).toBe('归档'))
+    expect(profileRequests()[0]).toEqual({ companionId: 'cmp_one', displayName: '资料伙伴', duty: '归档 ' })
+
+    view.rerender(renderContact(contact({ duty: '工具新职责', personaOverride: '工具新偏好' })))
+    await waitFor(() => {
+      expect((view.getByLabelText('职责') as HTMLTextAreaElement).value).toBe('工具新职责')
+      expect((view.getByLabelText('沟通偏好') as HTMLTextAreaElement).value).toBe('工具新偏好')
+    })
+    fireEvent.change(view.getByLabelText('头像'), { target: { value: '🗂' } })
+    fireEvent.submit(view.container.querySelector('form')!)
+    await waitFor(() => expect(profileRequests()).toHaveLength(2))
+    expect(profileRequests()[1]).toEqual({ companionId: 'cmp_one', displayName: '资料伙伴', avatarRef: '🗂' })
+  })
+
+  test('设置子视图：保存期间的新编辑和未提交字段不被原响应覆盖', async () => {
+    host()
+    const pending = deferred<unknown>()
+    const original = answer
+    answer = (command, args) => {
+      if (command !== 'companion_update_profile') return original!(command, args)
+      recordCommand(command, args)
+      return pending.promise
+    }
     const view = renderCard()
     openSettings(view)
-    await waitFor(() => expect(commandNames()).toContain('companion_template_status'))
-    expect(view.getByText('专家模板有新版')).toBeDefined()
-    expect(view.getByText('当前版本 1.0')).toBeDefined()
-    // 字段级差异复用资料页同一块组件（当前 / 新版）。
-    expect(view.container.textContent).toContain('当前：旧工作要求')
-    expect(view.container.textContent).toContain('新版：新工作要求')
-    fireEvent.click(view.getByRole('button', { name: '采用新版' }))
-    await waitFor(() => expect(commandNames()).toContain('companion_template_update'))
-    expect(requestOf('companion_template_update')).toEqual({ companionId: 'cmp_one', expectedHash: 'hash-2' })
-    // 决策之后必须重新读一次状态，卡片显示 Host 决定的结果，而不是停在旧 diff 上。
-    await waitFor(() => expect(commandNames().filter((name) => name === 'companion_template_status').length).toBe(2))
-    await waitFor(() => expect(view.getByText('正在使用当前模板')).toBeDefined())
-    expect(view.queryByText('专家模板有新版')).toBeNull()
-    expect(view.queryByText('当前：旧工作要求')).toBeNull()
-    view.unmount()
+    fireEvent.change(view.getByLabelText('职责'), { target: { value: '归档 ' } })
+    fireEvent.submit(view.container.querySelector('form')!)
+    await waitFor(() => expect(profileRequests()).toHaveLength(1))
+    fireEvent.change(view.getByLabelText('职责'), { target: { value: '继续归档' } })
+    fireEvent.change(view.getByLabelText('沟通偏好'), { target: { value: '新的未提交偏好' } })
+    pending.resolve(ok(contact({ duty: '归档' })))
+    await waitFor(() => expect(toasted('success', '已保存联系人资料')).toBe(true))
+    expect((view.getByLabelText('职责') as HTMLTextAreaElement).value).toBe('继续归档')
+    expect((view.getByLabelText('沟通偏好') as HTMLTextAreaElement).value).toBe('新的未提交偏好')
 
-    // 第二张卡要先卸载第一张：RTL 的查询绑定在 document.body 上，两张同级卡片
-    // 会同时命中「联系人设置」标题。
+    answer = original
+    fireEvent.change(view.getByLabelText('头像'), { target: { value: '🗂' } })
+    fireEvent.submit(view.container.querySelector('form')!)
+    await waitFor(() => expect(profileRequests()).toHaveLength(2))
+    expect(profileRequests()[1]).toEqual({
+      companionId: 'cmp_one', displayName: '资料伙伴', avatarRef: '🗂', duty: '继续归档', personaOverride: '新的未提交偏好',
+    })
+  })
+
+  test('设置子视图：归一化到原基线、职责空白、偏好裁剪与清空均确认保存值', async () => {
     host()
-    const second = renderCard()
-    openSettings(second)
-    await waitFor(() => expect(commandNames()).toContain('companion_template_status'))
-    fireEvent.click(second.getByRole('button', { name: '暂不更新' }))
-    await waitFor(() => expect(commandNames()).toContain('companion_template_dismiss'))
-    expect(requestOf('companion_template_dismiss')).toEqual({ companionId: 'cmp_one', expectedHash: 'hash-2' })
-    await waitFor(() => expect(commandNames().filter((name) => name === 'companion_template_status').length).toBe(2))
-    expect((second.getByRole('button', { name: '暂不更新' }) as HTMLButtonElement).disabled).toBe(true)
-    second.unmount()
+    let saved = contact()
+    const original = answer
+    answer = (command, args) => {
+      if (command !== 'companion_update_profile') return original!(command, args)
+      recordCommand(command, args)
+      return ok(saved)
+    }
+    const view = renderCard()
+    openSettings(view)
+    const cases = [
+      { label: '职责', input: '整理资料 ', response: contact({ duty: '整理资料' }), expected: '整理资料' },
+      { label: '职责', input: '   ', response: contact({ duty: '' }), expected: '' },
+      { label: '沟通偏好', input: '  先给结论  ', response: contact({ personaOverride: '先给结论' }), expected: '先给结论' },
+      { label: '沟通偏好', input: '', response: contact({ personaOverride: null }), expected: '' },
+    ]
+    for (const item of cases) {
+      saved = item.response
+      fireEvent.change(view.getByLabelText(item.label), { target: { value: item.input } })
+      fireEvent.submit(view.container.querySelector('form')!)
+      await waitFor(() => expect((view.getByLabelText(item.label) as HTMLTextAreaElement).value).toBe(item.expected))
+    }
+    expect(profileRequests()).toEqual([
+      { companionId: 'cmp_one', displayName: '资料伙伴', duty: '整理资料 ' },
+      { companionId: 'cmp_one', displayName: '资料伙伴', duty: '   ' },
+      { companionId: 'cmp_one', displayName: '资料伙伴', personaOverride: '  先给结论  ' },
+      { companionId: 'cmp_one', displayName: '资料伙伴', personaOverride: '' },
+    ])
+  })
+
+  test('设置子视图：保存成功但刷新失败仍确认归一化值，后续保存不重复提交', async () => {
+    host()
+    const original = answer
+    answer = (command, args) => {
+      if (command !== 'companion_update_profile') return original!(command, args)
+      recordCommand(command, args)
+      return ok(contact({ duty: '归档' }))
+    }
+    const view = renderCard(contextValue({ refresh: async () => { throw new Error('refresh failed') } }))
+    openSettings(view)
+    fireEvent.change(view.getByLabelText('职责'), { target: { value: '归档 ' } })
+    fireEvent.submit(view.container.querySelector('form')!)
+    await waitFor(() => expect(toasted('error', 'refresh failed')).toBe(true))
+    expect((view.getByLabelText('职责') as HTMLTextAreaElement).value).toBe('归档')
+
+    fireEvent.change(view.getByLabelText('头像'), { target: { value: '🗂' } })
+    fireEvent.submit(view.container.querySelector('form')!)
+    await waitFor(() => expect(profileRequests()).toHaveLength(2))
+    expect(profileRequests()[1]).toEqual({ companionId: 'cmp_one', displayName: '资料伙伴', avatarRef: '🗂' })
+  })
+
+  test('设置子视图：持久化 props 在保存响应前后到达都不丢失归一化', async () => {
+    for (const propsFirst of [true, false]) {
+      host()
+      const pending = deferred<unknown>()
+      const original = answer
+      answer = (command, args) => {
+      if (command !== 'companion_update_profile') return original!(command, args)
+      recordCommand(command, args)
+      return pending.promise
+    }
+      const renderContact = (value: Companion) => <ContactsContext.Provider value={contextValue()}>
+        <ContactSideCard contact={value} detail={detail} onClose={() => undefined} onResetContext={() => undefined} search={searchStub} />
+      </ContactsContext.Provider>
+      const view = render(renderContact(contact()))
+      openSettings(view)
+      fireEvent.change(view.getByLabelText('职责'), { target: { value: '归档 ' } })
+      fireEvent.submit(view.container.querySelector('form')!)
+      await waitFor(() => expect(profileRequests()).toHaveLength(1))
+      if (propsFirst) view.rerender(renderContact(contact({ duty: '归档' })))
+      pending.resolve(ok(contact({ duty: '归档' })))
+      if (!propsFirst) {
+        await waitFor(() => expect(toasted('success', '已保存联系人资料')).toBe(true))
+        view.rerender(renderContact(contact({ duty: '归档' })))
+      }
+      await waitFor(() => expect((view.getByLabelText('职责') as HTMLTextAreaElement).value).toBe('归档'))
+      view.unmount()
+    }
+  })
+
+  test('设置子视图：切换联系人（包括切回）后忽略旧保存响应', async () => {
+    host()
+    const pending = deferred<unknown>()
+    const original = answer
+    answer = (command, args) => {
+      if (command !== 'companion_update_profile') return original!(command, args)
+      recordCommand(command, args)
+      return pending.promise
+    }
+    const renderContact = (value: Companion) => <ContactsContext.Provider value={contextValue()}>
+      <ContactSideCard contact={value} detail={detail} onClose={() => undefined} onResetContext={() => undefined} search={searchStub} />
+    </ContactsContext.Provider>
+    const view = render(renderContact(contact()))
+    openSettings(view)
+    fireEvent.change(view.getByLabelText('职责'), { target: { value: '旧联系人职责' } })
+    fireEvent.submit(view.container.querySelector('form')!)
+    await waitFor(() => expect(profileRequests()).toHaveLength(1))
+    view.rerender(renderContact(contact({ id: 'cmp_two', conversationId: 'chat_two', duty: '新联系人职责', personaOverride: '新联系人偏好' })))
+    await waitFor(() => expect((view.getByLabelText('职责') as HTMLTextAreaElement).value).toBe('新联系人职责'))
+    view.rerender(renderContact(contact({ duty: '切回后的最新职责', personaOverride: '切回后的最新偏好' })))
+    await waitFor(() => expect((view.getByLabelText('职责') as HTMLTextAreaElement).value).toBe('切回后的最新职责'))
+    pending.resolve(ok(contact({ duty: '旧联系人已保存职责' })))
+    await waitFor(() => expect(toasted('success', '已保存联系人资料')).toBe(true))
+    expect((view.getByLabelText('职责') as HTMLTextAreaElement).value).toBe('切回后的最新职责')
+    expect((view.getByLabelText('沟通偏好') as HTMLTextAreaElement).value).toBe('切回后的最新偏好')
+  })
+
+  test('重命名只提交 displayName，不覆盖其他资料配置', async () => {
+    host()
+    const view = renderCard()
+    fireEvent.click(view.getByRole('button', { name: '资料伙伴' }))
+    fireEvent.change(view.getByLabelText('重命名联系人'), { target: { value: '新名称' } })
+    fireEvent.keyDown(view.getByLabelText('重命名联系人'), { key: 'Enter' })
+    await waitFor(() => expect(profileRequests()).toHaveLength(1))
+    expect(profileRequests()[0]).toEqual({ companionId: 'cmp_one', displayName: '新名称' })
+  })
+
+  test('设置子视图：只显示冻结来源，保存失败保留职责和沟通偏好草稿', async () => {
+    host()
+    const frozenDetail = { ...detail, expertBindings: [{ displaySnapshot: { name: '资料专家', packageVersion: '1.0' } }] } as ConversationDetail
+    const view = render(<ContactsContext.Provider value={contextValue()}>
+      <ContactSideCard contact={contact({ duty: '', personaOverride: '旧沟通偏好' })} detail={frozenDetail} onClose={() => undefined} onResetContext={() => undefined} search={searchStub} />
+    </ContactsContext.Provider>)
+    openSettings(view)
+    expect(view.getByText('创建来源').parentElement?.textContent).toContain('资料专家 · v1.0')
+    expect(view.queryByText('采用新版')).toBeNull()
+    expect(view.queryByText('暂不更新')).toBeNull()
+    expect(commandNames()).not.toContain('companion_template_status')
+    fireEvent.change(view.getByLabelText('职责'), { target: { value: '' } })
+    fireEvent.change(view.getByLabelText('沟通偏好'), { target: { value: '新沟通偏好' } })
+    const original = answer
+    answer = (command, args) => {
+      if (command === 'companion_update_profile') throw new Error('preference save failed')
+      return original!(command, args)
+    }
+    fireEvent.submit(view.container.querySelector('form')!)
+    await waitFor(() => expect(toasted('error', 'preference save failed')).toBe(true))
+    expect((view.getByLabelText('职责') as HTMLTextAreaElement).value).toBe('')
+    expect((view.getByLabelText('沟通偏好') as HTMLTextAreaElement).value).toBe('新沟通偏好')
+    expect(toasted('success', '已保存联系人资料')).toBe(false)
   })
 
   test('设置子视图：项目笔记授权、置顶、归档、删除都在且参数正确', async () => {
@@ -412,4 +652,196 @@ describe('旧资料页的功能仍然可达（缺口 E）', () => {
     fireEvent.click(view.getByRole('button', { name: /打开文件夹/ }))
     await waitFor(() => expect(toasted('error', 'host said no')).toBe(true))
   })
+
+  test('定时任务详情入口显示数量与待处理状态，并嵌入原有返回视图', async () => {
+    host()
+    const { owned, trigger } = taskFixture()
+    taskList = [owned]
+    taskRuns = [trigger]
+    const view = renderCard()
+    await waitFor(() => expect(view.getByText('1 个任务 · 1 个待处理')).toBeDefined())
+    expect(view.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['详情', '资料库', '工作目录'])
+    fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
+    await waitFor(() => expect(view.getByRole('heading', { level: 2 }).textContent).toBe('定时任务'))
+    expect(view.queryByRole('tab')).toBeNull()
+    expect(view.getByText('最近结果：排队中')).toBeDefined()
+    fireEvent.click(view.getByRole('button', { name: '运行记录' }))
+    expect(view.getByRole('region', { name: '整理日报 运行记录' }).textContent).toContain('排队中')
+    fireEvent.click(view.getByRole('button', { name: '返回详情' }))
+    expect(view.getByRole('heading', { level: 2 }).textContent).toBe('联系人资料')
+  })
+
+  test('定时任务编辑器只有支持的频率，不提供专家或技术预算字段', async () => {
+    host()
+    const view = renderCard()
+    await waitFor(() => expect(view.getByText('暂无任务')).toBeDefined())
+    fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
+    fireEvent.click(view.getByRole('button', { name: '添加任务' }))
+    expect(Array.from((view.getByLabelText('执行频率') as HTMLSelectElement).options).map(option => option.value))
+      .toEqual(['once', 'interval', 'daily', 'weekly'])
+    for (const absent of ['专家', '模板', '最大运行次数', 'Token 预算', '最大时长', '工具预算', 'Cron', '每月', '节假日'])
+      expect(view.queryByText(absent, { exact: false })).toBeNull()
+    expect(view.getByText(/设备时区/)).toBeDefined()
+  })
+
+  test('添加任务发送类型化间隔和设备时区，不发送技术预算', async () => {
+    host()
+    const view = renderCard()
+    await waitFor(() => expect(view.getByText('暂无任务')).toBeDefined())
+    fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
+    fireEvent.click(view.getByRole('button', { name: '添加任务' }))
+    fireEvent.change(view.getByLabelText('任务名称'), { target: { value: '两小时整理' } })
+    fireEvent.change(view.getByLabelText('执行要求'), { target: { value: '整理新增资料' } })
+    fireEvent.click(view.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(commandNames()).toContain('companion_task_create'))
+    expect(requestOf('companion_task_create')).toEqual({
+      companionId: 'cmp_one', name: '两小时整理', objective: '整理新增资料', enabled: true,
+      schedule: { kind: 'interval', intervalSeconds: 7200, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
+    })
+  })
+
+  test('定时任务控件复用语义命令，并保留创建默认值在 Host 端', async () => {
+    host()
+    const { owned, trigger } = taskFixture()
+    taskList = [owned]
+    taskRuns = [trigger]
+    const view = renderCard()
+    await waitFor(() => expect(view.getByText('1 个任务 · 1 个待处理')).toBeDefined())
+    fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
+    fireEvent.click(view.getByRole('button', { name: '暂停' }))
+    await waitFor(() => expect(requestOf('companion_task_pause')).toEqual({ companionId: 'cmp_one', taskId: 'task_one' }))
+    fireEvent.click(view.getByRole('button', { name: '立即执行' }))
+    await waitFor(() => expect(requestOf('companion_task_run_now')).toEqual({ companionId: 'cmp_one', taskId: 'task_one' }))
+    fireEvent.click(view.getByRole('button', { name: '删除' }))
+    expect(commandNames()).not.toContain('companion_task_delete')
+    fireEvent.click(view.getByRole('button', { name: '确认删除' }))
+    await waitFor(() => expect(requestOf('companion_task_delete')).toEqual({ companionId: 'cmp_one', taskId: 'task_one' }))
+  })
+
+  test('编辑整天间隔任务只改名称时保留原间隔', async () => {
+    host()
+    const { owned, trigger } = taskFixture()
+    owned.schedule.intervalSeconds = 86_400
+    taskList = [owned]
+    taskRuns = [trigger]
+    const view = renderCard()
+    await waitFor(() => expect(view.getByText('1 个任务 · 1 个待处理')).toBeDefined())
+    fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
+    fireEvent.click(view.getByRole('button', { name: '编辑' }))
+    expect((view.getByLabelText('间隔数值') as HTMLInputElement).value).toBe('1')
+    expect((view.getByLabelText('间隔单位') as HTMLSelectElement).value).toBe('86400')
+    fireEvent.change(view.getByLabelText('任务名称'), { target: { value: '改名日报' } })
+    fireEvent.click(view.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(commandNames()).toContain('companion_task_update'))
+    expect(requestOf('companion_task_update')).toEqual({
+      companionId: 'cmp_one', taskId: 'task_one', name: '改名日报', objective: '汇总今天的工作', enabled: true,
+      schedule: { kind: 'interval', intervalSeconds: 86_400, timezone: 'Asia/Shanghai' },
+    })
+  })
+
+  test('较新的跳过记录不遮蔽仍在排队的任务', async () => {
+    host()
+    const { owned, trigger } = taskFixture()
+    const skipped = {
+      ...trigger, id: 'trigger_two', status: 'skipped', scheduledFor: 2, createdAt: 2, updatedAt: 2,
+      errorMessage: '与进行中的私聊重叠',
+    } as DigitalColleagueTriggerRecord
+    taskList = [owned]
+    taskRuns = [skipped, trigger]
+    const view = renderCard()
+    await waitFor(() => expect(view.getByText('1 个任务 · 1 个待处理')).toBeDefined())
+    fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
+    expect(view.getByText('当前状态：排队中')).toBeDefined()
+    expect(view.getByText('最近结果：已跳过 · 与进行中的私聊重叠')).toBeDefined()
+    fireEvent.click(view.getByRole('button', { name: '运行记录' }))
+    const history = view.getByRole('region', { name: '整理日报 运行记录' }).textContent ?? ''
+    expect(history).toContain('已跳过')
+    expect(history).toContain('排队中')
+  })
+
+  test('保存失败时保留编辑器草稿', async () => {
+    host()
+    const previous = answer
+    answer = (command, args) => {
+      if (command === 'companion_task_create') {
+        recordCommand(command, args)
+        return { ok: false, error: { code: 'conflict', message: '名称已被使用', retryable: false } }
+      }
+      return previous!(command, args)
+    }
+    const view = renderCard()
+    await waitFor(() => expect(view.getByText('暂无任务')).toBeDefined())
+    fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
+    fireEvent.click(view.getByRole('button', { name: '添加任务' }))
+    fireEvent.change(view.getByLabelText('任务名称'), { target: { value: '两小时整理' } })
+    fireEvent.change(view.getByLabelText('执行要求'), { target: { value: '整理新增资料' } })
+    fireEvent.click(view.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(view.getByRole('alert').textContent).toContain('名称已被使用'))
+    expect(view.getByRole('heading', { level: 3 }).textContent).toBe('添加任务')
+    expect((view.getByLabelText('任务名称') as HTMLInputElement).value).toBe('两小时整理')
+    expect((view.getByLabelText('执行要求') as HTMLTextAreaElement).value).toBe('整理新增资料')
+    expect(toasted('error', '名称已被使用')).toBe(true)
+  })
+
+  test('编辑非整分钟间隔只改名称时保留原秒数，并按秒展示', async () => {
+    host()
+    const { owned, trigger } = taskFixture()
+    owned.schedule.intervalSeconds = 90
+    taskList = [owned]
+    taskRuns = [trigger]
+    const view = renderCard()
+    await waitFor(() => expect(view.getByText('1 个任务 · 1 个待处理')).toBeDefined())
+    fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
+    expect(view.getByText(/每 90 秒/)).toBeDefined()
+    fireEvent.click(view.getByRole('button', { name: '编辑' }))
+    expect((view.getByLabelText('间隔数值') as HTMLInputElement).value).toBe('90')
+    expect((view.getByLabelText('间隔单位') as HTMLSelectElement).value).toBe('1')
+    fireEvent.change(view.getByLabelText('任务名称'), { target: { value: '改名秒级' } })
+    fireEvent.click(view.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(commandNames()).toContain('companion_task_update'))
+    expect(requestOf('companion_task_update')).toEqual({
+      companionId: 'cmp_one', taskId: 'task_one', name: '改名秒级', objective: '汇总今天的工作', enabled: true,
+      schedule: { kind: 'interval', intervalSeconds: 90, timezone: 'Asia/Shanghai' },
+    })
+  })
+
+  test('任务子页展示刷新错误', async () => {
+    host()
+    const previous = answer
+    answer = (command, args) => {
+      if (command === 'companion_task_list') {
+        recordCommand(command, args)
+        return { ok: false, error: { code: 'unavailable', message: '列表暂时不可用', retryable: true } }
+      }
+      return previous!(command, args)
+    }
+    const view = renderCard()
+    await waitFor(() => expect(view.getByText('列表暂时不可用')).toBeDefined())
+    fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
+    expect(view.getAllByRole('alert').some(node => node.textContent?.includes('列表暂时不可用'))).toBe(true)
+  })
+
+  test('编辑一次性任务只改名称时保留原秒和毫秒', async () => {
+    host()
+    const { owned, trigger } = taskFixture()
+    const onceAt = Date.UTC(2027, 5, 15, 6, 30, 45, 250)
+    owned.schedule.scheduleKind = 'once'
+    owned.schedule.onceAt = onceAt
+    owned.schedule.intervalSeconds = null
+    taskList = [owned]
+    taskRuns = [trigger]
+    const view = renderCard()
+    await waitFor(() => expect(view.getByText('1 个任务 · 1 个待处理')).toBeDefined())
+    fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
+    fireEvent.click(view.getByRole('button', { name: '编辑' }))
+    expect((view.getByLabelText('执行时间') as HTMLInputElement).value).toBe('2027-06-15T14:30')
+    fireEvent.change(view.getByLabelText('任务名称'), { target: { value: '改名一次性' } })
+    fireEvent.click(view.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(commandNames()).toContain('companion_task_update'))
+    expect(requestOf('companion_task_update')).toEqual({
+      companionId: 'cmp_one', taskId: 'task_one', name: '改名一次性', objective: '汇总今天的工作', enabled: true,
+      schedule: { kind: 'once', atMs: onceAt, timezone: 'Asia/Shanghai' },
+    })
+  })
+
 })

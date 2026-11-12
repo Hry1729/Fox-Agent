@@ -307,6 +307,29 @@ impl Database {
         })
     }
 
+    pub(crate) fn run_companion_profile_update_scope(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<CompanionScope>, String> {
+        self.with_connection(|connection| {
+            let identity: Option<(Option<String>, Option<String>)> = connection
+                .query_row(
+                    "SELECT parent_run_id, root_run_id FROM runs WHERE id = ?1",
+                    [run_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
+            match identity {
+                Some((None, root)) if root.as_deref().is_none_or(|root| root == run_id) => {
+                    resolve_run_on(connection, run_id)
+                        .map_err(rusqlite::Error::InvalidParameterName)
+                }
+                _ => Ok(None),
+            }
+        })
+    }
+
     /// The companion execution position a Run needs, or None when the Run is
     /// outside any contact's serial range. A broken background chain is an
     /// error so the caller stops instead of queueing without an identity.

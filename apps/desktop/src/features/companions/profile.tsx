@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button'
 import { notify as toast } from '@/features/notifications'
 import { desktopClient, desktopErrorDetails } from '@/features/conversations/api/desktop-client'
 import type { ProjectFileEntry } from '@/features/conversations/model/types'
-import { contacts, direct, type Companion, type CompanionGrant, type ReminderMode, type RetainedWorkspace, type TemplateStatus } from './api'
+import { contacts, direct, type Companion, type CompanionGrant, type ReminderMode, type RetainedWorkspace } from './api'
 import { ContactCapabilities } from './capabilities'
 import { ContactFiles } from './files'
 import { ContactFavorites } from './marks'
@@ -12,26 +12,6 @@ import { showContactError, useContacts } from './context'
 import { ContactDelete } from './delete'
 import { ContactModelSelect } from './model-select'
 import { ContactNotes } from './notes'
-
-/** Exported so the private-chat side card's settings subview can show the exact
- *  same field-by-field template diff instead of a second wording. */
-export function TemplateChanges({ template }: { template: TemplateStatus }) {
-  const before = template.boundSnapshot ?? {}
-  const after = template.latestSnapshot ?? {}
-  const rows = [
-    ['名称', before.name, after.name],
-    ['简介', before.description, after.description],
-    ['工作要求', before.systemPrompt, after.systemPrompt],
-    ['开场建议', before.openingSuggestions?.join('、'), after.openingSuggestions?.join('、')],
-    ['技能', before.packageManifest?.skills?.join('、'), after.packageManifest?.skills?.join('、')],
-    ['可用工具', before.packageManifest?.allowedTools?.join('、'), after.packageManifest?.allowedTools?.join('、')],
-    ['连接器', before.packageManifest?.mcpServers?.join('、'), after.packageManifest?.mcpServers?.join('、')],
-    ['版本', before.packageVersion, after.packageVersion],
-  ].filter(([, oldValue, newValue]) => oldValue !== newValue)
-  return rows.length ? <>{rows.map(([label, oldValue, newValue]) => <div key={label}>
-    <strong>{label}</strong><p>当前：{oldValue || '未设置'}</p><p>新版：{newValue || '未设置'}</p>
-  </div>)}</> : <p>专家模板的配置已更新。</p>
-}
 
 export function ContactProfile({ contact }: { contact: Companion }) {
   const ctx = useContacts()
@@ -47,20 +27,11 @@ export function ContactProfile({ contact }: { contact: Companion }) {
   const [busy, setBusy] = useState(false)
   const [files, setFiles] = useState<ProjectFileEntry[]>([])
   const [filesOpen, setFilesOpen] = useState(false)
-  const [template, setTemplate] = useState<TemplateStatus | null>(null)
-  const loadTemplate = useCallback(() => contacts.template(contact.id).then(setTemplate), [contact.id])
-  useEffect(() => { void loadTemplate().catch(showContactError) }, [loadTemplate])
   const run = async (action: () => Promise<unknown>) => {
     setBusy(true)
     try { await action(); await ctx?.refresh() } catch (cause) { showContactError(cause) } finally { setBusy(false) }
   }
   const loadFiles = async () => setFiles((await desktopClient.listProjectFiles(contact.conversationId)).filter(f => !f.isDirectory))
-  const decide = async (adopt: boolean) => {
-    if (!template?.latestHash) return
-    await contacts.decideTemplate(contact.id, template.latestHash, adopt)
-    await loadTemplate()
-    if (adopt) await ctx?.refreshConversation()
-  }
   return <div className="fox-contact-panel"><div className="fox-contact-actions" role="group" aria-label="资料分类">
     <Button size="sm" variant={tab === 'profile' ? 'secondary' : 'ghost'} onClick={() => { setTab('profile'); setCapabilitiesOpen(false); setLibraryOpen(false); setFavoritesOpen(false) }}>资料</Button>
     <Button size="sm" variant={tab === 'notes' ? 'secondary' : 'ghost'} onClick={() => setTab('notes')}>笔记</Button></div>
@@ -69,16 +40,9 @@ export function ContactProfile({ contact }: { contact: Companion }) {
         <label>名字<input value={name} required maxLength={40} onChange={e => setName(e.target.value)} /></label>
         <label>头像<input value={avatar} onChange={e => setAvatar(e.target.value)} placeholder="输入表情或头像资源路径" /></label>
         <label>职责<textarea value={duty} onChange={e => setDuty(e.target.value)} /></label>
-        <label>自定义人设<textarea value={persona} onChange={e => setPersona(e.target.value)} placeholder="留空时使用模板人设" /></label>
+        <label>沟通偏好<textarea value={persona} onChange={e => setPersona(e.target.value)} placeholder="填写沟通偏好" /></label>
         <Button type="submit" size="sm" disabled={busy}>保存资料</Button>
       </form>
-      <section className="fox-contact-section"><h3>专家模板</h3>
-        {template?.boundSnapshot?.packageVersion != null && <small>当前版本 {String(template.boundSnapshot.packageVersion)}</small>}
-        <p>{contact.isDefault ? '小狐的模板随 Fox 更新' : template?.updateAvailable ? '专家模板有新版' : '正在使用当前模板'}</p>
-        {template?.updateAvailable && <details open={!template.dismissed}><summary>查看变化</summary>
-          <TemplateChanges template={template} />
-          <div className="fox-contact-actions"><Button size="sm" disabled={busy || Boolean(contact.activeRunStatus)} onClick={() => void run(() => decide(true))}>采用新版</Button><Button size="sm" variant="ghost" disabled={busy || template.dismissed} onClick={() => void run(() => decide(false))}>暂不更新</Button></div></details>}
-      </section>
       <SettingsGroup title="对话设置"><SettingsRow title="模型"><ContactModelSelect contact={contact} /></SettingsRow>
         <SettingsRow title="提醒" description="静音只关闭主动弹窗和声音，侧栏未读与待处理标记仍保留"><select aria-label="提醒方式" value={contact.reminderMode} disabled={busy} onChange={e => void run(() => contacts.setReminderMode(contact.id, e.target.value as ReminderMode))}><option value="follow_global">沿用全局</option><option value="all">全部提醒</option><option value="action_only">仅需要处理</option><option value="muted">静音</option></select></SettingsRow>
         <SettingsRow title="权限"><select aria-label="私聊权限" value={ctx?.permission ?? 'ask'} onChange={e => ctx?.setPermission(e.target.value as 'read_only' | 'ask' | 'allow')}><option value="read_only">只读</option><option value="ask">询问</option><option value="allow">自动</option></select></SettingsRow>

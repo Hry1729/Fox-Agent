@@ -1,4 +1,5 @@
 pub(crate) mod companion_notes;
+pub(crate) mod companion_tasks;
 pub(crate) mod companion_files;
 pub(crate) mod companions;
 pub(crate) mod agent_backend_routing;
@@ -1044,11 +1045,6 @@ pub fn agent_copy(
 
 #[tauri::command]
 pub fn agent_delete(state: State<'_, AppState>, request: AgentIdRequest) -> ApiResponse<bool> {
-    match state.database.companion_name_for_template(&request.agent_id) {
-        Ok(Some(name)) => return ApiResponse::failure("companion.template_in_use", format!("请先删除联系人「{name}」。"), false),
-        Ok(None) => {}
-        Err(error) => return storage_error(error),
-    }
     state
         .database
         .delete_agent(&request.agent_id)
@@ -2620,9 +2616,12 @@ mod command_tests {
         assert!(database.search_conversations("小狐", 20).unwrap().iter().all(|c| &c.id != chat));
         assert!(database.global_search("小狐", 20).unwrap().iter().all(|hit| &hit.id != chat));
         assert!(database.rewind_run(chat, "missing", "补充说明", None).is_err());
+        let messages_before = database.load_conversation(chat).unwrap().messages;
         database.archive_companion(&private.profile.id).unwrap();
         assert!(database.create_run_checked(chat, "归档期间不能发送", None).is_err());
-        assert!(database.load_conversation(chat).unwrap().messages.is_empty());
+        let messages_after = database.load_conversation(chat).unwrap().messages;
+        assert_eq!(messages_after.iter().map(|message| &message.id).collect::<Vec<_>>(),
+            messages_before.iter().map(|message| &message.id).collect::<Vec<_>>());
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }

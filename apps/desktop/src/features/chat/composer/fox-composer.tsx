@@ -41,15 +41,28 @@ import { AGENT_BACKEND_LABELS, type AgentBackendId } from '@/features/conversati
 import { type ComposerAccessMode } from '../access-mode'
 import { FoxApprovalControl } from './composer-approval-control'
 import type { NativePermissionCatalog } from '@/features/conversations/model/agent-native-permission'
-import { ArrowUp, Eye, Play, Check, ChevronDown, CircleHelp, ShieldAlert, CircleStop, Clock3, CornerDownLeft, FileText, FolderOpen, Library, LoaderCircle, Plus, Sparkles, Terminal, X } from 'lucide-react'
+import { ArrowUp, Eye, Play, Check, ChevronDown, CircleHelp, ShieldAlert, CircleStop, Clock3, CornerDownLeft, FileText, FolderOpen, Library, LoaderCircle, Plus, Sparkles, Terminal, UserRound, X } from 'lucide-react'
 import { type ChangeEvent, type ComponentProps, type Dispatch, type KeyboardEvent, type ReactNode, type SetStateAction, Suspense, lazy, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { type SlashCommand, slashCommandRuntimeText, slashCommands } from './fox-slash-commands'
 import { ApprovalPrompt, QuestionPrompt } from '../demo/fox-demo-prompts'
-import { type ChatState, ComposerRuntimeContext, isConfirmationQuestion, layoutStorage } from '../fox-shared'
+import { type ChatState, ComposerRuntimeContext, type ComposerRuntimeContextValue, isConfirmationQuestion, layoutStorage } from '../fox-shared'
 import { compactValue } from '../timeline/fox-runtime-process-model'
 
 const RuntimeApprovalPrompt = lazy(() => import('../components/RuntimeApprovalPrompt').then(module => ({ default: module.RuntimeApprovalPrompt })))
+
+export function ProjectNoteChoices({ runtimeContext }: { runtimeContext: ComposerRuntimeContextValue }) {
+  const projectNoteOptions = runtimeContext.projectNoteOptions
+  if (!projectNoteOptions) return null
+  return <>
+    <div className="fox-slash-knowledge-separator" aria-hidden="true" />
+    <CommandGroup heading="小 Fox 笔记">
+      <CommandItem disabled={runtimeContext.projectNoteLoading} value="不使用小 Fox 笔记" onSelect={() => void runtimeContext.onProjectNoteSelect?.(null)}><span className="fox-command-icon"><UserRound /></span><span className="fox-command-copy"><strong>不使用</strong><small>当前对话不读取任何小 Fox 笔记</small></span>{projectNoteOptions.selectedCompanionId === null && <Check className="fox-command-selected-check" />}</CommandItem>
+      {projectNoteOptions.options.map(item => <CommandItem key={item.id} disabled={runtimeContext.projectNoteLoading} value={`小 Fox 笔记 ${item.displayName}`} onSelect={() => void runtimeContext.onProjectNoteSelect?.(item.id)}><span className="fox-command-icon"><UserRound /></span><span className="fox-command-copy"><strong>{item.displayName}</strong><small>仅使用所选小 Fox 的已授权笔记</small></span>{projectNoteOptions.selectedCompanionId === item.id && <Check className="fox-command-selected-check" />}</CommandItem>)}
+      {runtimeContext.projectNoteError && <CommandItem disabled value={`小 Fox 笔记加载失败 ${runtimeContext.projectNoteError}`}><span className="fox-command-copy"><strong>加载或保存失败</strong><small>{runtimeContext.projectNoteError}</small></span></CommandItem>}
+    </CommandGroup>
+  </>
+}
 
 function ComposerBorderBeam({ enabled, ...props }: ComponentProps<typeof BorderBeam> & { enabled: boolean }) {
   return enabled ? <BorderBeam {...props} /> : <>{props.children}</>
@@ -708,6 +721,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
                   return <CommandItem key={`remote:${item.id}`} value={`远程资料库 ${item.name} ${item.description}`} onSelect={() => { if (!runtimeContext.knowledgeLoading) void runtimeContext.onKnowledgeToggle?.(reference, item.name) }}><span className="fox-command-icon"><Library /></span><span className="fox-command-copy"><strong>{item.name}</strong><small>{item.description || `${item.fileCount} 个文件`}</small></span>{selected && <Check className="fox-command-selected-check" />}</CommandItem>
                 })}
               </CommandGroup>
+              <ProjectNoteChoices runtimeContext={runtimeContext} />
               <div className="fox-slash-knowledge-separator" aria-hidden="true" />
               <CommandGroup heading="本机资料库">
                 {(runtimeContext.localKnowledgeBases ?? []).map((item) => {

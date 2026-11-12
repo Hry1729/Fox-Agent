@@ -327,7 +327,7 @@ mod tests {
             .start_expert_team(&StartExpertTeamInput {
                 conversation_id: conversation.id.clone(),
                 expert_binding_id: binding.id,
-                expert_id: binding.expert_id,
+                expert_id: binding.expert_id.expect("test binding retains its source"),
                 package_hash: binding.package_hash,
                 team_id: "delivery.team".to_owned(),
                 team_version: "1.0.0".to_owned(),

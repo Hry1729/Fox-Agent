@@ -118,7 +118,7 @@ fn check_stage(
 }
 
 #[test]
-fn companion_template_adoption_and_installed_skills_reach_the_composed_runtime_prompt() {
+fn companion_source_updates_do_not_change_frozen_skills_or_prompt() {
     let root = std::env::temp_dir().join(format!("fox-companion-a24-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
     let db = Database::open(root.join("fox.db")).unwrap();
@@ -147,23 +147,13 @@ fn companion_template_adoption_and_installed_skills_reach_the_composed_runtime_p
     check_stage(&db, &root, chat, "before-adoption", "v1", &SKILLS[..2]);
     db.set_agent_skill_enabled(EXPERT, SKILLS[1], false)
         .unwrap();
-    check_stage(&db, &root, chat, "disable-s2", "v1", &SKILLS[..1]);
-    assert!(!conversation_enabled_skill_ids(&db, chat)
+    check_stage(&db, &root, chat, "disable-s2-source-stays-frozen", "v1", &SKILLS[..2]);
+    assert!(conversation_enabled_skill_ids(&db, &root.join("skills"), chat)
         .unwrap()
         .contains(&SKILLS[1].to_owned()));
-    let status = db.companion_template_status(id).unwrap();
-    db.apply_companion_template(id, &status.latest_hash.unwrap(), false)
-        .unwrap();
-    check_stage(
-        &db,
-        &root,
-        chat,
-        "after-adoption",
-        "v2",
-        &[SKILLS[0], SKILLS[2]],
-    );
+    check_stage(&db, &root, chat, "source-v2-stays-frozen", "v1", &SKILLS[..2]);
     fs::remove_dir_all(root.join("skills").join(SKILLS[0])).unwrap();
-    check_stage(&db, &root, chat, "uninstall-s1", "v2", &SKILLS[2..]);
+    check_stage(&db, &root, chat, "uninstall-s1", "v1", &SKILLS[1..2]);
     drop(db);
     fs::remove_dir_all(root).unwrap();
 }

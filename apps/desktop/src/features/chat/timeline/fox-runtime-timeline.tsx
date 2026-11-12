@@ -271,7 +271,7 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
         <div className="fox-thread-date"><span>今天</span></div>
         {timelineEntries.map((entry) => {
           if (entry.kind === 'expert') {
-            const expert = agentsById.get(entry.binding.expertId)
+            const expert = entry.binding.expertId ? agentsById.get(entry.binding.expertId) : undefined
             return <ExpertActivationCard key={`expert-binding-${entry.binding.id}`} binding={entry.binding} expert={expert} onView={(expertId) => onViewExpert?.(expertId)} />
           }
           const message = entry.message

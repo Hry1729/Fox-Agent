@@ -436,9 +436,12 @@ mod tests {
         assert!(fixture.host.state.lock().unwrap().worker.as_ref().unwrap().sessions.is_empty());
         assert!(KernelRunLock::acquire(&fixture.host.sessions_dir,&started.run.id).is_ok());
 
-        let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {name:"Scoped recovery".into(),expert_id:"fox-debugger".into(),
+        let owner_root=std::env::temp_dir().join(format!("fox-native-scope-owner-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&owner_root).unwrap();
+        let owner=database.add_companion(&owner_root,"fox-debugger").unwrap();
+        let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {name:"Scoped recovery".into(),expert_id:String::new(),
             objective:"read within the bound MCP scope".into(),project_id:None,project_root:None,knowledge_references:Vec::new(),
-            max_runs_per_day:2,max_tokens_per_day:10_000,max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,companion_id:None}).unwrap();
+            max_runs_per_day:2,max_tokens_per_day:10_000,max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,companion_id:Some(owner.profile.id)}).unwrap();
         database.update_conversation_permission_mode(&colleague.conversation_id,"ask").unwrap();
         let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,"native-scope-test",&json!({}),None,"test").unwrap();
         let started=accepted.prepared.expect("digital colleague trigger is admitted").started;

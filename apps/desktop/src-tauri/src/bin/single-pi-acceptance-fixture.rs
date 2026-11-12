@@ -524,7 +524,7 @@ fn seed() -> Result<Value, String> {
             .map_err(|error| format!("cannot read the expert binding: {error}"))?;
         let expert_binding_action = if active
             .as_ref()
-            .is_some_and(|binding| binding.expert_id == expert.id)
+            .is_some_and(|binding| binding.expert_id.as_deref() == Some(expert.id.as_str()))
         {
             "reused"
         } else {

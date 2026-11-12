@@ -6,6 +6,10 @@ import { contacts, type Companion, type CompanionsList, type QuotePreview } from
 import { companionBubbleOrders, readWalkBase, reportableReadOrder, shouldReportRead } from './read-position'
 
 export const showContactError = (error: unknown) => toast.error(desktopErrorDetails(error).message)
+export const shouldRefreshContacts = (notice: { event: { type?: string; tool?: string; isError?: boolean } }) =>
+  /^(run\.(started|completed|failed|cancelled|interrupted)|message\.completed)$/.test(notice.event.type ?? '')
+  || (notice.event.type === 'tool.completed' && notice.event.tool === 'companion_profile_update' && notice.event.isError !== true)
+
 export function useContactList(enabled: boolean) {
   const [list, setList] = useState<CompanionsList>({ companions: [], pendingDeletions: [] })
   const [error, setError] = useState('')
@@ -24,7 +28,7 @@ export function useContactList(enabled: boolean) {
     if (!enabled) return
     void refresh()
     const listener = desktopClient.listenRuntimeEvents(event => {
-      if (/^(run\.(started|completed|failed|cancelled|interrupted)|message\.completed)$/.test(event.event.type)) void refresh()
+      if (shouldRefreshContacts(event)) void refresh()
     })
     return () => { ++version.current; void listener.then(stop => stop()).catch(() => { }) }
   }, [enabled, refresh])
@@ -49,7 +53,6 @@ export interface ContactsContextValue extends ReturnType<typeof useContactList> 
   setPermission: (mode: ProjectRecord['permissionMode']) => void
   open: (contact: Companion, profile?: boolean) => void
   showProfile: () => void
-  add: () => void
   leave: (contact: Companion) => void
   refreshConversation: () => Promise<void>
   /** C05: jump from the profile's file list back to the source message. */

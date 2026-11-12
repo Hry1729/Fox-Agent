@@ -201,6 +201,12 @@ export function globalSearchKindLabel(kind: GlobalSearchRecord['kind']): string 
   })[kind]
 }
 
+export function projectNoteConversationFor(detail: Pick<ConversationDetail, 'conversation' | 'companionId'> | null | undefined) {
+  return detail?.conversation.projectId && !detail.companionId && !detail.conversation.parentConversationId
+    ? detail.conversation.id
+    : undefined
+}
+
 export type ComposerRuntimeContextValue = {
   mentionFiles?: readonly string[]
   knowledgeBindings: KnowledgeBindingRecord[]
@@ -218,6 +224,10 @@ export type ComposerRuntimeContextValue = {
   knowledgeError?: string | null
   onKnowledgeMenuOpen?: () => void
   onKnowledgeToggle?: (reference: KnowledgeReference, name: string) => Promise<boolean>
+  projectNoteOptions?: { selectedCompanionId: string | null; options: Array<{ id: string; displayName: string }> }
+  projectNoteLoading?: boolean
+  projectNoteError?: string | null
+  onProjectNoteSelect?: (companionId: string | null) => Promise<void>
 }
 
 export type TimelineRuntimeContextValue = Pick<ComposerRuntimeContextValue,

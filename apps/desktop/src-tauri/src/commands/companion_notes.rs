@@ -276,3 +276,66 @@ pub(crate) fn companion_revoke_project(
             .companion_grant_project(&companion_id, &project_id, false),
     )
 }
+
+#[tauri::command]
+pub(crate) fn companion_project_note_options(
+    state: State<'_, AppState>,
+    conversation_id: String,
+) -> ApiResponse<Value> {
+    response(state.database.companion_project_note_options(&conversation_id))
+}
+
+#[tauri::command]
+pub(crate) fn companion_project_note_reference_set(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    companion_id: Option<String>,
+) -> ApiResponse<()> {
+    response(set_project_note_reference(
+        &state.database,
+        &conversation_id,
+        companion_id.as_deref(),
+    ))
+}
+
+fn set_project_note_reference(
+    database: &crate::database::Database,
+    conversation_id: &str,
+    companion_id: Option<&str>,
+) -> Result<(), String> {
+    database.companion_project_note_reference_set(conversation_id, companion_id)
+}
+
+#[cfg(test)]
+mod project_note_reference_tests {
+    use super::set_project_note_reference;
+    use crate::database::Database;
+    use uuid::Uuid;
+
+    #[test]
+    fn command_sets_and_clears_only_explicit_project_companion_references() {
+        let root = std::env::temp_dir().join(format!("fox-note-reference-command-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let database = Database::open(root.join("fox.db")).unwrap();
+        let contact = database.add_companion(&root, "fox-security").unwrap();
+        database.with_connection(|connection| {
+            connection.execute_batch(
+                "INSERT INTO projects(id,name,root_path,created_at,updated_at)
+                 VALUES ('project','project','project-root',1,1);
+                 INSERT INTO conversations(id,agent_id,title,project_id,status,created_at,updated_at)
+                 VALUES ('project-chat','fox-general','project','project','active',1,1);
+                 INSERT INTO conversations(id,agent_id,title,status,created_at,updated_at)
+                 VALUES ('ordinary-chat','fox-general','ordinary','active',1,1);",
+            )?;
+            Ok(())
+        }).unwrap();
+        database.companion_grant_project(&contact.profile.id, "project", true).unwrap();
+        set_project_note_reference(&database, "project-chat", Some(&contact.profile.id)).unwrap();
+        assert_eq!(database.companion_note_access("project-chat").unwrap(), Some((contact.profile.id.clone(), false)));
+        assert!(set_project_note_reference(&database, "ordinary-chat", Some(&contact.profile.id)).is_err());
+        set_project_note_reference(&database, "project-chat", None).unwrap();
+        assert!(database.companion_note_access("project-chat").unwrap().is_none());
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
