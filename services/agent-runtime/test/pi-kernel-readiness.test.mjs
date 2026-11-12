@@ -483,6 +483,29 @@ async function createRuntimeSession(runtime, conversationId, runtimeSessionId, s
   return runtime.waitFor((message) => message.requestId === request.id && message.type === 'session_created')
 }
 
+test('Fox Pi Runtime starts a real chat with the exact assembled tool catalog', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-catalog-startup-'))
+  const runtime = startRuntimeProcess(piRuntimePath)
+  context.after(() => runtime.close())
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const conversationId = 'catalog-startup-conversation'
+  const runtimeSessionId = 'catalog-startup-session'
+  const runId = 'catalog-startup-run'
+  await initializeRuntime(runtime, piConfig({ fauxResponses: ['catalog startup succeeded'] }))
+  await createRuntimeSession(runtime, conversationId, runtimeSessionId, join(directory, 'session.json'))
+  runtime.send('prompt', {
+    conversationId,
+    runtimeSessionId,
+    runId,
+    payload: { projectContext: { projectRoot: directory }, text: 'start with the complete catalog', messages: [{ role: 'user', content: 'start with the complete catalog' }] },
+  })
+  const terminal = await runtime.waitFor((message) => message.runId === runId
+    && ['run.completed', 'run.failed'].includes(message.payload?.type))
+  assert.equal(terminal.payload.type, 'run.completed', JSON.stringify(terminal.payload))
+  assert.equal(runtime.messages.some((message) => message.runId === runId
+    && message.payload?.type === 'run.failed'), false)
+})
+
 test('Fox Pi Runtime classifies Host-preflight cancellation as run.cancelled without executing the tool', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'fox-preflight-cancel-'))
   const target = join(directory, 'cancelled.txt')

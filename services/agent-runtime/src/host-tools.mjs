@@ -1061,6 +1061,21 @@ export function createHostTools(requestHost) {
       execute: (id, params, signal) => executeHostTool(id, 'memory_write', params, requestHost, signal),
     },
     {
+      name: 'companion_profile_update',
+      label: 'Update current companion profile',
+      description: 'Update the current root-run companion name, long-term duty, or communication preferences. Preferences are additive by default; use replace or clear only on an explicit user request. Never supply a target companion ID.',
+      parameters: Type.Object({
+        name: Type.Optional(Type.String({ minLength: 1, maxLength: 40 })),
+        display_name: Type.Optional(Type.String({ minLength: 1, maxLength: 40 })),
+        duty: Type.Optional(Type.String({ maxLength: 4000 })),
+        persona_override: Type.Optional(Type.String({ minLength: 1, maxLength: 4000 })),
+        preferenceOperation: Type.Optional(Type.Union([
+          Type.Literal('add'), Type.Literal('replace'), Type.Literal('clear'),
+        ], { description: 'Defaults to add. clear requires persona_override to be omitted.' })),
+      }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'companion_profile_update', params, requestHost, signal),
+    },
+    {
       name: 'note_organize',
       label: 'Move main notes into a topic',
       description: 'Move the specified main notes verbatim into a topic. Moving a user-written entry requires their confirmation.',

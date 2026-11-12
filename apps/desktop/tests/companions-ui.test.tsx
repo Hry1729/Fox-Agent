@@ -3,12 +3,12 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { SharedDecision } from '../src/features/companions/shared-decision'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { ContactSidebar, ContactRepairBanner, AddContactAction } from '../src/features/companions/chat-controls'
+import { ContactSidebar, ContactRepairBanner } from '../src/features/companions/chat-controls'
 import { ContactSideCard } from '../src/features/companions/contact-side-card'
 import { ContactWriteCards, WriteCallsContext } from '../src/features/companions/chat-cards'
 import { ContactsContext, type ContactsContextValue } from '../src/features/companions/context'
 import type { Companion } from '../src/features/companions/api'
-import type { AgentRecord, ConversationDetail, ToolCallRecord } from '../src/features/conversations/model/types'
+import type { ConversationDetail, ToolCallRecord } from '../src/features/conversations/model/types'
 
 const contact: Companion = {
   id: 'cmp_one', conversationId: 'chat', templateAgentId: 'expert', displayName: '当前联系人',
@@ -32,11 +32,6 @@ describe('联系人桌面组件', () => {
     expect(html).toContain('2 条新消息')
     expect(html).toContain('aria-current="page"')
     expect(html).not.toContain('已归档角色')
-  })
-  test('本机专家按已有身份打开，并隐藏远端专家入口', () => {
-    const expert = { id: 'expert', runtimeType: 'pi', agentKind: 'expert' } as AgentRecord
-    expect(render(<AddContactAction agent={expert} />)).toContain('打开私聊')
-    expect(render(<AddContactAction agent={{ ...expert, runtimeType: 'yuxi' }} />)).toBe('')
   })
   test('损坏判定来自 Host，仅受影响私聊显示修复', () => {
     const detail = { conversation: { id: 'chat' }, contextRepair: { available: false } } as ConversationDetail

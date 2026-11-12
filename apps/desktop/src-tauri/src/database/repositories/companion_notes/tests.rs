@@ -394,6 +394,54 @@ fn project_reader_requires_an_explicit_granted_companion_reference_and_cannot_wr
 }
 
 #[test]
+fn project_note_options_are_scoped_to_valid_grants_and_current_conversation() {
+    with_notes(|db, root, owner, private_chat| {
+        let other = db.add_companion(root, "fox-security").unwrap();
+        let other_id = other.profile.id;
+        db.with_connection(|connection| {
+            connection.execute_batch(
+                "INSERT INTO projects(id,name,root_path,created_at,updated_at)
+                 VALUES ('options-project','options','options-root',1,1);
+                 INSERT INTO conversations(id,agent_id,title,project_id,status,created_at,updated_at)
+                 VALUES ('options-chat','fox-general','options','options-project','active',1,1),
+                        ('ordinary-chat','fox-general','ordinary',NULL,'active',1,1);
+                 INSERT INTO conversations(id,agent_id,title,project_id,status,parent_conversation_id,created_at,updated_at)
+                 VALUES ('child-chat','fox-general','child','options-project','active','options-chat',1,1);",
+            )?;
+            Ok(())
+        }).unwrap();
+        db.companion_grant_project(owner, "options-project", true).unwrap();
+        db.companion_grant_project(&other_id, "options-project", true).unwrap();
+
+        let initial = db.companion_project_note_options("options-chat").unwrap();
+        assert_eq!(initial["selectedCompanionId"], Value::Null);
+        assert_eq!(initial["options"].as_array().unwrap().len(), 2);
+        db.companion_project_note_reference_set("options-chat", Some(&other_id)).unwrap();
+        assert_eq!(db.companion_project_note_options("options-chat").unwrap()["selectedCompanionId"], other_id);
+
+        db.companion_grant_project(&other_id, "options-project", false).unwrap();
+        let revoked = db.companion_project_note_options("options-chat").unwrap();
+        assert_eq!(revoked["selectedCompanionId"], Value::Null);
+        assert_eq!(revoked["options"].as_array().unwrap().len(), 1);
+        assert_eq!(revoked["options"][0]["id"], owner);
+
+        db.archive_companion(owner).unwrap();
+        assert_eq!(db.companion_project_note_options("options-chat").unwrap()["options"], json!([]));
+        db.restore_companion(owner).unwrap();
+        db.with_connection(|connection| {
+            connection.execute("UPDATE companion_profiles SET deleting_at=1 WHERE id=?", [owner])?;
+            Ok(())
+        }).unwrap();
+        assert_eq!(db.companion_project_note_options("options-chat").unwrap()["options"], json!([]));
+
+        for conversation in [private_chat, "ordinary-chat", "child-chat"] {
+            assert!(db.companion_project_note_options(conversation).unwrap_err()
+                .contains("companion.project_note_reference_invalid_conversation"));
+        }
+    })
+}
+
+#[test]
 fn same_expert_project_companions_never_cross_read_notes() {
     with_notes(|db, root, owner, private_chat| {
         let other = db.add_companion(root, "fox-security").unwrap();

@@ -4,7 +4,7 @@ import { ContactTopbar, ContactRepairBanner } from '@/features/companions/chat-c
 import { ContactSideCard, CONTACT_SIDE_CARD_WIDTH } from '@/features/companions/contact-side-card'
 import { useContactChatSearch } from '@/features/companions/chat-search'
 import { ContactWorkStatus } from '@/features/companions/chat-status'
-import { contacts, type Companion, type QuotePreview } from '@/features/companions/api'
+import { contacts, type Companion, type ProjectNoteOptions, type QuotePreview } from '@/features/companions/api'
 import { FoxRunStatusBar } from './components/FoxRunStatusBar'
 import { AgentBackendPanel } from './components/AgentBackendPanel'
 import { AGENT_BACKEND_REFUSED, agentBackendAccess, agentBackendInputLockedReason, conversationAgentBackend, isAgentBackendHidden, isAgentBackendRetired, NEW_CONVERSATION_AGENT_BACKEND, type AgentBackendId } from '@/features/conversations/model/agent-backend'
@@ -57,7 +57,7 @@ import { needsLocalKnowledgeNames } from './composer/knowledge-chip-name'
 import { MemoizedComposer, composerEntryFrozen, composerUsesNewConversation, conversationFirstReplyCompleted, isChangeOrCommandTool, readStoredSeenChanges } from './composer/fox-composer'
 import { ComposerEntryContext } from './composer/composer-entry-context'
 import { ConversationManagementDialogs, KnowledgeBindingDialog, ProjectDeleteDialog } from './conversation-dialogs'
-import { type AssistantMode, CONVERSATION_FORK_EVENT, type ChatState, type ChildAgentSelection, ComposerRuntimeContext, type ComposerRuntimeContextValue, EMPTY_CONVERSATION_ATTACHMENTS, EMPTY_CONVERSATION_MESSAGES, EMPTY_RUNTIME_APPROVALS, type OpenFileTab, type RightMode, TimelineRuntimeContext, type TimelineRuntimeContextValue, layoutStorage, readDefaultProjectPermission, readStoredBoolean, readStoredNumber, readStoredRightMode, readStoredRightTabs, recordRegionRender, useStableCallback } from './fox-shared'
+import { type AssistantMode, CONVERSATION_FORK_EVENT, type ChatState, type ChildAgentSelection, ComposerRuntimeContext, projectNoteConversationFor, type ComposerRuntimeContextValue, EMPTY_CONVERSATION_ATTACHMENTS, EMPTY_CONVERSATION_MESSAGES, EMPTY_RUNTIME_APPROVALS, type OpenFileTab, type RightMode, TimelineRuntimeContext, type TimelineRuntimeContextValue, layoutStorage, readDefaultProjectPermission, readStoredBoolean, readStoredNumber, readStoredRightMode, readStoredRightTabs, recordRegionRender, useStableCallback } from './fox-shared'
 import { RightPanel, artifactProjectPath, childAgentVisualQaPanelWidth, createOpenFileTab } from './right-panel/fox-right-panel'
 import { ChatTopbar } from './shell/fox-chat-topbar'
 import { MemoizedSidebar } from './shell/fox-sidebar'
@@ -330,6 +330,9 @@ export function Workbench() {
   const [knowledgeDialogOpen, setKnowledgeDialogOpen] = useState(false)
   const [knowledgeDialogBusy, setKnowledgeDialogBusy] = useState(false)
   const [knowledgeDialogError, setKnowledgeDialogError] = useState<string | null>(null)
+  const [projectNoteOptions, setProjectNoteOptions] = useState<ProjectNoteOptions>({ selectedCompanionId: null, options: [] })
+  const [projectNoteLoading, setProjectNoteLoading] = useState(false)
+  const [projectNoteError, setProjectNoteError] = useState<string | null>(null)
   const [localKnowledgeBases, setLocalKnowledgeBases] = useState<LocalKnowledgeBaseDto[]>([])
   const [localKnowledgeLoading, setLocalKnowledgeLoading] = useState(false)
   const [conversationDialog, setConversationDialog] = useState<{ conversation: { id: string; title: string }; mode: 'rename' | 'purge' } | null>(null)
@@ -431,9 +434,30 @@ export function Workbench() {
   }, [activeConversationId])
   const totalChangeCount = desktopConversation.detail?.toolCalls.filter((tool) => isChangeOrCommandTool(tool.toolName)).length ?? 0
 
+  const projectNoteConversationId = projectNoteConversationFor(desktopConversation.detail)
+  const refreshProjectNoteOptions = useStableCallback(async () => {
+    if (!projectNoteConversationId) { setProjectNoteOptions({ selectedCompanionId: null, options: [] }); return }
+    setProjectNoteLoading(true)
+    setProjectNoteError(null)
+    try { setProjectNoteOptions(await contacts.projectNoteOptions(projectNoteConversationId)) }
+    catch (cause) { setProjectNoteError(userFacingCause(cause)) }
+    finally { setProjectNoteLoading(false) }
+  })
+  const handleProjectNoteSelect = useStableCallback(async (companionId: string | null) => {
+    if (!projectNoteConversationId) return
+    setProjectNoteLoading(true)
+    setProjectNoteError(null)
+    try {
+      await contacts.setProjectNoteReference(projectNoteConversationId, companionId)
+      setProjectNoteOptions(await contacts.projectNoteOptions(projectNoteConversationId))
+    } catch (cause) { setProjectNoteError(userFacingCause(cause)) }
+    finally { setProjectNoteLoading(false) }
+  })
+
   const refreshKnowledgeChoices = useCallback(() => {
     setKnowledgeDialogError(null)
     void knowledge.refresh()
+    void refreshProjectNoteOptions()
     if (!desktopRuntimeAvailable) {
       setLocalKnowledgeBases([])
       setLocalKnowledgeLoading(false)
@@ -447,7 +471,7 @@ export function Workbench() {
         setKnowledgeDialogError(userFacingCause(cause))
       })
       .finally(() => setLocalKnowledgeLoading(false))
-  }, [knowledge.refresh])
+  }, [knowledge.refresh, refreshProjectNoteOptions])
 
 
   useEffect(() => {
@@ -1266,10 +1290,14 @@ export function Workbench() {
     knowledgeError: knowledgeDialogError ?? knowledge.error,
     onKnowledgeMenuOpen: refreshKnowledgeChoices,
     onKnowledgeToggle: handleKnowledgeToggle,
+    projectNoteOptions: projectNoteConversationId ? projectNoteOptions : undefined,
+    projectNoteLoading,
+    projectNoteError,
+    onProjectNoteSelect: handleProjectNoteSelect,
     questionRequest: runtimeQuestion,
     onSubmitQuestion: handleRuntimeSubmitQuestion,
     onKnowledge: handleKnowledgeOpen,
-  }), [desktopConversation.knowledgeReferences, desktopConversation.knowledgeReferenceNames, handleKnowledgeOpen, handleKnowledgeToggle, handleRuntimeSubmitQuestion, knowledge.error, knowledge.items, knowledge.loading, knowledgeDialogBusy, knowledgeDialogError, localKnowledgeBases, localKnowledgeLoading, refreshKnowledgeChoices, runtimeQuestion, timelineRuntimeContextValue])
+  }), [desktopConversation.knowledgeReferences, desktopConversation.knowledgeReferenceNames, handleKnowledgeOpen, handleKnowledgeToggle, handleRuntimeSubmitQuestion, knowledge.error, knowledge.items, knowledge.loading, knowledgeDialogBusy, knowledgeDialogError, localKnowledgeBases, localKnowledgeLoading, refreshKnowledgeChoices, runtimeQuestion, timelineRuntimeContextValue, projectNoteConversationId, projectNoteOptions, projectNoteLoading, projectNoteError, handleProjectNoteSelect])
   const handleTimelineLoadEarlierMessages = useStableCallback(() => {
     void desktopConversation.loadEarlierMessages()
   })
@@ -1759,7 +1787,6 @@ export function Workbench() {
     handleOpenConversation(item.conversationId)
     if (profile) setContactCardConversationId(item.conversationId)
   })
-  const addContact = useStableCallback(() => navigate('agents'))
   const showContactProfile = useStableCallback(() => { if (contact) setContactCardConversationId(contact.conversationId) })
   const getSelectedConversationId = useStableCallback(
     () => desktopConversation.selectedConversationId,
@@ -1816,11 +1843,11 @@ export function Workbench() {
   }, [desktopConversation.selectedConversationId])
   const contactsContext = useMemo(() => ({
     model:contactModel,permission:contactPermission,setPermission:handleComposerPermissionModeChange,openSharedMemory,askToOrganize,
-    ...contactList,current:contact,privateChat,projects,open:openContact,add:addContact,
+    ...contactList,current:contact,privateChat,projects,open:openContact,
     showProfile:showContactProfile,leave:leaveContact,refreshConversation:refreshContactConversation,
     locateRequest:contactLocateRequest,jumpToMessage,quoteDraft:contactQuote,quoteBubble:quoteContactBubble,clearQuote:clearContactQuote,
     bubbleMarkUpdates:contactMarkUpdates,publishBubbleMark:publishContactBubbleMark,
-  }), [contactList.list,contactList.refresh,contactList.error,contactModel,contactPermission,handleComposerPermissionModeChange,openSharedMemory,askToOrganize,contact,privateChat,projects,openContact,addContact,showContactProfile,leaveContact,refreshContactConversation,contactLocateRequest,jumpToMessage,contactQuote,quoteContactBubble,clearContactQuote,contactMarkUpdates,publishContactBubbleMark])
+  }), [contactList.list,contactList.refresh,contactList.error,contactModel,contactPermission,handleComposerPermissionModeChange,openSharedMemory,askToOrganize,contact,privateChat,projects,openContact,showContactProfile,leaveContact,refreshContactConversation,contactLocateRequest,jumpToMessage,contactQuote,quoteContactBubble,clearContactQuote,contactMarkUpdates,publishContactBubbleMark])
   if (activeView === 'onboarding') return <Suspense fallback={<div className="fox-app-loading" role="status" aria-label="正在加载引导页" />}><OnboardingPage dark={dark} navigate={navigate} onExit={finishOnboarding} /></Suspense>
 
   return (

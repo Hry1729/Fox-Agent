@@ -278,6 +278,14 @@ pub(crate) fn companion_revoke_project(
 }
 
 #[tauri::command]
+pub(crate) fn companion_project_note_options(
+    state: State<'_, AppState>,
+    conversation_id: String,
+) -> ApiResponse<Value> {
+    response(state.database.companion_project_note_options(&conversation_id))
+}
+
+#[tauri::command]
 pub(crate) fn companion_project_note_reference_set(
     state: State<'_, AppState>,
     conversation_id: String,

@@ -1,5 +1,5 @@
 import { command } from '@/features/conversations/api/desktop-client'
-import type { AgentRecord, ContactBubbleMarkRecord, ConversationContextReset, MemoryEntityRecord } from '@/features/conversations/model/types'
+import type { ContactBubbleMarkRecord, ConversationContextReset, MemoryEntityRecord } from '@/features/conversations/model/types'
 
 export interface Companion {
   id: string
@@ -52,14 +52,6 @@ export interface DeletePlan {
   files: Array<{ kind: string; disposition: string; path: string; bytes: number }>
 }
 
-export interface TemplateStatus {
-  latestHash: string | null
-  boundSnapshot: Partial<AgentRecord> | null
-  latestSnapshot: Partial<AgentRecord> | null
-  updateAvailable: boolean
-  dismissed: boolean
-}
-
 export interface NoteTopic {
   id: string; title: string; aliases: string[]; contentSha256: string; revision: number
 }
@@ -76,6 +68,7 @@ export interface CompanionNotes {
   sharedRequestHistory?: Array<CompanionNotes['sharedRequests'][number] & { status: 'open' | 'added' | 'replaced' | 'rejected' | 'stale'; resolvedAt: number | null }>
   writeReceipts?: Array<{ memoryId: string; runId: string; status: 'created' | 'undone' | 'changed' }>
 }
+export type ProjectNoteOptions = { selectedCompanionId: string | null; options: Array<{ id: string; displayName: string }> }
 export type CompanionGrant = { id: string; projectId: string; projectName: string; grantedAt: number }
 export type RetainedWorkspace = { companionId: string; displayName: string; workspacePath: string }
 
@@ -122,6 +115,7 @@ export const contacts = {
   list: () => command<CompanionsList>('companions_list'),
   open: (companionId: string) => command<Companion>('companion_open', { companionId }),
   add: (expertId: string) => command<Companion>('companion_add_from_expert', { expertId }),
+  createBlank: () => command<Companion>('companion_create_blank'),
   profile: (companionId: string, edit: Partial<Pick<Companion, 'displayName' | 'avatarRef' | 'duty' | 'personaOverride'>>) => command<Companion>('companion_update_profile', { companionId, ...edit }),
   setModel: (companionId: string, providerId: string | null, modelRef: string | null) => command<Companion>('companion_set_model', { companionId, providerId, modelRef }),
   capabilities: (companionId: string) => command<CompanionCapabilities>('companion_capabilities_get', { companionId }),
@@ -139,8 +133,6 @@ export const contacts = {
   favorites: (companionId: string) => command<FavoriteEntry[]>('companion_favorites_list', { companionId }),
   archive: (companionId: string) => command<Companion>('companion_archive', { companionId }),
   restore: (companionId: string) => command<Companion>('companion_restore', { companionId }),
-  template: (companionId: string) => command<TemplateStatus>('companion_template_status', { companionId }),
-  decideTemplate: (companionId: string, expectedHash: string, adopt: boolean) => command(adopt ? 'companion_template_update' : 'companion_template_dismiss', { companionId, expectedHash }),
   repairContext: (conversationId: string) => command<ConversationContextReset>('companion_context_repair', { conversationId }),
   repairWorkspace: (companionId: string) => direct<string>('companion_workspace_repair', { companionId }),
   importFiles: (companionId: string, paths?: string[]) => direct<string[]>('companion_import_files', { companionId, paths }),
@@ -152,5 +144,6 @@ export const contacts = {
   notes: (companionId: string) => direct<CompanionNotes>('companion_notes_get', { companionId }),
   grants: (companionId: string) => direct<CompanionGrant[]>('companion_grants_list', { companionId }),
   setGrant: (companionId: string, projectId: string, grant: boolean) => direct(grant ? 'companion_grant_project' : 'companion_revoke_project', { companionId, projectId }),
+  projectNoteOptions: (conversationId: string) => direct<ProjectNoteOptions>('companion_project_note_options', { conversationId }),
   setProjectNoteReference: (conversationId: string, companionId: string | null) => direct<void>('companion_project_note_reference_set', { conversationId, companionId }),
 }

@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { randomUUID } from 'node:crypto'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { checkLiveNoteOrganization, checkLiveTemplateChange } from './contacts-live-notes.mjs'
+import { checkLiveNoteOrganization, checkLiveFrozenTemplate } from './contacts-live-notes.mjs'
 
 export async function connectLiveModel({ source, invoke, db, check, poll }, overrides = {}) {
   const installed = new DatabaseSync(source, { readOnly: true })
@@ -198,7 +198,7 @@ export async function checkLiveModel(context) {
     const project = await grantedProject()
     return checkLiveNoteOrganization({ invoke, expert, exchange, project, assertToolRead, endpoint, service })
   })
-  await scenario('A24 采用新版后才回答新模板编号', () => checkLiveTemplateChange({ invoke, exchange, model }))
+  await scenario('A24 专家源更新不改变已冻结模板', () => checkLiveFrozenTemplate({ invoke, exchange, model }))
   await scenario('A26 说明定时任务限制', async () => {
     const counts = () => db.prepare(`SELECT (SELECT count(*) FROM digital_colleagues) AS colleagues,
       (SELECT count(*) FROM digital_colleague_schedules) AS schedules`).get()

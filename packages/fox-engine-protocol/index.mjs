@@ -2851,6 +2851,12 @@ export const SCHEMA_BUNDLE = {
       "approval": "none",
       "category": "memory",
       "execution": "host",
+      "name": "companion_profile_update"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
       "name": "note_organize"
     },
     {

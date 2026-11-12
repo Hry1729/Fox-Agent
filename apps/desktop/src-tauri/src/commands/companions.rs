@@ -3,7 +3,7 @@ use crate::{
     companion_workspace,
     database::{
         companions::{
-            CompanionError, CompanionProfileEdit, CompanionTemplateStatus, CompanionView,
+            CompanionError, CompanionProfileEdit, CompanionView,
             CompanionsList,
         },
         ApiResponse, Database,
@@ -135,13 +135,6 @@ pub(crate) struct SetBubbleReaction {
     reaction: String,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct TemplateDecision {
-    companion_id: String,
-    expected_hash: String,
-}
-
 fn response<T: Serialize>(result: Result<T, CompanionError>) -> ApiResponse<T> {
     match result {
         Ok(value) => ApiResponse::success(value),
@@ -200,6 +193,16 @@ pub(crate) fn companion_add_from_expert(
         state
             .database
             .add_companion(&state.data_dir, &request.expert_id)
+            .and_then(|view| prepare_new_workspace(&state.database, &state.data_dir, view)),
+    )
+}
+
+#[tauri::command]
+pub(crate) fn companion_create_blank(state: State<'_, AppState>) -> ApiResponse<CompanionView> {
+    response(
+        state
+            .database
+            .create_blank_companion(&state.data_dir)
             .and_then(|view| prepare_new_workspace(&state.database, &state.data_dir, view)),
     )
 }
@@ -424,40 +427,4 @@ pub(crate) fn companion_restore(
     request: CompanionId,
 ) -> ApiResponse<CompanionView> {
     response(state.database.restore_companion(&request.companion_id))
-}
-
-#[tauri::command]
-pub(crate) fn companion_template_status(
-    state: State<'_, AppState>,
-    request: CompanionId,
-) -> ApiResponse<CompanionTemplateStatus> {
-    response(
-        state
-            .database
-            .companion_template_status(&request.companion_id),
-    )
-}
-
-#[tauri::command]
-pub(crate) fn companion_template_update(
-    state: State<'_, AppState>,
-    request: TemplateDecision,
-) -> ApiResponse<()> {
-    response(state.database.apply_companion_template(
-        &request.companion_id,
-        &request.expected_hash,
-        false,
-    ))
-}
-
-#[tauri::command]
-pub(crate) fn companion_template_dismiss(
-    state: State<'_, AppState>,
-    request: TemplateDecision,
-) -> ApiResponse<()> {
-    response(state.database.apply_companion_template(
-        &request.companion_id,
-        &request.expected_hash,
-        true,
-    ))
 }

@@ -4,6 +4,8 @@ import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { notify as toast } from '@/features/notifications'
 import type { AgentRecord, ConversationDetail } from '@/features/conversations/model/types'
+import { desktopClient } from '@/features/conversations/api/desktop-client'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { contacts, type Companion } from './api'
 import { useContacts, showContactError } from './context'
 import { ContactDelete } from './delete'
@@ -20,18 +22,44 @@ export function ContactAvatar({ contact }: { contact: Companion }) {
 export function ContactSidebar({ activeId, collapsed = false }: { activeId?: string; collapsed?: boolean }) {
   const ctx = useContacts()
   const [deleting, setDeleting] = useState<Companion | null>(null)
+  const [creating, setCreating] = useState(false)
+  const [expertOpen, setExpertOpen] = useState(false)
+  const [experts, setExperts] = useState<AgentRecord[]>([])
+  const [selectedExpertId, setSelectedExpertId] = useState('')
+  const [expertsLoading, setExpertsLoading] = useState(false)
   if (!ctx) return null
   const { list, refresh } = ctx
   const open = async (contact: Companion, profile = false) => {
     try { ctx.open(await contacts.open(contact.id), profile) } catch (error) { showContactError(error) }
   }
+  const create = async (expertId?: string) => {
+    if (creating) return
+    setCreating(true)
+    try {
+      const created = expertId ? await contacts.add(expertId) : await contacts.createBlank()
+      const opened = await contacts.open(created.id)
+      await refresh()
+      ctx.open(opened)
+      setExpertOpen(false)
+      setSelectedExpertId('')
+    } catch (error) { showContactError(error) } finally { setCreating(false) }
+  }
+  const chooseExpert = async () => {
+    setExpertOpen(true)
+    setExpertsLoading(true)
+    try {
+      const available = await desktopClient.listAgents()
+      setExperts(available.filter(agent => agent.available && agent.runtimeType === 'pi' && agent.agentKind === 'expert'))
+    } catch (error) { showContactError(error) } finally { setExpertsLoading(false) }
+  }
   const archive = async (contact: Companion) => {
     try { await contacts.archive(contact.id); ctx.leave(contact); await refresh() } catch (error) { showContactError(error) }
   }
   if (collapsed) return <DropdownMenu><DropdownMenuTrigger asChild><button type="button" className="fox-sidebar-command" aria-label="Fox"><UserRound size={18} /></button></DropdownMenuTrigger>
-    <DropdownMenuContent side="right">{list.companions.filter(item => !item.archivedAt && !item.deletingAt).map(item => <DropdownMenuItem key={item.id} onSelect={() => void open(item)}><ContactAvatar contact={item} />{item.displayName}</DropdownMenuItem>)}<DropdownMenuItem onSelect={ctx.add}>添加联系人</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
+    <DropdownMenuContent side="right">{list.companions.filter(item => !item.archivedAt && !item.deletingAt).map(item => <DropdownMenuItem key={item.id} onSelect={() => void open(item)}><ContactAvatar contact={item} />{item.displayName}</DropdownMenuItem>)}</DropdownMenuContent></DropdownMenu>
   return <section className="fox-contact-sidebar" aria-label="Fox">
-    <div className="fox-section-head fox-sidebar-group-head"><span>Fox</span><button type="button" className="fox-icon-button" aria-label="添加联系人" onClick={ctx.add}><Plus size={14} /></button></div>
+    <div className="fox-section-head fox-sidebar-group-head"><span>小 Fox</span><DropdownMenu><DropdownMenuTrigger asChild><button type="button" className="fox-icon-button" aria-label="新建小 Fox" disabled={creating}><Plus size={14} /></button></DropdownMenuTrigger>
+      <DropdownMenuContent align="end"><DropdownMenuItem disabled={creating} onSelect={() => void create()}>新建小 Fox</DropdownMenuItem><DropdownMenuItem disabled={creating} onSelect={() => void chooseExpert()}>从专家创建</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
     {ctx.error && <button type="button" title={ctx.error} onClick={() => void refresh()}>重新加载联系人</button>}
     {list.companions.filter(item => !item.archivedAt && !item.deletingAt).map(item => <div className={'fox-contact-row' + (activeId === item.conversationId ? ' is-active' : '')} key={item.id}>
       <button type="button" className="fox-contact-link" onClick={() => void open(item)} aria-current={activeId === item.conversationId ? 'page' : undefined}><ContactAvatar contact={item} /><span>{item.displayName}</span>{item.pinnedAt && <Pin size={11} aria-label="已置顶" />}{item.pendingActionCount > 0 && <small className="fox-contact-flag is-action" aria-label="需要你确认">需要你确认</small>}{item.activeRunStatus && <small className="fox-contact-flag is-working">正在工作</small>}{item.unreadCount > 0 && <small className="fox-contact-flag is-unread" aria-label={item.unreadCount + ' 条新消息'}>{item.unreadCount}</small>}</button>
@@ -43,22 +71,11 @@ export function ContactSidebar({ activeId, collapsed = false }: { activeId?: str
           {!item.isDefault && <DropdownMenuItem variant="destructive" disabled={Boolean(item.activeRunStatus)} onSelect={() => setDeleting(item)}>删除…</DropdownMenuItem>}
         </DropdownMenuContent></DropdownMenu></div>)}
     {deleting && <ContactDelete contact={deleting} close={() => setDeleting(null)} />}
+    <Dialog open={expertOpen} onOpenChange={open => { if (!creating) setExpertOpen(open) }}><DialogContent><DialogHeader><DialogTitle>从专家创建</DialogTitle><DialogDescription>选择一个可用的本机专家。每次确认都会创建独立的小 Fox。</DialogDescription></DialogHeader>
+      <div role="radiogroup" aria-label="可用专家">{expertsLoading ? <p>正在加载专家…</p> : experts.length ? experts.map(agent => <label key={agent.id}><input type="radio" name="companion-expert" value={agent.id} checked={selectedExpertId === agent.id} disabled={creating} onChange={() => setSelectedExpertId(agent.id)} />{agent.name}</label>) : <p>暂无可用专家</p>}</div>
+      <DialogFooter><Button variant="outline" disabled={creating} onClick={() => setExpertOpen(false)}>取消</Button><Button disabled={creating || !selectedExpertId} onClick={() => void create(selectedExpertId)}>{creating ? '正在创建…' : '确认创建'}</Button></DialogFooter>
+    </DialogContent></Dialog>
   </section>
-}
-
-export function AddContactAction({ agent, onOpened }: { agent: AgentRecord; onOpened?: () => void }) {
-  const ctx = useContacts()
-  const [busy, setBusy] = useState(false)
-  if (!ctx || agent.agentKind !== 'expert' || agent.runtimeType !== 'pi') return null
-  const existing = ctx.list.companions.find(item => item.templateAgentId === agent.id)
-  const add = async () => {
-    setBusy(true)
-    try {
-      const result = await contacts.add(agent.id)
-      await ctx.refresh(); onOpened?.(); ctx.open(result)
-    } catch (e) { showContactError(e) } finally { setBusy(false) }
-  }
-  return <Button variant="outline" disabled={busy || Boolean(existing?.deletingAt)} onClick={() => void add()}>{existing?.deletingAt ? '正在删除' : existing?.archivedAt ? '恢复并打开' : existing ? '打开私聊' : '加为联系人'}</Button>
 }
 
 /**

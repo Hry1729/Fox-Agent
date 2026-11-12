@@ -121,6 +121,7 @@ pub(crate) fn allows_tool(tool: &str) -> bool {
             | "edit_file"
             | "memory_search"
             | "memory_write"
+            | "companion_profile_update"
             | "note_read"
             | "note_search"
             | "note_organize"

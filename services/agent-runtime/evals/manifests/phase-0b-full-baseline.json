@@ -92,10 +92,10 @@
   ],
   "expectedCaseCounts": {
     "simple": 10,
-    "medium": 93,
+    "medium": 94,
     "complex": 25,
     "recovery": 5,
-    "total": 133
+    "total": 134
   },
   "cases": [
     {
@@ -651,6 +651,11 @@
     {
       "suiteId": "runtime-tool-catalog",
       "caseId": "memory_write",
+      "category": "medium"
+    },
+    {
+      "suiteId": "runtime-tool-catalog",
+      "caseId": "companion_profile_update",
       "category": "medium"
     },
     {

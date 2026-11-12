@@ -437,6 +437,29 @@ impl Database {
         })
     }
 
+    pub(crate) fn companion_project_note_options(&self, conversation: &str) -> Result<Value, String> {
+        self.with_connection(|db| {
+            let project: String = db.query_row(
+                "SELECT c.project_id FROM conversations c
+                 JOIN projects p ON p.id=c.project_id AND p.status='active'
+                 WHERE c.id=? AND c.companion_id IS NULL AND c.parent_conversation_id IS NULL AND c.trashed_at IS NULL",
+                [conversation], |row| row.get(0),
+            ).map_err(|_| denied("companion.project_note_reference_invalid_conversation"))?;
+            let options = json_rows(db,
+                "SELECT json_object('id',p.id,'displayName',p.display_name) FROM companion_profiles p
+                 JOIN companion_project_grants g ON g.companion_id=p.id AND g.revoked_at IS NULL
+                 WHERE g.project_id=? AND p.archived_at IS NULL AND p.deleting_at IS NULL ORDER BY p.display_name,p.id",
+                [&project])?;
+            let selected = db.query_row(
+                "SELECT r.companion_id FROM conversation_companion_note_refs r
+                 JOIN companion_profiles p ON p.id=r.companion_id AND p.archived_at IS NULL AND p.deleting_at IS NULL
+                 JOIN companion_project_grants g ON g.companion_id=p.id AND g.project_id=?2 AND g.revoked_at IS NULL
+                 WHERE r.conversation_id=?1",
+                params![conversation, project], |row| row.get::<_,String>(0)).optional()?;
+            Ok(json!({"selectedCompanionId":selected,"options":options}))
+        })
+    }
+
     pub(crate) fn companion_project_note_reference_set(
         &self,
         conversation: &str,
@@ -446,7 +469,7 @@ impl Database {
             let project: String = tx.query_row(
                 "SELECT c.project_id FROM conversations c
                  JOIN projects p ON p.id=c.project_id AND p.status='active'
-                 WHERE c.id=? AND c.companion_id IS NULL AND c.trashed_at IS NULL",
+                 WHERE c.id=? AND c.companion_id IS NULL AND c.parent_conversation_id IS NULL AND c.trashed_at IS NULL",
                 [conversation],
                 |row| row.get(0),
             ).map_err(|_| denied("companion.project_note_reference_invalid_conversation"))?;

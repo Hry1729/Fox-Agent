@@ -325,6 +325,7 @@ pub const TOOL_CONTRACTS: &[(&str, &str, &str, &str)] = &[
     ("memory_search", "memory", "host", "none"),
     ("memory_propose", "memory", "host", "none"),
     ("memory_write", "memory", "host", "none"),
+    ("companion_profile_update", "memory", "host", "none"),
     ("note_organize", "memory", "host", "none"),
     ("note_search", "memory", "host", "none"),
     ("note_read", "memory", "host", "none"),

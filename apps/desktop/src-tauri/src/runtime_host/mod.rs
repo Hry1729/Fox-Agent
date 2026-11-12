@@ -2077,7 +2077,11 @@ impl RuntimeHost {
         )?;
 
         let mut companion_context = self.database.companion_runtime_notes(&started.run.conversation_id, text)?;
+        let can_update_profile = self.database.run_companion_profile_update_scope(&started.run.id)?
+            .is_some_and(|scope| scope.conversation_id == started.run.conversation_id);
         if let Some(context) = companion_context.as_mut().filter(|ctx| ctx["role"] == "owner") {
+            context["canUpdateProfile"] = json!(can_update_profile);
+            context["canWriteNotes"] = json!(can_update_profile);
             // K4: freeze this run's capability snapshot (write-once) and show
             // the model exactly that set. A grant added mid-run only appears
             // in the next run; a revocation still stops execution via the
@@ -2096,6 +2100,7 @@ impl RuntimeHost {
             let mut allowed: Vec<&str> = fox_engine_protocol::TOOL_CONTRACTS.iter()
                 .map(|contract| contract.0)
                 .filter(|name| crate::companion_workspace::allows_tool(name))
+                .filter(|name| *name != "companion_profile_update" || can_update_profile)
                 .collect();
             for tool in crate::database::WEB_TOOLS {
                 if snapshot.iter().any(|id| id == tool) {
@@ -6373,7 +6378,7 @@ fn run_status_is_terminal(status: &str) -> bool {
 }
 
 fn is_memory_tool(tool: &str) -> bool {
-    matches!(tool, "memory_search" | "memory_propose" | "memory_write" | "note_organize" | "note_search" | "note_read")
+    matches!(tool, "memory_search" | "memory_propose" | "memory_write" | "companion_profile_update" | "note_organize" | "note_search" | "note_read")
 }
 
 fn is_child_run_tool(tool: &str) -> bool {
@@ -6493,6 +6498,52 @@ fn execute_memory_tool_request(
 fn execute_memory_operation(database: &Database, conversation_id: &str, run_id: &str,
     tool: &str, input: &Value) -> Result<Value,String> {
         match tool {
+            "memory_write" | "note_organize" if database.run_companion_profile_update_scope(run_id)?.is_none() => {
+                Err("[companion.tool_not_available] 子运行不能写入联系人配置或笔记。".into())
+            }
+            "companion_profile_update" => {
+                let scope = database.run_companion_profile_update_scope(run_id)?
+                    .filter(|scope| scope.conversation_id == conversation_id)
+                    .ok_or_else(|| "[companion.tool_not_available] 只有该联系人的根运行可以修改配置。".to_owned())?;
+                let allowed: std::collections::HashSet<&str> = [
+                    "name", "display_name", "duty", "persona_override", "preferenceOperation",
+                ].into_iter().collect();
+                if input.as_object().is_none_or(|fields| fields.keys().any(|key| !allowed.contains(key.as_str()))) {
+                    return Err("companion.profile_invalid_fields: 只允许修改名称、职责和沟通偏好".into());
+                }
+                if allowed.iter().any(|field| input.get(*field).is_some_and(|value| !value.is_string())) {
+                    return Err("companion.profile_invalid_field_types: 名称、职责和沟通偏好必须是字符串".into());
+                }
+                let name = input.get("name").and_then(Value::as_str);
+                let display_name = input.get("display_name").and_then(Value::as_str);
+                if name.is_some() && display_name.is_some() {
+                    return Err("companion.profile_name_ambiguous: name 和 display_name 只能提供一个".into());
+                }
+                let operation = input.get("preferenceOperation").and_then(Value::as_str).unwrap_or("add");
+                let preference = input.get("persona_override").and_then(Value::as_str);
+                if operation == "clear" && preference.is_some() || operation != "clear" && preference.is_none() && input.get("preferenceOperation").is_some() {
+                    return Err("companion.profile_preference_operation_invalid".into());
+                }
+                let preference = match (operation, preference) {
+                    (_, Some(value)) if operation == "add" => crate::database::companions::CompanionPreferenceEdit::Add(value.to_owned()),
+                    (_, Some(value)) if operation == "replace" => crate::database::companions::CompanionPreferenceEdit::Replace(value.to_owned()),
+                    ("clear", None) => crate::database::companions::CompanionPreferenceEdit::Clear,
+                    _ if preference.is_none() => crate::database::companions::CompanionPreferenceEdit::Preserve,
+                    _ => return Err("companion.profile_preference_operation_invalid".into()),
+                };
+                let display_name = name.or(display_name).map(str::to_owned);
+                let duty = input.get("duty").and_then(Value::as_str).map(str::to_owned);
+                if display_name.is_none() && duty.is_none() && matches!(preference, crate::database::companions::CompanionPreferenceEdit::Preserve) {
+                    return Err("companion.profile_empty_update".into());
+                }
+                let saved = database.save_companion_profile(&scope.companion_id, crate::database::companions::CompanionProfileSaveInput {
+                    display_name,
+                    avatar_ref: None,
+                    duty,
+                    preference,
+                }).map_err(|error| error.response().1.to_owned())?;
+                serde_json::to_value(saved).map_err(|error| error.to_string())
+            }
             "memory_write" | "note_organize" | "note_search" | "note_read" =>
                 database.companion_notes_tool(conversation_id, run_id, tool, input),
             "memory_search" => {
@@ -6942,6 +6993,9 @@ fn ensure_expert_tool_allowed(
     conversation_id: &str,
     tool: &str,
 ) -> Result<(), String> {
+    if tool == "companion_profile_update" {
+        return Ok(());
+    }
     if matches!(tool, "memory_write" | "note_organize" | "note_search" | "note_read") {
         let access = database.companion_note_access(conversation_id)?;
         if access.is_some_and(|(_, owner)| owner || matches!(tool, "note_read" | "note_search")) {
@@ -11041,7 +11095,7 @@ fn record_runtime_crash(
 #[cfg(test)]
 mod attachment_tests {
     use crate::canonical_json::CanonicalJson;
-    use super::{conversation_prompt_context, conversation_enabled_skill_ids, PromptScopeOverrides, apply_delegated_package_scope, attachment_image_media_type, attachment_is_docx, attachment_is_text, attachment_looks_like_image, bounded_knowledge_tool_result, execute_bound_knowledge_tool, create_fresh_host_tool_call, dispatch_created_work_child, effective_conversation_delegation_scope, effective_digital_colleague_output_limit, ensure_expert_tool_allowed, ensure_plan_approved_before_mutation, event_projection_failure_code, extract_docx_text, finalize_host_tool_execution, inspect_existing_host_tool_call, intersect_mcp_server_scopes, intersect_optional_scopes, node_dependency_is_available, normalized_child_budget, parse_runtime_ready_payload, pending_approval_ids_for_run, redact_diagnostic_line, runtime_expert_package, structured_runtime_error, validate_envelope_identity_scope, validate_runtime_tool_authority, HostToolCallExecution, PendingApproval, RuntimeToolIngress};
+    use super::{conversation_prompt_context, conversation_enabled_skill_ids, PromptScopeOverrides, apply_delegated_package_scope, attachment_image_media_type, attachment_is_docx, attachment_is_text, attachment_looks_like_image, bounded_knowledge_tool_result, execute_bound_knowledge_tool, create_fresh_host_tool_call, dispatch_created_work_child, effective_conversation_delegation_scope, effective_digital_colleague_output_limit, ensure_expert_tool_allowed, ensure_plan_approved_before_mutation, event_projection_failure_code, execute_memory_operation, extract_docx_text, finalize_host_tool_execution, inspect_existing_host_tool_call, intersect_mcp_server_scopes, intersect_optional_scopes, node_dependency_is_available, normalized_child_budget, parse_runtime_ready_payload, pending_approval_ids_for_run, redact_diagnostic_line, runtime_expert_package, structured_runtime_error, validate_envelope_identity_scope, validate_runtime_tool_authority, HostToolCallExecution, PendingApproval, RuntimeToolIngress};
     use crate::database::{
         AddEvidenceInput, AttachmentRecord, CreateDigitalColleagueInput,
         CreateGoalInput, CreateTaskInput, Database, EvidenceReferenceKind, EvidenceType,
@@ -13621,6 +13675,82 @@ mod attachment_tests {
             assert!(effective_conversation_delegation_scope(&database, conversation_id).is_err());
             assert!(ensure_expert_tool_allowed(&database, conversation_id, "read").is_err());
         }
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn companion_profile_update_enforces_root_run_and_persists_actual_values() {
+        let root = std::env::temp_dir().join(format!("fox-profile-host-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let database = Database::open(root.join("test.db")).unwrap();
+        let companion = database.create_blank_companion(&root).unwrap();
+        let other = database.create_blank_companion(&root).unwrap();
+        database.with_connection(|connection| {
+            connection.execute_batch(&format!(
+                "INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES
+                 ('root','{}','running','fox',1),
+                 ('child','{}','running','fox',2),
+                 ('other','{}','running','fox',1);
+                 UPDATE runs SET parent_run_id='root',root_run_id='root' WHERE id='child';",
+                companion.conversation_id, companion.conversation_id, other.conversation_id,
+            ))
+        }).unwrap();
+        let updated = execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({
+            "display_name": "小周", "duty": "准备党群汇报", "persona_override": "先给结论"
+        })).unwrap();
+        assert_eq!(updated["displayName"], "小周");
+        assert_eq!(updated["personaOverride"], "先给结论");
+        assert_eq!(updated["changes"], json!(["displayName", "duty", "personaOverride"]));
+        let renamed = execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({"name":"小周 2"})).unwrap();
+        assert_eq!(renamed["duty"], "准备党群汇报");
+        assert_eq!(renamed["personaOverride"], "先给结论");
+        assert!(execute_memory_operation(&database, &companion.conversation_id, "child", "companion_profile_update", &json!({"name":"伪造子运行"})).is_err());
+        assert!(execute_memory_operation(&database, &companion.conversation_id, "child", "memory_write", &json!({"target":"notes","action":"add","content":"非法"})).is_err());
+        assert!(execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({"name":"小 Fox","targetId":other.profile.id})).is_err());
+        assert!(execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({"name":42,"duty":"不应保存"})).is_err());
+        assert!(execute_memory_operation(&database, &other.conversation_id, "other", "companion_profile_update", &json!({"name":"小周 2"})).is_err());
+        let saved = database.companion_runtime_notes(&companion.conversation_id, "").unwrap().unwrap();
+        assert_eq!(saved["displayName"], "小周 2");
+        assert_eq!(saved["duty"], "准备党群汇报");
+        assert_eq!(saved["personaOverride"], "先给结论");
+
+        let ordinary = database.create_conversation("fox-general", None, None, None).unwrap();
+        database.with_connection(|connection| {
+            connection.execute("INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES ('ordinary',?1,'running','fox',1)", [&ordinary.id])
+        }).unwrap();
+        assert!(execute_memory_operation(&database, &ordinary.id, "ordinary", "companion_profile_update", &json!({"name":"普通对话"})).is_err());
+
+        database.with_connection(|connection| {
+            connection.execute_batch(
+                "INSERT INTO projects(id,name,root_path,created_at,updated_at) VALUES ('reader-project','reader','reader-root',1,1);
+                 INSERT INTO conversations(id,agent_id,title,project_id,status,created_at,updated_at)
+                 VALUES ('reader-chat','fox-general','reader','reader-project','active',1,1);
+                 INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES ('reader-run','reader-chat','running','fox',1);",
+            )
+        }).unwrap();
+        database.companion_grant_project(&companion.profile.id, "reader-project", true).unwrap();
+        database.companion_project_note_reference_set("reader-chat", Some(&companion.profile.id)).unwrap();
+        assert!(execute_memory_operation(&database, "reader-chat", "reader-run", "companion_profile_update", &json!({"name":"项目读者越权"})).is_err());
+
+        let background = database.create_digital_colleague(&crate::database::CreateDigitalColleagueInput {
+            name: "Background profile".into(), expert_id: "fox-security".into(), objective: "profile".into(),
+            project_id: None, project_root: None, knowledge_references: Vec::new(), max_runs_per_day: 1,
+            max_tokens_per_day: 1000, max_duration_ms: 1000, max_output_tokens: 100, max_tool_calls: 1,
+            companion_id: Some(companion.profile.id.clone()),
+        }).unwrap();
+        database.with_connection(|connection| {
+            connection.execute("INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES ('background',?1,'running','fox',1)", [&background.conversation_id])
+        }).unwrap();
+        let background_saved = execute_memory_operation(&database, &background.conversation_id, "background", "companion_profile_update", &json!({"persona_override":"尽量简短"})).unwrap();
+        assert_eq!(background_saved["personaOverride"], "先给结论\n尽量简短");
+        let replaced = execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({"persona_override":"完整替换", "preferenceOperation":"replace"})).unwrap();
+        assert_eq!(replaced["personaOverride"], "完整替换");
+        let cleared = execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({"preferenceOperation":"clear"})).unwrap();
+        assert_eq!(cleared["personaOverride"], Value::Null);
+        assert_eq!(cleared["duty"], "准备党群汇报");
+        let cleared_duty = execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({"duty":"   "})).unwrap();
+        assert_eq!(cleared_duty["duty"], "");
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }

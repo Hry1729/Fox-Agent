@@ -1,4 +1,3 @@
-import { AddContactAction } from '@/features/companions/chat-controls'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Brain, CalendarDays, CheckCircle2, Clock3, Code2, Copy, Database, Download, FileUp, Folder, Globe2, History, Images, Info, LoaderCircle, MessageSquareText, Pencil, Plus, Puzzle, RefreshCw, RotateCcw, Search, Settings2, Sparkles, Trash2, Wrench } from 'lucide-react'
 import { notify as toast } from '@/features/notifications'
@@ -838,7 +837,6 @@ export function AgentDetailDialog({ agent, open, onOpenChange, onManage, onUse }
             {agent.runtimeType === 'pi' && <Button variant="outline" onClick={() => onManage(agent)}><Settings2 size={14} />管理专家</Button>}
             <span />
             <Button variant="outline" onClick={() => onOpenChange(false)}>关闭</Button>
-            <AddContactAction agent={agent} onOpened={() => onOpenChange(false)} />
             <Button disabled={!agent.available} onClick={() => onUse(agent)}><Sparkles size={14} />开始对话</Button>
           </DialogFooter>
         </>}
@@ -1350,7 +1348,6 @@ export function AgentDetailPage({ sidebarCollapsed, onSidebar, navigate, agentId
 
               <Card className="fox-agent-manage-zone-card">
                 <header><h2><Settings2 size={15} />专家操作</h2></header>
-                <AddContactAction agent={view} />
                 <div className="fox-agent-manage-zone-actions">
                   <Button variant="outline" size="sm" disabled={editor.saving} onClick={() => void copyManage()}><Copy size={13} />复制专家</Button>
                   {agent.runtimeType === 'pi' && <Button variant="outline" size="sm" disabled={editor.packageBusy} onClick={() => void editor.exportPackage()}><Download size={13} />导出专家</Button>}

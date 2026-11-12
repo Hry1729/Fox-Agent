@@ -250,7 +250,6 @@ describe('联系人资料库', () => {
   test('资料页入口打开资料库，并可返回资料', async () => {
     const harness: Harness = { gets: 0, calls: [] }
     mockIPC(command => {
-      if (command === 'companion_template_status') return { ok: true, data: { latestHash: null, boundSnapshot: null, latestSnapshot: null, updateAvailable: false, dismissed: false } }
       if (command === 'model_providers_list') return { ok: true, data: [] }
       if (command === 'companion_files_list') { harness.gets += 1; return { ok: true, data: files() } }
       throw new Error('Unexpected command: ' + command)

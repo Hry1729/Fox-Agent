@@ -4,10 +4,13 @@ const readerTools = new Set(['note_search', 'note_read'])
 export function selectCompanionTools(catalog, diagnostics, context) {
   const owner = context?.role === 'owner'
   const reader = context?.role === 'reader'
+  const canUpdateProfile = context?.canUpdateProfile === true
+  const canWriteNotes = context?.canWriteNotes !== false
   const allowed = new Set(context?.allowedTools ?? [])
   const general = new Set(diagnostics.tools.map(tool => tool.name))
   return catalog.filter(({ name }) => {
-    if (noteTools.has(name)) return owner ? allowed.has(name) : reader && readerTools.has(name)
+    if (name === 'companion_profile_update') return owner && canUpdateProfile && allowed.has(name)
+    if (noteTools.has(name)) return owner ? (readerTools.has(name) || canWriteNotes) && allowed.has(name) : reader && readerTools.has(name)
     return general.has(name) && (!owner || allowed.has(name))
   })
 }
