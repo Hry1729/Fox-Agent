@@ -302,6 +302,7 @@ export function Sidebar({
 
   const conversationList = useMemo(() => (
         <ScrollArea className="fox-sidebar-scroll fox-sidebar-group-scroll">
+          <ContactSidebar activeId={activeConversationId} />
           {lifecycleView === 'active' && <section className="fox-sidebar-section">
             <div className="fox-section-head fox-sidebar-group-head"><span>项目</span><span><IconButton label="添加项目" onClick={onAddProject}><Plus size={14} /></IconButton><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button" aria-label="更多项目操作"><MoreHorizontal size={14} /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" side="right" sideOffset={5} className="fox-project-menu"><DropdownMenuItem onSelect={onAddProject}><Plus />添加项目</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem disabled={!projectGroups.length} onSelect={() => setAllProjectsOpen(true)}><ChevronDown />全部展开</DropdownMenuItem><DropdownMenuItem disabled={!projectGroups.length} onSelect={() => setAllProjectsOpen(false)}><ChevronRight />全部收起</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => onNavigate('settings-projects')}><ShieldCheck />项目权限</DropdownMenuItem></DropdownMenuContent></DropdownMenu></span></div>
             {projectGroups.length ? projectGroups.map((project) => {
@@ -441,7 +442,7 @@ export function Sidebar({
             </div>
           </section>
         </ScrollArea>
-  ), [lifecycleView, projectGroups, projectOpen, visibleConversations, runIndicators,
+  ), [activeConversationId, lifecycleView, projectGroups, projectOpen, visibleConversations, runIndicators,
     onAddProject, onNewChat, onNewProjectChat, onNavigate, onPinProject, onDeleteProject,
     onOpenConversation, onPinConversation, onRenameConversation, onArchiveConversation,
     onTrashConversation, onUnarchiveConversation, onRestoreConversation, onPurgeConversation,
@@ -496,7 +497,6 @@ export function Sidebar({
 
       {sidebarMode === 'chat' ? <>{!notificationsOpen && (
         <div className="fox-sidebar-list-pane" hidden={collapsed}>
-        <ContactSidebar activeId={activeConversationId} />
         {conversationList}
         </div>
       )}</> : sidebarMode === 'local-knowledge' ? <LocalKnowledgeSidebarNavigation collapsed={collapsed} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} navigate={onNavigate} hideLibrary={notificationsOpen} onCreate={() => { if (onCreateLocalKnowledge) onCreateLocalKnowledge(); else onNavigate('local-knowledge') }} /> : !notificationsOpen ? <>

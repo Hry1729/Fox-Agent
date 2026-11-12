@@ -102,6 +102,10 @@ export async function checkXiaoFoxUi(context) {
     const conversations = await invoke('conversations_list')
     const internal = db.prepare('SELECT conversation_id FROM digital_colleagues WHERE id=?').get(taskId).conversation_id
     assert.ok(!conversations.some(item => item.id === internal))
+    if (process.env.FOX_CONTACTS_VISUAL_INSPECTION === '1') {
+      console.log(`A22 目视观察窗口（60秒）：${filename}，文件内容 ${proof}，来源 ${entry.source.bubbleId}`)
+      await new Promise(resolve => setTimeout(resolve, 60_000))
+    }
     return { ...result, runId: artifactRun, sourceBubbleId: entry.source.bubbleId,
       externalViewer: '仅验证已触发打开且桌面没有报告错误，外部查看器内容未目视确认' }
   })

@@ -10,6 +10,7 @@ import {
 import { diagnoseToolsForAgentContext } from '../src/expert-package.mjs'
 import { createReadOnlyTools } from '../src/read-only-tools.mjs'
 import { createGraphReadonlyTools } from '../src/graph-readonly-tools.mjs'
+import { adaptFoxToolToPi } from '../src/tool-adapter.mjs'
 import {
   KNOWLEDGE_TOOL_NAMES,
   runtimeToolNames,
@@ -55,6 +56,25 @@ test('companion profile updates accept and forward an explicitly cleared duty', 
   assert.deepEqual(requests, [{
     type: 'tool.execute',
     payload: { toolCallId: 'profile-clear-duty', tool: 'companion_profile_update', input },
+  }])
+})
+
+test('the model-facing companion tool documents and forwards persona_override', async () => {
+  const requests = []
+  const tool = adaptFoxToolToPi(toolByName(createHostTools(async (type, payload) => {
+    requests.push({ type, payload })
+    return { payload: { result: { changedFields: ['personaOverride'] } } }
+  }), 'companion_profile_update'))
+  const input = { persona_override: '回答先给结论' }
+  assert.match(tool.description, /persona_override/)
+  assert.match(tool.parameters.properties.persona_override.description, /communication preference/)
+  assert.match(tool.parameters.properties.persona_override.description, /copy it verbatim/)
+  assert.equal(Check(tool.parameters, input), true)
+  assert.equal(Check(tool.parameters, { preference_override: input.persona_override }), false)
+  await tool.execute('profile-preference', input, new AbortController().signal)
+  assert.deepEqual(requests, [{
+    type: 'tool.execute',
+    payload: { toolCallId: 'profile-preference', tool: 'companion_profile_update', input },
   }])
 })
 
@@ -852,9 +872,13 @@ test('publishes governed memory tools and forwards candidate evidence unchanged'
   const tools = createHostTools(requestHost)
   const search = toolByName(tools, 'memory_search')
   const propose = toolByName(tools, 'memory_propose')
+  const write = adaptFoxToolToPi(toolByName(tools, 'memory_write'))
   const searchSchema = objectProperties(search.parameters)
   const proposalSchema = objectProperties(propose.parameters)
 
+  assert.match(write.description, /action="add".*canonicalKey and changesExisting=true.*pending request/)
+  assert.match(write.parameters.properties.action.description, /Use add for target="shared", including replacements/)
+  assert.match(write.parameters.properties.action.description, /patch or remove only for non-shared targets/)
   assert.equal(searchSchema.limit.maximum, 20)
   assert.equal(proposalSchema.content.maxLength, 4000)
   assert.equal(proposalSchema.evidenceExcerpt.maxLength, 1000)

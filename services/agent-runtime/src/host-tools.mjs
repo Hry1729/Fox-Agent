@@ -1042,10 +1042,12 @@ export function createHostTools(requestHost) {
     {
       name: 'memory_write',
       label: 'Write companion memory',
-      description: 'Add a main note, update or remove a named note, append to a topic, or save a stable fact about the user. For a clearly stated shared fact copy the complete first-person clause into content, supply the user quote, and distinguish a personal preference from a report or a one-time request. Report the returned status, including pending user confirmation.',
+      description: 'Add a main note, update or remove a named note, append to a topic, or save a stable fact about the user. Shared memory always uses action="add". To replace a shared preference, use its existing canonicalKey and changesExisting=true. The user confirms the replacement through the pending request. For a clearly stated shared fact copy the complete first-person clause into content, supply the user quote, and distinguish a personal preference from a report or a one-time request. Report the returned status, including pending user confirmation.',
       parameters: Type.Object({
         target: Type.Union([Type.Literal('notes'), Type.Literal('topic'), Type.Literal('shared')]),
-        action: Type.Union([Type.Literal('add'), Type.Literal('patch'), Type.Literal('remove')]),
+        action: Type.Union([Type.Literal('add'), Type.Literal('patch'), Type.Literal('remove')], {
+          description: 'Use add for target="shared", including replacements. Use patch or remove only for non-shared targets.',
+        }),
         memoryId: Type.Optional(Type.String()),
         canonicalKey: Type.Optional(Type.String({ maxLength: 160, description: 'Required for adding a shared preference. A short key naming the preference, e.g. units.' })),
         content: Type.Optional(Type.String({ maxLength: 4000 })),
@@ -1063,12 +1065,16 @@ export function createHostTools(requestHost) {
     {
       name: 'companion_profile_update',
       label: 'Update current companion profile',
-      description: 'Update the current root-run companion name, long-term duty, or communication preferences. Preferences are additive by default; use replace or clear only on an explicit user request. Never supply a target companion ID.',
+      description: 'Update the current root-run companion name, long-term duty, or communication preferences. Use the persona_override field for how this companion should communicate. Preferences are additive by default. Use replace or clear only on an explicit user request. Never supply a target companion ID.',
       parameters: Type.Object({
         name: Type.Optional(Type.String({ minLength: 1, maxLength: 40 })),
         display_name: Type.Optional(Type.String({ minLength: 1, maxLength: 40 })),
         duty: Type.Optional(Type.String({ maxLength: 4000 })),
-        persona_override: Type.Optional(Type.String({ minLength: 1, maxLength: 4000 })),
+        persona_override: Type.Optional(Type.String({
+          minLength: 1,
+          maxLength: 4000,
+          description: 'Long-term communication preference for this companion, for example "回答先给结论". If the user supplies exact wording to save, copy it verbatim.',
+        })),
         preferenceOperation: Type.Optional(Type.Union([
           Type.Literal('add'), Type.Literal('replace'), Type.Literal('clear'),
         ], { description: 'Defaults to add. clear requires persona_override to be omitted.' })),

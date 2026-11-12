@@ -110,7 +110,7 @@ pub(super) fn write(
     input: &WriteInput,
 ) -> DbResult<Value> {
     if input.action != "add" || input.basis.as_deref() != Some("user_stated") {
-        return Err(denied("memory.shared_user_statement_required"));
+        return Err(denied("memory.shared_user_statement_required 共享记忆必须使用 action=add、basis=user_stated。替换已有偏好也提交 add，并提供同主题 canonicalKey、changesExisting=true，由用户确认后替换；不要对 shared 使用 patch 或 remove。"));
     }
     let kind = input.kind.as_deref().unwrap_or("preference");
     let statement = input.statement.as_deref().unwrap_or("");

@@ -8,7 +8,14 @@ export async function checkXiaoFoxBehavior(context) {
   const { invoke, db, check, directory } = context
   const { model, exchange } = await connectLiveModel(context)
   const failures = []
+  const filter = process.env.FOX_CONTACTS_LIVE_FILTER?.trim()
+  const pattern = filter ? new RegExp(filter) : null
+  console.log('小 Fox 真实行为验收范围：' + (filter || '全量'))
   const scenario = async (name, action) => {
+    if (pattern && !pattern.test(name)) {
+      console.log('[未执行] ' + name)
+      return
+    }
     try {
       await check(name, action)
     } catch (error) {
@@ -42,7 +49,7 @@ export async function checkXiaoFoxBehavior(context) {
       '没有成功的沟通偏好更新回执')
     const afterPreference = profile.get(contact.id)
     assert.equal(afterPreference.persona_override, '回答先给结论')
-    assert.deepEqual(afterPreference, { ...initial, persona_override: '回答先给结论' })
+    assert.deepEqual({ ...afterPreference }, { ...initial, persona_override: '回答先给结论' })
     assert.deepEqual(profile.get(other.id), untouched)
     assert.deepEqual(memories.all(), before)
 
@@ -83,7 +90,7 @@ export async function checkXiaoFoxBehavior(context) {
     assert.equal(confirmed.status, 'updated')
     assert.equal(confirmed.memoryId, pending.memory_id)
     const enabled = db.prepare('SELECT state, enabled FROM memory_entities WHERE id = ?')
-    assert.deepEqual(enabled.get(pending.memory_id), { state: 'confirmed', enabled: 1 })
+    assert.deepEqual({ ...enabled.get(pending.memory_id) }, { state: 'confirmed', enabled: 1 })
     assert.equal(enabled.get(old.id).enabled, 0)
     assert.equal(db.prepare('SELECT status FROM companion_shared_requests WHERE id = ?').get(pending.id).status, 'replaced')
     return { temporaryRunId: temporary.run, preferenceRunId: preference.run, sharedRunId: shared.run, confirmedAfterUserAction: true }
@@ -167,5 +174,5 @@ export async function checkXiaoFoxBehavior(context) {
   })
 
   if (failures.length) throw new AggregateError(failures, '小 Fox 真实行为验收存在失败')
-  return { model }
+  return { model, selection: { scope: filter ? 'partial' : 'full', filter: filter || null } }
 }

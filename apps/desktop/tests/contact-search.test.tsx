@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 import { useState } from 'react'
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import { mockIPC, clearMocks } from '@tauri-apps/api/mocks'
@@ -221,6 +221,22 @@ describe('联系人私聊搜索', () => {
     await waitFor(() => expect(view.getByText('1 条消息')).toBeDefined())
     expect(calls).toHaveLength(1)
     expect(loads).toBe(1)
+  })
+
+  test('定位报告消息时滚动实际消息而非 display contents 锚点', async () => {
+    const scrolled: Element[] = []
+    const scroll = spyOn(Element.prototype, 'scrollIntoView').mockImplementation(function (this: Element) { scrolled.push(this) })
+    try {
+      const snapshot = detail({ messages: [message('dc-report-test', 'assistant', '任务报告')] })
+      const view = renderTopbar(snapshot, async () => {}, { ...context, locateRequest: { id: 'dc-report-test', key: 1 } })
+      await waitFor(() => expect(view.container.querySelector('[data-turn-message-id="dc-report-test"]')?.classList.contains('is-search-hit')).toBe(true))
+      const anchor = view.container.querySelector('[data-turn-message-id="dc-report-test"]')!
+      expect(anchor.classList.contains('fox-turn-anchor')).toBe(true)
+      expect(scrolled).toContain(anchor.firstElementChild!)
+      expect(scrolled).not.toContain(anchor)
+    } finally {
+      scroll.mockRestore()
+    }
   })
 
   test('Esc 关闭面板并保留聊天记录原样', async () => {

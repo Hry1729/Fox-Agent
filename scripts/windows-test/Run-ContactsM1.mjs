@@ -24,12 +24,13 @@ const xiaofox = argv.at(-1) === '--xiaofox'
 const xiaofoxAcceptance = argv.at(-1) === '--xiaofox-acceptance'
 const xiaofoxUi = argv.at(-1) === '--xiaofox-ui'
 const xiaofoxLifecycle = argv.at(-1) === '--xiaofox-lifecycle'
-if (m2 || xiaofox || xiaofoxAcceptance || xiaofoxUi || xiaofoxLifecycle) {
+const xiaofoxBehavior = argv.at(-1) === '--xiaofox-behavior'
+if (m2 || xiaofox || xiaofoxAcceptance || xiaofoxUi || xiaofoxLifecycle || xiaofoxBehavior) {
   argv.pop()
   assert.ok(dev && liveProfile && argv[0] === '--exe', 'M2 and Xiao Fox require --exe, --dev and --live-profile')
 }
 if (argv.length && !(argv.length === 2 && argv[0] === '--exe') && !(argv.length === 4 && argv[0] === '--exe' && argv[2] === '--sidecar')) {
-  throw new Error('Usage: node scripts/windows-test/Run-ContactsM1.mjs [--exe candidate.exe [--sidecar candidate-runtime.exe] [--m2|--xiaofox|--xiaofox-acceptance|--xiaofox-lifecycle|--xiaofox-ui] [--dev] [--live-profile model-config-snapshot.db]]')
+  throw new Error('Usage: node scripts/windows-test/Run-ContactsM1.mjs [--exe candidate.exe [--sidecar candidate-runtime.exe] [--m2|--xiaofox|--xiaofox-acceptance|--xiaofox-lifecycle|--xiaofox-ui|--xiaofox-behavior] [--dev] [--live-profile model-config-snapshot.db]]')
 }
 const directory = await mkdtemp(join(tmpdir(), 'fox-contacts-m1-'))
 const evidence = { revision: spawnSync('git', ['rev-parse', 'HEAD'], {cwd:repo,encoding:'utf8'}).stdout?.trim(), started: new Date().toISOString(), checks: [] }
@@ -185,6 +186,11 @@ async function desktop() {
     bridge.ready = 0
     app = start(exe, [], appEnv, 'desktop-restart-' + ++restartCount, repo)
     await poll('restarted WebView', () => bridge.ready && Date.now() - bridge.ready >= 1000)
+  }
+  if (xiaofoxBehavior) {
+    const { checkXiaoFoxBehavior } = await import('./contacts-xiaofox-behavior.mjs')
+    evidence.xiaofoxBehavior = await checkXiaoFoxBehavior({ source: liveProfile, invoke, db, check, poll, directory })
+    return
   }
   if (xiaofoxLifecycle) {
     const { checkXiaoFoxLifecycle } = await import('./contacts-xiaofox-lifecycle.mjs')

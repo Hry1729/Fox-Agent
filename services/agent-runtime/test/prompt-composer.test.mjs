@@ -238,6 +238,22 @@ test('adds a fixed isolated expert consultation contract without replacing the e
   assert.match(composed.prompt, /You are the security review expert/)
 })
 
+test('requires workspace read evidence only in the Child Worker contract', () => {
+  const composeFor = (runKind, runRole, isUserFacingLead) => composeFoxPrompt({
+    runtimeInstructions: 'Stable Host contract.',
+    context: { runContext: { runKind, runRole, isUserFacingLead }, projectRoot: 'D:/project' },
+  })
+  const child = composeFor('child', 'child_worker', false)
+  assert.equal(child.diagnostics.fragments.filter(({ id }) => id === 'delegation_contract').length, 1)
+  assert.match(child.prompt, /call the native read tool for the requested path/)
+  assert.match(child.prompt, /Report contents, byte counts, or identifiers only from a successful read result/)
+  assert.match(child.prompt, /If read is unavailable, fails, or returns no result, report that you could not read the file/)
+
+  for (const other of [composeFor('chat', 'lead', true), composeFor('child', 'expert_consultation', false)]) {
+    assert.doesNotMatch(other.prompt, /Report contents, byte counts, or identifiers only from a successful read result/)
+  }
+})
+
 test('keeps the Skill authority boundary when rendering selected Skill instructions', () => {
   const composed = composeFoxPrompt({
     runtimeInstructions: 'Stable Host contract.',

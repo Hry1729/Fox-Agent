@@ -55,7 +55,7 @@ test('the prompt distinguishes the read-only project view from a private profile
     topics: [{ id: 'b', title: '十月报价' }], snippets: [{ topicId: 'b', text: '由用户核对' }],
   }
   const owner = companionMemoryPrompt({ ...facts, role: 'owner', canUpdateProfile: true, canWriteNotes: true })
-  const reader = companionMemoryPrompt({ ...facts, role: 'reader' })
+  const reader = companionMemoryPrompt({ ...facts, role: 'reader', canUpdateProfile: true })
   assert.ok(owner.required.includes(facts.duty) && owner.required.includes('4/4000'))
   assert.match(owner.required, /私聊默认采用自然对话/)
   assert.doesNotMatch(reader.required, /私聊默认采用自然对话/)
@@ -64,7 +64,11 @@ test('the prompt distinguishes the read-only project view from a private profile
   assert.ok(owner.required.includes('companion_task_*'))
   assert.ok(owner.required.includes('不得换算成近似时间'))
   assert.ok(owner.required.includes('只对我生效还是对所有小 Fox 生效'))
+  assert.match(owner.required, /\{"persona_override":"回答先给结论"\}/)
+  assert.match(owner.required, /逐字传入该原文，不改写或扩写/)
+  assert.doesNotMatch(reader.required, /persona_override/)
   assert.ok(owner.required.includes('pending'))
+  assert.match(owner.required, /替换旧共享偏好时仍用 action=add.*canonicalKey.*changesExisting=true.*待确认请求/)
   assert.match(owner.required, /"author":"user"/)
   assert.match(owner.required, /note_organize/)
   assert.match(owner.required, /本次会话的压缩摘要/)
@@ -87,7 +91,7 @@ test('child prompt and catalog respect the parent tool subset', () => {
     assert.ok(!selected.includes(name), name)
   }
   const prompt = companionMemoryPrompt(context).required
-  assert.doesNotMatch(prompt, /memory_write|note_organize|companion_profile_update|companion_task_/)
+  assert.doesNotMatch(prompt, /memory_write|note_organize|companion_profile_update|companion_task_|persona_override/)
   assert.match(prompt, /根运行处理/)
 })
 

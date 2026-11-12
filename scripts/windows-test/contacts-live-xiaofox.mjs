@@ -22,7 +22,14 @@ export async function checkXiaoFox(context) {
   const request = { companionId: contact.id }
   const invokeTask = (name, taskId) => invoke('companion_task_' + name, { request: { ...request, taskId } })
   const failures = []
+  const filter = process.env.FOX_CONTACTS_LIVE_FILTER?.trim()
+  const pattern = filter ? new RegExp(filter) : null
+  console.log('小 Fox 真实模型验收范围：' + (filter || '全量'))
   const scenario = async (name, action) => {
+    if (pattern && !pattern.test(name) && !name.startsWith('停用')) {
+      console.log('[未执行] ' + name)
+      return
+    }
     try {
       await check(name, action)
     } catch (error) {
@@ -212,5 +219,5 @@ export async function checkXiaoFox(context) {
     })
   }
   if (failures.length) throw new AggregateError(failures, '小 Fox 真实验收存在失败')
-  return { model, hostCoverage: 'A17 超额终止及重复用量、A23 越界/撤权/拒绝直接请求/停止传播由独立 Host 测试判定' }
+  return { model, selection: { scope: filter ? 'partial' : 'full', filter: filter || null }, hostCoverage: 'A17 超额终止及重复用量、A23 越界/撤权/拒绝直接请求/停止传播由独立 Host 测试判定' }
 }

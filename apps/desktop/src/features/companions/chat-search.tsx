@@ -77,7 +77,9 @@ function highlightBubble(element: HTMLElement, query: string) {
   clearContactSearchHighlight()
   highlightedElement = element
   element.classList.add('is-search-hit')
-  element.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  // Turn anchors use display: contents, so scroll their rendered message instead.
+  const scrollTarget = element.classList.contains('fox-turn-anchor') ? element.firstElementChild ?? element : element
+  scrollTarget.scrollIntoView({ behavior: 'smooth', block: 'center' })
   if (!query || typeof CSS === 'undefined' || !('highlights' in CSS) || typeof Highlight === 'undefined') return
   // ASCII-only folding keeps offsets aligned with the original text and matches
   // the SQLite LIKE semantics used by the backend.

@@ -1,6 +1,6 @@
 .fox-contact-sidebar { padding: 0 4px 10px; }
-.fox-sidebar-list-pane > .fox-contact-sidebar { padding-inline-end: var(--fox-space-l); }
-.fox-contact-row { position:relative; display:flex; align-items:center; gap:8px; padding:5px var(--fox-sidebar-inset) 5px 7px; border-radius:var(--fox-radius-control,6px); }
+.fox-sidebar-list-pane .fox-contact-sidebar { padding-inline-end: var(--fox-space-l); }
+.fox-contact-row { position:relative; display:flex; align-items:center; gap:8px; min-height:54px; padding:5px var(--fox-sidebar-inset) 5px 7px; border-radius:var(--fox-radius-control,6px); }
 .fox-contact-row:hover,.fox-contact-row:focus-within,.fox-contact-row.is-active { background:var(--accent); }
 .fox-contact-heading { display:flex; align-items:center; gap:8px; padding:5px 4px; min-width:0; text-align:left; }
 .fox-chat-topbar.fox-contact-topbar { grid-template-columns: minmax(0, 1fr) minmax(0, max-content) minmax(min-content, 1fr); gap: 8px; }
@@ -44,8 +44,8 @@
 }
 .fox-contact-avatar { width:22px; height:22px; object-fit:cover; border-radius:50%; flex:none; }
 .fox-contact-avatar.is-letter { display:grid; place-items:center; background:var(--muted); font-size:12px; }
-.fox-contact-row > .fox-contact-avatar { width:44px; height:44px; font-size:22px; }
-.fox-contact-row-copy { display:flex; flex:1; flex-direction:column; gap:2px; min-width:0; line-height:1.35; }
+.fox-contact-row > .fox-contact-avatar { width:40px; height:40px; font-size:20px; }
+.fox-contact-row-copy { display:flex; flex:1; flex-direction:column; gap:0; min-width:0; line-height:1.2; }
 .fox-contact-row-head { display:flex; align-items:center; gap:3px; min-width:0; }
 .fox-contact-link { display:flex; flex:1; align-items:center; gap:5px; min-width:0; text-align:left; font-weight:var(--fox-weight-medium); }
 .fox-contact-link > svg { flex:none; }
