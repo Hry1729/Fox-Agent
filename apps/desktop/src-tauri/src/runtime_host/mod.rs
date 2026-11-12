@@ -76,7 +76,7 @@ use crate::{
         AgentRecord, ApprovalDecision, ApprovalRecord, ApprovalRefusal,
         AttachmentRecord, ChildRunBudget,
         ChildRunRecord, Database, EvaluationRunSummary, HostToolCallDisposition,
-        KnowledgeReference, MemoryProposalInput, PreparedDigitalColleagueTrigger,
+        KnowledgeReference, MemoryProposalInput, PreparedDigitalColleagueTrigger, resolved_device_timezone,
         SkillActivationRecord, StartRunResult, ToolCallRecord,
         MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS,
     },
@@ -2100,7 +2100,7 @@ impl RuntimeHost {
             let mut allowed: Vec<&str> = fox_engine_protocol::TOOL_CONTRACTS.iter()
                 .map(|contract| contract.0)
                 .filter(|name| crate::companion_workspace::allows_tool(name))
-                .filter(|name| *name != "companion_profile_update" || can_update_profile)
+                .filter(|name| (*name != "companion_profile_update" && !name.starts_with("companion_task_")) || can_update_profile)
                 .collect();
             for tool in crate::database::WEB_TOOLS {
                 if snapshot.iter().any(|id| id == tool) {
@@ -6378,7 +6378,7 @@ fn run_status_is_terminal(status: &str) -> bool {
 }
 
 fn is_memory_tool(tool: &str) -> bool {
-    matches!(tool, "memory_search" | "memory_propose" | "memory_write" | "companion_profile_update" | "note_organize" | "note_search" | "note_read")
+    matches!(tool, "memory_search" | "memory_propose" | "memory_write" | "companion_profile_update" | "companion_task_create" | "companion_task_update" | "companion_task_list" | "companion_task_history" | "companion_task_pause" | "companion_task_resume" | "companion_task_run_now" | "companion_task_delete" | "note_organize" | "note_search" | "note_read")
 }
 
 fn is_child_run_tool(tool: &str) -> bool {
@@ -6486,7 +6486,11 @@ fn execute_memory_tool_request(
                 hook_decision.approval_reason.as_deref(),
             )?;
         }
-        execute_memory_operation(database,conversation_id,run_id,tool,&input)
+        if tool == "companion_task_run_now" {
+            execute_companion_task_run_now(app, database, conversation_id, run_id, &input)
+        } else {
+            execute_memory_operation(database,conversation_id,run_id,tool,&input)
+        }
     })();
     finalize_host_tool_execution(
         database,run_id,tool_call_id,tool,&input,hook_decision.annotations,outcome,
@@ -6495,11 +6499,143 @@ fn execute_memory_tool_request(
 
 // Shared operation only: execution authority, approvals and result commits
 // remain with the calling Legacy or Kernel owner.
+fn companion_task_owner_scope(
+    database: &Database,
+    conversation_id: &str,
+    run_id: &str,
+) -> Result<String, String> {
+    database.run_companion_profile_update_scope(run_id)?
+        .filter(|scope| scope.conversation_id == conversation_id)
+        .map(|scope| scope.companion_id)
+        .ok_or_else(|| "[companion.tool_not_available] 只有该联系人的根运行可以管理任务。".to_owned())
+}
+
+fn companion_task_id(input: &Value) -> Result<&str, String> {
+    input.get("taskId").and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "companion.task_id_required".to_owned())
+}
+
+fn companion_task_spec(input: &Value, timezone: Option<&str>) -> Result<crate::database::DigitalColleagueScheduleSpec, String> {
+    let mut value = input.clone();
+    let fields = value.as_object_mut().ok_or_else(|| "companion.schedule_invalid".to_owned())?;
+    if !fields.contains_key("timezone") {
+        fields.insert("timezone".to_owned(), json!(timezone.ok_or_else(|| "companion.schedule_timezone_required".to_owned())?));
+    }
+    serde_json::from_value(value).map_err(|_| "companion.schedule_invalid: 仅支持明确的单次、间隔、每日或每周时间".to_owned())
+}
+
+fn execute_companion_task_run_now(
+    app: &AppHandle,
+    database: &Database,
+    conversation_id: &str,
+    run_id: &str,
+    input: &Value,
+) -> Result<Value, String> {
+    let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
+    let task_id = companion_task_id(input)?;
+    let before = database.owned_companion_task(&scope, task_id)?
+        .ok_or_else(|| "digital_colleague.not_found".to_owned())?;
+    let acceptance = database.accept_digital_colleague_trigger(
+        task_id, "manual", None, &format!("companion-task:{}", Uuid::new_v4()),
+        &json!({"objective": before.task.objective, "source": "companion_task_run_now"}),
+        None, "user",
+    )?;
+    let trigger = acceptance.trigger.clone();
+    if let Some(prepared) = acceptance.prepared {
+        app.state::<AppState>().runtime_host.dispatch_digital_colleague_trigger(prepared)?;
+    }
+    let after = database.owned_companion_task(&scope, task_id)?
+        .ok_or_else(|| "digital_colleague.not_found".to_owned())?;
+    Ok(json!({"task": after, "trigger": trigger, "runId": trigger.run_id}))
+}
+
 fn execute_memory_operation(database: &Database, conversation_id: &str, run_id: &str,
     tool: &str, input: &Value) -> Result<Value,String> {
         match tool {
             "memory_write" | "note_organize" if database.run_companion_profile_update_scope(run_id)?.is_none() => {
                 Err("[companion.tool_not_available] 子运行不能写入联系人配置或笔记。".into())
+            }
+            "companion_task_create" => {
+                let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
+                let allowed: HashSet<&str> = ["name", "objective", "schedule", "enabled", "knowledgeReferences"].into_iter().collect();
+                if input.as_object().is_none_or(|fields| fields.keys().any(|key| !allowed.contains(key.as_str()))) {
+                    return Err("companion.task_invalid_fields".into());
+                }
+                let required = |name: &str| input.get(name).and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty()).map(str::to_owned)
+                    .ok_or_else(|| format!("companion.task_{name}_required"));
+                let schedule_input = input.get("schedule").ok_or_else(|| "companion.schedule_required".to_owned())?;
+                let timezone = schedule_input.get("timezone").and_then(Value::as_str)
+                    .map(crate::database::canonical_timezone)
+                    .transpose()?
+                    .map_or_else(resolved_device_timezone, Ok)?;
+                let spec = companion_task_spec(schedule_input, Some(&timezone))?;
+                let enabled = input.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+                let input = crate::database::CreateDigitalColleagueInput {
+                    name: required("name")?, objective: required("objective")?, expert_id: String::new(),
+                    project_id: None, project_root: None,
+                    knowledge_references: serde_json::from_value(input.get("knowledgeReferences").cloned().unwrap_or_else(|| json!([])))
+                        .map_err(|_| "companion.task_knowledge_invalid".to_owned())?,
+                    max_runs_per_day: 8, max_tokens_per_day: 128_000, max_duration_ms: 300_000,
+                    max_output_tokens: 4_096, max_tool_calls: 16,
+                    companion_id: Some(scope),
+                };
+                serde_json::to_value(database.create_owned_companion_task(&input, spec, enabled)?)
+                    .map_err(|error| error.to_string())
+            }
+            "companion_task_update" => {
+                let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
+                let allowed: HashSet<&str> = ["taskId", "name", "objective", "schedule", "enabled", "knowledgeReferences"].into_iter().collect();
+                if input.as_object().is_none_or(|fields| fields.keys().any(|key| !allowed.contains(key.as_str()))) {
+                    return Err("companion.task_invalid_fields".into());
+                }
+                let task_id = companion_task_id(input)?;
+                let existing = database.owned_companion_task(&scope, task_id)?
+                    .ok_or_else(|| "digital_colleague.not_found".to_owned())?;
+                let schedule = input.get("schedule").map(|value| {
+                    if let Some(zone) = value.get("timezone").and_then(Value::as_str) {
+                        if crate::database::canonical_timezone(zone)? != existing.schedule.timezone {
+                            return Err("companion.schedule_timezone_immutable: 现有计划必须保留原时区".to_owned());
+                        }
+                    }
+                    companion_task_spec(value, Some(&existing.schedule.timezone))
+                }).transpose()?;
+                let update = crate::database::OwnedCompanionTaskUpdate {
+                    name: input.get("name").and_then(Value::as_str).map(str::to_owned),
+                    objective: input.get("objective").and_then(Value::as_str).map(str::to_owned),
+                    knowledge_references: input.get("knowledgeReferences").map(|value| serde_json::from_value(value.clone())
+                        .map_err(|_| "companion.task_knowledge_invalid".to_owned())).transpose()?,
+                    schedule, enabled: input.get("enabled").and_then(Value::as_bool),
+                };
+                serde_json::to_value(database.update_owned_companion_task(&scope, task_id, update)?)
+                    .map_err(|error| error.to_string())
+            }
+            "companion_task_list" => {
+                let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
+                serde_json::to_value(database.list_owned_companion_tasks(&scope)?)
+                    .map_err(|error| error.to_string())
+            }
+            "companion_task_history" => {
+                let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
+                let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(20).clamp(1, 100) as usize;
+                serde_json::to_value(database.list_owned_companion_task_history(&scope, companion_task_id(input)?, limit)?)
+                    .map_err(|error| error.to_string())
+            }
+            "companion_task_pause" | "companion_task_resume" => {
+                let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
+                let enabled = tool == "companion_task_resume";
+                let update = crate::database::OwnedCompanionTaskUpdate { enabled: Some(enabled), ..Default::default() };
+                serde_json::to_value(database.update_owned_companion_task(&scope, companion_task_id(input)?, update)?)
+                    .map_err(|error| error.to_string())
+            }
+            "companion_task_delete" => {
+                let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
+                let task_id = companion_task_id(input)?;
+                database.owned_companion_task(&scope, task_id)?
+                    .ok_or_else(|| "digital_colleague.not_found".to_owned())?;
+                serde_json::to_value(database.revoke_digital_colleague(task_id, "companion_task_delete")?)
+                    .map_err(|error| error.to_string())
             }
             "companion_profile_update" => {
                 let scope = database.run_companion_profile_update_scope(run_id)?
@@ -6993,7 +7129,7 @@ fn ensure_expert_tool_allowed(
     conversation_id: &str,
     tool: &str,
 ) -> Result<(), String> {
-    if tool == "companion_profile_update" {
+    if tool == "companion_profile_update" || tool.starts_with("companion_task_") {
         return Ok(());
     }
     if matches!(tool, "memory_write" | "note_organize" | "note_search" | "note_read") {
@@ -13751,6 +13887,84 @@ mod attachment_tests {
         assert_eq!(cleared["duty"], "准备党群汇报");
         let cleared_duty = execute_memory_operation(&database, &companion.conversation_id, "root", "companion_profile_update", &json!({"duty":"   "})).unwrap();
         assert_eq!(cleared_duty["duty"], "");
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn companion_task_tools_enforce_root_owner_and_return_saved_values() {
+        let root = std::env::temp_dir().join(format!("fox-task-host-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let database = Database::open(root.join("test.db")).unwrap();
+        let companion = database.create_blank_companion(&root).unwrap();
+        let other = database.create_blank_companion(&root).unwrap();
+        database.with_connection(|connection| {
+            connection.execute_batch(&format!(
+                "INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES
+                 ('task-root','{}','running','fox',1),
+                 ('task-child','{}','running','fox',2),
+                 ('task-other','{}','running','fox',1);
+                 UPDATE runs SET parent_run_id='task-root',root_run_id='task-root' WHERE id='task-child';",
+                companion.conversation_id, companion.conversation_id, other.conversation_id,
+            ))
+        }).unwrap();
+        let schedule = json!({"kind":"weekly","weekdays":[5],"localTime":"15:00","timezone":"Asia/Shanghai"});
+        let created = execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_create", &json!({
+            "name":"Friday review", "objective":"Review the saved evidence", "schedule":schedule,
+        })).unwrap();
+        let task_id = created["task"]["id"].as_str().unwrap();
+        assert_eq!(created["task"]["companionId"], companion.profile.id);
+        assert_eq!(created["task"]["reportConversationId"], companion.conversation_id);
+        assert_eq!(created["task"]["expertId"], Value::Null);
+        assert_eq!(created["task"]["expertBindingId"], Value::Null);
+        assert_eq!(created["task"]["packageHash"], Value::Null);
+        assert_eq!(created["task"]["packageSnapshot"], Value::Null);
+        assert_eq!(created["task"]["maxRunsPerDay"], 8);
+        assert_eq!(created["task"]["maxTokensPerDay"], 128_000);
+        assert_eq!(created["task"]["maxDurationMs"], 300_000);
+        assert_eq!(created["task"]["maxOutputTokens"], 4_096);
+        assert_eq!(created["task"]["maxToolCalls"], 16);
+        assert_eq!(created["schedule"]["catchupWindowSeconds"], 3_600);
+        assert_eq!(created["schedule"]["timezone"], "Asia/Shanghai");
+        assert!(created["schedule"]["nextDueAt"].as_i64().unwrap() > crate::database::now_ms());
+        assert!(execute_memory_operation(&database, &companion.conversation_id, "task-child", "companion_task_list", &json!({})).is_err());
+        assert!(execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_create", &json!({
+            "name":"Wrong owner", "objective":"Reject", "schedule":schedule, "companionId":other.profile.id,
+        })).is_err());
+        assert!(execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_create", &json!({
+            "name":"Approximation", "objective":"Reject", "schedule":{"kind":"monthly","localTime":"15:00","timezone":"UTC"},
+        })).is_err());
+        assert!(execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_create", &json!({
+            "name":"Ambiguous", "objective":"Reject", "schedule":{"kind":"once","timezone":"UTC"},
+        })).is_err());
+        assert!(execute_memory_operation(&database, &other.conversation_id, "task-other", "companion_task_update", &json!({
+            "taskId":task_id, "objective":"Cross-owner write",
+        })).is_err());
+        assert!(execute_memory_operation(&database, &other.conversation_id, "task-other", "companion_task_history", &json!({"taskId":task_id})).is_err());
+        let updated = execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_update", &json!({
+            "taskId":task_id, "objective":"Use the revised objective",
+        })).unwrap();
+        assert_eq!(updated["task"]["objective"], "Use the revised objective");
+        assert_eq!(updated["schedule"]["timezone"], "Asia/Shanghai");
+        assert!(execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_update", &json!({
+            "taskId":task_id, "schedule":{"kind":"weekly","weekdays":[5],"localTime":"15:00","timezone":"UTC"},
+        })).is_err());
+        let paused = execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_pause", &json!({"taskId":task_id})).unwrap();
+        assert_eq!(paused["schedule"]["enabled"], false);
+        let resumed = execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_resume", &json!({"taskId":task_id})).unwrap();
+        assert_eq!(resumed["schedule"]["enabled"], true);
+        let listed = execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_list", &json!({})).unwrap();
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert!(execute_memory_operation(&database, &other.conversation_id, "task-other", "companion_task_list", &json!({})).unwrap().as_array().unwrap().is_empty());
+        let accepted = database.accept_digital_colleague_trigger(task_id, "manual", None, "host-history", &json!({}), None, "user").unwrap();
+        assert!(accepted.prepared.is_some());
+        let history = execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_history", &json!({"taskId":task_id})).unwrap();
+        assert_eq!(history.as_array().unwrap().len(), 1);
+        database.apply_runtime_event(accepted.trigger.run_id.as_deref().unwrap(), 1, &json!({"type":"run.started"})).unwrap();
+        database.apply_runtime_event(accepted.trigger.run_id.as_deref().unwrap(), 2, &json!({"type":"run.completed"})).unwrap();
+        execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_delete", &json!({"taskId":task_id})).unwrap();
+        assert_eq!(database.get_digital_colleague(task_id).unwrap().unwrap().status, "revoked");
+        assert_eq!(database.list_digital_colleague_triggers(task_id, 20).unwrap().len(), 1);
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }

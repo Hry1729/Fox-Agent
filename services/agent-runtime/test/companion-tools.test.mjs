@@ -7,13 +7,15 @@ import { composeFoxPrompt } from '../src/prompt-composer.mjs'
 import { companionMemoryPrompt } from '../src/companion-memory-prompt.mjs'
 
 const noteNames = ['memory_write', 'note_organize', 'note_search', 'note_read']
+const taskNames = ['companion_task_create', 'companion_task_update', 'companion_task_list', 'companion_task_history', 'companion_task_pause', 'companion_task_resume', 'companion_task_run_now', 'companion_task_delete']
+const ownerReserved = ['companion_profile_update', ...taskNames]
 const catalog = RUNTIME_TOOL_CATALOG
 const names = (context, expert = null) => selectCompanionTools(
   catalog, diagnoseToolsForAgentContext(catalog, null, expert), context,
 ).map(tool => tool.name)
 
 test('ordinary chats retain their previous catalog and projects only gain granted read tools', () => {
-  assert.deepEqual(names(null), catalog.map(t => t.name).filter(name => !noteNames.includes(name) && name !== 'companion_profile_update'))
+  assert.deepEqual(names(null), catalog.map(t => t.name).filter(name => !noteNames.includes(name) && !ownerReserved.includes(name)))
   assert.deepEqual(names({ role: 'reader' }).filter(name => noteNames.includes(name)), ['note_search', 'note_read'])
 })
 
@@ -37,6 +39,13 @@ test('profile updates require trusted root-run eligibility in both foreground an
     assert.ok(!names(context).includes('companion_profile_update'))
   }
   assert.ok(!names({ role: 'owner', allowedTools, canWriteNotes: false }).includes('memory_write'))
+  const taskAllowed = ['read', ...noteNames, ...taskNames]
+  for (const name of taskNames) {
+    assert.ok(names({ role: 'owner', allowedTools: taskAllowed, canUpdateProfile: true }).includes(name))
+    assert.ok(!names({ role: 'owner', allowedTools: taskAllowed }).includes(name))
+    assert.ok(!names({ role: 'reader', allowedTools: taskAllowed, canUpdateProfile: true }).includes(name))
+    assert.ok(!names(null).includes(name))
+  }
 })
 
 test('the prompt distinguishes the read-only project view from a private profile', () => {
@@ -49,7 +58,9 @@ test('the prompt distinguishes the read-only project view from a private profile
   const reader = companionMemoryPrompt({ ...facts, role: 'reader' })
   assert.ok(owner.required.includes(facts.duty) && owner.required.includes('4/4000'))
   assert.ok(!owner.required.includes('当前私聊不支持定时任务'))
-  assert.ok(owner.required.includes('已有计划工具'))
+  assert.ok(owner.required.includes('companion_task_create'))
+  assert.ok(owner.required.includes('companion_task_*'))
+  assert.ok(owner.required.includes('不得换算成近似时间'))
   assert.ok(owner.required.includes('只对我生效还是对所有小 Fox 生效'))
   assert.ok(owner.required.includes('pending'))
   assert.match(owner.required, /"author":"user"/)

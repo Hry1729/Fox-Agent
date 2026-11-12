@@ -330,6 +330,22 @@ pub struct DigitalColleagueTriggerAcceptance {
     pub prepared: Option<PreparedDigitalColleagueTrigger>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnedCompanionTask {
+    pub task: DigitalColleagueRecord,
+    pub schedule: DigitalColleagueScheduleRecord,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OwnedCompanionTaskUpdate {
+    pub name: Option<String>,
+    pub objective: Option<String>,
+    pub knowledge_references: Option<Vec<KnowledgeReference>>,
+    pub schedule: Option<crate::database::DigitalColleagueScheduleSpec>,
+    pub enabled: Option<bool>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CreateDigitalColleagueInput {
     pub name: String,

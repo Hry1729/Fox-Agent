@@ -29,3 +29,14 @@ Cron expressions and the croniter path, Hermes's 120-second one-shot grace,
 adjusted-working-day approximation, webhooks, Cloud VM behavior, and any new
 standalone scheduler service. Fox uses its existing schema constraints,
 catchup policy, and dispatch/idempotency implementation.
+
+## Phase 3b conversational task controls
+
+Fox adapts `cronjob_manage`'s create/update/list/pause/resume/trigger/delete
+action split into explicit `companion_task_*` contracts, plus the idea that
+results return to the originating chat. Fox persists the owner's fixed private
+chat as the report target and returns the actual saved task and next due time.
+
+Rejected: croniter, the 120-second one-shot grace, an independent daemon,
+arbitrary target owners, monthly/holiday approximation, and host-local timezone
+reinterpretation.

@@ -442,7 +442,8 @@ impl Database {
             let project: String = db.query_row(
                 "SELECT c.project_id FROM conversations c
                  JOIN projects p ON p.id=c.project_id AND p.status='active'
-                 WHERE c.id=? AND c.companion_id IS NULL AND c.parent_conversation_id IS NULL AND c.trashed_at IS NULL",
+                 WHERE c.id=? AND c.companion_id IS NULL AND c.parent_conversation_id IS NULL AND c.trashed_at IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM digital_colleagues dc WHERE dc.conversation_id=c.id AND dc.companion_bound=1)",
                 [conversation], |row| row.get(0),
             ).map_err(|_| denied("companion.project_note_reference_invalid_conversation"))?;
             let options = json_rows(db,
@@ -469,7 +470,8 @@ impl Database {
             let project: String = tx.query_row(
                 "SELECT c.project_id FROM conversations c
                  JOIN projects p ON p.id=c.project_id AND p.status='active'
-                 WHERE c.id=? AND c.companion_id IS NULL AND c.parent_conversation_id IS NULL AND c.trashed_at IS NULL",
+                 WHERE c.id=? AND c.companion_id IS NULL AND c.parent_conversation_id IS NULL AND c.trashed_at IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM digital_colleagues dc WHERE dc.conversation_id=c.id AND dc.companion_bound=1)",
                 [conversation],
                 |row| row.get(0),
             ).map_err(|_| denied("companion.project_note_reference_invalid_conversation"))?;

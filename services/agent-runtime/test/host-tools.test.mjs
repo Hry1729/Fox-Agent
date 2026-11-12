@@ -36,6 +36,11 @@ test('assembled Host tools exactly match the protocol capability catalog order',
     ...createMcpTools(() => {}),
   ]
   assert.deepEqual(tools.map(tool => tool.name), runtimeToolNames())
+  const names = tools.map(tool => tool.name)
+  assert.deepEqual(names.slice(names.indexOf('companion_profile_update') + 1, names.indexOf('note_organize')), [
+    'companion_task_create', 'companion_task_update', 'companion_task_list', 'companion_task_history',
+    'companion_task_pause', 'companion_task_resume', 'companion_task_run_now', 'companion_task_delete',
+  ])
 })
 
 test('companion profile updates accept and forward an explicitly cleared duty', async () => {

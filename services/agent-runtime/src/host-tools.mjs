@@ -1076,6 +1076,95 @@ export function createHostTools(requestHost) {
       execute: (id, params, signal) => executeHostTool(id, 'companion_profile_update', params, requestHost, signal),
     },
     {
+      name: 'companion_task_create',
+      label: 'Create companion task',
+      description: 'Create a scheduled task owned by the current Xiao Fox. Return the saved schedule and next execution time. Never supply a companion ID.',
+      parameters: Type.Object({
+        name: Type.String({ minLength: 1, maxLength: 120 }),
+        objective: Type.String({ minLength: 1, maxLength: 8000 }),
+        schedule: Type.Object({
+          kind: Type.Union([Type.Literal('once'), Type.Literal('interval'), Type.Literal('daily'), Type.Literal('weekly')]),
+          atMs: Type.Optional(Type.Integer({ minimum: 0 })),
+          intervalSeconds: Type.Optional(Type.Integer({ minimum: 60, maximum: 2592000 })),
+          weekdays: Type.Optional(Type.Array(Type.Integer({ minimum: 0, maximum: 7 }), { minItems: 1, maxItems: 7, uniqueItems: true })),
+          localTime: Type.Optional(Type.String({ pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$' })),
+          timezone: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
+        }, { additionalProperties: false }),
+        enabled: Type.Optional(Type.Boolean()),
+        knowledgeReferences: Type.Optional(Type.Array(Type.Object({ source: Type.Union([Type.Literal('local'), Type.Literal('remote')]), providerKey: Type.String(), connectionId: Type.Optional(Type.String()), id: Type.String() }, { additionalProperties: false }), { maxItems: 20 })),
+      }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'companion_task_create', params, requestHost, signal),
+    },
+    {
+      name: 'companion_task_update',
+      label: 'Update companion task',
+      description: 'Update a task owned by the current Xiao Fox. Changes affect subsequent runs only; an existing schedule keeps its stored timezone.',
+      parameters: Type.Object({
+        taskId: Type.String({ minLength: 1 }),
+        name: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })),
+        objective: Type.Optional(Type.String({ minLength: 1, maxLength: 8000 })),
+        schedule: Type.Optional(Type.Object({ kind: Type.Union([Type.Literal('once'), Type.Literal('interval'), Type.Literal('daily'), Type.Literal('weekly')]), atMs: Type.Optional(Type.Integer({ minimum: 0 })), intervalSeconds: Type.Optional(Type.Integer({ minimum: 60, maximum: 2592000 })), weekdays: Type.Optional(Type.Array(Type.Integer({ minimum: 0, maximum: 7 }), { minItems: 1, maxItems: 7, uniqueItems: true })), localTime: Type.Optional(Type.String({ pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$' })), timezone: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })) }, { additionalProperties: false })),
+        enabled: Type.Optional(Type.Boolean()),
+        knowledgeReferences: Type.Optional(Type.Array(Type.Object({ source: Type.Union([Type.Literal('local'), Type.Literal('remote')]), providerKey: Type.String(), connectionId: Type.Optional(Type.String()), id: Type.String() }, { additionalProperties: false }), { maxItems: 20 })),
+      }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'companion_task_update', params, requestHost, signal),
+    },
+    {
+      name: 'companion_task_list',
+      label: 'List companion tasks',
+      description: 'List only tasks owned by the current Xiao Fox, including their saved schedules and next execution times.',
+      parameters: Type.Object({
+
+      }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'companion_task_list', params, requestHost, signal),
+    },
+    {
+      name: 'companion_task_history',
+      label: 'Read companion task history',
+      description: 'Read trigger history for one task owned by the current Xiao Fox.',
+      parameters: Type.Object({
+        taskId: Type.String({ minLength: 1 }),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+      }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'companion_task_history', params, requestHost, signal),
+    },
+    {
+      name: 'companion_task_pause',
+      label: 'Pause companion task',
+      description: 'Pause future triggers for one task owned by the current Xiao Fox without cancelling active runs.',
+      parameters: Type.Object({
+        taskId: Type.String({ minLength: 1 }),
+      }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'companion_task_pause', params, requestHost, signal),
+    },
+    {
+      name: 'companion_task_resume',
+      label: 'Resume companion task',
+      description: 'Resume future triggers for one task owned by the current Xiao Fox. A completed past one-time schedule cannot be re-enabled.',
+      parameters: Type.Object({
+        taskId: Type.String({ minLength: 1 }),
+      }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'companion_task_resume', params, requestHost, signal),
+    },
+    {
+      name: 'companion_task_run_now',
+      label: 'Run companion task now',
+      description: 'Start one task run now without moving its saved schedule cursor.',
+      parameters: Type.Object({
+        taskId: Type.String({ minLength: 1 }),
+      }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'companion_task_run_now', params, requestHost, signal),
+    },
+    {
+      name: 'companion_task_delete',
+      label: 'Delete companion task',
+      description: 'Soft-delete one task owned by the current Xiao Fox, stopping future triggers while preserving history and artifacts.',
+      parameters: Type.Object({
+        taskId: Type.String({ minLength: 1 }),
+      }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'companion_task_delete', params, requestHost, signal),
+    },
+    {
       name: 'note_organize',
       label: 'Move main notes into a topic',
       description: 'Move the specified main notes verbatim into a topic. Moving a user-written entry requires their confirmation.',

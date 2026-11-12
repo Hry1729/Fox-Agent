@@ -23,3 +23,13 @@ cron expressions, `limit_reset`, webhooks, Cloud VM behavior, scheduler
 daemons, or anything under `enterprise/` (which has a separate Enterprise
 License). Calendar calculation uses `chrono-tz`; DST gaps are skipped and fold
 candidates are evaluated explicitly.
+
+## Phase 3b conversational task controls
+
+Fox adapts the conversational create/update/pause/resume/run-now/delete tool
+shape and the rule that mutation results include the next due time. Host resolves
+the current root companion, the typed Rust scheduler persists the plan, pause
+only disables future work, and run-now never advances the plan cursor.
+
+Rejected: host-local `Date` arithmetic, cron, webhooks, Cloud VM behavior,
+independent daemons, arbitrary companion targeting, and `enterprise/`.

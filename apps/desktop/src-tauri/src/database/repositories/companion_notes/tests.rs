@@ -434,6 +434,25 @@ fn project_note_options_are_scoped_to_valid_grants_and_current_conversation() {
         }).unwrap();
         assert_eq!(db.companion_project_note_options("options-chat").unwrap()["options"], json!([]));
 
+        let task = db.create_digital_colleague(&crate::database::CreateDigitalColleagueInput {
+            name: "internal task".into(), expert_id: String::new(), objective: "private execution".into(),
+            project_id: None, project_root: None, knowledge_references: vec![],
+            max_runs_per_day: 8, max_tokens_per_day: 128_000, max_duration_ms: 300_000,
+            max_output_tokens: 4_096, max_tool_calls: 16, companion_id: Some(other_id.clone()),
+        }).unwrap();
+        db.with_connection(|connection| {
+            connection.execute("UPDATE conversations SET project_id='options-project' WHERE id=?", [&task.conversation_id])?;
+            Ok(())
+        }).unwrap();
+        let assigned_project: String = db.with_connection(|connection| {
+            connection.query_row("SELECT project_id FROM conversations WHERE id=?", [&task.conversation_id], |row| row.get(0))
+        }).unwrap();
+        assert_eq!(assigned_project, "options-project", "the rejection uses task ownership, not a NULL project");
+        assert!(db.companion_project_note_options(&task.conversation_id).unwrap_err()
+            .contains("companion.project_note_reference_invalid_conversation"));
+        assert!(db.companion_project_note_reference_set(&task.conversation_id, Some(&other_id)).unwrap_err()
+            .contains("companion.project_note_reference_invalid_conversation"));
+
         for conversation in [private_chat, "ordinary-chat", "child-chat"] {
             assert!(db.companion_project_note_options(conversation).unwrap_err()
                 .contains("companion.project_note_reference_invalid_conversation"));
