@@ -1,28 +1,27 @@
-import { createContext, useContext, useEffect, useRef, useState, type ComponentProps } from 'react'
+import { createContext, useContext, useEffect, useId, useRef, useState, type ComponentProps } from 'react'
+import { LayoutGroup, motion, useReducedMotion } from 'motion/react'
+import { motionTokens } from '@/components/arc/lib/motion-tokens'
 import * as RadixTabs from '@radix-ui/react-tabs'
 import { ChevronDown } from 'lucide-react'
 import type { UserMenuProps } from '@/components/arc/user-menu/user-menu'
 import { deferredModule } from '@/components/fox-ui/use-deferred-module'
-import tabStyles from '@/components/arc/tabs/tabs.module.css'
 import userStyles from '@/components/arc/user-menu/user-menu.module.css'
 
-const tabs = deferredModule(() => import('@/components/arc/tabs/tabs'))
-const ActiveTabContext = createContext<string | undefined>(undefined)
-const TabsContext = createContext<ReturnType<typeof tabs.useModule>>(undefined)
 const menu = deferredModule(() => import('@/components/arc/user-menu/user-menu'))
+const ActiveModeContext = createContext<string | undefined>(undefined)
 export function SidebarModeTabs({ value, onValueChange, children }: ComponentProps<typeof RadixTabs.Root>) {
-  const loaded = tabs.useModule()
-  const content = <TabsContext.Provider value={loaded}><ActiveTabContext.Provider value={value}>{children}</ActiveTabContext.Provider></TabsContext.Provider>
-  if (loaded) return <loaded.Tabs value={value} onValueChange={onValueChange} className="fox-mode-tabs fox-arc-mode-tabs"><loaded.TabsList aria-label="工作区模式">{content}</loaded.TabsList></loaded.Tabs>
-  return <RadixTabs.Root value={value} onValueChange={onValueChange} className={`${tabStyles.root} fox-mode-tabs fox-arc-mode-tabs`} onPointerEnter={tabs.preload} onFocusCapture={tabs.preload}><div className={tabStyles.listShell}><div className={tabStyles.viewport}><RadixTabs.List className={tabStyles.list} aria-label="工作区模式">{content}</RadixTabs.List></div></div></RadixTabs.Root>
+  const id = useId()
+  return <ActiveModeContext.Provider value={value}><LayoutGroup id={id}><RadixTabs.Root value={value} onValueChange={onValueChange} className="fox-mode-tabs fox-arc-mode-tabs"><RadixTabs.List data-slot="tabs-list" aria-label="工作区模式">{children}</RadixTabs.List></RadixTabs.Root></LayoutGroup></ActiveModeContext.Provider>
 }
-export function SidebarModeTab({ value, children, className, ...props }: ComponentProps<typeof RadixTabs.Trigger>) {
-  const loaded = useContext(TabsContext)
-  const active = useContext(ActiveTabContext)
-  if (loaded) return <loaded.TabsTrigger value={value} className={className} {...props}>{children}</loaded.TabsTrigger>
-  // Merge rather than replace: a bare `className={tabStyles.trigger}` drops any
-  // caller class, which is how the fox-* sizing rules go missing on this path.
-  return <RadixTabs.Trigger {...props} value={value} data-value={value} className={[tabStyles.trigger, className].filter(Boolean).join(' ')}>{active === value && <span className={tabStyles.selection} aria-hidden="true" />}<span className={tabStyles.triggerLabel}>{children}</span></RadixTabs.Trigger>
+export function SidebarModeTab({ value, children, onPointerDown, onKeyDown, onBlur, ...props }: ComponentProps<typeof RadixTabs.Trigger>) {
+  const active = useContext(ActiveModeContext)
+  const reduced = useReducedMotion()
+  return <RadixTabs.Trigger {...props} value={value} data-value={value} data-slot="tabs-trigger"
+    onPointerDown={event => { event.currentTarget.dataset.pointerFocus = 'true'; onPointerDown?.(event) }}
+    onKeyDown={event => { delete event.currentTarget.dataset.pointerFocus; onKeyDown?.(event) }}
+    onBlur={event => { delete event.currentTarget.dataset.pointerFocus; onBlur?.(event) }}>
+    {active === value && <motion.span className="fox-mode-selection" layoutId="mode-selection" transition={reduced ? { duration: 0 } : { duration: motionTokens.duration.standard, ease: motionTokens.ease.standard }} aria-hidden="true" />}<span className="fox-mode-content">{children}</span>
+  </RadixTabs.Trigger>
 }
 export function UserMenu(props: UserMenuProps) {
   const loaded = menu.useModule()

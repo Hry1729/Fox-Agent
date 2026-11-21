@@ -1,6 +1,6 @@
+use super::{now_ms, Database};
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::{now_ms, Database};
 use crate::database::{
     ExpertWorkflowGateRecord, ExpertWorkflowRunRecord, ExpertWorkflowSnapshot,
     ExpertWorkflowStageRunRecord, StartExpertWorkflowInput,
@@ -363,7 +363,12 @@ impl Database {
                  SET status = 'completed', output_json = ?3, error_message = NULL,
                      completed_at = ?4, updated_at = ?4
                  WHERE workflow_run_id = ?1 AND stage_id = ?2",
-                params![workflow_run_id, stage_id, stage_output.canonical_string(), now],
+                params![
+                    workflow_run_id,
+                    stage_id,
+                    stage_output.canonical_string(),
+                    now
+                ],
             )
             .map_err(|error| error.to_string())?;
         let stage_count = transaction

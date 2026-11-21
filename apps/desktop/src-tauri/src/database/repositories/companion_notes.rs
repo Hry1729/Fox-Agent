@@ -52,11 +52,12 @@ fn over_budget(db: &Connection, owner: &str, delta: i64) -> DbResult<Option<Valu
 }
 
 fn access(db: &Connection, conversation: &str) -> DbResult<Option<(String, bool)>> {
-    // K2: a contact background task owns its contact's notes through the
-    // persisted ownership chain, not through conversations.companion_id.
+    // Background tasks and coordination use the persisted owner chain.
     let scope = super::companion_ownership::resolve_conversation_on(db, conversation)
         .map_err(|error| denied(&error))?;
-    if let Some(scope) = scope.filter(|scope| scope.background) {
+    if let Some(scope) = scope.filter(|scope| {
+        scope.background || (!scope.is_child && scope.report_conversation_id.is_some())
+    }) {
         return Ok(Some((scope.companion_id, true)));
     }
     db.query_row("SELECT p.id,c.companion_id IS NOT NULL FROM conversations c
@@ -437,7 +438,10 @@ impl Database {
         })
     }
 
-    pub(crate) fn companion_project_note_options(&self, conversation: &str) -> Result<Value, String> {
+    pub(crate) fn companion_project_note_options(
+        &self,
+        conversation: &str,
+    ) -> Result<Value, String> {
         self.with_connection(|db| {
             let project: String = db.query_row(
                 "SELECT c.project_id FROM conversations c

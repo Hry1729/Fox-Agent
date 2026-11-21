@@ -1,6 +1,6 @@
+use super::{ArtifactDeliveryView, ArtifactRecord};
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::{ArtifactDeliveryView, ArtifactRecord};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -434,10 +434,17 @@ mod tests {
                 params![hash, path.to_string_lossy().as_ref()],
             )
             .unwrap();
-        connection.execute("INSERT INTO delivery_checklist_items
+        connection
+            .execute(
+                "INSERT INTO delivery_checklist_items
             (run_id,item_key,target_path,artifact_id,status,finding_json)
             VALUES ('run','file:summary.json','summary.json',NULL,'passed',?1)",
-            [serde_json::json!({"boundPath":path,"managedVersionId":"v1","reason":null}).canonical_string()]).unwrap();
+                [
+                    serde_json::json!({"boundPath":path,"managedVersionId":"v1","reason":null})
+                        .canonical_string(),
+                ],
+            )
+            .unwrap();
         let mut artifact = ArtifactRecord {
             id: "artifact".into(),
             conversation_id: "conv".into(),

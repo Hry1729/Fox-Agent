@@ -5,23 +5,70 @@ use std::process::Command;
 
 #[cfg(windows)]
 const ALLOWED_PARENT_ENV: &[&str] = &[
-    "PATH", "PATHEXT", "SystemRoot", "WINDIR", "COMSPEC", "TEMP", "TMP",
-    "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA", "APPDATA",
-    "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432",
-    "USERNAME", "USERDOMAIN", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
-    "OS", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "CARGO_HOME", "RUSTUP_HOME",
-    "VCPKG_ROOT", "VSINSTALLDIR", "VCINSTALLDIR", "WindowsSdkDir", "INCLUDE",
-    "LIB", "LIBPATH",
+    "PATH",
+    "PATHEXT",
+    "SystemRoot",
+    "WINDIR",
+    "COMSPEC",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    "USERNAME",
+    "USERDOMAIN",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "OS",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "VCPKG_ROOT",
+    "VSINSTALLDIR",
+    "VCINSTALLDIR",
+    "WindowsSdkDir",
+    "INCLUDE",
+    "LIB",
+    "LIBPATH",
     // A1: commands run directly as the user, so the user's own HOME (git,
     // ssh, npm), PowerShell module path and proxy settings come along.
-    "HOME", "PSModulePath", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+    "HOME",
+    "PSModulePath",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
 ];
 
 #[cfg(not(windows))]
 const ALLOWED_PARENT_ENV: &[&str] = &[
-    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TEMP", "TMP",
-    "LANG", "LC_ALL", "LC_CTYPE", "TERM", "XDG_CACHE_HOME", "XDG_CONFIG_HOME",
-    "CARGO_HOME", "RUSTUP_HOME", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH",
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
     "PKG_CONFIG_PATH",
 ];
 
@@ -49,17 +96,38 @@ pub fn validate_explicit_environment(entries: &[(String, String)]) -> io::Result
             || key.contains('=')
             || key.contains('\0')
             || value.contains('\0')
-            || !key.bytes().all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+            || !key
+                .bytes()
+                .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
         {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid child environment entry"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid child environment entry",
+            ));
         }
         let folded = key.to_ascii_uppercase();
         if seen.insert(folded.clone(), ()).is_some() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "duplicate child environment key"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "duplicate child environment key",
+            ));
         }
-        let sensitive = ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "API_KEY", "APIKEY", "CREDENTIAL", "COOKIE", "AUTH"];
+        let sensitive = [
+            "TOKEN",
+            "SECRET",
+            "PASSWORD",
+            "PASSWD",
+            "API_KEY",
+            "APIKEY",
+            "CREDENTIAL",
+            "COOKIE",
+            "AUTH",
+        ];
         if sensitive.iter().any(|marker| folded.contains(marker)) {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "sensitive child environment keys are not permitted"));
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "sensitive child environment keys are not permitted",
+            ));
         }
         // Explicit values may add ordinary application configuration. Names
         // inherited from the parent are canonicalized to avoid Windows aliases.
@@ -89,27 +157,44 @@ mod tests {
         std::env::set_var("FOX_TEST_SECRET_TOKEN", "must-not-cross");
         let environment = inherited_environment();
         std::env::remove_var("FOX_TEST_SECRET_TOKEN");
-        assert!(!environment.iter().any(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("FOX_TEST_SECRET_TOKEN")));
-        assert!(environment.iter().any(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("PATH")));
+        assert!(!environment.iter().any(|(key, _)| key
+            .to_string_lossy()
+            .eq_ignore_ascii_case("FOX_TEST_SECRET_TOKEN")));
+        assert!(environment
+            .iter()
+            .any(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("PATH")));
     }
 
     #[cfg(windows)]
     #[test]
     fn a1_windows_commands_inherit_home_psmodulepath_and_proxies() {
-        for name in ["HOME", "PSModulePath", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"] {
+        for name in [
+            "HOME",
+            "PSModulePath",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "ALL_PROXY",
+        ] {
             assert!(canonical_allowed_name(name).is_some(), "{name}");
         }
         std::env::set_var("HTTPS_PROXY", "http://127.0.0.1:7890");
         let environment = inherited_environment();
         std::env::remove_var("HTTPS_PROXY");
-        assert!(environment.iter().any(|(key, value)| key.to_string_lossy().eq_ignore_ascii_case("HTTPS_PROXY")
+        assert!(environment.iter().any(|(key, value)| key
+            .to_string_lossy()
+            .eq_ignore_ascii_case("HTTPS_PROXY")
             && value.to_string_lossy() == "http://127.0.0.1:7890"));
     }
 
     #[test]
     fn explicit_environment_rejects_secrets_duplicates_and_invalid_names() {
         assert!(validate_explicit_environment(&[("API_TOKEN".into(), "x".into())]).is_err());
-        assert!(validate_explicit_environment(&[("A".into(), "1".into()), ("a".into(), "2".into())]).is_err());
+        assert!(validate_explicit_environment(&[
+            ("A".into(), "1".into()),
+            ("a".into(), "2".into())
+        ])
+        .is_err());
         assert!(validate_explicit_environment(&[("A=B".into(), "1".into())]).is_err());
         assert!(validate_explicit_environment(&[("MODE".into(), "safe".into())]).is_ok());
     }

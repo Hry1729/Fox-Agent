@@ -117,20 +117,35 @@
   flex: none;
   stroke-width: 1.8;
 }
-/* `[role=tab]` is in Chromium's default focus-ring group, and arc's
-   `.trigger:focus-visible` draws `2px solid var(--ring)` at `offset: -2px` —
-   which lands just inside the selected pill, so the switch shows two concentric
-   rounded rectangles: the pill's own edge plus an outline that is 1px short of
-   it. That offset is the whole defect; recolouring it does not help (with
-   `--brand` it becomes a near-black box, since light-theme `--brand` is
-   `oklch(0.205 0 0)`).
-   This control is a two-option segmented switch whose state is already carried
-   by the pill, and arc has the same call in `expanding-search` (`.trigger:
-   focus-visible { outline: none }`). So drop the outline and signal focus the
-   way this trigger already signals hover: the label goes to full contrast. */
-.fox-arc-mode-tabs [role='tab']:focus-visible {
-  outline: none;
-  color: var(--foreground);
+.fox-mode-tabs { --fox-mode-surface:#fff; --fox-mode-text:#2f353c; }
+[data-color-theme='paper'] .fox-mode-tabs { --fox-mode-surface:#fffcf7; --fox-mode-text:#363b41; }
+[data-color-theme='mist'] .fox-mode-tabs { --fox-mode-surface:#fff; --fox-mode-text:#2b3a46; }
+.dark .fox-mode-tabs { --fox-mode-surface:#414750; --fox-mode-text:#f5f6f8; }
+[data-color-theme='paper'].dark .fox-mode-tabs { --fox-mode-surface:#484238; --fox-mode-text:#fff6e6; }
+[data-color-theme='mist'].dark .fox-mode-tabs { --fox-mode-surface:#354957; --fox-mode-text:#ecf5fb; }
+.fox-sidebar :is(.fox-project-children,.fox-conversation-list) .fox-sidebar-tree-row { padding-right:0; }
+.fox-sidebar :is(.fox-project-children,.fox-conversation-list) .fox-sidebar-tree-row > .fox-sidebar-tree-main {
+  padding-left:var(--fox-sidebar-inset);
+  padding-right:calc(var(--fox-sidebar-action-size) + var(--fox-sidebar-action-inset) + var(--fox-space-xs));
+}
+.fox-sidebar .fox-sidebar-row-actions {
+  position:absolute;
+  inset-inline-end:var(--fox-sidebar-action-inset);
+  top:50%;
+  transform:translateY(-50%);
+}
+.fox-sidebar .fox-sidebar-list-pane.is-companions {
+  margin-top: 0;
+  padding-top: 0;
+}
+/* The collapsed Fox entry sits directly in the rail, outside the centred command group. */
+.fox-sidebar.is-collapsed > .fox-sidebar-command {
+  align-self: center;
+}
+/* 通知按钮绝对定位在侧栏上，右缘对齐动作列。 */
+.fox-sidebar:not(.is-collapsed) > .fox-notification-trigger,
+.fox-sidebar:not(.is-collapsed) .fox-notification-trigger {
+  right: calc(var(--fox-sidebar-gutter) + var(--fox-sidebar-action-inset));
 }
 .fox-sidebar-collapsed-utilities {
   display: flex;
@@ -184,8 +199,9 @@
 .fox-sidebar-footer-actions {
   display: flex;
   align-items: center;
-  gap: var(--fox-space-xs);
+  gap: var(--fox-sidebar-action-gap);
   flex: 0 0 auto;
+  padding-inline-end: var(--fox-sidebar-action-inset);
 }
 .fox-sidebar-footer-actions > * {
   display: flex;
@@ -194,9 +210,9 @@
 }
 .fox-sidebar-footer-actions .fox-icon-button {
   box-sizing: border-box;
-  width: var(--fox-control-md);
-  height: var(--fox-control-md);
-  flex: 0 0 var(--fox-control-md);
+  width: var(--fox-sidebar-action-size) !important;
+  height: var(--fox-sidebar-action-size) !important;
+  flex: 0 0 var(--fox-sidebar-action-size);
   display: grid;
   place-items: center;
 }
@@ -210,6 +226,11 @@
 .fox-sidebar-search-dialog .fox-global-search-results > [data-slot='fox-empty-state'],
 .fox-sidebar-search-idle > [data-slot='fox-empty-state'] {
   min-height: 150px;
+}
+.fox-global-search-results mark {
+  border-radius: var(--fox-radius-control);
+  background: var(--fox-accent-soft);
+  color: inherit;
 }
 .fox-sidebar-search-state-action {
   min-height: 28px;

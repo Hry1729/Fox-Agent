@@ -142,7 +142,12 @@ mod tests {
     fn both_literals_round_trip_through_a_spec() {
         for rule in [MergeRule::SeparatorV1, MergeRule::SeparatorV2] {
             let spec = json!({"schemaVersion": 1, "rule": {}, KEY: rule.as_str()});
-            assert_eq!(from_spec(&spec), Ok(rule), "{} must round-trip", rule.as_str());
+            assert_eq!(
+                from_spec(&spec),
+                Ok(rule),
+                "{} must round-trip",
+                rule.as_str()
+            );
         }
     }
 
@@ -217,7 +222,10 @@ mod tests {
         // this build cannot honour, while an absent key is a record that predates
         // the marker. Collapsing the two would reinterpret frozen contracts.
         assert!(from_spec(&json!({"schemaVersion": 1, KEY: null})).is_err());
-        assert_eq!(from_spec(&json!({"schemaVersion": 1})), Ok(MergeRule::SeparatorV1));
+        assert_eq!(
+            from_spec(&json!({"schemaVersion": 1})),
+            Ok(MergeRule::SeparatorV1)
+        );
     }
 
     /// The frozen literal strings are the persisted contract; they may not drift.

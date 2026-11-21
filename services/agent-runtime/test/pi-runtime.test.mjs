@@ -174,7 +174,7 @@ test('runs the real Pi Agent loop through Fox JSONL with a faux provider', async
   registerRuntimeCleanup(context, runtime, directory)
 
   const initialize = runtime.send('initialize', {
-    payload: { modelService: { baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 32768, maxOutputTokens: 512 } },
+    payload: { modelService: { baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 32768, fauxContextWindow: 32768, maxOutputTokens: 512 } },
   })
   const ready = await runtime.waitFor((message) => message.requestId === initialize.id)
   assert.equal(ready.type, 'ready')
@@ -205,6 +205,237 @@ test('runs the real Pi Agent loop through Fox JSONL with a faux provider', async
   })
   await runtime.waitFor((message) => message.runId === 'run-1' && message.payload?.type === 'message.delta')
   await runtime.waitFor((message) => message.runId === 'run-1' && message.payload?.type === 'run.completed')
+  const contextUsage = runtime.messages.find(message => message.runId === 'run-1' && message.payload?.type === 'context.usage')
+  assert.equal(contextUsage?.payload?.limitTokens, 32768)
+  assert.ok(contextUsage.payload.usedTokens > 0)
+})
+
+test('native Pi keeps Host delivery placement when applying frozen permissions', async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-native-placement-'))
+  const runtime = startRuntime()
+  registerRuntimeCleanup(context, runtime, directory)
+  const initialize = runtime.send('initialize', { payload: { modelService: {
+    baseUrl: 'faux://placement', modelId: 'placement', apiType: 'faux',
+    contextWindow: 32768, maxOutputTokens: 512,
+  } } })
+  await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
+  const identity = { conversationId: 'placement-chat', runtimeSessionId: 'placement-session', runId: 'placement-run' }
+  const create = runtime.send('create_session', { ...identity, payload: {
+    sessionFormat: 'pi-native', cwd: directory, sessionDir: join(directory, 'sessions'),
+  } })
+  const created = await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+  runtime.send('prompt', { ...identity, payload: {
+    text: 'Inspect this project.',
+    controlBinding: nativeProjectBinding(identity.conversationId, identity.runId, directory),
+    projectContext: { projectRoot: directory, permissionMode: 'read_only', deliverableRoot: 'fox/placement-results',
+      deliveryTargets: { recognition: 'recognized', targets: [{ path: 'reports/report.csv' }] } },
+  } })
+  await runtime.waitFor(message => message.runId === identity.runId && message.type === 'run_released')
+  assert.ok(runtime.messages.some(message => message.runId === identity.runId && message.payload?.type === 'run.completed'))
+  assert.ok(runtime.messages.some(message => message.runId === identity.runId && message.payload?.type === 'context.usage' && message.payload.usedTokens > 0))
+  const transcript = await readFile(created.payload.nativeSessionPath, 'utf8')
+  assert.match(transcript, /fox\/placement-results/u)
+  assert.match(transcript, /reports\/report\.csv/u)
+})
+
+test('native Pi keeps fresh collaboration and persisted card states in each current turn', async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-native-companion-turn-'))
+  const runtime = startRuntime()
+  registerRuntimeCleanup(context, runtime, directory)
+  const initialize = runtime.send('initialize', { payload: { modelService: {
+    baseUrl: 'faux://companion-turn', modelId: 'companion-turn', apiType: 'faux',
+    contextWindow: 32768, maxOutputTokens: 512, fauxResponses: ['收到本轮记录。'],
+  } } })
+  await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
+  const identity = { conversationId: 'recipient-chat', runtimeSessionId: 'recipient-session' }
+  const create = runtime.send('create_session', { ...identity, payload: {
+    sessionFormat: 'pi-native', cwd: directory, sessionDir: join(directory, 'sessions'),
+  } })
+  const created = await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+  const incoming = { assignmentId: 'TEST-101', fromName: '小狐', message: '核对 20、30、50', consult: true, reply: 'resume' }
+  const turn = async (runId, payload) => {
+    runtime.send('prompt', { ...identity, runId, payload: {
+      ...payload, controlBinding: nativeControlBinding(identity.conversationId, runId),
+    } })
+    await runtime.waitFor(message => message.runId === runId && message.type === 'run_released')
+    assert.ok(runtime.messages.some(message => message.runId === runId && message.payload?.type === 'run.completed'))
+  }
+  await turn('first', { text: '处理伙伴派来的协作事项', companionCoordination: { allowedTools: [], incoming } })
+  await turn('second', { text: '处理伙伴派来的协作事项', companionCoordination: {
+    allowedTools: [], incoming: { ...incoming, assignmentId: 'TEST-102', message: '核对 7＋8', answer: '普通加法' },
+  } })
+  await turn('returned', { text: '继续处理伙伴已回报的协作事项', companionCoordination: {
+    allowedTools: [], returned: [
+      { id: 'one', fromName: '核对员', status: 'completed', result: '没有收到新内容，仍是 TEST-103' },
+      { id: 'two', fromName: '整理员', status: 'cancelled', result: '用户取消' },
+    ],
+  } })
+  const companion = {
+    role: 'owner', isDefault: true, canUpdateProfile: true, allowedTools: [], notes: [], topics: [], snippets: [],
+    displayName: '小狐', usedChars: 0,
+  }
+  for (const status of ['pending', 'dismissed', 'undone', 'confirmed']) {
+    await turn('card-' + status, { text: '核实伙伴状态', companionContext: {
+      ...companion, teamActions: { totalCount: 1, actions: [{
+        actionId: 'card', targetId: 'peer', targetName: '核对员', kind: 'archive', status, updatedAt: 1,
+      }] },
+    } })
+  }
+  const entries = (await readFile(created.payload.nativeSessionPath, 'utf8')).trim().split('\n').map(JSON.parse)
+  const users = entries.filter(entry => entry.type === 'message' && entry.message?.role === 'user')
+    .map(entry => typeof entry.message.content === 'string' ? entry.message.content : entry.message.content.map(part => part.text ?? '').join('\n'))
+  assert.equal(users.length, 7)
+  assert.match(users[0], /TEST-101/)
+  assert.match(users[1], /TEST-102/)
+  assert.match(users[1], /核对 7＋8/)
+  assert.match(users[1], /Fox 记录的用户答复："普通加法"/)
+  assert.doesNotMatch(users[1], /TEST-101/)
+  assert.match(users[2], /没有收到新内容，仍是 TEST-103/)
+  assert.match(users[2], /Fox 记录的状态："cancelled"/)
+  for (const [index, status] of ['pending', 'dismissed', 'undone', 'confirmed'].entries()) {
+    assert.match(users[index + 3], new RegExp(`"status":"${status}"`))
+    assert.ok(users[index + 3].endsWith('核实伙伴状态'))
+  }
+  assert.ok(users.every(text => !text.includes('处理伙伴派来的协作事项') && !text.includes('继续处理伙伴已回报的协作事项')))
+  assert.ok(!runtime.messages.some(message => message.payload?.type === 'planner.started'))
+})
+
+test('ordinary Fox uses one question card for multiple choices and ends the turn', async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-user-question-'))
+  const runtime = startRuntime()
+  registerRuntimeCleanup(context, runtime, directory)
+  const questions = [
+    { question: '按什么维度汇总？', options: ['按地区', '按商品'] },
+    { question: '需要什么交付格式？', options: ['CSV', 'Excel'] },
+  ]
+  const initialize = runtime.send('initialize', { payload: { modelService: {
+    baseUrl: 'faux://question', modelId: 'question', apiType: 'faux',
+    contextWindow: 32768, maxOutputTokens: 512,
+    fauxResponses: [{ content: [{ type: 'toolCall', id: 'user-question', name: 'ask_user', arguments: { questions } }], stopReason: 'toolUse' }],
+  } } })
+  await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
+  const identity = { conversationId: 'question-chat', runtimeSessionId: 'question-session', runId: 'question-run' }
+  const create = runtime.send('create_session', { ...identity, payload: { sessionFormat: 'pi-native', cwd: directory, sessionDir: join(directory, 'sessions') } })
+  await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+  runtime.send('prompt', { ...identity, payload: {
+    text: '整理销售表',
+    controlBinding: nativeControlBinding(identity.conversationId, identity.runId),
+  } })
+  const registration = await runtime.waitFor(message => message.runId === identity.runId && message.type === 'tool_batch.register')
+  runtime.respond(registration, 'tool_batch.registered', { batchId: 'question-batch', registeredCalls: 1 })
+  const close = await runtime.waitFor(message => message.runId === identity.runId && message.type === 'tool_call.close')
+  assert.equal(close.payload.reason, 'intercepted')
+  runtime.respond(close, 'tool_call.closed', { closed: true, state: 'not_started' })
+  await runtime.waitFor(message => message.runId === identity.runId && message.type === 'run_released')
+  const events = runtime.messages.filter(message => message.runId === identity.runId)
+  const cards = events.filter(message => message.payload?.type === 'user.question.requested')
+  assert.equal(cards.length, 1)
+  assert.deepEqual(cards[0].payload.questions.map(({ question, options }) => ({ question, options: options.map(option => option.value) })), questions)
+  assert.equal(events.find(message => message.payload?.type === 'run.completed')?.payload.completionReason, 'awaiting_user')
+  assert.ok(!events.some(message => message.payload?.type === 'message.delta'))
+})
+
+test('a native contact explains a choice before pausing for the user, while a peer cannot ask directly', async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-contact-question-'))
+  const runtime = startRuntime()
+  registerRuntimeCleanup(context, runtime, directory)
+  const explanation = '我已请核对员补发明细，目前只有汇总。可以先交汇总，也可以等明细齐了再交。'
+  const question = '这次要怎么交付？'
+  const options = ['先交汇总', '等明细齐了再交']
+  const modelService = {
+    baseUrl: 'faux://contact-choice', modelId: 'contact-choice', apiType: 'faux',
+    contextWindow: 32768, maxOutputTokens: 512,
+    fauxResponses: [
+      { content: [{ type: 'toolCall', id: 'contact-choice', name: 'ask_user', arguments: { explanation, question, options } }], stopReason: 'toolUse' },
+      'NEEDS INPUT: 还缺明细，请发起伙伴核对交付范围。',
+    ],
+  }
+  const initialize = runtime.send('initialize', { payload: { modelService } })
+  await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
+  const companionContext = { role: 'owner', displayName: '核对员', allowedTools: [], notes: [], topics: [], snippets: [] }
+  const open = async runId => {
+    const identity = { conversationId: runId + '-chat', runtimeSessionId: runId + '-session', runId }
+    const create = runtime.send('create_session', { ...identity, payload: { sessionFormat: 'pi-native', cwd: directory, sessionDir: join(directory, 'sessions') } })
+    await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+    return identity
+  }
+  const closePosition = async (runId, reason) => {
+    const registration = await runtime.waitFor(message => message.runId === runId && message.type === 'tool_batch.register')
+    runtime.respond(registration, 'tool_batch.registered', { batchId: runId + '-batch', registeredCalls: 1 })
+    const close = await runtime.waitFor(message => message.runId === runId && message.type === 'tool_call.close')
+    assert.equal(close.payload.reason, reason)
+    runtime.respond(close, 'tool_call.closed', { closed: true, state: 'not_started' })
+    await runtime.waitFor(message => message.runId === runId && message.type === 'run_released')
+    return runtime.messages.filter(message => message.runId === runId)
+  }
+  const source = await open('source')
+  runtime.send('prompt', { ...source, payload: {
+    text: '继续核对报表',
+    companionContext,
+    companionCoordination: { allowedTools: [], returned: [{ id: 'r1', status: 'failed', result: '目前没有明细' }] },
+    controlBinding: nativeControlBinding(source.conversationId, source.runId),
+  } })
+  const sourceEvents = await closePosition(source.runId, 'intercepted')
+  assert.equal(sourceEvents.filter(message => message.type === 'model_request.admit').length, 1)
+  const explanationIndex = sourceEvents.findIndex(message => message.payload?.delta === explanation)
+  const cardIndex = sourceEvents.findIndex(message => message.payload?.type === 'user.question.requested')
+  const terminalIndex = sourceEvents.findIndex(message => message.payload?.type === 'run.completed')
+  assert.ok(explanationIndex >= 0 && explanationIndex < cardIndex && cardIndex < terminalIndex)
+  assert.deepEqual(sourceEvents[cardIndex].payload.questions[0].options.map(option => option.label), options)
+  assert.equal(sourceEvents[terminalIndex].payload.completionReason, 'awaiting_user')
+
+  const receiver = await open('receiver')
+  runtime.send('prompt', { ...receiver, payload: {
+    text: '处理伙伴派来的协作事项',
+    companionContext,
+    companionCoordination: { allowedTools: [], incoming: { assignmentId: 'r1', fromId: 'peer-1', fromName: '小狐', message: '核对明细', reply: 'resume' } },
+    controlBinding: nativeControlBinding(receiver.conversationId, receiver.runId),
+  } })
+  const receiverEvents = await closePosition(receiver.runId, 'unknown_tool')
+  assert.ok(!receiverEvents.some(message => message.payload?.type === 'user.question.requested'))
+  assert.match(receiverEvents.map(message => message.payload?.delta ?? '').join(''), /NEEDS INPUT: 还缺明细/)
+})
+
+test('real Pi runtime dispatches an allowed partner handoff and rejects writes during a consultation', async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-companion-coordination-'))
+  const runtime = startRuntime()
+  registerRuntimeCleanup(context, runtime, directory)
+  const input = { targets: ['peer-1'], instructions: '核对报表', done_when: '说明核对范围' }
+  const initialize = runtime.send('initialize', { payload: { modelService: {
+    baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 32768, maxOutputTokens: 512,
+    fauxResponses: [
+      { content: [{ type: 'toolCall', id: 'handoff', name: 'companion_coordinate', arguments: input }], stopReason: 'toolUse' },
+      '伙伴的协作已排队。',
+      { content: [{ type: 'toolCall', id: 'consult-write', name: 'write_file', arguments: { path: 'report.txt', text: 'new' } }], stopReason: 'toolUse' },
+      '根据已有资料，建议再核对数值。',
+    ],
+  } } })
+  await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
+  const begin = async (runId, text, companionCoordination, projectRoot = null) => {
+    const identity = { conversationId: runId + '-chat', runtimeSessionId: runId + '-session' }
+    const create = runtime.send('create_session', { ...identity, payload: { sessionPath: join(directory, runId + '.json') } })
+    await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+    runtime.send('prompt', { ...identity, runId, payload: { text, projectContext: { projectRoot }, companionCoordination } })
+  }
+  await begin('send', '@资料助手核对报表', {
+    allowedTools: ['companion_coordinate', 'companion_assignment_status'],
+    mentions: [{ id: 'peer-1', name: '资料助手' }],
+  })
+  const call = await runtime.waitFor(message => message.runId === 'send' && message.type === 'tool.execute')
+  assert.equal(call.payload.tool, 'companion_coordinate')
+  assert.deepEqual(call.payload.input, input)
+  runtime.respond(call, 'tool.execute_completed', { isError: false, result: { status: 'queued' } })
+  await runtime.waitFor(message => message.runId === 'send' && message.payload?.type === 'run.completed')
+
+  await begin('consult', '请处理伙伴咨询。', {
+    allowedTools: [],
+    incoming: { assignmentId: 'work-1', fromName: '小狐', message: '核对依据。', consult: true, reply: 'resume' },
+  }, directory)
+  const snapshot = await runtime.waitFor(message => message.runId === 'consult' && message.payload?.type === 'run.request_snapshot')
+  assert.deepEqual(snapshot.payload.effectiveToolNames, [])
+  assert.ok(snapshot.payload.promptDiagnostics.fragments.some(({ id, authority }) => id === 'companion_assignment' && authority === 'untrusted'))
+  await runtime.waitFor(message => message.runId === 'consult' && message.payload?.type === 'run.completed')
+  assert.ok(!runtime.messages.some(message => message.runId === 'consult' && /^tool\.(execute|preflight)$/.test(message.type)))
 })
 
 test('unknown Office name stays an SDK error and recovers through the declared MCP wrapper', async context => {
@@ -1713,6 +1944,78 @@ test('concurrent native Runs send each actual HTTP request to its bound endpoint
     assert.ok(!JSON.stringify(snapshot.messages).includes(`Endpoint ${1 - index} replied.`))
   }
 })
+
+for (const stage of ['planner', 'agent']) {
+  test(`native ${stage} first-response timeout recovers within the same Run`, async context => {
+    const directory = await mkdtemp(join(tmpdir(), 'fox-first-response-'))
+    const runtime = startRuntime({ modelAdmission: request => ({
+      allowed: true, timeoutMs: 5000, firstResponseMs: 900, idleMs: 5000,
+      maxOutputTokens: request.payload.maxOutputTokens,
+    }) })
+    registerRuntimeCleanup(context, runtime, directory)
+    const requests = []
+    const server = createServer(async (request, response) => {
+      let body = ''
+      for await (const chunk of request) body += chunk
+      requests.push(JSON.parse(body))
+      if (requests.length === 1 && stage === 'planner') return
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      if (requests.length === 1) {
+        response.write(': heartbeat\n\n')
+        return
+      }
+      for (const choice of [
+        { index: 0, delta: { role: 'assistant', content: 'Executor completed.' }, finish_reason: null },
+        { index: 0, delta: {}, finish_reason: 'stop' },
+      ]) response.write(`data: ${JSON.stringify({ id: 'model-recovered', object: 'chat.completion.chunk', created: 1,
+        model: 'timeout-fixture', choices: [choice] })}\n\n`)
+      response.end('data: [DONE]\n\n')
+    })
+    await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve))
+    context.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)) })
+    const initialize = runtime.send('initialize', { payload: { modelService: {
+      baseUrl: `http://127.0.0.1:${server.address().port}/v1`, modelId: 'timeout-fixture',
+      apiType: 'openai-completions', apiKey: 'fixture', contextWindow: 32768, maxOutputTokens: 256,
+      ...(stage === 'planner' ? { plannerMode: 'always' } : {}),
+    } } })
+    await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
+    const identity = { conversationId: 'timeout-c', runtimeSessionId: 'timeout-s', runId: 'timeout-r' }
+    const create = runtime.send('create_session', { ...identity, payload: { sessionPath: join(directory, 'session.json') } })
+    await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+    const projectContext = stage === 'planner' ? { projectRoot: directory, permissionMode: 'read_only' } : null
+    runtime.send('prompt', { ...identity, payload: {
+      text: 'Read the request and respond.',
+      ...(projectContext ? { projectContext } : {}),
+      controlBinding: projectContext ? nativeProjectBinding(identity.conversationId, identity.runId, directory)
+        : nativeControlBinding(identity.conversationId, identity.runId),
+    } })
+    await runtime.waitFor(message => message.runId === identity.runId && message.payload?.type === 'run.completed', 7000)
+
+    assert.equal(requests.length, 2)
+    const records = runtime.messages.filter(entry => entry.payload?.type === 'usage.request').map(entry => entry.payload.record)
+    assert.deepEqual(records.map(record => [record.stage, record.outcome]), [[stage, 'failure'], ['agent', 'success']])
+    assert.equal(records[0].firstResponse.timeoutCode, 'runtime.model_first_response_timeout')
+    assert.equal(records[0].firstResponse.firstEventMs, null)
+    const { headersMs, firstBodyMs, firstEventMs } = records[1].firstResponse
+    assert.ok([headersMs, firstBodyMs, firstEventMs].every(Number.isFinite))
+    assert.ok(headersMs <= firstBodyMs && firstBodyMs <= firstEventMs)
+    const settlement = runtime.messages.findIndex(entry => entry.type === 'model_request.complete' && entry.payload.requestId === records[0].requestId)
+    const admission = runtime.messages.findIndex(entry => entry.type === 'model_request.admit' && entry.payload.requestId === records[1].requestId)
+    assert.ok(settlement >= 0 && settlement < admission)
+    assert.notEqual(records[0].requestId, records[1].requestId)
+    if (stage === 'planner') {
+      assert.equal(records[0].firstResponse.headersMs, null)
+      assert.equal(records[0].firstResponse.firstBodyMs, null)
+      assert.ok(runtime.messages.some(entry => entry.payload?.type === 'planner.failed' && entry.payload.fallback === 'executor_only'))
+    } else {
+      assert.ok(Number.isFinite(records[0].firstResponse.headersMs))
+      assert.ok(Number.isFinite(records[0].firstResponse.firstBodyMs))
+      assert.ok(records[0].firstResponse.headersMs <= records[0].firstResponse.firstBodyMs)
+      assert.equal(records[0].logicalRequestId, records[1].logicalRequestId)
+      assert.deepEqual(requests[0].messages, requests[1].messages)
+    }
+  })
+}
 
 test('a Pi-native planner tool and main work tool with the same model call ID use separate Host positions', async context => {
   const directory = await mkdtemp(join(tmpdir(), 'fox-native-planner-'))

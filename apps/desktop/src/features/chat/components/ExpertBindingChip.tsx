@@ -38,7 +38,7 @@ export function ExpertBindingChip({ expert, readOnly, onView, onChange, onRemove
     <DropdownMenu>
       <DropdownMenuTrigger className="fox-expert-chip" data-default-expert={defaultLabel || undefined} title={`当前专家：${expert.name}`}>
         <ExpertIcon icon={expert.icon || (defaultLabel ? FOX_ASSISTANT_AVATAR : undefined)} name={expert.name} />
-        <span>{defaultLabel ? '默认专家' : expert.name}</span>
+        <span>{defaultLabel ? '默认Fox助手' : expert.name}</span>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" side="top" sideOffset={7} className="fox-expert-menu">
         <DropdownMenuItem onSelect={onView}><Eye />查看详情</DropdownMenuItem>

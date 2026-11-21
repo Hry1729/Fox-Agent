@@ -24,8 +24,8 @@ use process_jobs::{
     SystemIdentityProbe, SystemSpawner, TerminateOutcome,
 };
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -206,7 +206,11 @@ struct JobReclaimer {
 
 impl JobReclaimer {
     fn new(manager: Arc<ProcessJobManager>) -> Self {
-        Self { manager, job_ids: Vec::new(), gates: Vec::new() }
+        Self {
+            manager,
+            job_ids: Vec::new(),
+            gates: Vec::new(),
+        }
     }
 
     /// Remembers a job so it can still be reclaimed if the test unwinds.
@@ -279,7 +283,10 @@ impl Drop for JobReclaimer {
 fn a_real_non_zero_exit_keeps_its_code_and_its_output() {
     let dir = fixture("nonzero");
     let manager = manager(ManagerConfig::default());
-    let spec = SpawnSpec::shell("echo out-line && echo err-line 1>&2 && exit /b 7", &dir.to_string_lossy());
+    let spec = SpawnSpec::shell(
+        "echo out-line && echo err-line 1>&2 && exit /b 7",
+        &dir.to_string_lossy(),
+    );
 
     let job = manager
         .start(start_request("nonzero", spec, Duration::from_secs(30)))
@@ -287,7 +294,11 @@ fn a_real_non_zero_exit_keeps_its_code_and_its_output() {
     let job_id = job.view().job_id.clone();
     let view = wait_terminal(&manager, &job_id, Duration::from_secs(20));
 
-    assert_eq!(view.state, JobRunState::Failed, "a non-zero exit is not success");
+    assert_eq!(
+        view.state,
+        JobRunState::Failed,
+        "a non-zero exit is not success"
+    );
     assert_eq!(view.exit_code, Some(7));
     assert_eq!(view.error_code.as_deref(), Some("nonzero_exit"));
     assert_eq!(view.production_state(), "failed");
@@ -337,7 +348,10 @@ fn cmd_shell_preserves_quoted_arguments_spaces_and_powershell_exit_code() {
     let view = wait_terminal(&manager, &id, Duration::from_secs(20));
     assert_eq!(view.state, JobRunState::Failed, "{view:?}");
     assert_eq!(view.exit_code, Some(13), "PowerShell must actually execute");
-    assert_eq!(read_all(&manager, &id, Stream::Stdout), "quoted value with spaces");
+    assert_eq!(
+        read_all(&manager, &id, Stream::Stdout),
+        "quoted value with spaces"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -384,15 +398,23 @@ fn heavy_output_on_both_streams_does_not_deadlock_and_reports_what_was_dropped()
     );
     // Retention is bounded, and the loss is reported rather than hidden.
     assert!(view.stdout.dropped_bytes > 0);
-    assert_eq!(view.stdout.retained_bytes, view.stdout.retention_limit as u64);
+    assert_eq!(
+        view.stdout.retained_bytes,
+        view.stdout.retention_limit as u64
+    );
     assert_eq!(
         view.stdout.total_bytes,
         view.stdout.retained_bytes + view.stdout.dropped_bytes
     );
 
     // The retained tail is still readable, and a stale cursor is told what it lost.
-    let page = manager.output(&job_id, Stream::Stdout, 0, 4096).expect("page");
-    assert!(page.lost_before_offset > 0, "an old cursor is informed, not silently shifted");
+    let page = manager
+        .output(&job_id, Stream::Stdout, 0, 4096)
+        .expect("page");
+    assert!(
+        page.lost_before_offset > 0,
+        "an old cursor is informed, not silently shifted"
+    );
     assert!(!page.content.is_empty());
     assert!(page.stream_closed, "the pipe ended with the process");
     assert!(
@@ -416,7 +438,9 @@ fn a_process_with_no_output_still_completes() {
     assert_eq!(view.state, JobRunState::Succeeded);
     assert_eq!(view.stdout.total_bytes, 0);
     assert_eq!(view.stderr.total_bytes, 0);
-    let page = manager.output(&job_id, Stream::Stdout, 0, 1024).expect("page");
+    let page = manager
+        .output(&job_id, Stream::Stdout, 0, 1024)
+        .expect("page");
     assert!(page.content.is_empty());
     assert!(page.at_end_of_available);
     assert!(page.stream_closed);
@@ -542,8 +566,15 @@ fn a_real_grandchild_does_not_survive_the_tree_termination() {
     // asked. `Terminated` is only reachable when the walker reported success, so
     // a silently-failed `taskkill` can no longer pass this test.
     match view.terminate {
-        Some(TerminateOutcome::Terminated { walker_exit_code, walker_visited }) => {
-            assert_eq!(walker_exit_code, Some(0), "the tree walker must report success: {view:?}");
+        Some(TerminateOutcome::Terminated {
+            walker_exit_code,
+            walker_visited,
+        }) => {
+            assert_eq!(
+                walker_exit_code,
+                Some(0),
+                "the tree walker must report success: {view:?}"
+            );
             assert!(
                 walker_visited >= 1,
                 "the walker must report the processes it acted on, not zero: {view:?}"
@@ -666,7 +697,11 @@ fn a_naturally_exited_shell_closes_its_job_before_waiting_for_pipe_eof() {
     reclaimer.arm_gate(gate.clone());
     let spec = SpawnSpec::shell("launch-descendant.cmd", &dir.to_string_lossy());
     let job = manager
-        .start(start_request("natural-descendant", spec, Duration::from_secs(30)))
+        .start(start_request(
+            "natural-descendant",
+            spec,
+            Duration::from_secs(30),
+        ))
         .expect("start");
     let job_id = job.view().job_id.clone();
     reclaimer.track(&job_id);
@@ -683,7 +718,9 @@ fn a_naturally_exited_shell_closes_its_job_before_waiting_for_pipe_eof() {
         "natural parent exit must close the Job before pipe draining: {view:?}"
     );
     assert!(
-        view.events.iter().any(|event| event.kind == process_jobs::JobEventKind::ReadersJoined),
+        view.events
+            .iter()
+            .any(|event| event.kind == process_jobs::JobEventKind::ReadersJoined),
         "the readers must reach EOF once the Job is closed: {view:?}"
     );
     let stdout = read_all(&manager, &job_id, Stream::Stdout);
@@ -759,7 +796,11 @@ fn concurrent_real_starts_with_one_key_launch_exactly_once() {
         let spec = Arc::clone(&spec);
         handles.push(thread::spawn(move || {
             let outcome = manager
-                .start(start_request("race-key", (*spec).clone(), Duration::from_secs(30)))
+                .start(start_request(
+                    "race-key",
+                    (*spec).clone(),
+                    Duration::from_secs(30),
+                ))
                 .expect("start");
             (outcome.launched(), outcome.view().job_id.clone())
         }));
@@ -798,7 +839,9 @@ fn polling_and_reconnecting_never_re_execute_the_command() {
     // not run again, so the witness file must not grow.
     for _ in 0..40 {
         let _ = manager.status(&job_id).expect("status");
-        let _ = manager.output(&job_id, Stream::Stdout, 0, 1024).expect("output");
+        let _ = manager
+            .output(&job_id, Stream::Stdout, 0, 1024)
+            .expect("output");
         let _ = manager.list(Some("it-run"));
         manager.tick();
     }
@@ -855,7 +898,10 @@ fn recovery_reads_identity_from_the_real_process_table() {
     let me = probe.current();
     assert!(me.pid > 0);
     assert!(
-        matches!(probe.probe(me.pid), Liveness::Alive { .. } | Liveness::Unknown(_)),
+        matches!(
+            probe.probe(me.pid),
+            Liveness::Alive { .. } | Liveness::Unknown(_)
+        ),
         "probing our own pid must never report Gone"
     );
 
@@ -872,18 +918,29 @@ fn recovery_reads_identity_from_the_real_process_table() {
             job_id: "dead".to_owned(),
             run_id: "it-run".to_owned(),
             state: JobRunState::Running,
-            owner: Some(ProcessIdentity { pid: impossible, start_marker: Some(1) }),
+            owner: Some(ProcessIdentity {
+                pid: impossible,
+                start_marker: Some(1),
+            }),
         },
         PersistedJobRecord {
             job_id: "reused".to_owned(),
             run_id: "it-run".to_owned(),
             state: JobRunState::Running,
             // Right pid, wrong creation time: a pid reused after a restart.
-            owner: Some(ProcessIdentity { pid: me.pid, start_marker: Some(1) }),
+            owner: Some(ProcessIdentity {
+                pid: me.pid,
+                start_marker: Some(1),
+            }),
         },
     ]);
 
-    let find = |id: &str| decisions.iter().find(|decision| decision.job_id == id).unwrap();
+    let find = |id: &str| {
+        decisions
+            .iter()
+            .find(|decision| decision.job_id == id)
+            .unwrap()
+    };
 
     // Alive and provably ours: keep running, but still never replay.
     if find("ours").owner_status == OwnerStatus::Alive {
@@ -933,7 +990,9 @@ fn the_production_command_job_path_is_registered_durable_and_not_directly_execut
     const COMMAND_JOBS_RS: &str = include_str!("../src/runtime_host/command_jobs.rs");
     const TOOL_HOST_RS: &str = include_str!("../src/tool_host.rs");
     assert!(
-        LIB_RS.lines().any(|line| line.trim() == "mod process_jobs;"),
+        LIB_RS
+            .lines()
+            .any(|line| line.trim() == "mod process_jobs;"),
         "the production command-job path must explicitly register process_jobs"
     );
     assert!(
@@ -1124,7 +1183,11 @@ impl MatrixTrial {
         // bare `ping` survivor cannot, so a pipe-only cell can only be reported
         // through `readers_orphaned`. Naming the evidence kind keeps the two
         // readings from being compared as if they were the same measurement.
-        let evidence = if cell.nested { "sentinel+pipe" } else { "pipe-only" };
+        let evidence = if cell.nested {
+            "sentinel+pipe"
+        } else {
+            "pipe-only"
+        };
         format!(
             "MATRIX{{\"cell\":\"{cell}\",\"root\":\"{root}\",\"evidence\":\"{evidence}\",\"rep\":{rep},\
              \"pid\":{pid},\"start_marker\":{marker:?},\
@@ -1234,12 +1297,15 @@ fn phase_timeline(view: &process_jobs::JobStatusView) -> String {
 fn terminate_fields(view: &process_jobs::JobStatusView) -> (String, Option<i32>, u32) {
     use process_jobs::TerminateOutcome as T;
     match &view.terminate {
-        Some(T::Terminated { walker_exit_code, walker_visited }) => {
-            ("terminated".to_owned(), *walker_exit_code, *walker_visited)
-        }
-        Some(T::Incomplete { walker_exit_code, walker_visited, .. }) => {
-            ("incomplete".to_owned(), *walker_exit_code, *walker_visited)
-        }
+        Some(T::Terminated {
+            walker_exit_code,
+            walker_visited,
+        }) => ("terminated".to_owned(), *walker_exit_code, *walker_visited),
+        Some(T::Incomplete {
+            walker_exit_code,
+            walker_visited,
+            ..
+        }) => ("incomplete".to_owned(), *walker_exit_code, *walker_visited),
         Some(T::AlreadyExited) => ("already_exited".to_owned(), None, 0),
         Some(T::SkippedIdentityMismatch) => ("skipped_identity_mismatch".to_owned(), None, 0),
         None => ("none".to_owned(), None, 0),
@@ -1250,9 +1316,14 @@ fn terminate_fields(view: &process_jobs::JobStatusView) -> (String, Option<i32>,
 fn matrix_manager(flags: u32, grace: Duration) -> Arc<ProcessJobManager> {
     Arc::new(ProcessJobManager::with_backend_proof(
         Arc::new(SystemClock),
-        Arc::new(process_jobs::SystemSpawnerFlags { creation_flags: flags }),
+        Arc::new(process_jobs::SystemSpawnerFlags {
+            creation_flags: flags,
+        }),
         Arc::new(SystemIdentityProbe),
-        ManagerConfig { reader_grace: grace, ..ManagerConfig::default() },
+        ManagerConfig {
+            reader_grace: grace,
+            ..ManagerConfig::default()
+        },
         harness_proof(),
     ))
 }
@@ -1421,9 +1492,9 @@ fn run_matrix_trial(
         if trial.stderr_released_after_ms.is_none() && post.stderr_released == Some(true) {
             trial.stderr_released_after_ms = Some(observed_at.elapsed().as_millis());
         }
-        let nothing_to_watch =
-            post.stdout_released.is_none() && post.stderr_released.is_none();
-        let both_released = post.stdout_released == Some(true) && post.stderr_released == Some(true);
+        let nothing_to_watch = post.stdout_released.is_none() && post.stderr_released.is_none();
+        let both_released =
+            post.stdout_released == Some(true) && post.stderr_released == Some(true);
         if nothing_to_watch || both_released || Instant::now() >= watch_until {
             break;
         }

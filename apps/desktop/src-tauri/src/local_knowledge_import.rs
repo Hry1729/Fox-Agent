@@ -3,6 +3,8 @@ use flate2::read::{DeflateDecoder, ZlibDecoder};
 mod ooxml;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::sync::{atomic::AtomicBool, Arc};
 use std::{
     collections::HashSet,
     ffi::OsStr,
@@ -13,8 +15,6 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
-#[cfg(test)]
-use std::sync::{atomic::AtomicBool, Arc};
 
 pub const DEFAULT_MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
 pub const DEFAULT_CHUNK_MAX_BYTES: usize = 4 * 1024;
@@ -874,18 +874,26 @@ fn parse_zip_based_text(
 /// Pure, bounded extraction from bytes already read through an authorized
 /// attachment/project handle. Never launches Office or follows external links.
 pub(crate) fn extract_office_text(bytes: &[u8], filename: &str) -> Result<Option<String>, String> {
-    let extension = Path::new(filename).extension().and_then(|value| value.to_str())
-        .unwrap_or_default().to_ascii_lowercase();
+    let extension = Path::new(filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     if extension == "xls" {
         return extract_legacy_xls(bytes).map(Some);
     }
     if extension == "ppt" {
         let document = office_oxide::ppt::PptDocument::from_reader(std::io::Cursor::new(bytes))
             .map_err(|error| format!("无法读取旧版 PPT：{error}"))?;
-        if document.plain_text().trim().is_empty() { return Err("PPT 中没有可读取的文字，图片内容需要 OCR。".into()); }
+        if document.plain_text().trim().is_empty() {
+            return Err("PPT 中没有可读取的文字，图片内容需要 OCR。".into());
+        }
         let mut text = String::new();
-        append_text_section(&mut text, &document.to_markdown()).map_err(|error| error.to_string())?;
-        if text.trim().is_empty() { return Err("PPT 中没有可读取的文字，图片内容需要 OCR。".into()); }
+        append_text_section(&mut text, &document.to_markdown())
+            .map_err(|error| error.to_string())?;
+        if text.trim().is_empty() {
+            return Err("PPT 中没有可读取的文字，图片内容需要 OCR。".into());
+        }
         return Ok(Some(text));
     }
     let kind = match extension.as_str() {
@@ -895,7 +903,9 @@ pub(crate) fn extract_office_text(bytes: &[u8], filename: &str) -> Result<Option
         "doc" => return Err("旧版 DOC 暂不支持读取，请另存为 DOCX 后再添加。".into()),
         _ => return Ok(None),
     };
-    parse_zip_based_text(bytes, kind).map(Some).map_err(|error| error.to_string())
+    parse_zip_based_text(bytes, kind)
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 #[derive(serde::Serialize)]
@@ -909,14 +919,18 @@ pub(crate) struct AttachmentSheetOutline {
 
 /// The XLSX directory uses the same extraction pass and Unicode offsets as the
 /// paginated attachment reader. Other Office formats preserve their existing path.
-pub(crate) fn extract_office_text_with_outline(bytes: &[u8], filename: &str)
-    -> Result<(Option<String>, Vec<AttachmentSheetOutline>, Option<usize>), String>
-{
-    if Path::new(filename).extension().and_then(|value| value.to_str())
+pub(crate) fn extract_office_text_with_outline(
+    bytes: &[u8],
+    filename: &str,
+) -> Result<(Option<String>, Vec<AttachmentSheetOutline>, Option<usize>), String> {
+    if Path::new(filename)
+        .extension()
+        .and_then(|value| value.to_str())
         .is_some_and(|value| value.eq_ignore_ascii_case("xlsx"))
     {
         let archive = SafeZipArchive::new(bytes).map_err(|error| error.to_string())?;
-        let (text, sheets, count) = ooxml::xlsx_text_with_outline(&archive).map_err(|error| error.to_string())?;
+        let (text, sheets, count) =
+            ooxml::xlsx_text_with_outline(&archive).map_err(|error| error.to_string())?;
         return Ok((Some(text), sheets, Some(count)));
     }
     extract_office_text(bytes, filename).map(|text| (text, Vec::new(), None))
@@ -928,9 +942,14 @@ fn extract_legacy_xls(bytes: &[u8]) -> Result<String, String> {
         .map_err(|error| format!("无法读取旧版 XLS：{error}"))?;
     let mut text = String::new();
     for name in workbook.sheet_names() {
-        let range = workbook.worksheet_range(&name).map_err(|error| error.to_string())?;
-        append_text_section(&mut text, &format!("工作表：{name}（公式使用文件内保存的结果）"))
+        let range = workbook
+            .worksheet_range(&name)
             .map_err(|error| error.to_string())?;
+        append_text_section(
+            &mut text,
+            &format!("工作表：{name}（公式使用文件内保存的结果）"),
+        )
+        .map_err(|error| error.to_string())?;
         let (start_row, start_col) = range.start().unwrap_or_default();
         for (row, col, value) in range.used_cells() {
             let mut column = col + start_col as usize + 1;
@@ -940,11 +959,16 @@ fn extract_legacy_xls(bytes: &[u8]) -> Result<String, String> {
                 address.insert(0, (b'A' + (column % 26) as u8) as char);
                 column /= 26;
             }
-            append_text_section(&mut text, &format!("{address}{}: {value}", row + start_row as usize + 1))
-                .map_err(|error| error.to_string())?;
+            append_text_section(
+                &mut text,
+                &format!("{address}{}: {value}", row + start_row as usize + 1),
+            )
+            .map_err(|error| error.to_string())?;
         }
     }
-    if text.is_empty() { return Err("XLS 中没有可读取的工作表。".into()); }
+    if text.is_empty() {
+        return Err("XLS 中没有可读取的工作表。".into());
+    }
     Ok(text)
 }
 
@@ -1679,7 +1703,10 @@ fn validate_source_path(path: &Path) -> Result<(), ImportError> {
     Ok(())
 }
 
-pub(crate) fn validate_path_component(value: impl AsRef<OsStr>, label: &str) -> Result<(), ImportError> {
+pub(crate) fn validate_path_component(
+    value: impl AsRef<OsStr>,
+    label: &str,
+) -> Result<(), ImportError> {
     let value = value
         .as_ref()
         .to_str()
@@ -2171,7 +2198,9 @@ mod tests {
     #[test]
     fn reads_xlsx_cells_with_sheet_order_shared_strings_and_cached_formulas() {
         let bytes = include_bytes!("../tests/fixtures/office-reading.xlsx");
-        let text = extract_office_text(bytes, "AGV长时间任务汇总统计表.XLSX").unwrap().unwrap();
+        let text = extract_office_text(bytes, "AGV长时间任务汇总统计表.XLSX")
+            .unwrap()
+            .unwrap();
         assert!(text.contains("[Sheet: AGV统计]"));
         assert!(text.contains("A1: 任务 & 名称"));
         assert!(text.contains("A2: AGV长时间任务"));
@@ -2181,10 +2210,14 @@ mod tests {
         assert!(text.contains("E2: (no cached value)"));
         assert!(text.find("[Sheet: AGV统计]").unwrap() < text.find("[Sheet: 第二页]").unwrap());
         assert!(extract_office_text(bytes, "old.xls").is_err());
-        let (outlined, sheets, count) = extract_office_text_with_outline(bytes, "AGV.xlsx").unwrap();
+        let (outlined, sheets, count) =
+            extract_office_text_with_outline(bytes, "AGV.xlsx").unwrap();
         assert_eq!(outlined.as_deref(), Some(text.as_str()));
         assert_eq!(count, Some(2));
-        assert_eq!(sheets.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), vec!["AGV统计", "第二页"]);
+        assert_eq!(
+            sheets.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["AGV统计", "第二页"]
+        );
         for sheet in sheets {
             let suffix = text.chars().skip(sheet.offset).collect::<String>();
             assert!(suffix.starts_with(&format!("[Sheet: {}]", sheet.name)));
@@ -2198,24 +2231,47 @@ mod tests {
     #[ignore = "requires FOX_LEGACY_OFFICE_FIXTURES in the isolated acceptance directory"]
     fn reads_legacy_office_acceptance_files() {
         let root = std::path::PathBuf::from(std::env::var("FOX_LEGACY_OFFICE_FIXTURES").unwrap());
-        let xls = extract_office_text(&std::fs::read(root.join("legacy-reading.xls")).unwrap(), "legacy.xls").unwrap().unwrap();
+        let xls = extract_office_text(
+            &std::fs::read(root.join("legacy-reading.xls")).unwrap(),
+            "legacy.xls",
+        )
+        .unwrap()
+        .unwrap();
         assert!(xls.contains("工作表：AGV等待"));
         assert!(xls.contains("B2: 123.5"));
         assert!(xls.contains("C3: 中文读取正常"));
-        let ppt = extract_office_text(&std::fs::read(root.join("legacy-basic.ppt")).unwrap(), "legacy.ppt").unwrap().unwrap();
+        let ppt = extract_office_text(
+            &std::fs::read(root.join("legacy-basic.ppt")).unwrap(),
+            "legacy.ppt",
+        )
+        .unwrap()
+        .unwrap();
         assert!(ppt.contains("Slide 1"));
         assert!(ppt.contains("This is a test title"));
         assert!(ppt.contains("This is a test subtitle"));
         assert!(!ppt.contains("Click to edit Master"));
-        println!("PPT extracted: {}", ppt.chars().take(500).collect::<String>());
+        println!(
+            "PPT extracted: {}",
+            ppt.chars().take(500).collect::<String>()
+        );
     }
 
     #[test]
     fn xlsx_rejects_invalid_shared_strings_and_document_types() {
-        let bad_index = stored_zip_fixture(&[("xl/worksheets/sheet1.xml", br#"<worksheet><c r="A1" t="s"><v>9</v></c></worksheet>"#)]);
-        assert!(extract_office_text(&bad_index, "bad.xlsx").unwrap_err().contains("out of range"));
-        let doctype = stored_zip_fixture(&[("xl/worksheets/sheet1.xml", br#"<!DOCTYPE x SYSTEM "file:///secret"><worksheet/>"#)]);
-        assert!(extract_office_text(&doctype, "bad.xlsx").unwrap_err().contains("document types"));
+        let bad_index = stored_zip_fixture(&[(
+            "xl/worksheets/sheet1.xml",
+            br#"<worksheet><c r="A1" t="s"><v>9</v></c></worksheet>"#,
+        )]);
+        assert!(extract_office_text(&bad_index, "bad.xlsx")
+            .unwrap_err()
+            .contains("out of range"));
+        let doctype = stored_zip_fixture(&[(
+            "xl/worksheets/sheet1.xml",
+            br#"<!DOCTYPE x SYSTEM "file:///secret"><worksheet/>"#,
+        )]);
+        assert!(extract_office_text(&doctype, "bad.xlsx")
+            .unwrap_err()
+            .contains("document types"));
     }
 
     #[test]

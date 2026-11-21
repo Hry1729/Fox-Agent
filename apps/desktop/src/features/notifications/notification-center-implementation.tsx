@@ -16,6 +16,8 @@ import { userFacingError } from '@/features/chat/send-failure-notice'
 import { type AppNotificationRecord, type NotificationPreferencesRecord } from '@/features/conversations/model/types'
 import { FOX_IN_APP_NOTIFICATION_EVENT, FOX_NOTIFICATIONS_CHANGED_EVENT, FOX_NOTIFICATION_PREFERENCES_CHANGED_EVENT, type InAppNotificationEventDetail, directToastRecently, normalizeNotificationSoundId, notificationIsVisibleInContext, playNotificationSound, notify as toast } from '@/features/notifications'
 import { type NavigateWorkspace, type WorkspaceView } from '@/features/workspace/types'
+import { ContactAvatar } from '@/features/companions/chat-controls'
+import { useContacts } from '@/features/companions/context'
 import { AlertTriangle, Bell, CheckCheck, CircleDot, Eraser, ExternalLink, FolderOpen, MoreHorizontal, RotateCcw, Bot, Database, ListTodo, MessageSquare, Settings } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
@@ -66,8 +68,10 @@ function isAutomaticPriorityNotification(item: AppNotificationRecord): boolean {
 
 function notificationDestination(item: AppNotificationRecord) {
   const view = item.workspaceView ?? ''
+  if (typeof item.action?.coordinationConversationId === 'string') return { Icon: MessageSquare, label: '伙伴协作', action: '打开协作对话' }
   if (view.includes('knowledge') || view === 'local-files' || item.sourceType === 'knowledge') return { Icon: Database, label: '资料库', action: '打开资料库' }
   if (view === 'agents' || view === 'agent-detail') return { Icon: Bot, label: '专家', action: '查看专家' }
+  if (item.sourceType === 'companion') return { Icon: MessageSquare, label: '伙伴', action: '打开私聊' }
   if (view === 'chat' || item.sourceType === 'run') return { Icon: MessageSquare, label: '对话', action: '打开对话' }
   if (view === 'model-service') return { Icon: Settings, label: '模型服务', action: '去设置模型服务' }
   if (view.startsWith('settings')) return { Icon: Settings, label: '设置', action: '去设置' }
@@ -94,6 +98,7 @@ function NotificationCenterContent({
   activeConversationId?: string | null
 }) {
   const [unreadOnly, setUnreadOnly] = useState(false)
+  const contactsContext = useContacts()
   const [items, setItems] = useState<AppNotificationRecord[]>([])
   const [preferences, setPreferences] = useState<NotificationPreferencesRecord | null>(null)
   const [loading, setLoading] = useState(desktopRuntimeAvailable)
@@ -122,6 +127,7 @@ function NotificationCenterContent({
       type: toastType[notification.kind],
       title: notification.title,
       description: displayBody(notification),
+      icon: notification.sourceType === 'companion' ? (() => { const companion = contactsContext?.list.companions.find(item => item.id === notification.sourceId); return companion ? <ContactAvatar contact={companion} /> : undefined })() : undefined,
       // Background progress should also leave the screen after a short wait; history stays in the center.
       duration: notification.kind === 'failed' || notification.kind === 'approval' ? 8000 : 5000,
       // UI 1103: a notice that points at a settings page (an external Agent
@@ -140,7 +146,7 @@ function NotificationCenterContent({
           .catch(cause => toast.error('标记通知已读失败', { description: noticeError(cause, '请重试。') }))
       } } : undefined,
     })
-  }, [showToast])
+  }, [contactsContext?.list.companions, showToast])
 
   const clearToastQueue = useCallback(() => dismissToast(), [dismissToast])
 
@@ -264,7 +270,19 @@ function NotificationCenterContent({
     try {
       if (item.readAt == null) await desktopClient.setAppNotificationRead(item.id, true)
       dismissToast(item.id)
-      if (item.workspaceView) {
+      const coordinationId = item.action?.coordinationConversationId
+      if (typeof coordinationId === 'string') {
+        onNavigate('companions', undefined, { conversationId: coordinationId })
+        onOpenChange(false)
+      } else if (item.sourceType === 'companion') {
+        const companion = contactsContext?.list.companions.find(contact => contact.id === item.sourceId && !contact.archivedAt && !contact.deletingAt)
+        if (companion) {
+          if (activeView === 'chat' && (companion.isDefault || companion.workShortcutOrder != null)) onNavigate('chat', undefined, { conversationId: companion.conversationId })
+          else onNavigate('companions', companion.id)
+        }
+        else if (item.workspaceView) onNavigate(item.workspaceView as WorkspaceView, item.entityId ?? undefined)
+        onOpenChange(false)
+      } else if (item.workspaceView) {
         onNavigate(item.workspaceView as WorkspaceView, item.entityId ?? undefined)
         onOpenChange(false)
       }
@@ -304,6 +322,7 @@ function NotificationCenterContent({
   const renderNotificationItem = (item: AppNotificationRecord) => {
     const expanded = expandedId === item.id
     const { Icon, label, action } = notificationDestination(item)
+    const companion = item.sourceType === 'companion' ? contactsContext?.list.companions.find(contact => contact.id === item.sourceId) : undefined
     // Run records store the conversation title, rather than an event title.
     const title = item.sourceType === 'run'
       ? item.kind === 'failed' ? '任务运行失败'
@@ -312,15 +331,15 @@ function NotificationCenterContent({
             : item.kind === 'approval' ? '等待确认'
               : item.kind === 'question' ? '等待回答'
                 : item.status === 'queued' ? '任务正在排队' : '任务正在执行'
-      : item.title
-    const source = item.sourceType === 'run' ? item.title : label
+      : companion?.displayName ?? item.title
+    const source = item.sourceType === 'run' ? item.title : item.sourceType === 'companion' ? (item.kind === 'approval' || item.kind === 'question' ? item.title : displayBody(item)) : label
     const status = item.kind === 'failed' ? '失败' : item.readAt == null ? '未读' : '已读'
     const downloadedFile = item.action.type === 'downloaded_file' && typeof item.action.path === 'string'
     const canOpenDirectly = downloadedFile && item.action.canOpenDirectly === true
-    return <article key={item.id} className={`fox-notification-entry ${expanded ? 'is-expanded' : ''}`}>
+    return <article key={item.id} className={`fox-notification-entry ${item.readAt == null ? 'is-unread' : ''} ${expanded ? 'is-expanded' : ''}`} >
       <div className={`fox-notification-item fox-sidebar-tree-row is-${item.kind} ${item.readAt == null ? 'is-unread' : ''} ${expanded ? 'is-active' : ''}`}>
         <button type="button" className="fox-notification-item-main" onClick={() => void inspectItem(item)} aria-expanded={expanded}>
-          <span className="fox-notification-source-icon" role="img" aria-label={`${label}通知，${status}`}><Icon aria-hidden="true" />{item.kind === 'failed' ? <i className="fox-notification-badge is-failed" /> : item.readAt == null ? <i className="fox-notification-badge is-unread" /> : null}</span>
+          <span className={`fox-notification-source-icon ${companion ? 'is-companion' : ''}`} role="img" aria-label={`${label}通知，${status}`}>{companion ? <ContactAvatar contact={companion} /> : <Icon aria-hidden="true" />}{item.kind === 'failed' ? <i className="fox-notification-badge is-failed" /> : item.readAt == null ? <i className="fox-notification-badge is-unread" /> : null}</span>
           <span className="fox-notification-copy"><span className="fox-notification-line"><strong>{title}</strong><time>{new Date(item.updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time></span><small>{source}</small>{item.progress != null && item.kind === 'progress' && <Progress value={item.progress} aria-label={`${item.title}进度`} className="mt-1 h-1" />}</span>
         </button>
 

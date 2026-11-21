@@ -12,21 +12,40 @@ static PROCESS_START_MARKER: OnceLock<Option<i64>> = OnceLock::new();
 /// Unknown/access-denied ownership stays untouched. Another live Fox process
 /// sharing the database is not an orphan merely because its PID differs.
 pub(crate) fn owner_is_gone(pid: Option<i64>, marker: Option<i64>) -> bool {
-    let Some(pid) = pid.and_then(|id| u32::try_from(id).ok()).filter(|id| *id > 0) else { return true; };
-    if pid == std::process::id() { return marker != process_start_marker(); }
+    let Some(pid) = pid
+        .and_then(|id| u32::try_from(id).ok())
+        .filter(|id| *id > 0)
+    else {
+        return true;
+    };
+    if pid == std::process::id() {
+        return marker != process_start_marker();
+    }
     #[cfg(target_os = "windows")]
     unsafe {
-        #[repr(C)] struct FileTime { low: u32, high: u32 }
+        #[repr(C)]
+        struct FileTime {
+            low: u32,
+            high: u32,
+        }
         #[link(name = "kernel32")]
         extern "system" {
             fn OpenProcess(access: u32, inherit: i32, pid: u32) -> isize;
             fn CloseHandle(handle: isize) -> i32;
             fn GetLastError() -> u32;
             fn GetExitCodeProcess(handle: isize, code: *mut u32) -> i32;
-            fn GetProcessTimes(handle: isize, creation: *mut FileTime, exit: *mut FileTime, kernel: *mut FileTime, user: *mut FileTime) -> i32;
+            fn GetProcessTimes(
+                handle: isize,
+                creation: *mut FileTime,
+                exit: *mut FileTime,
+                kernel: *mut FileTime,
+                user: *mut FileTime,
+            ) -> i32;
         }
         let handle = OpenProcess(0x1000, 0, pid);
-        if handle == 0 { return matches!(GetLastError(), 87 | 1168); }
+        if handle == 0 {
+            return matches!(GetLastError(), 87 | 1168);
+        }
         let mut exit_code = 259;
         let stopped = GetExitCodeProcess(handle, &mut exit_code) != 0 && exit_code != 259;
         let mut creation: FileTime = std::mem::zeroed();
@@ -39,7 +58,9 @@ pub(crate) fn owner_is_gone(pid: Option<i64>, marker: Option<i64>) -> bool {
         return stopped || (known && marker.is_some_and(|expected| expected != start));
     }
     #[cfg(not(target_os = "windows"))]
-    { matches!(std::fs::metadata(format!("/proc/{pid}")), Err(error) if error.kind() == std::io::ErrorKind::NotFound) }
+    {
+        matches!(std::fs::metadata(format!("/proc/{pid}")), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    }
 }
 
 #[cfg(test)]

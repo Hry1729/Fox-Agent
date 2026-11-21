@@ -1,15 +1,16 @@
 import { cloneElement, type ComponentProps, type ComponentType, type ReactElement } from 'react'
-import { MessageCirclePlus as StaticMessageCirclePlus, Users as StaticUsers, Blocks as StaticBlocks, PanelLeft as StaticPanelLeft, PanelLeftOpen as StaticPanelLeftOpen, PanelRight as StaticPanelRight, Settings as StaticSettings, SunMoon as StaticSunMoon, Maximize as StaticMaximize, Minimize as StaticMinimize, Search as StaticSearch, Bell as StaticBell, Wallet as StaticWallet, Folders as StaticFolders, Library as StaticLibrary, Orbit as StaticOrbit, ListTodo as StaticListTodo, BookCopy as StaticBookCopy, House as StaticHouse, Sparkles as StaticSparkles, AlignLeft as StaticAlignLeft } from 'lucide-react'
+import { MessageCirclePlus as StaticMessageCirclePlus, Users as StaticUsers, Blocks as StaticBlocks, PanelLeft as StaticPanelLeft, PanelLeftOpen as StaticPanelLeftOpen, PanelRight as StaticPanelRight, Settings as StaticSettings, SunMoon as StaticSunMoon, Maximize as StaticMaximize, Minimize as StaticMinimize, Search as StaticSearch, Bell as StaticBell, Wallet as StaticWallet, Folders as StaticFolders, Library as StaticLibrary, Orbit as StaticOrbit, ListTodo as StaticListTodo, BookCopy as StaticBookCopy, House as StaticHouse, Sparkles as StaticSparkles, AlignLeft as StaticAlignLeft, SquareKanban as StaticSquareKanban } from 'lucide-react'
 import type { AnimateIconProps, IconProps } from '@/components/animate-ui/icons/icon'
 import { deferredModule } from './use-deferred-module'
 import { MessageCircleMore as StaticMessageCircleMore } from 'lucide-react'
 import { ArrowLeft as StaticArrowLeft, ArrowRight as StaticArrowRight } from 'lucide-react'
+import { StaticCatPaw } from '@/components/animate-ui/icons/cat-paw-static'
 
 const implementation = deferredModule(() => import('./animated-icons-implementation'))
 export type { IconProps, AnimateIconProps } from '@/components/animate-ui/icons/icon'
 export type AnimatedIconTriggerProps = Omit<AnimateIconProps, 'asChild' | 'children' | 'loop' | 'animate' | 'animateOnView'> & { children: ReactElement }
 
-function icon(name: 'ArrowLeft' | 'ArrowRight' | 'MessageCirclePlus' | 'MessageCircleMore' | 'Users' | 'Blocks' | 'PanelLeft' | 'PanelLeftOpen' | 'PanelRight' | 'Settings' | 'SunMoon' | 'Maximize' | 'Minimize' | 'Search' | 'Bell' | 'Wallet' | 'Folders' | 'Library' | 'Orbit' | 'ListTodo' | 'BookCopy' | 'Home' | 'Sparkles' | 'AlignLeft', Fallback: typeof StaticBell) {
+function icon(name: 'ArrowLeft' | 'ArrowRight' | 'MessageCirclePlus' | 'MessageCircleMore' | 'Users' | 'Blocks' | 'PanelLeft' | 'PanelLeftOpen' | 'PanelRight' | 'Settings' | 'SunMoon' | 'Maximize' | 'Minimize' | 'Search' | 'Bell' | 'Wallet' | 'Folders' | 'Library' | 'Orbit' | 'ListTodo' | 'BookCopy' | 'Home' | 'Sparkles' | 'AlignLeft' | 'SquareKanban' | 'CatPaw', Fallback: ComponentType<ComponentProps<typeof StaticBell>>) {
   return function DeferredIcon(props: IconProps<string>) {
     const loaded = implementation.useModule()
     if (loaded) { const Icon = loaded[name] as ComponentType<IconProps<string>>; return <Icon {...props} /> }
@@ -57,6 +58,10 @@ export const ListTodo = icon('ListTodo', StaticListTodo)
 export { ListTodo as ListTodoIcon }
 export const BookCopy = icon('BookCopy', StaticBookCopy)
 export { BookCopy as BookCopyIcon }
+export const SquareKanban = icon('SquareKanban', StaticSquareKanban)
+export { SquareKanban as SquareKanbanIcon }
+export const CatPaw = icon('CatPaw', StaticCatPaw)
+export { CatPaw as CatPawIcon }
 export const Home = icon('Home', StaticHouse)
 export { Home as HomeIcon }
 export const Sparkles = icon('Sparkles', StaticSparkles)

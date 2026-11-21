@@ -10,7 +10,7 @@ import type { ContactBubbleRecord } from '../src/features/conversations/model/ty
 const bubble = (deliveryOrder: number, author: 'user' | 'companion'): ContactBubbleRecord => ({
   id: `b${deliveryOrder}`, conversationId: 'c', runId: null, messageId: `m${deliveryOrder}`,
   sourceOrdinal: deliveryOrder / 1000, author, projection: 'message', segmentStart: null,
-  segmentEnd: null, deliveryOrder, deliveredAt: deliveryOrder, content: 'x', fingerprint: 'f',
+  segmentEnd: null, deliveryOrder, deliveredAt: deliveryOrder, content: 'x', fingerprint: 'f', metadata: {},
 })
 
 describe('K6 bubble read position', () => {

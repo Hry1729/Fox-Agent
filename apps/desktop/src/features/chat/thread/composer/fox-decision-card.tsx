@@ -1,16 +1,11 @@
-import { Confirmation, ConfirmationAction, ConfirmationActions, ConfirmationRequest, ConfirmationTitle } from '@/components/ai-elements/confirmation'
-import { Suggestion, Suggestions } from '@/components/ai-elements/suggestion'
+import { QuestionPages } from '../../composer/question-answer-rows'
 import { GoalProgress } from '../../components/GoalProgress'
-import { RuntimeApprovalPrompt } from '../../components/RuntimeApprovalPrompt'
+import { RuntimeApprovalQueue } from '../../components/RuntimeApprovalPrompt'
 import { type ComposerAccessMode, FOX_ACCESS_MODES } from '../../access-mode'
-import { Input } from '@/components/ui/input'
-import { Button } from '@/components/ui/button'
-import { isConfirmationQuestion } from '../../fox-shared'
 import { type GoalProgressData } from '../../hooks/use-goal-progress'
 import { type RuntimeQuestion, type RuntimeQuestionRequest } from '@/features/conversations/model/pending-interactions'
 import { type ApprovalDecision, type ApprovalRecord, type ProjectRecord, type TaskEvidenceRecord } from '@/features/conversations/model/types'
 import { notify as toast } from '@/features/notifications'
-import { CircleHelp } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 
 /**
@@ -32,7 +27,6 @@ export function FoxDecisionCard({ questionRequest, onSubmitQuestion, runtimeAppr
 }) {
   const pendingApprovals = (runtimeApprovals ?? [])
     .filter((approval) => approval.status === 'pending')
-    .sort((left, right) => left.requestedAt - right.requestedAt || left.id.localeCompare(right.id))
   const activeApproval = pendingApprovals[0]
   const activeQuestionRequest = questionRequest ?? null
   const planRevisionPending = Boolean(onResolvePlanRevision && goalProgressData?.planRevisions.some((plan) => plan.status === 'proposed'))
@@ -42,7 +36,7 @@ export function FoxDecisionCard({ questionRequest, onSubmitQuestion, runtimeAppr
 
   return <div className="fox-decision-card">
     {activeApproval && onResolveApproval && <div className="fox-decision-approval-list">
-      <RuntimeApprovalPrompt key={activeApproval.id} approval={activeApproval} onResolve={onResolveApproval} />
+      <RuntimeApprovalQueue approvals={pendingApprovals} onResolve={onResolveApproval} />
     </div>}
     {!activeApproval && activeQuestionRequest && <FoxQuestionCard request={activeQuestionRequest} onSubmitQuestion={onSubmitQuestion} />}
     {!activeApproval && !activeQuestionRequest && (goalConfirmationPending || planRevisionPending || workflowGatePending) && goalProgressData && <div className="fox-goal-decision-content">
@@ -55,19 +49,18 @@ export function FoxDecisionCard({ questionRequest, onSubmitQuestion, runtimeAppr
 function FoxQuestionCard({ request, onSubmitQuestion }: { request: RuntimeQuestionRequest; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean> }) {
   const [selections, setSelections] = useState<Record<string, string[]>>({})
   const [otherAnswers, setOtherAnswers] = useState<Record<string, string>>({})
-  const [freeform, setFreeform] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const submittingRef = useRef(false)
 
   useEffect(() => {
     setSelections({})
     setOtherAnswers({})
-    setFreeform('')
     submittingRef.current = false
     setSubmitting(false)
   }, [request.runId])
 
   const selectOption = (question: RuntimeQuestion, value: string) => {
+    setOtherAnswers(current => ({ ...current, [question.questionId]: '' }))
     setSelections((current) => {
       const selected = current[question.questionId] ?? []
       return {
@@ -79,7 +72,7 @@ function FoxQuestionCard({ request, onSubmitQuestion }: { request: RuntimeQuesti
     })
   }
 
-  const buildAnswer = (otherText: string) => {
+  const buildAnswer = () => {
     const answers: Record<string, string | string[]> = {}
     const lines: string[] = []
     for (const question of request.questions) {
@@ -89,23 +82,18 @@ function FoxQuestionCard({ request, onSubmitQuestion }: { request: RuntimeQuesti
         const labels = selected.map((value) => question.options.find((option) => option.value === value)?.label ?? value)
         lines.push(`${question.question}：${labels.join('、')}`)
       } else {
-        const individualAnswer = otherAnswers[question.questionId]?.trim()
-        const fallbackAnswer = request.questions.length === 1 ? otherText.trim() : ''
-        const openAnswer = individualAnswer || fallbackAnswer
+        const openAnswer = otherAnswers[question.questionId]?.trim()
         if (!question.allowOther || !openAnswer) return null
         answers[question.questionId] = openAnswer
         lines.push(`${question.question}：${openAnswer}`)
       }
-    }
-    if (otherText.trim() && !Object.values(answers).some((value) => value === otherText.trim())) {
-      lines.push(`其他补充：${otherText.trim()}`)
     }
     return { answers, text: lines.join('\n') }
   }
 
   const submit = async () => {
     if (!onSubmitQuestion || submittingRef.current) return
-    const answer = buildAnswer(freeform)
+    const answer = buildAnswer()
     if (!answer) {
       toast.error('请先完成需要补充的事项')
       return
@@ -119,33 +107,11 @@ function FoxQuestionCard({ request, onSubmitQuestion }: { request: RuntimeQuesti
     }
   }
 
-  return <div className="fox-question-decision-content">
-    <header><span><CircleHelp size={15} /></span><div><strong>需要你补充一点信息</strong><small>回答后 Fox 会继续刚才的任务</small></div></header>
-    <div className="fox-question-decision-list">
-      {request.questions.map((question, index) => isConfirmationQuestion(question) ? (
-        <Confirmation key={question.questionId} approval={{ id: question.questionId }} state="approval-requested" className="fox-question-confirmation">
-          <ConfirmationRequest>
-            <ConfirmationTitle>{question.question}</ConfirmationTitle>
-            <ConfirmationActions>
-              {question.options.map((option) => <ConfirmationAction key={option.value} disabled={submitting} variant={(selections[question.questionId] ?? []).includes(option.value) ? 'default' : 'outline'} onClick={() => selectOption(question, option.value)}>{option.label}</ConfirmationAction>)}
-            </ConfirmationActions>
-          </ConfirmationRequest>
-        </Confirmation>
-      ) : (
-        <section key={question.questionId} className="fox-question-field">
-          <div><b>{request.questions.length > 1 ? `${index + 1}. ` : ''}{question.question}</b>{question.multiSelect && <small>可多选</small>}</div>
-          <Suggestions className="fox-question-suggestions">
-            {question.options.map((option) => <Suggestion key={option.value} suggestion={option.value} disabled={submitting} variant={(selections[question.questionId] ?? []).includes(option.value) ? 'default' : 'outline'} onClick={() => selectOption(question, option.value)}>{option.label}</Suggestion>)}
-          </Suggestions>
-          {question.allowOther && request.questions.length > 1 && <Input disabled={submitting} value={otherAnswers[question.questionId] ?? ''} onChange={(event) => setOtherAnswers((current) => ({ ...current, [question.questionId]: event.target.value }))} placeholder="输入这一项的补充答案" />}
-        </section>
-      ))}
-    </div>
-    <div className="fox-question-decision-actions">
-      {request.questions.length === 1 && request.questions[0]?.allowOther && <Input disabled={submitting} value={freeform} onChange={(event) => setFreeform(event.currentTarget.value)} placeholder="也可以输入自己的答案" />}
-      <Button disabled={submitting} onClick={() => void submit()}>{submitting ? '正在提交…' : '确认并继续'}</Button>
-    </div>
-  </div>
+  return <QuestionPages key={request.runId} questions={request.questions} selections={selections} otherAnswers={otherAnswers} submitting={submitting}
+    onSelect={selectOption} onOtherChange={(question, value) => {
+      setOtherAnswers(current => ({ ...current, [question.questionId]: value }))
+      setSelections(current => ({ ...current, [question.questionId]: [] }))
+    }} onSubmit={() => void submit()} />
 }
 
 /** The four execution-mode labels shared by the composer menu (A1). */

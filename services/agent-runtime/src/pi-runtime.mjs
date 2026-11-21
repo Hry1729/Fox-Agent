@@ -1,4 +1,6 @@
 import { selectCompanionTools } from './companion-tools.mjs'
+import { composeCompanionTurn } from './companion-turn.mjs'
+import { CONTACT_QUESTION_TOOL, createContactQuestionTool, createUserQuestionTool } from './contact-question-tool.mjs'
 import { createInterface } from 'node:readline'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
@@ -585,6 +587,7 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
   const seq = { value: 1 }
   const fallbackMessages = normalizeHistory(request.payload?.messages)
   const currentText = String(request.payload?.text || '')
+  const promptText = composeCompanionTurn(currentText, request.payload?.companionContext, request.payload?.companionCoordination)
   const previousUserText = [...fallbackMessages]
     .reverse()
     .find((message) => message?.role === 'user' && message.content !== currentText)?.content
@@ -662,9 +665,11 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
   emit('run.started', { model: modelService.modelId, executionProfileId: activeExecutionProfile.id })
   const toolPreparers = new Map()
   const registeredEventTools = new Set()
+  let contactQuestion = null
   mapper = createPiEventMapper(emit, { deferCompletion: true,
     prepareToolInput: (name, input) => toolPreparers.get(name)?.(input) ?? input,
     isToolRegistered: name => registeredEventTools.has(name),
+    isLocalTool: name => name === CONTACT_QUESTION_TOOL,
   })
   runControl.mapper = mapper
   let agent = null
@@ -728,14 +733,14 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
       ...(executorRoute === 'pi_native' ? {
         signal: runAbort.signal,
         onFailure: error => failRun(error.code ?? 'runtime.model_request_failed', error.message),
-        beforeAttempt: async ({ requestId, stage, maxOutputTokens, signal }) => {
+        beforeAttempt: async ({ requestId, stage, maxOutputTokens, estimatedInputTokens, signal }) => {
           try {
             await modelToolBridge?.drain()
           } catch (error) {
             throw failRun('runtime.native_tool_bridge_failed', error.message)
           }
           signal?.throwIfAborted()
-          const response = await hostTransport('model_request.admit', { requestId, stage, maxOutputTokens }, signal)
+          const response = await hostTransport('model_request.admit', { requestId, stage, maxOutputTokens, estimatedInputTokens }, signal)
           if (response.type !== 'model_request.admitted' || response.payload?.allowed !== true) {
             throw failRun(response.payload?.code ?? response.payload?.errorDetails?.code ?? 'runtime.model_request_denied',
               response.payload?.error ?? response.payload?.reasonCode ?? 'Host did not admit the model request.')
@@ -765,6 +770,7 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     workSnapshot: request.payload?.workSnapshot,
     memoryContext: request.payload?.memoryContext,
     companionContext: request.payload?.companionContext,
+    companionCoordination: request.payload?.companionCoordination,
     previousRunBackgroundJobs: request.payload?.previousRunBackgroundJobs ?? null,
     assistantPackage: request.payload?.assistantPackage,
     skillPrompt: request.payload?.skillPrompt,
@@ -797,20 +803,30 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     ...createMcpTools(hostRequest),
   ]
   assertRegisteredToolsMatchCatalog(catalogTools)
-  const continuationTools = createContinuationDecisionTools({
-    runId: request.runId,
-    executionProfile: activeExecutionProfile,
-    getEventCursor: () => Math.max(0, seq.value - 1),
-    onProposal: (proposal) => emit(CONTINUATION_PROPOSAL_EVENT_TYPE, { proposal }),
-  })
+  const consultation = planningContext.companionCoordination?.incoming?.consult
   const toolDiagnostics = diagnoseToolsForAgentContext(
     catalogTools,
     request.payload?.assistantPackage,
     request.payload?.expertPackage,
   )
-  const companionTools = selectCompanionTools(catalogTools, toolDiagnostics, planningContext.companionContext)
+  const companionOwner = planningContext.companionContext?.role === 'owner'
+  const createQuestionTool = companionOwner ? createContactQuestionTool : createUserQuestionTool
+  const userQuestionTools = !planningContext.companionCoordination?.incoming && !approvalDemo
+    && !['child_worker', 'expert_consultation'].includes(planningContext.runContext?.runRole)
+    && (companionOwner || toolDiagnostics.tools.length > 0)
+    ? [createQuestionTool(question => { contactQuestion = question })]
+    : []
+  const continuationTools = consultation ? [] : createContinuationDecisionTools({
+    runId: request.runId,
+    executionProfile: activeExecutionProfile,
+    getEventCursor: () => Math.max(0, seq.value - 1),
+    onProposal: (proposal) => emit(CONTINUATION_PROPOSAL_EVENT_TYPE, { proposal }),
+  })
+  const companionTools = selectCompanionTools(
+    catalogTools, toolDiagnostics, planningContext.companionContext, planningContext.companionCoordination,
+  )
   const profileToolSelection = applyExecutionProfileToTools(
-    [...companionTools, ...continuationTools],
+    [...companionTools, ...continuationTools, ...userQuestionTools],
     activeExecutionProfile,
   )
   const projectSelection = selectToolsForProjectContext(
@@ -832,9 +848,10 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
   ]
   // Route the Fox executor before Pi result projection and Run budgeting. Both
   // wrappers must still see every Host answer, including work-extension tools.
-  const localTools = projectToolSelection.tools.filter((tool) => tool.name === CONTINUATION_PROPOSAL_TOOL_NAME)
+  const localToolNames = [CONTINUATION_PROPOSAL_TOOL_NAME, CONTACT_QUESTION_TOOL]
+  const localTools = projectToolSelection.tools.filter((tool) => localToolNames.includes(tool.name))
   const routedTools = nativeToolBridge
-    ? [...nativeToolBridge.wrapTools(projectToolSelection.tools.filter((tool) => tool.name !== CONTINUATION_PROPOSAL_TOOL_NAME)), ...localTools]
+    ? [...nativeToolBridge.wrapTools(projectToolSelection.tools.filter((tool) => !localToolNames.includes(tool.name))), ...localTools]
     : projectToolSelection.tools
   const tools = applyToolBudget(
     adaptFoxToolsToPi(routedTools, { runId: request.runId, storageFor: hostToolResultStorage }),
@@ -879,7 +896,7 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     .map((tool) => tool.name))
   const workTools = tools.filter((tool) => workToolNames.has(tool.name))
   const customTools = tools.filter((tool) => !workToolNames.has(tool.name))
-  const composePrompt = (plannerPlan = null) => composeRuntimePrompt({
+  const composePrompt = (plannerPlan = null, plannerFallback = false) => composeRuntimePrompt({
     systemPrompt: request.payload?.systemPrompt,
     modelInstructions: [modelProfilePrompt(modelProfile), executionProfilePrompt(activeExecutionProfile)]
       .filter(Boolean)
@@ -896,6 +913,7 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
       cwd,
       recovery: request.payload?.recoveryContext || null,
       plannerPlan: plannerPlan ? plannerHandoff(plannerPlan) : null,
+      plannerFallback,
     },
   })
   // Reject an impossible request before the planner or the SDK can issue any
@@ -909,7 +927,7 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     toolDefinitions: JSON.stringify(tools.map(({ name, description, parameters }) => ({
       name, description, parameters,
     }))),
-    userText: currentText,
+    userText: promptText,
     contextWindow: modelProfile.contextWindow,
     reserveTokens: modelProfile.runtime.reserveTokens,
   })
@@ -920,7 +938,8 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     )
   }
   let plannerPlan = null
-  if (modelProfile.planner.enabled && shouldUsePlanner(currentText, {
+  let plannerFallback = false
+  if (!consultation && modelProfile.planner.enabled && shouldUsePlanner(currentText, {
     approvalDemo,
     apiType: modelService.apiType,
     hasProject: Boolean(planningContext.projectRoot),
@@ -942,7 +961,7 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
         modelRuntime,
         context: planningContext,
         history: transcript,
-        text: currentText,
+        text: promptText,
         preflight,
         toolBridge: plannerToolBridge,
         prepareTools: list => applyToolBudget(adaptFoxToolsToPi(list, { runId: request.runId, storageFor: hostToolResultStorage })),
@@ -960,8 +979,9 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
       })
     } catch (error) {
       if (runControl.cancelled) throw error
+      plannerFallback = true
       emit('planner.failed', {
-        code: 'planner.failed',
+        code: error?.code ?? 'planner.failed',
         message: error instanceof Error ? error.message : String(error),
         fallback: 'executor_only',
       })
@@ -972,7 +992,7 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     if (runControl.budgetError) throw runControl.budgetError
     runAbort.signal.throwIfAborted()
   }
-  const promptComposition = composePrompt(plannerPlan)
+  const promptComposition = composePrompt(plannerPlan, plannerFallback)
   requestSnapshot.stablePromptHash = promptComposition.stablePromptHash
   requestSnapshot.contextHash = promptComposition.contextHash
   requestSnapshot.promptDefinitionId = promptComposition.diagnostics.promptRegistry.definitionId
@@ -1031,6 +1051,10 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
   if (session.format === 'pi-native' && !nativeManager) {
     throw sessionError('session.native_not_open', 'The native Pi session is not open for this run.')
   }
+  const checkWorkbookSource = plannerFallback && planningContext.projectRoot
+    && effectiveToolNames.includes('ls') && effectiveToolNames.includes('read')
+  const sourceChecks = new Map()
+  let workbookSourceChecked = false
   // The bridge hook is composed with the SDK's own beforeToolCall inside
   // `createFoxAgentSession`; the SDK overwrites a same-named option.
   const created = await createFoxAgentSession({
@@ -1044,12 +1068,90 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     sessionManager: nativeManager ?? SessionManager.inMemory(cwd),
     settingsManager,
     modelRuntime,
-    foxBeforeToolCall: nativeToolBridge ? (context, signal) => nativeToolBridge.beforeToolCall(context, signal).catch(error => {
-      throw failRun(error.code ?? 'runtime.native_tool_bridge_failed', error.message)
-    }) : undefined,
+    foxBeforeToolCall: async (context, signal) => {
+      if (context.toolCall.name === CONTACT_QUESTION_TOOL
+        && context.assistantMessage.content.filter(part => part.type === 'toolCall').length > 1) {
+        return { block: true, reason: '请单独调用 ask_user，问完后等待用户回答。' }
+      }
+      if (checkWorkbookSource && !workbookSourceChecked) {
+        const { name } = context.toolCall
+        const args = context.args
+        const createsWorkbook = name === 'call_mcp_tool' && args.serverId === 'fox-office'
+          && args.tool === 'office_create' && /\.xlsx$/iu.test(args.arguments?.output ?? '')
+        if (createsWorkbook) {
+          return { block: true, reason: 'Planner 降级后须先核对材料。请先 read 用户指定的源文件，或 ls 项目的 input 目录后 read 匹配的源文件。若 input 目录不存在，可 ls 项目根目录核实。材料缺失或有多个候选时，先向用户确认。' }
+        }
+        if (name === 'read' || name === 'ls') {
+          const path = (args.path || '.').replaceAll('\\', '/').replace(/^\.\//u, '').replace(/\/$/u, '').toLowerCase()
+          sourceChecks.set(context.toolCall.id, path)
+        }
+      }
+      try {
+        return await nativeToolBridge?.beforeToolCall(context, signal)
+      } catch (error) {
+        throw failRun(error.code ?? 'runtime.native_tool_bridge_failed', error.message)
+      }
+    },
   })
   agent = created.session
   runControl.agent = agent
+  if (nativeManager && nativeToolBridge && request.payload?.currentRunSteering === true) {
+    const finishTurn = agent.agent.finishTurn
+    const prepareNextTurn = agent.agent.prepareNextTurnWithContext
+    const prepareRequest = agent.agent.prepareRequest
+    let steeringThrough = null
+    let finalizationChecked = false
+    let deliveryReminder = null
+    const enqueueSteering = async (signal) => {
+      if (steeringThrough !== null) return
+      const { payload } = await hostRequest('run.steering.advance', {}, signal)
+      if (payload.isError) throw failRun('runtime.steering_failed', payload.error)
+      const messages = payload.messages
+      steeringThrough = messages.at(-1)?.seq ?? null
+      if (messages.length) {
+        // Keep this batch in one Pi queue item so request preparation applies
+        // exactly the input just appended to the session.
+        agent.agent.steer({ role: 'user', timestamp: Date.now(), content: [
+          { type: 'text', text: messages.map(message => message.content).join('\n\n') },
+        ] })
+      }
+    }
+    agent.agent.finishTurn = async (turn, signal) => {
+      const decision = await finishTurn?.(turn, signal)
+      if (decision?.action === 'end' || ['error', 'aborted'].includes(turn.message.stopReason)) return decision
+      await enqueueSteering(signal)
+      if (steeringThrough !== null || finalizationChecked || contactQuestion || approvalDemo || consultation
+        || planningContext.runContext?.runRole === 'child_worker' || !effectiveToolNames.includes('present_files')
+        || !planningContext.projectRoot || turn.message.content.some(part => part.type === 'toolCall')) return decision
+      finalizationChecked = true
+      const { payload } = await hostRequest('run.delivery.finalize', {}, signal)
+      if (payload.isError) throw failRun('runtime.delivery_finalization_failed', payload.error)
+      if (payload.candidates.length) {
+        deliveryReminder = `Fox Host 尚未登记本轮交付文件。已写入且仍存在的候选路径为 ${JSON.stringify(payload.candidates)}。请根据最新用户要求调用 present_files，仅登记实际最终文件。已有正确文件时直接登记。如校验失败，请修复原文件后重新登记。`
+        return { action: 'continue' }
+      }
+      return decision
+    }
+    agent.agent.prepareNextTurnWithContext = async (turn, signal) => {
+      const prepared = await prepareNextTurn?.(turn, signal)
+      await enqueueSteering(signal)
+      if (deliveryReminder !== null) {
+        const message = { role: 'system', content: deliveryReminder, timestamp: Date.now() }
+        deliveryReminder = null
+        return { ...prepared, messages: [...(prepared?.messages ?? []), message] }
+      }
+      return prepared
+    }
+    agent.agent.prepareRequest = async (context, signal) => {
+      const prepared = await prepareRequest?.(context, signal)
+      if (steeringThrough !== null) {
+        const { payload } = await hostRequest('run.steering.advance', { appliedThrough: steeringThrough }, signal)
+        if (payload.isError) throw failRun('runtime.steering_failed', payload.error)
+        steeringThrough = null
+      }
+      return prepared
+    }
+  }
   if (nativeManager) {
     // The manager already holds every prior turn (and the compaction record).
     // Injecting Fox's display history here would duplicate the conversation and
@@ -1099,6 +1201,21 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     mapper.handle(event)
   }
   stopListening = agent.subscribe((event) => {
+    if (sourceChecks.has(event.toolCallId) && event.type === 'tool_execution_end') {
+      const path = sourceChecks.get(event.toolCallId)
+      sourceChecks.delete(event.toolCallId)
+      if (!event.isError) {
+        const details = event.result?.details
+        const text = event.result?.content?.find(part => part.type === 'text')?.text ?? ''
+        if (event.toolName === 'read') {
+          workbookSourceChecked ||= path.startsWith('input/')
+            || (path.includes('.') && !path.startsWith('output/') && currentText.toLowerCase().includes(path))
+        } else if (!details?.truncated && !details?.outputTruncated) {
+          workbookSourceChecked ||= (path === 'input' && details?.count === 0)
+            || ((path === '.' || path === '') && Number.isInteger(details?.count) && !/^\[dir\] input$/imu.test(text))
+        }
+      }
+    }
     if (event?.type === 'agent_end' && !event.willRetry) terminalSeen = true
     if (nativeToolBridge) {
       const bridgeFailure = error => failRun('runtime.native_tool_bridge_failed', `Native tool bridge could not report its batch positions: ${error?.message ?? error}`)
@@ -1123,7 +1240,7 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     if (nativeManager) markNativeSessionRun(nativeManager, {
       runId: request.runId, contextGeneration: session.contextGeneration ?? 1, executorRoute,
     })
-    await agent.prompt(request.payload?.text ?? '', { images, expandPromptTemplates: false })
+    await agent.prompt(promptText, { images, expandPromptTemplates: false })
     await nativeEventQueue
     await nativeToolBridge?.drain()
     if (runControl.budgetError) throw runControl.budgetError
@@ -1148,8 +1265,12 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
         runtimeEvent(request, seq, 'message.completed')
       }
     }
+    const contextUsage = agent.getContextUsage()
+    if (contextUsage?.tokens != null) {
+      emit('context.usage', { usedTokens: contextUsage.tokens, limitTokens: contextUsage.contextWindow })
+    }
     emit('run.phase', { phase: 'finalizing', outcome: 'completed' })
-    mapper.finish()
+    mapper.finish(contactQuestion)
   } catch (error) {
     emit('run.phase', { phase: 'finalizing', outcome: runControl.cancelled ? 'cancelled' : 'failed' })
     if (runControl.cancelled) mapper.cancel()
@@ -1368,7 +1489,7 @@ async function handleRequest(request) {
               signal: AbortSignal.any([slot.abort.signal, AbortSignal.timeout(30_000)]),
             })
             slot.abort.signal.throwIfAborted()
-            if (frozenProject) request.payload.projectContext = frozenProject
+            if (frozenProject) request.payload.projectContext = { ...request.payload.projectContext, ...frozenProject }
             respond(request, 'request_succeeded')
             acknowledged = true
             await executePrompt(request, config, slot)

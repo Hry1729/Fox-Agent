@@ -153,7 +153,7 @@ export async function reconcileNativeSession({ manager, runId, contextGeneration
     throw recoveryError('session.native_waiting_approval', 'The Pi session is waiting for Host approval; no new prompt can start.')
   }
   if (body.blocked || body.facts.some(fact => fact.state === 'outcome_unknown')) {
-    throw recoveryError('session.native_recovery_pending', 'A managed tool outcome is unknown and needs Host reconciliation before a new prompt.')
+    throw recoveryError('session.native_recovery_pending', '上一次工具调用缺少回执，结果暂未核实。Fox 未重发原操作。你可以在原对话再次发起核实。')
   }
   const expected = []
   for (let index = 0; index < calls.length; index += 1) {

@@ -39,8 +39,12 @@ fn search(
 #[test]
 fn search_knowledge_tool_reports_index_not_ready_and_keeps_binding_isolation() {
     let (store, root) = temp_store("tool");
-    let (base_a, document_a, _) =
-        base_with_document(&store, "A", "a.md", &["A 项目私有知识 第一段", "A 项目私有知识 第二段"]);
+    let (base_a, document_a, _) = base_with_document(
+        &store,
+        "A",
+        "a.md",
+        &["A 项目私有知识 第一段", "A 项目私有知识 第二段"],
+    );
     let (base_b, _, _) = base_with_document(&store, "B", "b.md", &["B 项目私有知识"]);
     let bindings = [binding(&base_a)];
 
@@ -77,7 +81,10 @@ fn search_knowledge_tool_reports_index_not_ready_and_keeps_binding_isolation() {
         json!({ "target": { "source": "local", "id": base_b }, "query": "私有知识" }),
     )
     .unwrap_err();
-    assert!(foreign.contains("local_knowledge.binding_invalid"), "{foreign}");
+    assert!(
+        foreign.contains("local_knowledge.binding_invalid"),
+        "{foreign}"
+    );
     assert!(!foreign.contains("B 项目私有知识"));
 
     let mixed = search(
@@ -110,8 +117,14 @@ fn doc3_keyword_retrieval_has_every_key_the_agent_mapping_reads() {
     assert!(result.get("mode").is_some());
     assert_eq!(result["mode"], "keyword");
     assert!(result.get("fusionVersion").is_some());
-    let items = result.get("items").and_then(Value::as_array).expect("items");
-    assert!(!items.is_empty(), "keyword retrieval must return the fixture hit");
+    let items = result
+        .get("items")
+        .and_then(Value::as_array)
+        .expect("items");
+    assert!(
+        !items.is_empty(),
+        "keyword retrieval must return the fixture hit"
+    );
     for item in items {
         assert!(item.get("chunkId").is_some(), "{item}");
         assert!(item.get("score").is_some(), "{item}");

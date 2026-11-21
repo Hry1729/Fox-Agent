@@ -35,6 +35,10 @@
   transition: border-color var(--fox-duration-base) var(--fox-ease-out), box-shadow var(--fox-duration-base) var(--fox-ease-out), background-color var(--fox-duration-base) var(--fox-ease-out);
 }
 
+[data-color-theme='mist']:not(.dark) .fox-composer-wrap.is-new-conversation .fox-prompt-input > [data-slot='input-group'] {
+  --fox-composer-elevation: 0 var(--fox-space-m) var(--fox-space-2xl) color-mix(in oklch, var(--fox-new-conversation-shadow-color) 18%, transparent), 0 var(--fox-space-micro) var(--fox-space-s) color-mix(in oklch, var(--fox-new-conversation-shadow-color) 10%, transparent);
+}
+
 /* 顶部渐变会在暗色里叠出第二道边。 */
 .fox-composer-wrap.is-new-conversation .fox-prompt-shell:not(.is-decision) .fox-prompt-input > [data-slot='input-group']::before {
   content: none;

@@ -126,7 +126,9 @@ pub(super) fn write(
     let key = input.canonical_key.as_deref().unwrap_or("").trim();
     let excerpt = spaces(input.evidence_excerpt.as_deref().unwrap_or(""));
     if key.is_empty() {
-        return Err(denied("memory.canonical_key_required 请提供表示偏好主题的 canonicalKey。"));
+        return Err(denied(
+            "memory.canonical_key_required 请提供表示偏好主题的 canonicalKey。",
+        ));
     }
     if text.is_empty() || text.chars().count() > 1000 {
         return Err(denied("memory.invalid_shared_content"));

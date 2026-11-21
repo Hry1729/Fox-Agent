@@ -20,9 +20,9 @@
 //!   timestamp decide whether a `running` row is ours; an orphaned job becomes
 //!   `paused` (resumable) instead of being silently replayed.
 
+use super::{now_ms, Database};
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::{now_ms, Database};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -193,9 +193,13 @@ fn validate_job_idempotency_key(run_id: &str, key: &str) -> Result<(), String> {
         if key.len() > MAX_HOST_KEY_BYTES {
             return Err("job idempotency key exceeds its bound".into());
         }
-        let encoded = key.strip_prefix("job:").ok_or("invalid Host job identity")?;
+        let encoded = key
+            .strip_prefix("job:")
+            .ok_or("invalid Host job identity")?;
         let (encoded_run, call_id) = fox_engine_protocol::decode_dispatch_id(encoded)?;
-        if encoded_run != run_id || fox_engine_protocol::encode_dispatch_id(&encoded_run, &call_id)? != encoded {
+        if encoded_run != run_id
+            || fox_engine_protocol::encode_dispatch_id(&encoded_run, &call_id)? != encoded
+        {
             return Err("credential_mismatch: Host job identity differs from its run".into());
         }
     } else if key.len() > 200 {
@@ -316,7 +320,11 @@ impl Database {
     /// 13.37（B1-5）：同一对话里最近几轮已经结束的 Run 启动过的后台任务，新到旧，最多 8 条。
     /// 后台任务随它的 Run 结束（例如用户点停止）被取消时，模型上下文里最后一次工具结果还是
     /// 「运行中」；下一轮开始前由 Host 把这些任务的真实状态交给模型。只读，不改任何任务。
-    pub fn recent_finished_run_jobs(&self, conversation_id: &str, current_run_id: &str) -> Result<Vec<JobSnapshot>, String> {
+    pub fn recent_finished_run_jobs(
+        &self,
+        conversation_id: &str,
+        current_run_id: &str,
+    ) -> Result<Vec<JobSnapshot>, String> {
         let ids: Vec<String> = self.with_connection(|connection| {
             let mut statement = connection.prepare(
                 "SELECT k.job_id FROM kernel_jobs k
@@ -329,14 +337,18 @@ impl Database {
                    )
                  ORDER BY k.created_at DESC, k.job_id LIMIT 8",
             )?;
-            let rows = statement.query_map(params![conversation_id, current_run_id], |row| row.get::<_, String>(0))?;
+            let rows = statement.query_map(params![conversation_id, current_run_id], |row| {
+                row.get::<_, String>(0)
+            })?;
             let mut ids = Vec::new();
             for row in rows {
                 ids.push(row?);
             }
             Ok(ids)
         })?;
-        ids.iter().map(|job_id| self.kernel_job_snapshot(job_id)).collect()
+        ids.iter()
+            .map(|job_id| self.kernel_job_snapshot(job_id))
+            .collect()
     }
 
     /// Mark a queued job as running and hand it to this process.
@@ -346,8 +358,8 @@ impl Database {
         let pid = i64::from(std::process::id());
         let started_at = process_started_at();
         self.with_connection(|connection| {
-            let transaction = connection
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let affected = transaction.execute(
                 "UPDATE kernel_jobs
                     SET state='running', owner_pid=?2, owner_started_at=?3,
@@ -375,8 +387,8 @@ impl Database {
     ) -> Result<JobSnapshot, String> {
         let now = now_ms();
         self.with_connection(|connection| {
-            let transaction = connection
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let affected = transaction.execute(
                 "UPDATE kernel_jobs
                     SET progress_done=MAX(progress_done, ?2),
@@ -412,12 +424,14 @@ impl Database {
         }
         let now = now_ms();
         self.with_connection(|connection| {
-            let transaction = connection
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let (result_ref, result_bytes, result_sha256) = match &result {
-                Some((reference, bytes, sha)) => {
-                    (Some(reference.clone()), Some(*bytes as i64), Some(sha.clone()))
-                }
+                Some((reference, bytes, sha)) => (
+                    Some(reference.clone()),
+                    Some(*bytes as i64),
+                    Some(sha.clone()),
+                ),
                 None => (None, None, None),
             };
             let (error_code, error_message) = match &error {
@@ -458,8 +472,8 @@ impl Database {
     pub fn kernel_job_cancel(&self, job_id: &str) -> Result<JobSnapshot, String> {
         let now = now_ms();
         self.with_connection(|connection| {
-            let transaction = connection
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let affected = transaction.execute(
                 "UPDATE kernel_jobs
                     SET state='cancelled', updated_at=?2, finished_at=?2,
@@ -485,8 +499,8 @@ impl Database {
     pub fn kernel_job_pause(&self, job_id: &str, reason: &str) -> Result<JobSnapshot, String> {
         let now = now_ms();
         self.with_connection(|connection| {
-            let transaction = connection
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let affected = transaction.execute(
                 "UPDATE kernel_jobs
                     SET state='paused', error_code='job.owner_gone', error_message=?2,
@@ -535,7 +549,9 @@ impl Database {
                 let snapshot=if changed==1 {Some(read_snapshot(&tx,&job_id)?)}else{None};
                 tx.commit()?;Ok(snapshot)
             })?;
-            if let Some(snapshot)=changed {paused.push(snapshot);}
+            if let Some(snapshot) = changed {
+                paused.push(snapshot);
+            }
         }
         Ok(paused)
     }
@@ -544,11 +560,14 @@ impl Database {
     /// marks the job running again under this process.
     pub fn kernel_job_resume(&self, job_id: &str) -> Result<JobSnapshot, String> {
         let snapshot = self.kernel_job_snapshot(job_id)?;
-        if snapshot.kind == "command" { return Err("Commands cannot be resumed or replayed".into()); }
-        if snapshot.state != JobState::Paused { return Err("job is not paused".into()); }
+        if snapshot.kind == "command" {
+            return Err("Commands cannot be resumed or replayed".into());
+        }
+        if snapshot.state != JobState::Paused {
+            return Err("job is not paused".into());
+        }
         Ok(snapshot)
     }
-
 }
 
 pub(super) fn read_snapshot(
@@ -575,9 +594,13 @@ pub(super) fn read_snapshot(
                 state,
                 cursor: row.get(5)?,
                 progress_done: row.get::<_, i64>(6)?.max(0) as u64,
-                progress_total: row.get::<_, Option<i64>>(7)?.map(|total| total.max(0) as u64),
+                progress_total: row
+                    .get::<_, Option<i64>>(7)?
+                    .map(|total| total.max(0) as u64),
                 result_ref: row.get(8)?,
-                result_bytes: row.get::<_, Option<i64>>(9)?.map(|bytes| bytes.max(0) as u64),
+                result_bytes: row
+                    .get::<_, Option<i64>>(9)?
+                    .map(|bytes| bytes.max(0) as u64),
                 result_sha256: row.get(10)?,
                 error_code: row.get(11)?,
                 error_message: row.get(12)?,
@@ -585,9 +608,10 @@ pub(super) fn read_snapshot(
                 updated_at: row.get(14)?,
                 finished_at: row.get(15)?,
                 attempts: row.get::<_, i64>(16)?.max(0) as u32,
-                resumable: row.get::<_,String>(3)? != "command" && (state == JobState::Paused
-                    || (state == JobState::Running
-                        && !owned_by_current_process(owner_pid, owner_started_at))),
+                resumable: row.get::<_, String>(3)? != "command"
+                    && (state == JobState::Paused
+                        || (state == JobState::Running
+                            && !owned_by_current_process(owner_pid, owner_started_at))),
                 owner_pid,
                 cancel_requested_at: row.get(19)?,
                 cancel_acknowledged_at: row.get(20)?,
@@ -607,7 +631,11 @@ mod tests {
         let conversation = db
             .create_conversation(db.default_agent_id(), None, None, None)
             .unwrap();
-        let run_id = db.create_run(&conversation.id, "test", None).unwrap().run.id;
+        let run_id = db
+            .create_run(&conversation.id, "test", None)
+            .unwrap()
+            .run
+            .id;
         (db, root, run_id)
     }
 
@@ -626,17 +654,43 @@ mod tests {
     fn recent_finished_run_jobs_reports_the_real_state_of_a_cancelled_runs_jobs() {
         let (db, root, first_run) = database();
         let conversation_id: String = db
-            .with_connection(|connection| connection.query_row("SELECT conversation_id FROM runs WHERE id = ?1", [&first_run], |row| row.get(0)))
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT conversation_id FROM runs WHERE id = ?1",
+                    [&first_run],
+                    |row| row.get(0),
+                )
+            })
             .unwrap();
-        let job = db.kernel_job_start(&start_request(&first_run, "bg-1", json!({"command": "ping -n 120 127.0.0.1"}))).unwrap();
+        let job = db
+            .kernel_job_start(&start_request(
+                &first_run,
+                "bg-1",
+                json!({"command": "ping -n 120 127.0.0.1"}),
+            ))
+            .unwrap();
         let job_id = job.snapshot().job_id.clone();
         // 运行中的这一轮自己看不到（它还没结束）。
-        assert!(db.recent_finished_run_jobs(&conversation_id, "another-run").unwrap().is_empty());
+        assert!(db
+            .recent_finished_run_jobs(&conversation_id, "another-run")
+            .unwrap()
+            .is_empty());
         db.kernel_job_cancel(&job_id).unwrap();
-        db.with_connection(|connection| connection.execute("UPDATE runs SET status = 'cancelled', finished_at = 1 WHERE id = ?1", [&first_run]))
+        db.with_connection(|connection| {
+            connection.execute(
+                "UPDATE runs SET status = 'cancelled', finished_at = 1 WHERE id = ?1",
+                [&first_run],
+            )
+        })
+        .unwrap();
+        let second_run = db
+            .create_run(&conversation_id, "test", None)
+            .unwrap()
+            .run
+            .id;
+        let jobs = db
+            .recent_finished_run_jobs(&conversation_id, &second_run)
             .unwrap();
-        let second_run = db.create_run(&conversation_id, "test", None).unwrap().run.id;
-        let jobs = db.recent_finished_run_jobs(&conversation_id, &second_run).unwrap();
         assert_eq!(jobs.len(), 1, "{jobs:?}");
         assert_eq!(jobs[0].job_id, job_id);
         assert_eq!(jobs[0].run_id, first_run);
@@ -715,7 +769,10 @@ mod tests {
     fn host_dispatch_keys_accept_the_full_utf8_bound_and_bind_the_run() {
         let run = "r".repeat(1024);
         let call = "c".repeat(1024);
-        let key = format!("job:{}", fox_engine_protocol::encode_dispatch_id(&run, &call).unwrap());
+        let key = format!(
+            "job:{}",
+            fox_engine_protocol::encode_dispatch_id(&run, &call).unwrap()
+        );
         validate_job_idempotency_key(&run, &key).unwrap();
         assert!(validate_job_idempotency_key("different-run", &key).is_err());
         assert!(validate_job_idempotency_key("r", "job:tool-dispatch:01:r:c").is_err());
@@ -724,9 +781,16 @@ mod tests {
         validate_job_idempotency_key("r", &"x".repeat(200)).unwrap();
 
         let (db, root, run_id) = database();
-        let key = format!("job:{}", fox_engine_protocol::encode_dispatch_id(&run_id, &"调用:".repeat(140)).unwrap());
-        let first = db.kernel_job_start(&start_request(&run_id, &key, json!({}))).unwrap();
-        let second = db.kernel_job_start(&start_request(&run_id, &key, json!({}))).unwrap();
+        let key = format!(
+            "job:{}",
+            fox_engine_protocol::encode_dispatch_id(&run_id, &"调用:".repeat(140)).unwrap()
+        );
+        let first = db
+            .kernel_job_start(&start_request(&run_id, &key, json!({})))
+            .unwrap();
+        let second = db
+            .kernel_job_start(&start_request(&run_id, &key, json!({})))
+            .unwrap();
         assert!(matches!(first, JobStartOutcome::Created(_)));
         assert!(matches!(second, JobStartOutcome::Existing(_)));
         assert_eq!(first.snapshot().job_id, second.snapshot().job_id);
@@ -761,7 +825,9 @@ mod tests {
             .unwrap();
         let job_id = started.snapshot().job_id.clone();
         db.kernel_job_mark_running(&job_id).unwrap();
-        let progressed = db.kernel_job_progress(&job_id, 4, Some(10), Some("c4")).unwrap();
+        let progressed = db
+            .kernel_job_progress(&job_id, 4, Some(10), Some("c4"))
+            .unwrap();
         assert_eq!(progressed.progress_done, 4);
         assert_eq!(progressed.cursor.as_deref(), Some("c4"));
         // A lower reading never rewinds durable progress.
@@ -794,7 +860,9 @@ mod tests {
         assert_eq!(settled.state, JobState::Completed);
         assert_eq!(settled.result_ref.as_deref(), Some("fox-result://x"));
         // A non-terminal settle is refused.
-        assert!(db.kernel_job_settle(&job_id, JobState::Running, None, None).is_err());
+        assert!(db
+            .kernel_job_settle(&job_id, JobState::Running, None, None)
+            .is_err());
         let _ = std::fs::remove_dir_all(root);
     }
 

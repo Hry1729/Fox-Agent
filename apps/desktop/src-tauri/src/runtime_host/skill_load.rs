@@ -94,9 +94,9 @@ pub(super) fn prepare(input: &Value) -> Result<SkillLoadRequest, String> {
             );
         }
         if skill_id.len() > 128
-            || !skill_id
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+            || !skill_id.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
         {
             return Err("skillId must only contain letters, digits, '-' and '_'".to_owned());
         }
@@ -271,7 +271,10 @@ fn bounded_description(description: &str) -> String {
     if trimmed.chars().count() <= CATALOG_DESCRIPTION_CHARS {
         return trimmed.to_owned();
     }
-    let mut bounded = trimmed.chars().take(CATALOG_DESCRIPTION_CHARS).collect::<String>();
+    let mut bounded = trimmed
+        .chars()
+        .take(CATALOG_DESCRIPTION_CHARS)
+        .collect::<String>();
     bounded.push('…');
     bounded
 }

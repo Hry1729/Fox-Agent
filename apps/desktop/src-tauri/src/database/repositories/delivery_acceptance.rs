@@ -236,12 +236,10 @@ impl Database {
         now: i64,
     ) -> Result<AcceptanceWrite, String> {
         self.with_connection(|connection| {
-            let transaction = connection.transaction_with_behavior(
-                rusqlite::TransactionBehavior::Immediate,
-            )?;
-            let changed = transaction
-                .execute(
-                    "INSERT INTO delivery_acceptances
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let changed = transaction.execute(
+                "INSERT INTO delivery_acceptances
                      (run_id, item_key, conversation_id, accepted_by, accepted_at,
                       candidate_path, candidate_sha256, managed_version_id, spec_hash,
                       rule_id, checker_version, acceptance_class,
@@ -260,20 +258,20 @@ impl Database {
                          rejected_at=NULL,
                          revoked_at=NULL,
                          revoke_reason=NULL",
-                    params![
-                        run_id,
-                        item_key,
-                        binding.conversation_id,
-                        actor,
-                        now,
-                        binding.candidate_path,
-                        binding.candidate_sha256,
-                        binding.managed_version_id,
-                        binding.spec_hash,
-                        binding.rule_id,
-                        binding.checker_version,
-                    ],
-                )?;
+                params![
+                    run_id,
+                    item_key,
+                    binding.conversation_id,
+                    actor,
+                    now,
+                    binding.candidate_path,
+                    binding.candidate_sha256,
+                    binding.managed_version_id,
+                    binding.spec_hash,
+                    binding.rule_id,
+                    binding.checker_version,
+                ],
+            )?;
             transaction.commit()?;
             Ok(if changed == 0 {
                 AcceptanceWrite::Unchanged
@@ -297,12 +295,10 @@ impl Database {
         now: i64,
     ) -> Result<AcceptanceWrite, String> {
         self.with_connection(|connection| {
-            let transaction = connection.transaction_with_behavior(
-                rusqlite::TransactionBehavior::Immediate,
-            )?;
-            let changed = transaction
-                .execute(
-                    "INSERT INTO delivery_acceptances
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let changed = transaction.execute(
+                "INSERT INTO delivery_acceptances
                      (run_id, item_key, conversation_id, accepted_by, accepted_at,
                       candidate_path, candidate_sha256, spec_hash,
                       rule_id, checker_version, acceptance_class, rejected_at,
@@ -313,19 +309,19 @@ impl Database {
                          rejected_at=excluded.rejected_at,
                          revoked_at=NULL,
                          revoke_reason=NULL",
-                    params![
-                        run_id,
-                        item_key,
-                        binding.conversation_id,
-                        actor,
-                        binding.candidate_path,
-                        binding.candidate_sha256,
-                        binding.spec_hash,
-                        binding.rule_id,
-                        binding.checker_version,
-                        now,
-                    ],
-                )?;
+                params![
+                    run_id,
+                    item_key,
+                    binding.conversation_id,
+                    actor,
+                    binding.candidate_path,
+                    binding.candidate_sha256,
+                    binding.spec_hash,
+                    binding.rule_id,
+                    binding.checker_version,
+                    now,
+                ],
+            )?;
             transaction.commit()?;
             Ok(if changed == 0 {
                 AcceptanceWrite::Unchanged
@@ -346,16 +342,14 @@ impl Database {
         now: i64,
     ) -> Result<AcceptanceWrite, String> {
         self.with_connection(|connection| {
-            let transaction = connection.transaction_with_behavior(
-                rusqlite::TransactionBehavior::Immediate,
-            )?;
-            let changed = transaction
-                .execute(
-                    "UPDATE delivery_acceptances
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let changed = transaction.execute(
+                "UPDATE delivery_acceptances
                      SET revoked_at = ?3, revoke_reason = '用户撤销接受'
                      WHERE run_id = ?1 AND item_key = ?2 AND revoked_at IS NULL",
-                    params![run_id, item_key, now],
-                )?;
+                params![run_id, item_key, now],
+            )?;
             transaction.commit()?;
             Ok(if changed == 0 {
                 AcceptanceWrite::Unchanged
@@ -419,4 +413,3 @@ fn digest_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(bytes))
 }
-

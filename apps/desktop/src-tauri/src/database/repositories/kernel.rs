@@ -6,15 +6,14 @@
 //! application restart. Pending approval and external-effect facts MUST survive
 //! restart — they are never held only in an in-memory promise.
 
+use super::{now_ms, Database};
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::{now_ms, Database};
 use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-impl Database {
-}
+impl Database {}
 
 /// Lift a Kernel fail-closed message into a rusqlite error so transaction
 /// closures can abort with a descriptive, non-panic error.
@@ -55,7 +54,6 @@ fn map_outbox_effect_row_at(
 }
 
 impl Database {
-
     /// Count durable bounded business-delivery repair decisions. Separate from
     /// both the stop-review continuation counter and model-failure retries.
     pub fn kernel_count_delivery_repairs(&self, run_id: &str) -> Result<i64, String> {
@@ -65,7 +63,8 @@ impl Database {
                  WHERE e.run_id=?1 AND e.event_type='engine.continuation_requested'
                    AND r.kernel_mode='authoritative'
                    AND json_extract(e.payload_json,'$.lane')='delivery_repair'",
-                params![run_id], |row| row.get(0),
+                params![run_id],
+                |row| row.get(0),
             )
         })
     }
@@ -554,8 +553,9 @@ impl Database {
         conversation_id: &str,
         run_id: &str,
     ) -> Result<Option<fox_engine_protocol::KernelRunSnapshot>, String> {
-        Ok(self.kernel_build_scoped_snapshot(run_id, Some(conversation_id))?.map(|s| {
-            fox_engine_protocol::KernelRunSnapshot {
+        Ok(self
+            .kernel_build_scoped_snapshot(run_id, Some(conversation_id))?
+            .map(|s| fox_engine_protocol::KernelRunSnapshot {
                 schema_version: 1,
                 run_id: s.run_id,
                 turn_id: s.turn_id.expect("snapshot validates turn identity"),
@@ -565,20 +565,23 @@ impl Database {
                 running_elapsed_ms: s.running_elapsed_ms,
                 approval_deadline_wall_ms: s.approval_deadline_wall_ms,
                 terminal_written: s.terminal_written,
-                tools: s.tool_calls.into_iter().map(|t| fox_engine_protocol::KernelToolSnapshot {
-                    tool_call_id: t.tool_call_id,
-                    batch_id: t.batch_id,
-                    tool: t.tool,
-                    source_order: t.source_order,
-                    state: t.state,
-                    approval_state: t.approval_state,
-                }).collect(),
+                tools: s
+                    .tool_calls
+                    .into_iter()
+                    .map(|t| fox_engine_protocol::KernelToolSnapshot {
+                        tool_call_id: t.tool_call_id,
+                        batch_id: t.batch_id,
+                        tool: t.tool,
+                        source_order: t.source_order,
+                        state: t.state,
+                        approval_state: t.approval_state,
+                    })
+                    .collect(),
                 provider_attempts: s.retry.provider_attempts,
                 turn_attempts: s.retry.turn_attempts,
                 retry_due_wall_ms: s.retry.due_wall_ms,
                 compactions: s.compaction.compactions,
-            }
-        }))
+            }))
     }
 
     fn kernel_build_scoped_snapshot(
@@ -930,8 +933,11 @@ impl Database {
             let mut query = connection.prepare(
                 "SELECT tool_name, scope_key FROM conversation_tool_permissions
                  WHERE conversation_id=?1 AND revoked_at IS NULL
-                 ORDER BY tool_name, scope_key")?;
-            let rows = query.query_map(params![conversation_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+                 ORDER BY tool_name, scope_key",
+            )?;
+            let rows = query.query_map(params![conversation_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
             rows.collect::<Result<Vec<_>, _>>()
         })?;
         Ok(serde_json::json!({
@@ -1042,9 +1048,7 @@ impl Database {
                             }
                             "settle" => {
                                 if open != 1 {
-                                    malformed = Some(
-                                        "model request settle without an open begin",
-                                    );
+                                    malformed = Some("model request settle without an open begin");
                                     break;
                                 }
                                 open = 0;
@@ -1068,7 +1072,9 @@ impl Database {
                     }
                 }
                 Err(error) => {
-                    reasons.push(format!("{run_id}: model request lifecycle unreadable: {error}"));
+                    reasons.push(format!(
+                        "{run_id}: model request lifecycle unreadable: {error}"
+                    ));
                 }
             }
             if self.kernel_executable_outbox_count(&shadow_id)? != 0
@@ -1151,6 +1157,4 @@ impl Database {
             Ok(out)
         })
     }
-
 }
-

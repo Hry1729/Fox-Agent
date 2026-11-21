@@ -27,7 +27,7 @@ const contact: Companion = {
 const bubble = (id: string, author: 'user' | 'companion', order: number, content: string): ContactBubbleRecord => ({
   id, conversationId: 'chat', runId: 'run', messageId: author === 'user' ? id : 'answer', sourceOrdinal: order,
   author, projection: author === 'user' ? 'message' : 'segmented', segmentStart: null, segmentEnd: null,
-  deliveryOrder: order, deliveredAt: 1700000000000 + order, content, fingerprint: 'f',
+  deliveryOrder: order, deliveredAt: 1700000000000 + order, content, fingerprint: 'f', metadata: {},
 })
 
 const userMessage: ConversationMessage = {
@@ -71,7 +71,7 @@ afterAll(() => { answer = null; mock.module('@tauri-apps/api/core', () => tauriC
 
 // C06：永久标记失败时 showContactError 走 notify.error。这里接管它，断言原始
 // Host 错误确实展示出来，而不是被前端吞掉冒充成功。
-const actualNotifications = await import('../src/features/notifications')
+const actualNotifications = { ...await import('../src/features/notifications') }
 const toasts: string[] = []
 mock.module('../src/features/notifications', () => ({
   ...actualNotifications,

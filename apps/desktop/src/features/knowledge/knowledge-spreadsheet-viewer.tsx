@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { LoaderCircle } from 'lucide-react'
 import type { KnowledgeDocumentSourceMetadata } from '@/features/conversations/model/types'
 import { assertSafeZipArchive, hasZipSignature } from './knowledge-archive-safety'
-import { openKnowledgeCachedPreviewSource, type KnowledgeCachedPreviewOpener } from './knowledge-preview-source'
+import { openKnowledgeCachedPreviewSource, type WholeFilePreviewOpener, type WholeFilePreviewSource } from './knowledge-preview-source'
 import './knowledge-reader-viewers.css'
 
 const MAX_SPREADSHEET_BYTES = 64 * 1024 * 1024
@@ -29,9 +29,9 @@ export default function KnowledgeSpreadsheetViewer({
   knowledgeBaseId: string
   documentId: string
   filename: string
-  metadata: KnowledgeDocumentSourceMetadata
+  metadata?: KnowledgeDocumentSourceMetadata
   onFailure(message: string): void
-  openPreviewSource?: KnowledgeCachedPreviewOpener
+  openPreviewSource?: WholeFilePreviewOpener
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [loading, setLoading] = useState(true)
@@ -63,7 +63,7 @@ export default function KnowledgeSpreadsheetViewer({
     const abortController = new AbortController()
 
     const load = async () => {
-      let source: Awaited<ReturnType<typeof openKnowledgeCachedPreviewSource>> | null = null
+      let source: WholeFilePreviewSource | null = null
       try {
         setLoading(true)
         source = openPreviewSource

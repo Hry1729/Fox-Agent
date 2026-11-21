@@ -121,10 +121,9 @@ fn map_windows_zvec_bundle_resource(source: &Path) {
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("Cargo manifest dir");
     let config_path = Path::new(&manifest_dir).join("tauri.conf.json");
-    let config: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(&config_path).expect("read Tauri configuration"),
-    )
-    .expect("parse Tauri configuration");
+    let config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).expect("read Tauri configuration"))
+            .expect("parse Tauri configuration");
     let Some(default_target) = config
         .pointer("/bundle/resources")
         .and_then(serde_json::Value::as_object)
@@ -270,9 +269,11 @@ fn main() {
         // The linker now embeds the same v6 manifest for both the desktop
         // binary and lib unit tests. Leave Tauri's icon and version resource
         // intact, but omit only its duplicate RT_MANIFEST (id 1).
-        tauri_build::try_build(tauri_build::Attributes::new().windows_attributes(
-            tauri_build::WindowsAttributes::new_without_app_manifest(),
-        )).expect("build Tauri resources without a duplicate linker manifest");
+        tauri_build::try_build(
+            tauri_build::Attributes::new()
+                .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest()),
+        )
+        .expect("build Tauri resources without a duplicate linker manifest");
     } else {
         tauri_build::build();
     }

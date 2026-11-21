@@ -596,8 +596,9 @@ impl Database {
                 .map(|node| (node.normalized.node_key.as_str(), node.task_id.as_str()))
                 .collect::<HashMap<_, _>>();
             for node in &bound_nodes {
-                let criteria_json = crate::canonical_json::to_string(&node.normalized.acceptance_criteria)
-                    .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
+                let criteria_json =
+                    crate::canonical_json::to_string(&node.normalized.acceptance_criteria)
+                        .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
                 transaction
                     .execute(
                         "INSERT INTO work_graph_nodes(
@@ -1421,15 +1422,22 @@ impl Database {
             let rows = statement
                 .query_map([], |row| {
                     let child_run_id = row.get::<_, Option<String>>(1)?;
-                    Ok((row.get::<_,String>(3)?,ActiveGraphNodeReviewRequest {
-                        request_id: row.get(0)?,
-                        dispatched: child_run_id.is_some(),
-                        reviewer_child_run_id: child_run_id,
-                        reviewer_agent_id: row.get(2)?,
-                    }))
+                    Ok((
+                        row.get::<_, String>(3)?,
+                        ActiveGraphNodeReviewRequest {
+                            request_id: row.get(0)?,
+                            dispatched: child_run_id.is_some(),
+                            reviewer_child_run_id: child_run_id,
+                            reviewer_agent_id: row.get(2)?,
+                        },
+                    ))
                 })
                 .map_err(database_error)?;
-            host_recovery_rows(connection,rows.collect::<Result<Vec<_>, _>>().map_err(database_error)?)
+            host_recovery_rows(
+                connection,
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(database_error)?,
+            )
         })
     }
 
@@ -1807,12 +1815,19 @@ impl Database {
                 .map_err(database_error)?;
             let rows = statement
                 .query_map([], |row| {
-                    Ok((row.get::<_,String>(1)?,PendingGraphAcceptance {
-                        acceptance_id: row.get(0)?,
-                    }))
+                    Ok((
+                        row.get::<_, String>(1)?,
+                        PendingGraphAcceptance {
+                            acceptance_id: row.get(0)?,
+                        },
+                    ))
                 })
                 .map_err(database_error)?;
-            host_recovery_rows(connection,rows.collect::<Result<Vec<_>, _>>().map_err(database_error)?)
+            host_recovery_rows(
+                connection,
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(database_error)?,
+            )
         })
     }
 
@@ -2122,17 +2137,20 @@ impl Database {
                 .map_err(database_error)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(database_error)?;
-            host_recovery_rows(connection,rows)
+            host_recovery_rows(connection, rows)
         })
     }
 }
 
-pub(super) fn host_recovery_rows<T>(connection:&Connection,rows:Vec<(String,T)>) -> Result<Vec<T>,RepositoryError> {
-    let mut owned=Vec::new();
-    for (run,row) in rows {
+pub(super) fn host_recovery_rows<T>(
+    connection: &Connection,
+    rows: Vec<(String, T)>,
+) -> Result<Vec<T>, RepositoryError> {
+    let mut owned = Vec::new();
+    for (run, row) in rows {
         // A Run whose frozen binding cannot be verified is never recovered
         // (startup interrupts it); it must not fail recovery of the others.
-        match super::native_route::sweep_writer_route(connection,&run).map_err(database_error)? {
+        match super::native_route::sweep_writer_route(connection, &run).map_err(database_error)? {
             Some(super::native_route::WriterRoute::Kernel) => {}
             Some(_) => owned.push(row),
             None => eprintln!("fox.run_control recovery_skipped run={run} reason=binding_refused"),
@@ -2332,8 +2350,9 @@ fn settle_graph_node_review_by(
                 })
             })
             .collect::<Vec<_>>();
-        let proof_tool_call_mappings_json = crate::canonical_json::to_string(&proof_tool_call_mappings)
-            .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
+        let proof_tool_call_mappings_json =
+            crate::canonical_json::to_string(&proof_tool_call_mappings)
+                .map_err(|error| RepositoryError::InvalidInput(error.to_string()))?;
         let proof = json!({
             "candidateHash": row.5,
             "requestId": request_id,
@@ -3381,7 +3400,8 @@ fn authoritative_graph_review_decision(
             crate::canonical_json::to_string(&decision).expect("canonical inconclusive is JSON"),
         );
     }
-    let canonical = crate::canonical_json::to_string(&parsed).expect("parsed Reviewer output is JSON");
+    let canonical =
+        crate::canonical_json::to_string(&parsed).expect("parsed Reviewer output is JSON");
     (outcome, summary, canonical)
 }
 
@@ -6514,36 +6534,103 @@ mod tests {
         // Once the parent is Kernel-owned, legacy recovery must not redispatch
         // even this already-activated intent. The owning Host action journal
         // is the sole recovery path, including uncertain claimed actions.
-        fixture.database.freeze_kernel_run_control(
-            &fixture.run.run.id, "durable_v2", fox_engine_protocol::TimeBudgets::default(),
-        ).unwrap();
-        assert!(fixture.database.active_graph_node_cancel_intents_for_recovery().unwrap().is_empty());
+        fixture
+            .database
+            .freeze_kernel_run_control(
+                &fixture.run.run.id,
+                "durable_v2",
+                fox_engine_protocol::TimeBudgets::default(),
+            )
+            .unwrap();
+        assert!(fixture
+            .database
+            .active_graph_node_cancel_intents_for_recovery()
+            .unwrap()
+            .is_empty());
         cleanup(fixture);
     }
 
     #[test]
     fn native_parent_cancel_intent_stays_in_the_host_recovery_query() {
-        use fox_engine_protocol::{ExecutionAuthority,ExecutorRoute,FrozenPermission,PermissionMode,ResourceExecutor,RunControlBinding,TimeBudgets};
-        let fixture=fixture(json!([{ "nodeKey":"root","title":"Root","ordinal":0,"acceptanceCriteria":["report inspected"] }]),"durable_v2");
-        let started=start_single_graph_node(&fixture,"native-recovery");
-        let input=create_node_cancel_input(&fixture,&started,"native-cancel-intent","Stop this read-only node");
-        let intent=fixture.database.create_graph_node_cancel_intent(input).unwrap();
-        fixture.database.complete_host_tool_call(&fixture.run.run.id,"native-cancel-intent",Some(&json!({"pendingActivation":true})),None).unwrap();
-        assert!(fixture.database.activate_graph_node_cancel_intent(&intent.intent_id).unwrap().activated);
-        let permission=FrozenPermission { mode:PermissionMode::Ask,project_root:Some("D:/workspace".into()),grants:Vec::new(),approval_epoch:None };
-        fixture.database.freeze_run_control(&RunControlBinding {
-            schema_version:1,run_id:fixture.run.run.id.clone(),conversation_id:fixture.conversation_id.clone(),engine_id:"pi".into(),
-            execution_profile_id:"durable_v2".into(),authority:ExecutionAuthority::Authoritative,executor_route:Some(ExecutorRoute::PiNative),
-            read_only_executor:ResourceExecutor::Rust,permission_snapshot_id:Database::run_control_permission_hash(&permission).unwrap(),
-            permission,budgets:TimeBudgets::default(),
-        }).unwrap();
-        let recovered=fixture.database.active_graph_node_cancel_intents_for_recovery().unwrap();
-        assert_eq!(recovered.len(),1);
-        assert_eq!(recovered[0].intent_id,intent.intent_id);
-        fixture.database.with_connection(|connection|connection.execute("UPDATE run_control_bindings SET binding_hash='corrupt' WHERE run_id=?1",[&fixture.run.run.id])).unwrap();
+        use fox_engine_protocol::{
+            ExecutionAuthority, ExecutorRoute, FrozenPermission, PermissionMode, ResourceExecutor,
+            RunControlBinding, TimeBudgets,
+        };
+        let fixture = fixture(
+            json!([{ "nodeKey":"root","title":"Root","ordinal":0,"acceptanceCriteria":["report inspected"] }]),
+            "durable_v2",
+        );
+        let started = start_single_graph_node(&fixture, "native-recovery");
+        let input = create_node_cancel_input(
+            &fixture,
+            &started,
+            "native-cancel-intent",
+            "Stop this read-only node",
+        );
+        let intent = fixture
+            .database
+            .create_graph_node_cancel_intent(input)
+            .unwrap();
+        fixture
+            .database
+            .complete_host_tool_call(
+                &fixture.run.run.id,
+                "native-cancel-intent",
+                Some(&json!({"pendingActivation":true})),
+                None,
+            )
+            .unwrap();
+        assert!(
+            fixture
+                .database
+                .activate_graph_node_cancel_intent(&intent.intent_id)
+                .unwrap()
+                .activated
+        );
+        let permission = FrozenPermission {
+            mode: PermissionMode::Ask,
+            project_root: Some("D:/workspace".into()),
+            grants: Vec::new(),
+            approval_epoch: None,
+        };
+        fixture
+            .database
+            .freeze_run_control(&RunControlBinding {
+                schema_version: 1,
+                run_id: fixture.run.run.id.clone(),
+                conversation_id: fixture.conversation_id.clone(),
+                engine_id: "pi".into(),
+                execution_profile_id: "durable_v2".into(),
+                authority: ExecutionAuthority::Authoritative,
+                executor_route: Some(ExecutorRoute::PiNative),
+                read_only_executor: ResourceExecutor::Rust,
+                permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(),
+                permission,
+                budgets: TimeBudgets::default(),
+            })
+            .unwrap();
+        let recovered = fixture
+            .database
+            .active_graph_node_cancel_intents_for_recovery()
+            .unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].intent_id, intent.intent_id);
+        fixture
+            .database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE run_control_bindings SET binding_hash='corrupt' WHERE run_id=?1",
+                    [&fixture.run.run.id],
+                )
+            })
+            .unwrap();
         // dbhash: a refused binding is excluded from recovery (never driven)
         // instead of failing recovery, and so startup, for every other row.
-        assert!(fixture.database.active_graph_node_cancel_intents_for_recovery().unwrap().is_empty());
+        assert!(fixture
+            .database
+            .active_graph_node_cancel_intents_for_recovery()
+            .unwrap()
+            .is_empty());
         cleanup(fixture);
     }
 

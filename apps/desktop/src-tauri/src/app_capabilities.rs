@@ -3,9 +3,8 @@ use crate::canonical_json::CanonicalJson;
 use crate::{
     app_state::AppState,
     database::{
-        ApiResponse, AppNotificationRecord, AppNotificationUpsert,
-        GlobalSearchRecord, MessageFeedbackRecord, NotificationPreferencesRecord,
-        ProjectManagementRecord,
+        ApiResponse, AppNotificationRecord, AppNotificationUpsert, GlobalSearchRecord,
+        MessageFeedbackRecord, NotificationPreferencesRecord, ProjectManagementRecord,
     },
     local_knowledge::LocalKnowledgeDocumentsRequest,
 };
@@ -422,9 +421,14 @@ pub fn app_global_search(
             }
         }
     }
-    records.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-    records.truncate(limit);
-    ApiResponse::success(records)
+    let (mut companions, mut other): (Vec<_>, Vec<_>) = records
+        .into_iter()
+        .partition(|record| record.kind == "companion");
+    companions.truncate(5);
+    other.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    other.truncate(limit.saturating_sub(companions.len()));
+    companions.extend(other);
+    ApiResponse::success(companions)
 }
 
 #[tauri::command]
@@ -498,11 +502,13 @@ pub fn project_root_open(
 
 #[cfg(target_os = "windows")]
 pub(crate) fn open_folder(path: &Path) -> Result<(), String> {
-    fox_agent_backend::console::HideConsole::hide_console(&mut std::process::Command::new("explorer.exe"))
-        .arg(path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    fox_agent_backend::console::HideConsole::hide_console(&mut std::process::Command::new(
+        "explorer.exe",
+    ))
+    .arg(path)
+    .spawn()
+    .map(|_| ())
+    .map_err(|error| error.to_string())
 }
 #[cfg(target_os = "macos")]
 pub(crate) fn open_folder(path: &Path) -> Result<(), String> {
@@ -514,9 +520,11 @@ pub(crate) fn open_folder(path: &Path) -> Result<(), String> {
 }
 #[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) fn open_folder(path: &Path) -> Result<(), String> {
-    fox_agent_backend::console::HideConsole::hide_console(&mut std::process::Command::new("xdg-open"))
-        .arg(path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    fox_agent_backend::console::HideConsole::hide_console(&mut std::process::Command::new(
+        "xdg-open",
+    ))
+    .arg(path)
+    .spawn()
+    .map(|_| ())
+    .map_err(|error| error.to_string())
 }

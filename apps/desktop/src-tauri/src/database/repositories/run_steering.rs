@@ -15,6 +15,8 @@
 //!   in which case the replacement dispatch includes the same rows again.
 //! * `applied` — a model round responding to that dispatch is committed. The
 //!   message text now also lives inside the durable engine history/checkpoint.
+//!   PiNative records this at SDK request preparation, after Pi appends the
+//!   user message to the session and before the next tools can run.
 //! * `cancelled` — the Run ended before a response; terminal history.
 //!
 //! A frozen, already-sent request is never rewritten: rows are attached when
@@ -86,19 +88,21 @@ impl Database {
     /// Newest authoritative active Run bound to a conversation, if any.
     /// Steering commands resolve the Run through this ownership join; the
     /// caller never supplies a run id from the client directly.
-    pub(crate) fn active_kernel_run_for_conversation(
+    pub(crate) fn active_steerable_run_for_conversation(
         &self,
         conversation_id: &str,
     ) -> Result<Option<String>, String> {
         self.with_connection(|conn| {
             conn.query_row(
-                "SELECT r.run_id FROM kernel_runs r
-                 JOIN run_control_bindings b ON b.run_id = r.run_id
+                "SELECT r.id FROM runs r
+                 JOIN run_control_bindings b ON b.run_id = r.id
+                 LEFT JOIN kernel_runs k ON k.run_id = r.id
                  WHERE b.conversation_id = ?1
-                   AND r.state IN ('created','running','retry_scheduled')
-                   AND r.kernel_mode = 'authoritative'
                    AND b.authority = 'authoritative'
-                 ORDER BY r.created_at DESC, r.run_id DESC
+                   AND ((k.kernel_mode = 'authoritative' AND k.state IN ('created','running','retry_scheduled'))
+                     OR (json_extract(b.binding_json,'$.executorRoute') = 'pi_native'
+                         AND r.status IN ('queued','running','awaiting_confirmation')))
+                 ORDER BY r.created_at DESC, r.id DESC
                  LIMIT 1",
                 params![conversation_id],
                 |row| row.get::<_, String>(0),
@@ -113,20 +117,21 @@ impl Database {
     /// record what happened to each additional request, and a lookup failure
     /// must not make them look like they never existed.
     ///
-    /// Enqueueing uses [`Database::active_kernel_run_for_conversation`] instead,
+    /// Enqueueing uses [`Database::active_steerable_run_for_conversation`] instead,
     /// so history can never widen the set of Runs that accept input.
-    pub(crate) fn latest_kernel_run_for_conversation(
+    pub(crate) fn latest_steerable_run_for_conversation(
         &self,
         conversation_id: &str,
     ) -> Result<Option<(String, String)>, String> {
         self.with_connection(|conn| {
             conn.query_row(
-                "SELECT r.run_id, r.state FROM kernel_runs r
-                 JOIN run_control_bindings b ON b.run_id = r.run_id
+                "SELECT r.id, COALESCE(k.state, r.status) FROM runs r
+                 JOIN run_control_bindings b ON b.run_id = r.id
+                 LEFT JOIN kernel_runs k ON k.run_id = r.id
                  WHERE b.conversation_id = ?1
-                   AND r.kernel_mode = 'authoritative'
                    AND b.authority = 'authoritative'
-                 ORDER BY r.created_at DESC, r.run_id DESC
+                   AND (k.kernel_mode = 'authoritative' OR json_extract(b.binding_json,'$.executorRoute') = 'pi_native')
+                 ORDER BY r.created_at DESC, r.id DESC
                  LIMIT 1",
                 params![conversation_id],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
@@ -178,7 +183,10 @@ impl Database {
         self.with_connection(|conn| {
             let active: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM kernel_runs
-                  WHERE run_id=?1 AND state IN ('created','running','retry_scheduled'))",
+                  WHERE run_id=?1 AND state IN ('created','running','retry_scheduled'))
+                  OR EXISTS(SELECT 1 FROM runs r JOIN run_control_bindings b ON b.run_id=r.id
+                  WHERE r.id=?1 AND r.status IN ('queued','running','awaiting_confirmation')
+                    AND b.authority='authoritative' AND json_extract(b.binding_json,'$.executorRoute')='pi_native')",
                 params![run_id],
                 |row| row.get(0),
             )?;
@@ -258,10 +266,8 @@ impl Database {
         self.with_connection(|conn| {
             let mut stmt = conn.prepare(&steering_select(
                 "WHERE lane=?2 AND status='received' AND run_id IN (
-                     SELECT r.run_id FROM kernel_runs r
-                     JOIN run_control_bindings b ON b.run_id = r.run_id
+                     SELECT b.run_id FROM run_control_bindings b
                      WHERE b.conversation_id = ?1
-                       AND r.kernel_mode = 'authoritative'
                        AND b.authority = 'authoritative')
                  ORDER BY received_at, run_id, seq",
             ))?;
@@ -287,10 +293,8 @@ impl Database {
                 "DELETE FROM run_steering_messages
                   WHERE message_id=?2 AND lane=?3 AND status='received'
                     AND run_id IN (
-                      SELECT r.run_id FROM kernel_runs r
-                      JOIN run_control_bindings b ON b.run_id = r.run_id
+                      SELECT b.run_id FROM run_control_bindings b
                       WHERE b.conversation_id = ?1
-                        AND r.kernel_mode = 'authoritative'
                         AND b.authority = 'authoritative')",
                 params![conversation_id, message_id, STEERING_LANE_NEXT_TURN],
             )?;
@@ -298,7 +302,10 @@ impl Database {
         })
     }
 
-    pub(crate) fn run_steering_messages(&self, run_id: &str) -> Result<Vec<SteeringMessage>, String> {
+    pub(crate) fn run_steering_messages(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<SteeringMessage>, String> {
         self.with_connection(|conn| {
             let mut stmt = conn.prepare(&steering_select("WHERE run_id=?1 ORDER BY seq"))?;
             let rows = stmt
@@ -308,6 +315,51 @@ impl Database {
         })
     }
 
+    pub(crate) fn advance_native_steering(
+        &self,
+        run_id: &str,
+        applied_through: Option<i64>,
+    ) -> Result<Vec<SteeringMessage>, String> {
+        self.with_connection(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            if let Some(seq) = applied_through {
+                tx.execute(
+                    "UPDATE run_steering_messages SET status='applied', applied_at=?3
+                     WHERE run_id=?1 AND lane='current' AND status='delivered' AND seq<=?2",
+                    params![run_id, seq, now_ms()],
+                )?;
+                tx.commit()?;
+                return Ok(Vec::new());
+            }
+            tx.execute(
+                "UPDATE run_steering_messages SET status='delivered'
+                 WHERE run_id=?1 AND lane='current' AND status='received'",
+                [run_id],
+            )?;
+            let messages = {
+                let mut stmt = tx.prepare(&steering_select(
+                    "WHERE run_id=?1 AND lane='current' AND status='delivered' ORDER BY seq",
+                ))?;
+                let rows = stmt.query_map([run_id], row_to_steering)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            tx.commit()?;
+            Ok(messages)
+        })
+    }
+
+    pub(crate) fn cancel_pending_native_steering(&self, run_id: &str) -> Result<(), String> {
+        self.with_connection(|conn| {
+            conn.execute(
+                "UPDATE run_steering_messages SET status='cancelled'
+                 WHERE run_id=?1 AND lane='current' AND status IN ('received','delivered')
+                   AND EXISTS(SELECT 1 FROM run_control_bindings WHERE run_id=?1
+                     AND json_extract(binding_json,'$.executorRoute')='pi_native')",
+                [run_id],
+            )?;
+            Ok(())
+        })
+    }
 }
 
 /// One projection of the steering table for every reader in this module, so a

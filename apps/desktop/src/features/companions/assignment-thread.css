@@ -1,0 +1,127 @@
+.fox-coordination-topbar {
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 16px;
+  pointer-events: none;
+  color: var(--fox-text);
+}
+.fox-coordination-heading { display:flex; align-items:center; gap:8px; min-width:0; max-width:100%; padding:5px 12px 5px 6px; border-radius:var(--fox-radius-pill); background:var(--popover); box-shadow:0 0 0 1px var(--border),var(--shadow-sm); pointer-events:auto; }
+.fox-coordination-heading .fox-contact-avatar { width:26px; height:26px; flex:none; }
+.fox-coordination-heading strong { font-size:var(--fox-type-body); font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fox-coordination-heading > svg { flex:none; color:var(--fox-muted); }
+.fox-coordination-close { position:absolute; inset:auto 0 0; z-index:4; display:flex; justify-content:center; padding:24px 16px 16px; background:linear-gradient(transparent,var(--background) 40%); pointer-events:none; }
+.fox-coordination-close button { pointer-events:auto; border-radius:var(--fox-radius-pill); background:var(--muted); gap:6px; }
+.fox-coordination-transcript { width:100%; height:100%; }
+.fox-coordination-transcript .fox-coordination-messages { width:min(100%, 780px); margin-inline:auto; padding:76px 24px 88px; gap:18px; }
+.fox-coordination-message { display:flex; align-items:flex-end; gap:10px; min-width:0; }
+.fox-coordination-message > .fox-contact-avatar { width:24px; height:24px; flex:none; margin-bottom:6px; }
+.fox-coordination-message-body { display:flex; flex-direction:column; align-items:flex-start; gap:5px; min-width:0; max-width:calc(100% - 34px); }
+.fox-coordination-author { padding-inline:10px; color:var(--fox-muted); font-size:var(--fox-type-caption); }
+.fox-coordination-bubble { max-width:100%; padding:9px 13px; border-radius:18px; background:var(--muted); color:var(--fox-text); font-size:var(--fox-type-body); line-height:1.65; overflow-wrap:anywhere; }
+.fox-coordination-bubble :is(p,pre) { margin-block:0; }
+.fox-coordination-bubble p + p { margin-top:8px; }
+.fox-coordination-bubble pre { max-width:100%; overflow:auto; }
+.fox-coordination-earlier { align-self:center; }
+.fox-communication-line { width:100%; display:flex; align-items:center; justify-content:center; gap:6px; padding-block:3px; margin-block:0; color:var(--fox-muted); font-size:var(--fox-type-caption); }
+.fox-communication-line .fox-assignment-chip { max-width:min(100%, 30rem); }
+.fox-communication-label { flex:none; white-space:nowrap; }
+.fox-coordination-approval { align-items:flex-start; }
+.fox-coordination-approval > .fox-contact-avatar { margin-top:24px; }
+.fox-coordination-approval .fox-coordination-message-body { flex:1; width:calc(100% - 34px); }
+.fox-coordination-approval .fox-coordination-message-body > :not(.fox-coordination-author) { width:100%; max-width:100%; }
+@media (max-width:600px) { .fox-coordination-transcript .fox-coordination-messages { padding-inline:12px; } }
+
+.fox-coordination-topbar p,
+.fox-assignment-criteria,
+.fox-assignment-status {
+  font-size: var(--fox-type-caption);
+  color: var(--fox-muted);
+}
+
+.fox-assignment-lane {
+  gap: var(--fox-space-m);
+}
+
+.fox-assignment {
+  display: grid;
+  gap: var(--fox-space-xs);
+  width: 100%;
+  color: var(--fox-text);
+}
+
+.fox-assignment-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--fox-space-s);
+  min-width: 0;
+}
+
+.fox-assignment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--fox-space-xs);
+  min-height: 28px;
+  min-width: 0;
+  max-width: 100%;
+  padding-inline: var(--fox-space-s);
+  border: 0;
+  border-radius: var(--fox-radius-pill);
+  background: transparent;
+  color: var(--fox-muted);
+  font-size: var(--fox-type-caption);
+}
+
+.fox-assignment-chip :is(svg, .fox-contact-avatar) { flex: none; }
+.fox-assignment-chip .fox-contact-avatar { width: 18px; height: 18px; font-size: 11px; }
+button.fox-assignment-chip { cursor: pointer; }
+button.fox-assignment-chip:hover { background: var(--accent); }
+.fox-assignment-chip:focus-visible,
+.fox-assignment-result summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.fox-assignment-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.fox-assignment-status[data-status="failed"] { color: var(--destructive); }
+
+.fox-assignment-result {
+  width: fit-content;
+  max-width: 100%;
+  padding: var(--fox-space-xs) var(--fox-space-s);
+  border: 1px solid var(--fox-border);
+  border-radius: var(--fox-radius-control);
+  background: var(--fox-card);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.fox-assignment-result summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--fox-space-s);
+  cursor: pointer;
+}
+
+.fox-assignment-result summary span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fox-assignment-result summary svg { flex: none; }
+.fox-assignment-result[open] summary svg { transform: rotate(90deg); }
+.fox-assignment-result p { max-height: 20rem; overflow: auto; margin-top: var(--fox-space-s); }
+.fox-assignment-question { display: grid; gap: var(--fox-space-s); }
+.fox-assignment-question textarea { width: 100%; resize: vertical; }
+.fox-assignment-question textarea:focus-visible { outline: 2px solid var(--ring); }
+.fox-assignment-question .fox-contact-decision-note { color: var(--fox-text); }
+.fox-assignment-question > div { display: flex; flex-wrap: wrap; gap: var(--fox-space-s); }
+.fox-assignment-actions { display: flex; }
+
+@media (pointer: coarse) {
+  .fox-assignment-chip,
+  .fox-assignment-question button,
+  .fox-assignment-actions button { min-height: 44px; }
+}

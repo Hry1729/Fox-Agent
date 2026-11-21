@@ -6,7 +6,13 @@ use crate::kernel::CancellationToken;
 use fox_engine_protocol::{ResourceExecutor, RunControlBinding};
 use regex::RegexBuilder;
 use serde_json::{json, Value};
-use std::{collections::VecDeque, fs::{self, File, OpenOptions}, io::Read, path::{Path, PathBuf}, time::{Duration, Instant}};
+use std::{
+    collections::VecDeque,
+    fs::{self, File, OpenOptions},
+    io::Read,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 
 #[cfg(test)]
 #[path = "resource_gateway_test_probe.rs"]
@@ -22,31 +28,86 @@ const REGEX_COMPILED_SIZE_LIMIT: usize = 2 * 1024 * 1024;
 const REGEX_DFA_SIZE_LIMIT: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
-struct ReadLimits { entries: usize, matches: usize, read_chars: usize, output_chars: usize, line_chars: usize }
+struct ReadLimits {
+    entries: usize,
+    matches: usize,
+    read_chars: usize,
+    output_chars: usize,
+    line_chars: usize,
+}
 
 impl ReadLimits {
     fn for_profile(profile: &str) -> Self {
         if profile == "graph_readonly_preview" {
-            Self { entries: 1_000, matches: 50, read_chars: 24_000, output_chars: 24_000, line_chars: 1_000 }
+            Self {
+                entries: 1_000,
+                matches: 50,
+                read_chars: 24_000,
+                output_chars: 24_000,
+                line_chars: 1_000,
+            }
         } else {
-            Self { entries: MAX_ENTRIES, matches: MAX_MATCHES, read_chars: MAX_CHARS, output_chars: MAX_CHARS, line_chars: 8_000 }
+            Self {
+                entries: MAX_ENTRIES,
+                matches: MAX_MATCHES,
+                read_chars: MAX_CHARS,
+                output_chars: MAX_CHARS,
+                line_chars: 8_000,
+            }
         }
     }
 }
 
-pub fn is_reader(tool: &str) -> bool { matches!(tool, "read" | "ls" | "find" | "grep") }
+pub fn is_reader(tool: &str) -> bool {
+    matches!(tool, "read" | "ls" | "find" | "grep")
+}
 
 /// Independent byte-level observation. No model text or prior result is used
 /// as evidence, and a matching file is not proof of which process wrote it.
-pub(crate) fn reconciliation_fingerprint(binding: &RunControlBinding, path: &str, token: &CancellationToken) -> Result<Value,String> {
-    use sha2::{Digest,Sha256};
+pub(crate) fn reconciliation_fingerprint(
+    binding: &RunControlBinding,
+    path: &str,
+    token: &CancellationToken,
+) -> Result<Value, String> {
+    use sha2::{Digest, Sha256};
     binding.validate()?;
-    let approved=crate::tool_guard::approve_read_only_tool("read",&json!({"path":path}),binding.permission.project_root.as_deref())?;
-    let root=Path::new(binding.permission.project_root.as_deref().ok_or("missing frozen project root")?).canonicalize().map_err(|_|"原项目目录不可访问")?;
-    let gateway=Gateway {root,cancellation:token,deadline:Instant::now()+Duration::from_secs(10),remaining_bytes:MAX_FILE_BYTES,limits:ReadLimits::for_profile(&binding.execution_profile_id)};
-    let mut file=gateway.open(&approved.resolved_path,false)?;
-    let mut hash=Sha256::new();let mut bytes=0u64;let mut chunk=[0u8;16*1024];
-    loop {gateway.check()?;let n=file.read(&mut chunk).map_err(|_|"文件读取失败")?;if n==0 {break;}bytes+=n as u64;if bytes>MAX_FILE_BYTES{return Err("文件超过 8 MiB 独立核验上限".into());}hash.update(&chunk[..n]);}
+    let approved = crate::tool_guard::approve_read_only_tool(
+        "read",
+        &json!({"path":path}),
+        binding.permission.project_root.as_deref(),
+    )?;
+    let root = Path::new(
+        binding
+            .permission
+            .project_root
+            .as_deref()
+            .ok_or("missing frozen project root")?,
+    )
+    .canonicalize()
+    .map_err(|_| "原项目目录不可访问")?;
+    let gateway = Gateway {
+        root,
+        cancellation: token,
+        deadline: Instant::now() + Duration::from_secs(10),
+        remaining_bytes: MAX_FILE_BYTES,
+        limits: ReadLimits::for_profile(&binding.execution_profile_id),
+    };
+    let mut file = gateway.open(&approved.resolved_path, false)?;
+    let mut hash = Sha256::new();
+    let mut bytes = 0u64;
+    let mut chunk = [0u8; 16 * 1024];
+    loop {
+        gateway.check()?;
+        let n = file.read(&mut chunk).map_err(|_| "文件读取失败")?;
+        if n == 0 {
+            break;
+        }
+        bytes += n as u64;
+        if bytes > MAX_FILE_BYTES {
+            return Err("文件超过 8 MiB 独立核验上限".into());
+        }
+        hash.update(&chunk[..n]);
+    }
     Ok(json!({"bytes":bytes,"sha256":format!("sha256:{}",hex::encode(hash.finalize()))}))
 }
 
@@ -97,7 +158,9 @@ struct Gateway<'a> {
 impl Gateway<'_> {
     fn check(&self) -> Result<(), String> {
         self.cancellation.check()?;
-        if Instant::now() >= self.deadline { return Err("resource gateway execution budget exceeded".into()); }
+        if Instant::now() >= self.deadline {
+            return Err("resource gateway execution budget exceeded".into());
+        }
         Ok(())
     }
     fn open(&self, path: &Path, directory: bool) -> Result<File, String> {
@@ -105,8 +168,12 @@ impl Gateway<'_> {
     }
     fn open_observed(&self, path: &Path, directory: bool) -> Result<(File, PathBuf), String> {
         self.check()?;
-        let canonical = path.canonicalize().map_err(|error| format!("resource cannot be resolved: {error}"))?;
-        if !canonical.starts_with(&self.root) { return Err("resource is outside the frozen project root".into()); }
+        let canonical = path
+            .canonicalize()
+            .map_err(|error| format!("resource cannot be resolved: {error}"))?;
+        if !canonical.starts_with(&self.root) {
+            return Err("resource is outside the frozen project root".into());
+        }
         let mut options = OpenOptions::new();
         options.read(true);
         #[cfg(windows)]
@@ -114,9 +181,13 @@ impl Gateway<'_> {
             use std::os::windows::fs::OpenOptionsExt;
             // Pin against replacement/rename while reading; allow other readers.
             options.share_mode(1);
-            if directory { options.custom_flags(0x0200_0000); }
+            if directory {
+                options.custom_flags(0x0200_0000);
+            }
         }
-        let file = options.open(&canonical).map_err(|error| format!("resource cannot be opened: {error}"))?;
+        let file = options
+            .open(&canonical)
+            .map_err(|error| format!("resource cannot be opened: {error}"))?;
         let metadata = file.metadata().map_err(|error| error.to_string())?;
         if directory != metadata.is_dir() || (!directory && !metadata.is_file()) {
             return Err("resource type does not match the requested operation".into());
@@ -138,22 +209,33 @@ impl Gateway<'_> {
             self.check()?;
             let count = file.read(&mut chunk).map_err(|error| error.to_string())?;
             #[cfg(test)]
-            if let Some(probe) = probe.as_mut() { probe.record_read(count); }
-            if count == 0 { break; }
-            if contents.len() as u64 + count as u64 > MAX_FILE_BYTES || count as u64 > self.remaining_bytes {
+            if let Some(probe) = probe.as_mut() {
+                probe.record_read(count);
+            }
+            if count == 0 {
+                break;
+            }
+            if contents.len() as u64 + count as u64 > MAX_FILE_BYTES
+                || count as u64 > self.remaining_bytes
+            {
                 return Err("resource gateway text byte limit exceeded".into());
             }
             self.remaining_bytes -= count as u64;
             contents.extend_from_slice(&chunk[..count]);
         }
         #[cfg(test)]
-        if let Some(probe) = probe.as_mut() { probe.finish(); }
+        if let Some(probe) = probe.as_mut() {
+            probe.finish();
+        }
         Ok((contents, identity))
     }
     fn text(&mut self, path: &Path, extract_office: bool) -> Result<String, String> {
         let contents = self.bytes(path)?;
         if extract_office {
-            if let Some(text) = crate::local_knowledge_import::extract_office_text(&contents, &path.to_string_lossy())? {
+            if let Some(text) = crate::local_knowledge_import::extract_office_text(
+                &contents,
+                &path.to_string_lossy(),
+            )? {
                 self.check()?;
                 return Ok(text);
             }
@@ -167,15 +249,26 @@ impl Gateway<'_> {
             self.check()?;
             let item = item.map_err(|error| error.to_string())?;
             let name = item.file_name().to_string_lossy().into_owned();
-            if is_ignored_name(&name) { continue; }
+            if is_ignored_name(&name) {
+                continue;
+            }
             let target = item.path();
-            let canonical = target.canonicalize().map_err(|error| format!("nested resource cannot be resolved: {error}"))?;
-            if !canonical.starts_with(&self.root) { return Err("nested resource is outside the frozen project root".into()); }
+            let canonical = target
+                .canonicalize()
+                .map_err(|error| format!("nested resource cannot be resolved: {error}"))?;
+            if !canonical.starts_with(&self.root) {
+                return Err("nested resource is outside the frozen project root".into());
+            }
             let kind = item.file_type().map_err(|error| error.to_string())?;
             // Never traverse links. File reads still validate the actual handle.
-            entries.push(Entry { index: 0, path: target, name, directory: kind.is_dir() });
+            entries.push(Entry {
+                index: 0,
+                path: target,
+                name,
+                directory: kind.is_dir(),
+            });
         }
-        entries.sort_by(|a,b| a.name.cmp(&b.name));
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
         let truncated = entries.len() > limit;
         entries.truncate(limit);
         Ok((entries, truncated))
@@ -190,33 +283,87 @@ impl Gateway<'_> {
             // can never reach sibling entries beyond the first local page.
             let (entries, truncated) = self.entries(&directory, usize::MAX)?;
             for entry in entries {
-                if entry.directory { queue.push_back(entry.path.clone()); }
+                if entry.directory {
+                    queue.push_back(entry.path.clone());
+                }
                 index += 1;
-                if index <= start_after { continue; }
+                if index <= start_after {
+                    continue;
+                }
                 found.push(Entry { index, ..entry });
-                if found.len() == self.limits.entries { return Ok((found, true)); }
+                if found.len() == self.limits.entries {
+                    return Ok((found, true));
+                }
             }
-            if truncated { return Ok((found, true)); }
+            if truncated {
+                return Ok((found, true));
+            }
         }
         Ok((found, false))
     }
 }
 
-struct Entry { index: usize, path: PathBuf, name: String, directory: bool }
+struct Entry {
+    index: usize,
+    path: PathBuf,
+    name: String,
+    directory: bool,
+}
 
 fn is_ignored_name(name: &str) -> bool {
-    matches!(name, "node_modules" | ".git" | ".hg" | ".svn" | "target" | "dist" | "build" | "out" | ".output" | "__pycache__" | ".pytest_cache" | ".mypy_cache" | ".next" | ".nuxt" | ".svelte-kit" | "coverage" | ".nyc_output" | ".turbo" | ".cache" | "vendor" | "third_party" | "third-party")
+    matches!(
+        name,
+        "node_modules"
+            | ".git"
+            | ".hg"
+            | ".svn"
+            | "target"
+            | "dist"
+            | "build"
+            | "out"
+            | ".output"
+            | "__pycache__"
+            | ".pytest_cache"
+            | ".mypy_cache"
+            | ".next"
+            | ".nuxt"
+            | ".svelte-kit"
+            | "coverage"
+            | ".nyc_output"
+            | ".turbo"
+            | ".cache"
+            | "vendor"
+            | "third_party"
+            | "third-party"
+    )
 }
 
 #[cfg(windows)]
-pub(crate) fn verify_opened_path(file: &File, _requested: &Path, root: &Path) -> Result<(), String> {
-    use std::os::windows::{io::AsRawHandle, ffi::OsStringExt};
-    use windows::Win32::{Foundation::HANDLE, Storage::FileSystem::{GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED}};
+pub(crate) fn verify_opened_path(
+    file: &File,
+    _requested: &Path,
+    root: &Path,
+) -> Result<(), String> {
+    use std::os::windows::{ffi::OsStringExt, io::AsRawHandle};
+    use windows::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED},
+    };
     let mut buffer = vec![0u16; 32_768];
-    let count = unsafe { GetFinalPathNameByHandleW(HANDLE(file.as_raw_handle()), &mut buffer, FILE_NAME_NORMALIZED) } as usize;
-    if count == 0 || count >= buffer.len() { return Err("cannot validate opened resource handle".into()); }
+    let count = unsafe {
+        GetFinalPathNameByHandleW(
+            HANDLE(file.as_raw_handle()),
+            &mut buffer,
+            FILE_NAME_NORMALIZED,
+        )
+    } as usize;
+    if count == 0 || count >= buffer.len() {
+        return Err("cannot validate opened resource handle".into());
+    }
     let opened = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..count]));
-    if !opened.starts_with(root) { return Err("opened resource escaped the frozen project root".into()); }
+    if !opened.starts_with(root) {
+        return Err("opened resource escaped the frozen project root".into());
+    }
     Ok(())
 }
 
@@ -224,9 +371,14 @@ pub(crate) fn verify_opened_path(file: &File, _requested: &Path, root: &Path) ->
 pub(crate) fn verify_opened_path(file: &File, requested: &Path, root: &Path) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
     let opened = file.metadata().map_err(|error| error.to_string())?;
-    let canonical = requested.canonicalize().map_err(|error| error.to_string())?;
+    let canonical = requested
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
     let current = fs::metadata(&canonical).map_err(|error| error.to_string())?;
-    if !canonical.starts_with(root) || current.dev() != opened.dev() || current.ino() != opened.ino() {
+    if !canonical.starts_with(root)
+        || current.dev() != opened.dev()
+        || current.ino() != opened.ino()
+    {
         return Err("opened resource identity changed".into());
     }
     Ok(())
@@ -236,22 +388,32 @@ pub(crate) fn verify_opened_path(file: &File, requested: &Path, root: &Path) -> 
 // character. Matching is case-insensitive, like the Node runtime helper.
 // Dynamic programming: O(pattern chars * name chars) time, O(pattern chars)
 // memory. No recursive backtracking, and cancellation is checked per row.
-fn glob_match(glob: &str, name: &str, check: impl Fn() -> Result<(), String>) -> Result<bool, String> {
+fn glob_match(
+    glob: &str,
+    name: &str,
+    check: impl Fn() -> Result<(), String>,
+) -> Result<bool, String> {
     if glob.len() > MAX_REGEX_PATTERN_BYTES {
         return Err("invalid glob: pattern exceeds 4096 bytes".into());
     }
     let pattern: Vec<char> = glob.to_lowercase().chars().collect();
     let mut row = vec![false; pattern.len() + 1];
     row[0] = true;
-    for (i, p) in pattern.iter().enumerate() { row[i+1] = row[i] && *p == '*'; }
+    for (i, p) in pattern.iter().enumerate() {
+        row[i + 1] = row[i] && *p == '*';
+    }
     check()?;
     for c in name.to_lowercase().chars() {
         check()?;
         let mut diagonal = row[0];
         row[0] = false;
         for (i, p) in pattern.iter().enumerate() {
-            let previous = row[i+1];
-            row[i+1] = if *p == '*' { row[i] || previous } else { diagonal && (*p == '?' || *p == c) };
+            let previous = row[i + 1];
+            row[i + 1] = if *p == '*' {
+                row[i] || previous
+            } else {
+                diagonal && (*p == '?' || *p == c)
+            };
             diagonal = previous;
         }
     }
@@ -273,12 +435,20 @@ fn slice_utf16_range(text: &str, offset: usize, limit: usize) -> (String, usize,
     let total = units.len();
     let mut start = offset.min(total);
     // Never start inside a pair: a low half at `start` steps back one unit.
-    if start > 0 && start < total && (0xd800..=0xdbff).contains(&units[start - 1]) && (0xdc00..=0xdfff).contains(&units[start]) {
+    if start > 0
+        && start < total
+        && (0xd800..=0xdbff).contains(&units[start - 1])
+        && (0xdc00..=0xdfff).contains(&units[start])
+    {
         start -= 1;
     }
     let mut safe_end = start.saturating_add(limit).min(total);
     // Never end inside a pair: drop a dangling high half.
-    if safe_end > start && safe_end < total && (0xd800..=0xdbff).contains(&units[safe_end - 1]) && (0xdc00..=0xdfff).contains(&units[safe_end]) {
+    if safe_end > start
+        && safe_end < total
+        && (0xd800..=0xdbff).contains(&units[safe_end - 1])
+        && (0xdc00..=0xdfff).contains(&units[safe_end])
+    {
         safe_end -= 1;
     }
     // Defensive: never return a lone trailing high surrogate.
@@ -294,7 +464,11 @@ fn slice_utf16_range(text: &str, offset: usize, limit: usize) -> (String, usize,
             safe_end += 1;
         }
     }
-    (String::from_utf16_lossy(&units[start..safe_end]), start, safe_end)
+    (
+        String::from_utf16_lossy(&units[start..safe_end]),
+        start,
+        safe_end,
+    )
 }
 
 // Surrogate-pair-safe prefix cut to a UTF-16 unit budget (O-REVIEW-03 item 2).
@@ -307,7 +481,11 @@ fn slice_utf16_budget(text: &str, max_units: usize) -> String {
         return text.to_owned();
     }
     let mut end = max_units;
-    if end > 0 && end < units.len() && (0xd800..=0xdbff).contains(&units[end - 1]) && (0xdc00..=0xdfff).contains(&units[end]) {
+    if end > 0
+        && end < units.len()
+        && (0xd800..=0xdbff).contains(&units[end - 1])
+        && (0xdc00..=0xdfff).contains(&units[end])
+    {
         end -= 1;
     }
     if end > 0 && end == units.len() && (0xd800..=0xdbff).contains(&units[end - 1]) {
@@ -330,15 +508,21 @@ fn bounded_nonempty_utf16(text: &str, max_units: usize) -> Result<String, String
 // and search root — used only for mismatch rejection, never as an
 // authorization basis, and never a snapshot fact (see the reported semantics).
 #[derive(Clone, Copy)]
-enum CursorPosition { Entry(usize), Pair(usize, usize) }
+enum CursorPosition {
+    Entry(usize),
+    Pair(usize, usize),
+}
 
 fn encode_search_cursor(scope: &str, consumed: usize) -> String {
-    let payload = serde_json::json!({ "v": 1, "scope": scope, "consumed": consumed }).canonical_string();
+    let payload =
+        serde_json::json!({ "v": 1, "scope": scope, "consumed": consumed }).canonical_string();
     base64_encode_url(payload.as_bytes())
 }
 
 fn encode_search_cursor_pair(scope: &str, file: usize, line: usize) -> String {
-    let payload = serde_json::json!({ "v": 1, "scope": scope, "consumed": { "f": file, "l": line } }).canonical_string();
+    let payload =
+        serde_json::json!({ "v": 1, "scope": scope, "consumed": { "f": file, "l": line } })
+            .canonical_string();
     base64_encode_url(payload.as_bytes())
 }
 
@@ -346,22 +530,38 @@ fn decode_search_cursor(cursor: &str) -> Result<(String, CursorPosition), String
     if cursor.is_empty() || cursor.len() > 4096 {
         return Err("invalid cursor: cursor must be a non-empty bounded string".into());
     }
-    let bytes = base64_decode_url(cursor).map_err(|_| "invalid cursor: not decodable".to_owned())?;
-    let text = String::from_utf8(bytes).map_err(|_| "invalid cursor: not valid UTF-8".to_owned())?;
-    let payload: Value = serde_json::from_str(&text).map_err(|_| "invalid cursor: not JSON".to_owned())?;
+    let bytes =
+        base64_decode_url(cursor).map_err(|_| "invalid cursor: not decodable".to_owned())?;
+    let text =
+        String::from_utf8(bytes).map_err(|_| "invalid cursor: not valid UTF-8".to_owned())?;
+    let payload: Value =
+        serde_json::from_str(&text).map_err(|_| "invalid cursor: not JSON".to_owned())?;
     if payload.get("v").and_then(Value::as_u64) != Some(1) {
         return Err("invalid cursor: unknown version".into());
     }
-    let scope = payload.get("scope").and_then(Value::as_str)
+    let scope = payload
+        .get("scope")
+        .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .ok_or("invalid cursor: missing scope")?;
-    let consumed = payload.get("consumed").ok_or("invalid cursor: missing position")?;
+    let consumed = payload
+        .get("consumed")
+        .ok_or("invalid cursor: missing position")?;
     if let Some(entry) = consumed.as_u64() {
         return Ok((scope.to_owned(), CursorPosition::Entry(entry as usize)));
     }
-    let file = consumed.get("f").and_then(Value::as_u64).ok_or("invalid cursor: missing file position")?;
-    let line = consumed.get("l").and_then(Value::as_u64).ok_or("invalid cursor: missing line position")?;
-    Ok((scope.to_owned(), CursorPosition::Pair(file as usize, line as usize)))
+    let file = consumed
+        .get("f")
+        .and_then(Value::as_u64)
+        .ok_or("invalid cursor: missing file position")?;
+    let line = consumed
+        .get("l")
+        .and_then(Value::as_u64)
+        .ok_or("invalid cursor: missing line position")?;
+    Ok((
+        scope.to_owned(),
+        CursorPosition::Pair(file as usize, line as usize),
+    ))
 }
 
 // Minimal base64url helpers (no new dependencies): encode/decode with padding
@@ -376,8 +576,12 @@ fn base64_encode_url(bytes: &[u8]) -> String {
         let triple = (b0 << 16) | (b1 << 8) | b2;
         out.push(TABLE[((triple >> 18) & 0x3f) as usize] as char);
         out.push(TABLE[((triple >> 12) & 0x3f) as usize] as char);
-        if chunk.len() > 1 { out.push(TABLE[((triple >> 6) & 0x3f) as usize] as char); }
-        if chunk.len() > 2 { out.push(TABLE[(triple & 0x3f) as usize] as char); }
+        if chunk.len() > 1 {
+            out.push(TABLE[((triple >> 6) & 0x3f) as usize] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(triple & 0x3f) as usize] as char);
+        }
     }
     out
 }
@@ -398,14 +602,20 @@ fn base64_decode_url(text: &str) -> Result<Vec<u8>, ()> {
     }
     let mut out = Vec::with_capacity(values.len() / 4 * 3);
     for chunk in values.chunks(4) {
-        if chunk.len() == 1 { return Err(()); }
+        if chunk.len() == 1 {
+            return Err(());
+        }
         let mut triple = 0u32;
         for (position, value) in chunk.iter().enumerate() {
             triple |= (*value as u32) << (18 - 6 * position);
         }
         out.push(((triple >> 16) & 0xff) as u8);
-        if chunk.len() > 2 { out.push(((triple >> 8) & 0xff) as u8); }
-        if chunk.len() > 3 { out.push((triple & 0xff) as u8); }
+        if chunk.len() > 2 {
+            out.push(((triple >> 8) & 0xff) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push((triple & 0xff) as u8);
+        }
     }
     Ok(out)
 }
@@ -420,7 +630,8 @@ fn result(text: String, mut details: Value, max_chars: usize) -> Value {
         .get("outputTruncated")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    details["outputTruncated"] = json!(already_truncated || returned_units < text.encode_utf16().count());
+    details["outputTruncated"] =
+        json!(already_truncated || returned_units < text.encode_utf16().count());
     details["returnedUnits"] = json!(returned_units);
     let mut content = vec![json!({"type":"text", "text": returned})];
     if let Some(version) = details["readVersion"].as_str() {
@@ -430,8 +641,19 @@ fn result(text: String, mut details: Value, max_chars: usize) -> Value {
 }
 
 #[cfg(test)]
-pub fn execute(binding: &RunControlBinding, tool: &str, input: &Value, cancellation: &CancellationToken) -> Result<Value, String> {
-    execute_with_budget(binding, tool, input, cancellation, Duration::from_millis(binding.budgets.tool_execution_ms as u64))
+pub fn execute(
+    binding: &RunControlBinding,
+    tool: &str,
+    input: &Value,
+    cancellation: &CancellationToken,
+) -> Result<Value, String> {
+    execute_with_budget(
+        binding,
+        tool,
+        input,
+        cancellation,
+        Duration::from_millis(binding.budgets.tool_execution_ms as u64),
+    )
 }
 
 /// Host-private read evidence constructed at the actual opened-file boundary.
@@ -449,7 +671,10 @@ pub(crate) struct VerifiedReadObservation {
     truncated: bool,
 }
 impl VerifiedReadObservation {
-    pub(crate) fn host_observation(&self, tool_call_id: &str) -> fox_engine_protocol::HostObservation {
+    pub(crate) fn host_observation(
+        &self,
+        tool_call_id: &str,
+    ) -> fox_engine_protocol::HostObservation {
         fox_engine_protocol::HostObservation {
             target_identity: self.target_identity.clone(),
             version: self.version.clone(),
@@ -480,25 +705,47 @@ impl VerifiedReadObservation {
 }
 
 #[cfg(test)]
-pub(crate) fn execute_with_observation(binding: &RunControlBinding, tool: &str,
-    input: &Value, cancellation: &CancellationToken,
+pub(crate) fn execute_with_observation(
+    binding: &RunControlBinding,
+    tool: &str,
+    input: &Value,
+    cancellation: &CancellationToken,
 ) -> Result<(Value, Option<VerifiedReadObservation>), String> {
-    execute_with_observation_budget(binding, tool, input, cancellation,
-        Duration::from_millis(binding.budgets.tool_execution_ms as u64))
+    execute_with_observation_budget(
+        binding,
+        tool,
+        input,
+        cancellation,
+        Duration::from_millis(binding.budgets.tool_execution_ms as u64),
+    )
 }
 
-pub(crate) fn execute_with_observation_budget(binding: &RunControlBinding, tool: &str,
-    input: &Value, cancellation: &CancellationToken, budget: Duration,
+pub(crate) fn execute_with_observation_budget(
+    binding: &RunControlBinding,
+    tool: &str,
+    input: &Value,
+    cancellation: &CancellationToken,
+    budget: Duration,
 ) -> Result<(Value, Option<VerifiedReadObservation>), String> {
     let mut observation = None;
-    let result = execute_observed_with_budget(binding, tool, input, cancellation, budget, Some(&mut observation))?;
+    let result = execute_observed_with_budget(
+        binding,
+        tool,
+        input,
+        cancellation,
+        budget,
+        Some(&mut observation),
+    )?;
     Ok((result, observation))
 }
 
 /// A failed read may establish a missing-file baseline, but only from an
 /// independent filesystem NotFound observation within the frozen root.
-pub(crate) fn observe_missing_file(binding: &RunControlBinding, path: &str,
-    cancellation: &CancellationToken) -> Result<VerifiedReadObservation, String> {
+pub(crate) fn observe_missing_file(
+    binding: &RunControlBinding,
+    path: &str,
+    cancellation: &CancellationToken,
+) -> Result<VerifiedReadObservation, String> {
     cancellation.check()?;
     observe_missing_file_target(binding, path)
 }
@@ -506,46 +753,85 @@ pub(crate) fn observe_missing_file(binding: &RunControlBinding, path: &str,
 /// The same probe without a cancellation token, for callers that only need the
 /// fact (a gateway deciding a write precondition has no run token of its own;
 /// the authoritative execution boundary re-checks with the real one).
-pub(crate) fn observe_missing_file_target(binding: &RunControlBinding, path: &str)
-    -> Result<VerifiedReadObservation, String> {
+pub(crate) fn observe_missing_file_target(
+    binding: &RunControlBinding,
+    path: &str,
+) -> Result<VerifiedReadObservation, String> {
     binding.validate()?;
-    if binding.read_only_executor != ResourceExecutor::Rust { return Err("reader is not Rust".into()); }
-    let root = Path::new(binding.permission.project_root.as_deref().ok_or("missing frozen project root")?);
+    if binding.read_only_executor != ResourceExecutor::Rust {
+        return Err("reader is not Rust".into());
+    }
+    let root = Path::new(
+        binding
+            .permission
+            .project_root
+            .as_deref()
+            .ok_or("missing frozen project root")?,
+    );
     let identity = crate::tool_host::canonical_file_identity(root, path)?;
     match fs::symlink_metadata(&identity) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(VerifiedReadObservation {
-                target_identity: identity,
-                version: "missing".into(),
-                view_kind: fox_engine_protocol::ObservationView::Missing,
-                covered_whole_file: false,
-                range_start: None,
-                range_end: None,
-                total_units: None,
-                truncated: false,
-            })
-        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(VerifiedReadObservation {
+            target_identity: identity,
+            version: "missing".into(),
+            view_kind: fox_engine_protocol::ObservationView::Missing,
+            covered_whole_file: false,
+            range_start: None,
+            range_end: None,
+            total_units: None,
+            truncated: false,
+        }),
         _ => Err("target is not a verified missing file".into()),
     }
 }
 
 #[cfg(test)]
-pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input: &Value, cancellation: &CancellationToken, budget: Duration) -> Result<Value,String> {
+pub(crate) fn execute_with_budget(
+    binding: &RunControlBinding,
+    tool: &str,
+    input: &Value,
+    cancellation: &CancellationToken,
+    budget: Duration,
+) -> Result<Value, String> {
     execute_observed_with_budget(binding, tool, input, cancellation, budget, None)
 }
 
-fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: &Value,
-    cancellation: &CancellationToken, budget: Duration,
+fn execute_observed_with_budget(
+    binding: &RunControlBinding,
+    tool: &str,
+    input: &Value,
+    cancellation: &CancellationToken,
+    budget: Duration,
     observation: Option<&mut Option<VerifiedReadObservation>>,
-) -> Result<Value,String> {
+) -> Result<Value, String> {
     binding.validate()?;
     if binding.read_only_executor != ResourceExecutor::Rust || !is_reader(tool) {
         return Err("resource gateway is not the frozen executor for this tool".into());
     }
-    let approved = crate::tool_guard::approve_read_only_tool(tool, input, binding.permission.project_root.as_deref())?;
-    let root = Path::new(binding.permission.project_root.as_deref().ok_or("missing frozen project root")?).canonicalize().map_err(|error| error.to_string())?;
+    let approved = crate::tool_guard::approve_read_only_tool(
+        tool,
+        input,
+        binding.permission.project_root.as_deref(),
+    )?;
+    let root = Path::new(
+        binding
+            .permission
+            .project_root
+            .as_deref()
+            .ok_or("missing frozen project root")?,
+    )
+    .canonicalize()
+    .map_err(|error| error.to_string())?;
     let limits = ReadLimits::for_profile(&binding.execution_profile_id);
-    let mut gateway = Gateway { root, cancellation, deadline: Instant::now() + budget.min(Duration::from_millis(binding.budgets.tool_execution_ms as u64)), remaining_bytes: MAX_SCAN_BYTES, limits };
+    let mut gateway = Gateway {
+        root,
+        cancellation,
+        deadline: Instant::now()
+            + budget.min(Duration::from_millis(
+                binding.budgets.tool_execution_ms as u64,
+            )),
+        remaining_bytes: MAX_SCAN_BYTES,
+        limits,
+    };
     gateway.check()?;
     let path = approved.resolved_path;
     if tool == "read" {
@@ -555,7 +841,8 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
         // An extracted Office view is text derived from a container, never the
         // document's source text: it can never authorize a whole-file
         // replacement (REV-05).
-        let extracted = crate::local_knowledge_import::extract_office_text(&bytes, &path.to_string_lossy())?;
+        let extracted =
+            crate::local_knowledge_import::extract_office_text(&bytes, &path.to_string_lossy())?;
         // Office 抽取保持原样。普通字节按 BOM / UTF-8 / GB18030 解码；version 仍按原始字节计算。
         // 13.38 B5-1：Windows 批处理按系统 ANSI 代码页解码、换行显示成 LF；edit_file 能直接改它
         // （写回时重新转成 CRLF + 同一代码页），所以不加「不能直接修改」的说明。
@@ -572,7 +859,9 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
         let encoding_notice = if batch_code_page.is_some() {
             None
         } else {
-            decoded_encoding.as_ref().and_then(|(encoding, _)| model_encoding_notice(encoding))
+            decoded_encoding
+                .as_ref()
+                .and_then(|(encoding, _)| model_encoding_notice(encoding))
         };
         let notice_units = encoding_notice
             .as_ref()
@@ -596,7 +885,10 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
         let has_line_mode = input.get("startLine").is_some() || input.get("lineCount").is_some();
         let has_char_mode = input.get("offset").is_some() || input.get("limit").is_some();
         if has_line_mode && has_char_mode {
-            return Err("startLine/lineCount and offset/limit are mutually exclusive; use one mode only".into());
+            return Err(
+                "startLine/lineCount and offset/limit are mutually exclusive; use one mode only"
+                    .into(),
+            );
         }
         let total_units = text.encode_utf16().count() as u64;
         // Record the coverage of what is ACTUALLY delivered, in the single
@@ -621,12 +913,20 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
         };
         if has_line_mode {
             // RD-v1: startLine/lineCount must be paired positive integers.
-            let start_line = input.get("startLine").and_then(Value::as_u64)
+            let start_line = input
+                .get("startLine")
+                .and_then(Value::as_u64)
                 .filter(|v| *v >= 1)
-                .ok_or("startLine and lineCount must both be positive integers (startLine is 1-based)")? as usize;
-            let line_count = input.get("lineCount").and_then(Value::as_u64)
+                .ok_or(
+                    "startLine and lineCount must both be positive integers (startLine is 1-based)",
+                )? as usize;
+            let line_count = input
+                .get("lineCount")
+                .and_then(Value::as_u64)
                 .filter(|v| *v >= 1)
-                .ok_or("startLine and lineCount must both be positive integers (startLine is 1-based)")? as usize;
+                .ok_or(
+                    "startLine and lineCount must both be positive integers (startLine is 1-based)",
+                )? as usize;
             // Split into lines preserving line endings for accurate range extraction.
             let lines: Vec<&str> = text.split_inclusive('\n').collect();
             let total_lines = lines.len();
@@ -640,15 +940,22 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
                     None,
                     true,
                 );
-                return Ok(result(show(String::new()), with_encoding(json!({
-                    "path": path, "readVersion": version, "truncated": false,
-                    "startLine": start_line, "lineCount": line_count,
-                    "totalLines": total_lines, "pageComplete": true,
-                    "scanComplete": true,
-                    "readMode": "lines",
-                })), limits.output_chars));
+                return Ok(result(
+                    show(String::new()),
+                    with_encoding(json!({
+                        "path": path, "readVersion": version, "truncated": false,
+                        "startLine": start_line, "lineCount": line_count,
+                        "totalLines": total_lines, "pageComplete": true,
+                        "scanComplete": true,
+                        "readMode": "lines",
+                    })),
+                    limits.output_chars,
+                ));
             }
-            let end_line = start_line.saturating_add(line_count).saturating_sub(1).min(total_lines);
+            let end_line = start_line
+                .saturating_add(line_count)
+                .saturating_sub(1)
+                .min(total_lines);
             let selected: String = lines[start_line - 1..end_line].concat();
             let selected_utf16 = selected.encode_utf16().count();
             // RD-v1: pageComplete must reflect the actually returned range.
@@ -656,7 +963,10 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
             // requested page was not fully returned. Both cuts are
             // surrogate-pair safe (O-REVIEW-03 item 2).
             // 说明行占用输出额度，避免 result() 再把文件正文尾部切掉后 nextOffset 对不上。
-            let budget = limits.read_chars.min(limits.output_chars).saturating_sub(notice_units);
+            let budget = limits
+                .read_chars
+                .min(limits.output_chars)
+                .saturating_sub(notice_units);
             let bounded = bounded_nonempty_utf16(&selected, budget)?;
             let delivered_utf16 = bounded.encode_utf16().count();
             let truncated = delivered_utf16 < selected_utf16;
@@ -691,27 +1001,41 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
                 Some(range_to),
                 truncated,
             );
-            return Ok(result(show(bounded), with_encoding(json!({
-                "path": path, "readVersion": version, "truncated": truncated,
-                "startLine": start_line, "lineCount": line_count,
-                "totalLines": total_lines, "pageComplete": end_line == total_lines && !truncated,
-                "scanComplete": true,
-                "readMode": "lines",
-                "nextOffset": if truncated { json!(selected_start + delivered_utf16) } else { Value::Null },
-                "nextStartLine": next_start_line_value,
-                "returnedUnits": delivered_utf16, "totalUnits": text.encode_utf16().count(),
-            })), limits.output_chars));
+            return Ok(result(
+                show(bounded),
+                with_encoding(json!({
+                    "path": path, "readVersion": version, "truncated": truncated,
+                    "startLine": start_line, "lineCount": line_count,
+                    "totalLines": total_lines, "pageComplete": end_line == total_lines && !truncated,
+                    "scanComplete": true,
+                    "readMode": "lines",
+                    "nextOffset": if truncated { json!(selected_start + delivered_utf16) } else { Value::Null },
+                    "nextStartLine": next_start_line_value,
+                    "returnedUnits": delivered_utf16, "totalUnits": text.encode_utf16().count(),
+                })),
+                limits.output_chars,
+            ));
         }
         // Legacy UTF-16 code-unit mode: surrogate-pair safe, with nextOffset
         // derived from the ACTUALLY RETURNED text after the output budget
         // (O-REVIEW-03 item 2), and from the ACTUALLY STARTED index — using the
         // requested offset when it landed on a low surrogate half would skip the
         // character that half belongs to (REV-06).
-        let offset = input.get("offset").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as usize;
-        let limit = input.get("limit").and_then(Value::as_f64).filter(|v| *v != 0.0).unwrap_or(limits.read_chars as f64).clamp(1.0, limits.read_chars as f64) as usize;
+        let offset = input
+            .get("offset")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0)
+            .max(0.0) as usize;
+        let limit = input
+            .get("limit")
+            .and_then(Value::as_f64)
+            .filter(|v| *v != 0.0)
+            .unwrap_or(limits.read_chars as f64)
+            .clamp(1.0, limits.read_chars as f64) as usize;
         let total_units = text.encode_utf16().count();
         let (page_text, actual_start, safe_end) = slice_utf16_range(&text, offset, limit);
-        let final_text = bounded_nonempty_utf16(&page_text, limits.output_chars.saturating_sub(notice_units))?;
+        let final_text =
+            bounded_nonempty_utf16(&page_text, limits.output_chars.saturating_sub(notice_units))?;
         let final_units = final_text.encode_utf16().count();
         let page_units = page_text.encode_utf16().count();
         let output_cut = final_units < page_units;
@@ -720,10 +1044,17 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
         // navigation continues from its exclusive end, never from the request.
         let start = actual_start;
         let fully_delivered = source_exhausted && !output_cut;
-        let next_offset = if fully_delivered { Value::Null } else { json!(start + final_units) };
+        let next_offset = if fully_delivered {
+            Value::Null
+        } else {
+            json!(start + final_units)
+        };
         let range_from = start as u64;
         let range_to = (start + final_units) as u64;
-        let whole = !extracted.is_some() && fully_delivered && range_from == 0 && range_to >= total_units as u64;
+        let whole = !extracted.is_some()
+            && fully_delivered
+            && range_from == 0
+            && range_to >= total_units as u64;
         record(
             if whole {
                 fox_engine_protocol::ObservationView::FullFile
@@ -737,27 +1068,58 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
             Some(range_to),
             !fully_delivered,
         );
-        return Ok(result(show(final_text), with_encoding(json!({
-            "path": path, "readVersion": version, "truncated": !source_exhausted || output_cut,
-            "readMode": "utf16",
-            "offset": start,
-            "nextOffset": next_offset,
-            "totalUnits": total_units,
-        })), limits.output_chars));
+        return Ok(result(
+            show(final_text),
+            with_encoding(json!({
+                "path": path, "readVersion": version, "truncated": !source_exhausted || output_cut,
+                "readMode": "utf16",
+                "offset": start,
+                "nextOffset": next_offset,
+                "totalUnits": total_units,
+            })),
+            limits.output_chars,
+        ));
     }
     if tool == "ls" {
         let (entries, truncated) = gateway.entries(&path, limits.entries)?;
-        return Ok(result(entries.iter().map(|e| format!("{} {}", if e.directory {"[dir]"} else {"[file]"}, e.name)).collect::<Vec<_>>().join("\n"), json!({"path":path,"count":entries.len(),"truncated":truncated}), limits.output_chars));
+        return Ok(result(
+            entries
+                .iter()
+                .map(|e| {
+                    format!(
+                        "{} {}",
+                        if e.directory { "[dir]" } else { "[file]" },
+                        e.name
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            json!({"path":path,"count":entries.len(),"truncated":truncated}),
+            limits.output_chars,
+        ));
     }
-    let raw_pattern = input.get("pattern").and_then(Value::as_str).unwrap_or_default();
+    let raw_pattern = input
+        .get("pattern")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let regex_mode = input.get("regex").and_then(Value::as_bool).unwrap_or(false);
     let needle = raw_pattern.to_lowercase();
-    let case_sensitive = input.get("caseSensitive").and_then(Value::as_bool).unwrap_or(false);
-    let glob = input.get("glob").and_then(Value::as_str).unwrap_or_default();
-    if glob.len() > MAX_REGEX_PATTERN_BYTES { return Err("invalid glob: pattern exceeds 4096 bytes".into()); }
+    let case_sensitive = input
+        .get("caseSensitive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let glob = input
+        .get("glob")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if glob.len() > MAX_REGEX_PATTERN_BYTES {
+        return Err("invalid glob: pattern exceeds 4096 bytes".into());
+    }
     let regex_matcher = if regex_mode {
         if raw_pattern.len() > MAX_REGEX_PATTERN_BYTES {
-            return Err(format!("invalid regex: pattern exceeds {MAX_REGEX_PATTERN_BYTES} bytes"));
+            return Err(format!(
+                "invalid regex: pattern exceeds {MAX_REGEX_PATTERN_BYTES} bytes"
+            ));
         }
         Some(
             RegexBuilder::new(raw_pattern)
@@ -776,7 +1138,9 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
     // silently answering a different question.
     let scope = format!(
         "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-        tool, path.display(), raw_pattern,
+        tool,
+        path.display(),
+        raw_pattern,
         if case_sensitive { "cs" } else { "ci" },
         if regex_mode { "re" } else { "li" },
         if glob.is_empty() { "-" } else { glob },
@@ -796,7 +1160,10 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
         }
         match position {
             CursorPosition::Entry(value) => consumed = value,
-            CursorPosition::Pair(file, line) => { consumed = file; resume = Some((file, line)); }
+            CursorPosition::Pair(file, line) => {
+                consumed = file;
+                resume = Some((file, line));
+            }
         }
     }
     let walk_start = match resume {
@@ -829,17 +1196,31 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
         let mut last_scanned: usize = consumed;
         for entry in entries {
             gateway.check()?;
-            if entry.index <= consumed { continue; }
+            if entry.index <= consumed {
+                continue;
+            }
             last_scanned = entry.index;
-            if !glob.is_empty() && !glob_match(glob, &entry.name, || gateway.check())? { continue; }
-            if !name_hit(&entry.name) { continue; }
+            if !glob.is_empty() && !glob_match(glob, &entry.name, || gateway.check())? {
+                continue;
+            }
+            if !name_hit(&entry.name) {
+                continue;
+            }
             total_hits += 1;
-            if delivered.len() >= limits.matches { continue; }
-            let candidate = if text.is_empty() { entry.path.to_string_lossy().into_owned() }
-                else { format!("{}\n{}", text, entry.path.display()) };
+            if delivered.len() >= limits.matches {
+                continue;
+            }
+            let candidate = if text.is_empty() {
+                entry.path.to_string_lossy().into_owned()
+            } else {
+                format!("{}\n{}", text, entry.path.display())
+            };
             if candidate.encode_utf16().count() > limits.output_chars {
                 if delivered.is_empty() {
-                    return Err("match line exceeds the output budget; narrow the query or raise limits".into());
+                    return Err(
+                        "match line exceeds the output budget; narrow the query or raise limits"
+                            .into(),
+                    );
                 }
                 output_cut = true;
                 break;
@@ -850,7 +1231,11 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
         let cap_reached = total_hits > delivered.len();
         let scan_complete = !scan_truncated;
         let next_position = if delivered.is_empty() {
-            if scan_complete { None } else { Some(last_scanned) }
+            if scan_complete {
+                None
+            } else {
+                Some(last_scanned)
+            }
         } else {
             Some(*delivered.last().unwrap())
         };
@@ -863,17 +1248,21 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
             }
         };
         let scanned_from_start = consumed == 0;
-        return Ok(result(text, json!({
-            "count": delivered.len(), "returnedCount": delivered.len(),
-            "pageComplete": !output_cut && !cap_reached,
-            "scanComplete": scan_complete, "scanTruncated": scan_truncated,
-            "matchLimitReached": cap_reached,
-            "skippedUnreadable": unreadable,
-            "totalMatches": if scanned_from_start && scan_complete && !cap_reached && !output_cut { json!(total_hits) } else { Value::Null },
-            "nextCursor": next_cursor,
-            "outputTruncated": output_cut,
-            "cursorConsistency": "live", "cursorVersion": 1, "cursorStalePossible": true,
-        }), limits.output_chars));
+        return Ok(result(
+            text,
+            json!({
+                "count": delivered.len(), "returnedCount": delivered.len(),
+                "pageComplete": !output_cut && !cap_reached,
+                "scanComplete": scan_complete, "scanTruncated": scan_truncated,
+                "matchLimitReached": cap_reached,
+                "skippedUnreadable": unreadable,
+                "totalMatches": if scanned_from_start && scan_complete && !cap_reached && !output_cut { json!(total_hits) } else { Value::Null },
+                "nextCursor": next_cursor,
+                "outputTruncated": output_cut,
+                "cursorConsistency": "live", "cursorVersion": 1, "cursorStalePossible": true,
+            }),
+            limits.output_chars,
+        ));
     }
     // grep
     // O-REVIEW-03 item 3: grep's cursor is file+line shaped, so one file with
@@ -891,19 +1280,34 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
     let mut resume_out = (0usize, 0usize);
     let mut broke_mid_file = false;
     for entry in entries.into_iter().filter(|e| !e.directory) {
-        if entry.index <= walk_skip { continue; }
-        if !glob.is_empty() && !glob_match(glob, &entry.name, || gateway.check())? { continue; }
+        if entry.index <= walk_skip {
+            continue;
+        }
+        if !glob.is_empty() && !glob_match(glob, &entry.name, || gateway.check())? {
+            continue;
+        }
         let contents = match gateway.text(&entry.path, false) {
             Ok(text) => text,
-            Err(_) => { unreadable += 1; continue; }
+            Err(_) => {
+                unreadable += 1;
+                continue;
+            }
         };
-        let start_line = if entry.index == resume_file { resume_line } else { 0 };
+        let start_line = if entry.index == resume_file {
+            resume_line
+        } else {
+            0
+        };
         let mut stop = false;
         for (line_index, line) in contents.split('\n').enumerate() {
             gateway.check()?;
-            if line_index < start_line { continue; }
+            if line_index < start_line {
+                continue;
+            }
             let line = line.strip_suffix('\r').unwrap_or(line);
-            if !name_hit(line) { continue; }
+            if !name_hit(line) {
+                continue;
+            }
             total_hits += 1;
             if delivered >= limits.matches {
                 cap_reached = true;
@@ -913,11 +1317,23 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
                 break;
             }
             let (bounded_line, _, _) = slice_utf16_range(line, 0, limits.line_chars);
-            let formatted = format!("{}:{}:{}", entry.path.display(), line_index + 1, bounded_line);
-            let candidate = if text.is_empty() { formatted } else { format!("{}\n{}", text, formatted) };
+            let formatted = format!(
+                "{}:{}:{}",
+                entry.path.display(),
+                line_index + 1,
+                bounded_line
+            );
+            let candidate = if text.is_empty() {
+                formatted
+            } else {
+                format!("{}\n{}", text, formatted)
+            };
             if candidate.encode_utf16().count() > limits.output_chars {
                 if delivered == 0 {
-                    return Err("match line exceeds the output budget; narrow the query or raise limits".into());
+                    return Err(
+                        "match line exceeds the output budget; narrow the query or raise limits"
+                            .into(),
+                    );
                 }
                 output_cut = true;
                 broke_mid_file = true;
@@ -929,49 +1345,75 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
             delivered += 1;
             resume_out = (entry.index, line_index + 1);
         }
-        if stop { break; }
+        if stop {
+            break;
+        }
     }
     let cap_or_cut = cap_reached || output_cut;
     let scan_complete = !scan_truncated && !broke_mid_file && unreadable == 0;
     let next_cursor = if scan_complete && !cap_or_cut {
         Value::Null
     } else {
-        let position = if delivered > 0 || cap_or_cut { resume_out } else { (page_last_index + 1, 0) };
-        if position.0 == 0 && position.1 == 0 { Value::Null }
-        else { json!(encode_search_cursor_pair(&scope, position.0, position.1)) }
+        let position = if delivered > 0 || cap_or_cut {
+            resume_out
+        } else {
+            (page_last_index + 1, 0)
+        };
+        if position.0 == 0 && position.1 == 0 {
+            Value::Null
+        } else {
+            json!(encode_search_cursor_pair(&scope, position.0, position.1))
+        }
     };
     let scanned_from_start = consumed == 0 && resume.is_none();
-    Ok(result(text, json!({
-        "count": delivered, "returnedCount": delivered,
-        "pageComplete": !output_cut && !cap_reached && unreadable == 0,
-        "scanComplete": scan_complete, "scanTruncated": !scan_complete,
-        "matchLimitReached": cap_reached,
-        "skippedUnreadable": unreadable,
-        "totalMatches": if scanned_from_start && scan_complete && !cap_or_cut { json!(total_hits) } else { Value::Null },
-        "nextCursor": next_cursor,
-        "outputTruncated": output_cut,
-        "cursorConsistency": "live", "cursorVersion": 1, "cursorStalePossible": true,
-    }), limits.output_chars))
+    Ok(result(
+        text,
+        json!({
+            "count": delivered, "returnedCount": delivered,
+            "pageComplete": !output_cut && !cap_reached && unreadable == 0,
+            "scanComplete": scan_complete, "scanTruncated": !scan_complete,
+            "matchLimitReached": cap_reached,
+            "skippedUnreadable": unreadable,
+            "totalMatches": if scanned_from_start && scan_complete && !cap_or_cut { json!(total_hits) } else { Value::Null },
+            "nextCursor": next_cursor,
+            "outputTruncated": output_cut,
+            "cursorConsistency": "live", "cursorVersion": 1, "cursorStalePossible": true,
+        }),
+        limits.output_chars,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::{CancellationRegistry, CancellationPort};
+    use crate::kernel::{CancellationPort, CancellationRegistry};
     use fox_engine_protocol::{ExecutionAuthority, FrozenPermission, PermissionMode, TimeBudgets};
 
     fn fixture() -> (RunControlBinding, CancellationRegistry, CancellationToken) {
         let root = std::env::temp_dir().join(format!("fox-gateway-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("src/note.txt"), "A😀Fox\r\nsecond Fox line\n").unwrap();
-        let permission = FrozenPermission { mode: PermissionMode::ReadOnly, project_root: Some(root.to_string_lossy().into_owned()), grants: vec![],
-                approval_epoch: None,
-            };
+        let permission = FrozenPermission {
+            mode: PermissionMode::ReadOnly,
+            project_root: Some(root.to_string_lossy().into_owned()),
+            grants: vec![],
+            approval_epoch: None,
+        };
         let binding = RunControlBinding {
             executor_route: None,
-            schema_version: 1, run_id: "gateway-run".into(), conversation_id: "gateway-conversation".into(), engine_id: "pi".into(),
-            execution_profile_id: "test-profile".into(), authority: ExecutionAuthority::Legacy, read_only_executor: ResourceExecutor::Rust,
-            permission_snapshot_id: crate::database::Database::run_control_permission_hash(&permission).unwrap(), permission, budgets: TimeBudgets::default(),
+            schema_version: 1,
+            run_id: "gateway-run".into(),
+            conversation_id: "gateway-conversation".into(),
+            engine_id: "pi".into(),
+            execution_profile_id: "test-profile".into(),
+            authority: ExecutionAuthority::Legacy,
+            read_only_executor: ResourceExecutor::Rust,
+            permission_snapshot_id: crate::database::Database::run_control_permission_hash(
+                &permission,
+            )
+            .unwrap(),
+            permission,
+            budgets: TimeBudgets::default(),
         };
         let registry = CancellationRegistry::default();
         registry.register_run(&binding.run_id).unwrap();
@@ -984,17 +1426,31 @@ mod tests {
         let (binding, _, token) = fixture();
         let root = Path::new(binding.permission.project_root.as_ref().unwrap());
         let full = fs::read(root.join("src/note.txt")).unwrap();
-        let (mut output, observation) = execute_with_observation(&binding, "read",
-            &json!({"path":"src/note.txt", "offset":1, "limit":2}), &token).unwrap();
+        let (mut output, observation) = execute_with_observation(
+            &binding,
+            "read",
+            &json!({"path":"src/note.txt", "offset":1, "limit":2}),
+            &token,
+        )
+        .unwrap();
         assert_eq!(output["content"][0]["text"], "😀");
         output["details"]["readVersion"] = json!("forged");
         let evidence = observation.unwrap().host_observation("reader-id");
         assert_eq!(evidence.version, crate::tool_host::file_version(&full));
-        assert_eq!(evidence.target_identity, crate::tool_host::canonical_file_identity(root, "src/note.txt").unwrap());
+        assert_eq!(
+            evidence.target_identity,
+            crate::tool_host::canonical_file_identity(root, "src/note.txt").unwrap()
+        );
         assert_eq!(evidence.observed_by_tool_call_id, "reader-id");
         fs::write(root.join("src/note.txt"), "later mutation").unwrap();
-        assert_ne!(evidence.version, crate::tool_host::file_version(b"later mutation"));
-        assert!(execute_with_observation(&binding, "ls", &json!({}), &token).unwrap().1.is_none());
+        assert_ne!(
+            evidence.version,
+            crate::tool_host::file_version(b"later mutation")
+        );
+        assert!(execute_with_observation(&binding, "ls", &json!({}), &token)
+            .unwrap()
+            .1
+            .is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1002,7 +1458,9 @@ mod tests {
     fn missing_observation_requires_actual_absence_in_frozen_scope() {
         let (binding, _, token) = fixture();
         let root = Path::new(binding.permission.project_root.as_ref().unwrap());
-        let missing = observe_missing_file(&binding, "src/new.txt", &token).unwrap().host_observation("read-missing");
+        let missing = observe_missing_file(&binding, "src/new.txt", &token)
+            .unwrap()
+            .host_observation("read-missing");
         assert_eq!(missing.version, "missing");
         assert!(observe_missing_file(&binding, "src/note.txt", &token).is_err());
         assert!(observe_missing_file(&binding, "../outside.txt", &token).is_err());
@@ -1012,32 +1470,63 @@ mod tests {
     #[test]
     fn r3_adversarial_glob_has_bounded_work_and_checks_cancellation() {
         use std::cell::Cell;
-        let checks=Cell::new(0usize);
-        let name="a".repeat(2000);
-        let started=Instant::now();
-        assert!(!glob_match("*a*a*a*a*a*a*a*a*a*a*b", &name, || {checks.set(checks.get()+1); Ok(())}).unwrap());
-        assert_eq!(checks.get(),2001);
-        assert!(started.elapsed()<Duration::from_secs(2));
-        assert!(glob_match("*a*a*a*b", &name, || Err("cancelled".into())).unwrap_err().contains("cancelled"));
+        let checks = Cell::new(0usize);
+        let name = "a".repeat(2000);
+        let started = Instant::now();
+        assert!(!glob_match("*a*a*a*a*a*a*a*a*a*a*b", &name, || {
+            checks.set(checks.get() + 1);
+            Ok(())
+        })
+        .unwrap());
+        assert_eq!(checks.get(), 2001);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(glob_match("*a*a*a*b", &name, || Err("cancelled".into()))
+            .unwrap_err()
+            .contains("cancelled"));
         assert!(glob_match(&"*".repeat(4097), "a", || Ok(())).is_err());
-        for (pattern,name,expected) in [("*.TXT","文件.txt",true),("?","😀",true),("a?c","ac",false),("**","",true)] {
-            assert_eq!(glob_match(pattern,name,||Ok(())).unwrap(),expected);
+        for (pattern, name, expected) in [
+            ("*.TXT", "文件.txt", true),
+            ("?", "😀", true),
+            ("a?c", "ac", false),
+            ("**", "", true),
+        ] {
+            assert_eq!(glob_match(pattern, name, || Ok(())).unwrap(), expected);
         }
     }
     #[test]
     fn r4_read_version_reaches_model_and_drives_conflict_detection() {
-        let (binding, _, token)=fixture();
-        let root=Path::new(binding.permission.project_root.as_ref().unwrap());
-        let read=execute(&binding,"read",&json!({"path":"src/note.txt","startLine":1,"lineCount":1}),&token).unwrap();
-        let version=read["details"]["readVersion"].as_str().unwrap();
-        assert!(read["content"][1]["text"].as_str().unwrap().contains(version));
-        let input=json!({"path":"src/note.txt","content":"replacement","expectedVersion":version});
-        fs::write(root.join("src/note.txt"),"new user edit").unwrap();
-        assert!(crate::tool_host::prepare("write_file",&input,root.to_str().unwrap()).unwrap_err().contains("tool.file_conflict"));
-        let read=execute(&binding,"read",&json!({"path":"src/note.txt"}),&token).unwrap();
-        let input=json!({"path":"src/note.txt","content":"reconciled","expectedVersion":read["details"]["readVersion"]});
-        crate::tool_host::execute(crate::tool_host::prepare("write_file",&input,root.to_str().unwrap()).unwrap()).unwrap();
-        assert_eq!(fs::read_to_string(root.join("src/note.txt")).unwrap(),"reconciled");
+        let (binding, _, token) = fixture();
+        let root = Path::new(binding.permission.project_root.as_ref().unwrap());
+        let read = execute(
+            &binding,
+            "read",
+            &json!({"path":"src/note.txt","startLine":1,"lineCount":1}),
+            &token,
+        )
+        .unwrap();
+        let version = read["details"]["readVersion"].as_str().unwrap();
+        assert!(read["content"][1]["text"]
+            .as_str()
+            .unwrap()
+            .contains(version));
+        let input =
+            json!({"path":"src/note.txt","content":"replacement","expectedVersion":version});
+        fs::write(root.join("src/note.txt"), "new user edit").unwrap();
+        assert!(
+            crate::tool_host::prepare("write_file", &input, root.to_str().unwrap())
+                .unwrap_err()
+                .contains("tool.file_conflict")
+        );
+        let read = execute(&binding, "read", &json!({"path":"src/note.txt"}), &token).unwrap();
+        let input = json!({"path":"src/note.txt","content":"reconciled","expectedVersion":read["details"]["readVersion"]});
+        crate::tool_host::execute(
+            crate::tool_host::prepare("write_file", &input, root.to_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("src/note.txt")).unwrap(),
+            "reconciled"
+        );
     }
 
     #[test]
@@ -1046,7 +1535,10 @@ mod tests {
         let root = Path::new(binding.permission.project_root.as_ref().unwrap());
         fs::write(root.join("AGV长时间任务汇总统计表.xlsx"), "fixture").unwrap();
         let list = execute(&binding, "ls", &json!({}), &token).unwrap();
-        assert!(list["content"][0]["text"].as_str().unwrap().contains("AGV长时间任务汇总统计表.xlsx"));
+        assert!(list["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("AGV长时间任务汇总统计表.xlsx"));
         let found = execute(&binding, "find", &json!({"pattern":"AGV"}), &token).unwrap();
         assert_eq!(found["details"]["count"], 1);
         let grep = execute(&binding, "grep", &json!({"pattern":"second Fox"}), &token).unwrap();
@@ -1055,46 +1547,98 @@ mod tests {
         assert!(execute(&binding, "ls", &json!({"path":".."}), &token).is_err());
         let mut unbound = binding.clone();
         unbound.permission.project_root = None;
-        unbound.permission_snapshot_id = crate::database::Database::run_control_permission_hash(&unbound.permission).unwrap();
+        unbound.permission_snapshot_id =
+            crate::database::Database::run_control_permission_hash(&unbound.permission).unwrap();
         assert!(execute(&unbound, "ls", &json!({}), &token).is_err());
     }
 
     #[test]
     fn resource_gateway_executes_read_ls_find_grep_with_utf16_offsets() {
         let (binding, _, token) = fixture();
-        let read = execute(&binding, "read", &json!({"path":"src/note.txt","offset":1,"limit":2}), &token).unwrap();
+        let read = execute(
+            &binding,
+            "read",
+            &json!({"path":"src/note.txt","offset":1,"limit":2}),
+            &token,
+        )
+        .unwrap();
         assert_eq!(read["content"][0]["text"], "😀");
         assert_eq!(read["details"]["truncated"], true);
         let list = execute(&binding, "ls", &json!({"path":"src"}), &token).unwrap();
         assert_eq!(list["content"][0]["text"], "[file] note.txt");
-        let found = execute(&binding, "find", &json!({"path":".","pattern":"NOTE"}), &token).unwrap();
+        let found = execute(
+            &binding,
+            "find",
+            &json!({"path":".","pattern":"NOTE"}),
+            &token,
+        )
+        .unwrap();
         assert_eq!(found["details"]["count"], 1);
-        let searched = execute(&binding, "grep", &json!({"path":".","pattern":"fox"}), &token).unwrap();
+        let searched = execute(
+            &binding,
+            "grep",
+            &json!({"path":".","pattern":"fox"}),
+            &token,
+        )
+        .unwrap();
         assert_eq!(searched["details"]["count"], 2);
-        assert!(searched["content"][0]["text"].as_str().unwrap().contains(":2:second Fox line"));
-        let regex = execute(&binding, "grep", &json!({"path":".","pattern":"^a😀f.*$","regex":true}), &token).unwrap();
+        assert!(searched["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains(":2:second Fox line"));
+        let regex = execute(
+            &binding,
+            "grep",
+            &json!({"path":".","pattern":"^a😀f.*$","regex":true}),
+            &token,
+        )
+        .unwrap();
         assert_eq!(regex["details"]["returnedCount"], 1);
-        let strict_case = execute(&binding, "grep", &json!({"path":".","pattern":"^a😀f.*$","regex":true,"caseSensitive":true}), &token).unwrap();
+        let strict_case = execute(
+            &binding,
+            "grep",
+            &json!({"path":".","pattern":"^a😀f.*$","regex":true,"caseSensitive":true}),
+            &token,
+        )
+        .unwrap();
         assert_eq!(strict_case["details"]["returnedCount"], 0);
-        assert!(execute(&binding, "grep", &json!({"path":".","pattern":"[","regex":true}), &token)
-            .unwrap_err().contains("invalid regex"));
-        let tiny = execute(&binding, "read", &json!({"path":"src/note.txt","offset":1,"limit":1}), &token).unwrap();
+        assert!(execute(
+            &binding,
+            "grep",
+            &json!({"path":".","pattern":"[","regex":true}),
+            &token
+        )
+        .unwrap_err()
+        .contains("invalid regex"));
+        let tiny = execute(
+            &binding,
+            "read",
+            &json!({"path":"src/note.txt","offset":1,"limit":1}),
+            &token,
+        )
+        .unwrap();
         assert_eq!(tiny["content"][0]["text"], "😀");
         assert_eq!(tiny["details"]["nextOffset"], 3);
     }
 
     #[test]
     fn reconciliation_fingerprint_reads_exact_bytes_and_rejects_scope_escape() {
-        use sha2::{Digest,Sha256};
-        let (binding,_,token)=fixture();
-        let observed=reconciliation_fingerprint(&binding,"src/note.txt",&token).unwrap();
-        let content="A😀Fox\r\nsecond Fox line\n";
-        assert_eq!(observed["bytes"],content.len());
-        assert_eq!(observed["sha256"],format!("sha256:{}",hex::encode(Sha256::digest(content.as_bytes()))));
-        assert!(reconciliation_fingerprint(&binding,"../outside.txt",&token).is_err());
-        let large=Path::new(binding.permission.project_root.as_ref().unwrap()).join("large.bin");
-        File::create(&large).unwrap().set_len(MAX_FILE_BYTES+1).unwrap();
-        assert!(reconciliation_fingerprint(&binding,"large.bin",&token).is_err());
+        use sha2::{Digest, Sha256};
+        let (binding, _, token) = fixture();
+        let observed = reconciliation_fingerprint(&binding, "src/note.txt", &token).unwrap();
+        let content = "A😀Fox\r\nsecond Fox line\n";
+        assert_eq!(observed["bytes"], content.len());
+        assert_eq!(
+            observed["sha256"],
+            format!("sha256:{}", hex::encode(Sha256::digest(content.as_bytes())))
+        );
+        assert!(reconciliation_fingerprint(&binding, "../outside.txt", &token).is_err());
+        let large = Path::new(binding.permission.project_root.as_ref().unwrap()).join("large.bin");
+        File::create(&large)
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
+        assert!(reconciliation_fingerprint(&binding, "large.bin", &token).is_err());
     }
 
     #[test]
@@ -1103,7 +1647,13 @@ mod tests {
         binding.execution_profile_id = "graph_readonly_preview".into();
         let file = Path::new(binding.permission.project_root.as_ref().unwrap()).join("large.txt");
         fs::write(&file, "x".repeat(30_000)).unwrap();
-        let read = execute(&binding, "read", &json!({"path":file,"limit":120_000}), &token).unwrap();
+        let read = execute(
+            &binding,
+            "read",
+            &json!({"path":file,"limit":120_000}),
+            &token,
+        )
+        .unwrap();
         assert_eq!(read["content"][0]["text"].as_str().unwrap().len(), 24_000);
         assert_eq!(read["details"]["truncated"], true);
         fs::write(&file, format!("{}\n", "x".repeat(2_000)).repeat(100)).unwrap();
@@ -1112,52 +1662,101 @@ mod tests {
         assert_eq!(grep["details"]["pageComplete"], false);
         assert!(grep["details"]["nextCursor"].is_string());
         assert_eq!(grep["details"]["outputTruncated"], true);
-        assert!(grep["content"][0]["text"].as_str().unwrap().encode_utf16().count() <= 24_000);
+        assert!(
+            grep["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .encode_utf16()
+                .count()
+                <= 24_000
+        );
     }
 
     #[test]
     fn resource_gateway_rejects_wrong_executor_cancelled_calls_and_oversized_files() {
         let (mut binding, registry, token) = fixture();
         binding.read_only_executor = ResourceExecutor::Runtime;
-        assert!(execute(&binding,"read",&json!({"path":"src/note.txt"}),&token).is_err());
+        assert!(execute(&binding, "read", &json!({"path":"src/note.txt"}), &token).is_err());
         binding.read_only_executor = ResourceExecutor::Rust;
         let huge = Path::new(binding.permission.project_root.as_ref().unwrap()).join("huge.txt");
-        File::create(&huge).unwrap().set_len(MAX_FILE_BYTES + 1).unwrap();
-        assert!(execute(&binding,"read",&json!({"path":huge}),&token).unwrap_err().contains("byte limit"));
+        File::create(&huge)
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
+        assert!(execute(&binding, "read", &json!({"path":huge}), &token)
+            .unwrap_err()
+            .contains("byte limit"));
         registry.request_run_cancel(&binding.run_id);
-        assert!(execute(&binding,"ls",&json!({"path":"."}),&token).unwrap_err().contains("tool.cancelled"));
+        assert!(execute(&binding, "ls", &json!({"path":"."}), &token)
+            .unwrap_err()
+            .contains("tool.cancelled"));
     }
 
     #[test]
     fn resource_gateway_blocks_nested_links_outside_frozen_root() {
         let (binding, _, token) = fixture();
-        let outside = std::env::temp_dir().join(format!("fox-gateway-outside-{}",uuid::Uuid::new_v4()));
+        let outside =
+            std::env::temp_dir().join(format!("fox-gateway-outside-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&outside).unwrap();
         fs::write(outside.join("secret.txt"), "must never be returned").unwrap();
-        let link = Path::new(binding.permission.project_root.as_ref().unwrap()).join("outside-link");
+        let link =
+            Path::new(binding.permission.project_root.as_ref().unwrap()).join("outside-link");
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            let status = std::process::Command::new("cmd.exe").args(["/D","/C","mklink","/J"])
-                .arg(&link).arg(&outside).creation_flags(0x0800_0000).stdout(std::process::Stdio::null()).status().unwrap();
+            let status = std::process::Command::new("cmd.exe")
+                .args(["/D", "/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(&outside)
+                .creation_flags(0x0800_0000)
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap();
             assert!(status.success(), "junction fixture must be created");
         }
         #[cfg(not(windows))]
-        std::os::unix::fs::symlink(&outside,&link).unwrap();
-        assert!(execute(&binding,"grep",&json!({"path":".","pattern":"must"}),&token).unwrap_err().contains("outside"));
-        assert!(execute(&binding,"read",&json!({"path":outside.join("secret.txt")}),&token).is_err());
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(execute(
+            &binding,
+            "grep",
+            &json!({"path":".","pattern":"must"}),
+            &token
+        )
+        .unwrap_err()
+        .contains("outside"));
+        assert!(execute(
+            &binding,
+            "read",
+            &json!({"path":outside.join("secret.txt")}),
+            &token
+        )
+        .is_err());
         for tool in ["ls", "find", "grep"] {
             for path in [&outside, &link] {
-                assert!(execute(&binding,tool,&json!({"path":path,"pattern":"secret"}),&token).is_err(),
-                    "{tool} crossed the frozen workspace through {}", path.display());
+                assert!(
+                    execute(
+                        &binding,
+                        tool,
+                        &json!({"path":path,"pattern":"secret"}),
+                        &token
+                    )
+                    .is_err(),
+                    "{tool} crossed the frozen workspace through {}",
+                    path.display()
+                );
             }
         }
-        let root = Path::new(binding.permission.project_root.as_ref().unwrap()).canonicalize().unwrap();
+        let root = Path::new(binding.permission.project_root.as_ref().unwrap())
+            .canonicalize()
+            .unwrap();
         for path in [outside.join("secret.txt"), link.join("secret.txt")] {
             let path = path.to_str().unwrap();
-            assert!(crate::companion_workspace::check_hard_root(&root,path).is_err());
+            assert!(crate::companion_workspace::check_hard_root(&root, path).is_err());
             assert!(crate::runtime_host::present_files::resolve_declared_files(
-                &json!({"files":[{"path":path}]}), root.to_str()).is_err());
+                &json!({"files":[{"path":path}]}),
+                root.to_str()
+            )
+            .is_err());
         }
     }
 
@@ -1169,29 +1768,64 @@ mod tests {
             fs::write(root.join(format!("hit-{index}.txt")), "hit\nhit\n").unwrap();
         }
         fs::write(root.join("hit-no.md"), "hit\n").unwrap();
-        let literal_page = execute(&binding, "find", &json!({"path":".","pattern":"hit"}), &token).unwrap();
+        let literal_page = execute(
+            &binding,
+            "find",
+            &json!({"path":".","pattern":"hit"}),
+            &token,
+        )
+        .unwrap();
         assert!(literal_page["details"]["nextCursor"].is_string());
-        assert!(execute(&binding, "find", &json!({
-            "path":".", "pattern":"hit", "regex":true,
-            "cursor": literal_page["details"]["nextCursor"],
-        }), &token).unwrap_err().contains("cursor scope mismatch"));
-        assert!(execute(&binding, "find", &json!({
-            "path":".", "pattern":"x".repeat(MAX_REGEX_PATTERN_BYTES + 1), "regex":true,
-        }), &token).unwrap_err().contains("pattern exceeds"));
+        assert!(execute(
+            &binding,
+            "find",
+            &json!({
+                "path":".", "pattern":"hit", "regex":true,
+                "cursor": literal_page["details"]["nextCursor"],
+            }),
+            &token
+        )
+        .unwrap_err()
+        .contains("cursor scope mismatch"));
+        assert!(execute(
+            &binding,
+            "find",
+            &json!({
+                "path":".", "pattern":"x".repeat(MAX_REGEX_PATTERN_BYTES + 1), "regex":true,
+            }),
+            &token
+        )
+        .unwrap_err()
+        .contains("pattern exceeds"));
         let mut cursor = Value::Null;
         let mut seen = std::collections::HashSet::new();
         for _ in 0..10 {
             let mut input = json!({"path":".","pattern":"hit","glob":"*.txt"});
-            if !cursor.is_null() { input["cursor"] = cursor.clone(); }
+            if !cursor.is_null() {
+                input["cursor"] = cursor.clone();
+            }
             let page = execute(&binding, "find", &input, &token).unwrap();
-            for line in page["content"][0]["text"].as_str().unwrap().lines() { seen.insert(line.to_owned()); }
+            for line in page["content"][0]["text"].as_str().unwrap().lines() {
+                seen.insert(line.to_owned());
+            }
             cursor = page["details"]["nextCursor"].clone();
-            if cursor.is_null() { break; }
+            if cursor.is_null() {
+                break;
+            }
         }
         assert_eq!(seen.len(), 205);
 
-        let grep = execute(&binding, "grep", &json!({"path":".","pattern":"hit","glob":"*.txt"}), &token).unwrap();
-        assert!(!grep["content"][0]["text"].as_str().unwrap().contains("hit-no.md"));
+        let grep = execute(
+            &binding,
+            "grep",
+            &json!({"path":".","pattern":"hit","glob":"*.txt"}),
+            &token,
+        )
+        .unwrap();
+        assert!(!grep["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("hit-no.md"));
     }
 
     #[test]
@@ -1201,9 +1835,17 @@ mod tests {
         fs::create_dir_all(root.join("a-dir")).unwrap();
         fs::write(root.join("a-dir/match.txt"), "needle").unwrap();
         let gateway = Gateway {
-            root: root.canonicalize().unwrap(), cancellation: &token,
-            deadline: Instant::now() + Duration::from_secs(5), remaining_bytes: MAX_SCAN_BYTES,
-            limits: ReadLimits { entries: 1, matches: 2, read_chars: 100, output_chars: 100, line_chars: 100 },
+            root: root.canonicalize().unwrap(),
+            cancellation: &token,
+            deadline: Instant::now() + Duration::from_secs(5),
+            remaining_bytes: MAX_SCAN_BYTES,
+            limits: ReadLimits {
+                entries: 1,
+                matches: 2,
+                read_chars: 100,
+                output_chars: 100,
+                line_chars: 100,
+            },
         };
         let (first, first_more) = gateway.walk(root, 0).unwrap();
         assert!(first_more);
@@ -1216,8 +1858,17 @@ mod tests {
         let err = bounded_nonempty_utf16("😀X", 1).unwrap_err();
         assert!(err.contains("output budget is too small"));
 
-        File::create(root.join("unreadable-large.txt")).unwrap().set_len(MAX_FILE_BYTES + 1).unwrap();
-        let incomplete = execute(&binding, "grep", &json!({"path":".","pattern":"needle"}), &token).unwrap();
+        File::create(root.join("unreadable-large.txt"))
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
+        let incomplete = execute(
+            &binding,
+            "grep",
+            &json!({"path":".","pattern":"needle"}),
+            &token,
+        )
+        .unwrap();
         assert!(incomplete["details"]["skippedUnreadable"].as_u64().unwrap() >= 1);
         assert_eq!(incomplete["details"]["scanComplete"], false);
         assert_eq!(incomplete["details"]["pageComplete"], false);
@@ -1229,7 +1880,10 @@ mod tests {
     fn tx8_decode_text_bytes_detects_bom_utf8_and_gb18030() {
         let (gbk, _, gbk_errors) = encoding_rs::GBK.encode("中文");
         assert!(!gbk_errors);
-        assert!(std::str::from_utf8(&gbk).is_err(), "GBK 中文不应是合法 UTF-8");
+        assert!(
+            std::str::from_utf8(&gbk).is_err(),
+            "GBK 中文不应是合法 UTF-8"
+        );
         let (text, encoding, lossy) = decode_text_bytes(&gbk);
         assert_eq!(text, "中文");
         assert_eq!(encoding, "gb18030");

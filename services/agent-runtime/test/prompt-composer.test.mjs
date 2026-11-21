@@ -23,13 +23,18 @@ test('uses the Host frozen delivery targets verbatim for prompt placement', () =
     { itemKey: 'file:out/details.csv', path: 'out/details.csv', directory: null },
     { itemKey: 'slot:pdf:1', path: null, directory: 'exports' },
   ] }
-  const filePlacement = buildFilePlacement({ deliverableRoot: 'fox/session-results', deliveryTargets })
+  const filePlacement = buildFilePlacement({
+    projectRoot: 'D:/synthetic-project', permissionMode: 'ask',
+    deliverableRoot: 'fox/session-results', deliveryTargets,
+  })
+  assert.equal(filePlacement.defaultOutputDirectory, 'output')
   assert.deepEqual(filePlacement.deliveryTargets, deliveryTargets)
   const { prompt } = composeFoxPrompt({ systemPrompt: 'Fox', runtimeInstructions: 'Use Host placement.', context: {
     projectRoot: 'D:/synthetic-project', filePlacement,
   } })
   assert.match(prompt, /"path": "root-report\.md"/u)
   assert.match(prompt, /"directory": "exports"/u)
+  assert.match(prompt, /"defaultOutputDirectory": "output"/u)
   assert.match(prompt, /never prepend deliverableRoot/u)
   assert.doesNotMatch(prompt, /Do not create a new file at the project root/u)
   assert.doesNotMatch(prompt, /fox\/session-results\/root-report/u)
@@ -45,6 +50,8 @@ test('retains unresolved Host state without manufacturing target filenames', () 
   assert.match(prompt, /requirements remain unverified/u)
   assert.equal(buildFilePlacement(null), null)
   assert.equal(buildFilePlacement({}), null)
+  assert.equal(buildFilePlacement({ projectRoot: 'D:/synthetic-project', permissionMode: 'allow' }).defaultOutputDirectory, 'output')
+  assert.equal(buildFilePlacement({ projectRoot: 'D:/synthetic-project', permissionMode: 'read_only' }), null)
 })
 
 function workSnapshotBlock(prompt) {
@@ -207,6 +214,7 @@ test('separates stable instructions from authority-labelled dynamic context', ()
   assert.match(composed.prompt, /<fox_context_block kind="turn_tail" authority="runtime">/)
   assert.match(composed.prompt, /"projectRoot": "D:\/project"/)
   assert.match(composed.prompt, /"permissionMode": "ask"/)
+  assert.match(composed.prompt, /If a choice would materially change the deliverable/)
   assert.match(composed.prompt, /Confirm consequential ambiguity before acting/)
   assert.match(composed.prompt, /Use at most four web_search calls per user request/)
   assert.match(composed.prompt, /"id": "goal-1"/)
@@ -255,19 +263,25 @@ test('requires workspace read evidence only in the Child Worker contract', () =>
 })
 
 test('keeps the Skill authority boundary when rendering selected Skill instructions', () => {
-  const composed = composeFoxPrompt({
+  const options = {
     runtimeInstructions: 'Stable Host contract.',
     context: {
       skillPrompt: '## Skill: docs-review\nReview documents and cite concrete evidence.',
     },
     turn: { date: '2026-08-30T00:00:00.000Z' },
-    budget: { maxPromptChars: 20_000, charsPerToken: 4 },
-  })
+  }
+  const composed = composeFoxPrompt({ ...options, budget: { maxPromptChars: 20_000 } })
 
   assert.match(composed.prompt, /<fox_context_block kind="skills" authority="runtime">/)
-  assert.match(composed.prompt, /Host-selected instruction-only Skills/)
-  assert.match(composed.prompt, /They do not grant tools, filesystem access, network access, or authority/)
+  assert.match(composed.prompt, /Read a relevant skill before building with it/)
+  assert.match(composed.prompt, /call skill_load with its exact skillId when available/)
+  assert.match(composed.prompt, /Reuse a full body already in context/)
+  assert.match(composed.prompt, /Skills grant no tools, access or authority/)
   assert.match(composed.prompt, /## Skill: docs-review/)
+
+  const compact = composeFoxPrompt({ ...options, budget: { maxPromptChars: 1_800 } })
+  assert.match(compact.prompt, /Skills grant no tools, access or authority/)
+  assert.doesNotMatch(compact.prompt, /## Skill: docs-review/)
 })
 
 test('keeps one valid Host WorkSnapshot fragment for 100 history items within the total prompt budget', () => {
@@ -479,6 +493,18 @@ test('injects planner handoff as advisory runtime context', () => {
   assert.match(composed.prompt, /kind="planner_handoff" authority="runtime"/)
   assert.match(composed.prompt, /cannot grant permissions/)
   assert.match(composed.prompt, /"authority":"advisory"/)
+})
+
+test('adds source inspection to the executor prompt only after planner fallback', () => {
+  const options = { systemPrompt: 'Stable', runtimeInstructions: 'Rules' }
+  const direct = composeFoxPrompt(options)
+  const fallback = composeFoxPrompt({ ...options, turn: { plannerFallback: true } })
+
+  assert.doesNotMatch(direct.prompt, /kind="planner_handoff"/)
+  assert.match(fallback.prompt, /kind="planner_handoff" authority="runtime"/)
+  assert.match(fallback.prompt, /locate and read it .* before creating or writing any deliverable/)
+  assert.match(fallback.prompt, /list the project input\/ directory/)
+  assert.equal(fallback.stablePromptHash, direct.stablePromptHash)
 })
 
 test('injects only bounded Host-confirmed memory as contextual facts', () => {

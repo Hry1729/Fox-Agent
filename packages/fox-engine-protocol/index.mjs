@@ -2905,6 +2905,72 @@ export const SCHEMA_BUNDLE = {
       "approval": "none",
       "category": "memory",
       "execution": "host",
+      "name": "companion_list"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "companion_create"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "companion_propose_profile"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "companion_propose_model"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "companion_propose_deletion"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "companion_propose_archive"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "companion_coordinate"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "companion_assignment_status"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "companion_list_unread_notifications"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "companion_mark_notifications_read"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "companion_retry_failed_task"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
       "name": "note_organize"
     },
     {

@@ -469,7 +469,9 @@ fn canonical_json(value: &Value) -> String {
         Value::Null => "null".to_owned(),
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => value.to_string(),
-        Value::String(value) => crate::canonical_json::to_string(value).expect("serialize JSON string"),
+        Value::String(value) => {
+            crate::canonical_json::to_string(value).expect("serialize JSON string")
+        }
         Value::Array(values) => format!(
             "[{}]",
             values
@@ -767,8 +769,12 @@ fn compiled_manifest(package: &ValidatedPackage) -> Value {
                 }
             }
             if let Some(tools) = bindings["officeTools"].as_array() {
-                manifest["officeTools"] = json!(tools.iter().filter_map(Value::as_str)
-                    .filter(|name| crate::office::tool_definitions().iter().any(|tool| tool["name"] == *name))
+                manifest["officeTools"] = json!(tools
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|name| crate::office::tool_definitions()
+                        .iter()
+                        .any(|tool| tool["name"] == *name))
                     .collect::<Vec<_>>());
             }
         }
@@ -810,8 +816,11 @@ fn install_request(
     }
 }
 
-pub(crate) fn bundled_install_request(raw: Value) -> Result<InstallExpertPackageVersionRequest, String> {
-    let package = parse_package(raw).map_err(|error| format!("Invalid bundled expert: {error:?}"))?;
+pub(crate) fn bundled_install_request(
+    raw: Value,
+) -> Result<InstallExpertPackageVersionRequest, String> {
+    let package =
+        parse_package(raw).map_err(|error| format!("Invalid bundled expert: {error:?}"))?;
     Ok(install_request(&package, None))
 }
 
@@ -821,7 +830,14 @@ pub fn expert_package_inspect(
     request: ExpertPackageInspectRequest,
 ) -> ApiResponse<ExpertPackagePreview> {
     parse_package(request.package)
-        .and_then(|package| inspect(&state.database, &state.skills_dir, &state.local_knowledge, &package))
+        .and_then(|package| {
+            inspect(
+                &state.database,
+                &state.skills_dir,
+                &state.local_knowledge,
+                &package,
+            )
+        })
         .map(ApiResponse::success)
         .unwrap_or_else(package_failure)
 }
@@ -835,7 +851,12 @@ pub fn expert_package_install(
         Ok(package) => package,
         Err(error) => return package_failure(error),
     };
-    let preview = match inspect(&state.database, &state.skills_dir, &state.local_knowledge, &package) {
+    let preview = match inspect(
+        &state.database,
+        &state.skills_dir,
+        &state.local_knowledge,
+        &package,
+    ) {
         Ok(preview) => preview,
         Err(error) => return package_failure(error),
     };
@@ -925,7 +946,12 @@ pub fn expert_package_rollback(
         Ok(package) => package,
         Err(error) => return package_failure(error),
     };
-    let missing = match missing_resources(&state.database, &state.skills_dir, &state.local_knowledge, &package) {
+    let missing = match missing_resources(
+        &state.database,
+        &state.skills_dir,
+        &state.local_knowledge,
+        &package,
+    ) {
         Ok(missing) => missing,
         Err(error) => return package_failure(error),
     };

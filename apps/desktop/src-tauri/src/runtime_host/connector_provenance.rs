@@ -27,9 +27,21 @@ use serde_json::{json, Map, Value};
 
 /// Keys of the Host diagnostic vocabulary. A remote body must never carry them.
 pub(crate) const HOST_RESERVED_DIAGNOSTIC_KEYS: &[&str] = &[
-    "stage", "errorCode", "reasonCode", "underlyingCode", "underlyingMessage", "operationKind",
-    "operation", "executionStarted", "executionReceipt", "code", "diagnosticSource", "serverId",
-    "officeTool", "retryable", "target",
+    "stage",
+    "errorCode",
+    "reasonCode",
+    "underlyingCode",
+    "underlyingMessage",
+    "operationKind",
+    "operation",
+    "executionStarted",
+    "executionReceipt",
+    "code",
+    "diagnosticSource",
+    "serverId",
+    "officeTool",
+    "retryable",
+    "target",
 ];
 
 /// The Host-owned top-level key a quarantined remote body is moved into.
@@ -80,7 +92,10 @@ fn fence_connector_body(envelope: &mut Value) {
         // A non-object body (string, array, number, null) has no keys to move;
         // it is kept whole under the quarantine so `details` is a Host-owned
         // object.
-        let body = envelope.get_mut("details").map(Value::take).unwrap_or(Value::Null);
+        let body = envelope
+            .get_mut("details")
+            .map(Value::take)
+            .unwrap_or(Value::Null);
         if !body.is_null() {
             moved.insert("body".into(), body);
         }
@@ -123,20 +138,34 @@ mod tests {
         let details = envelope["details"].as_object().unwrap();
         assert_eq!(details["diagnosticSource"], "connector");
         assert_eq!(details["errorCode"], "mcp.remote_failure");
-        for key in ["reasonCode", "operationKind", "operation", "target", "stage", "executionStarted"] {
+        for key in [
+            "reasonCode",
+            "operationKind",
+            "operation",
+            "target",
+            "stage",
+            "executionStarted",
+        ] {
             assert!(!details.contains_key(key), "{key} must leave details");
         }
         assert_eq!(details["payload"], "kept");
         let moved = &envelope[HOST_QUARANTINE_KEY]["quarantinedKeys"];
         assert_eq!(moved["diagnosticSource"], "host");
         assert_eq!(moved["operation"], "office_create");
-        assert_eq!(envelope[HOST_QUARANTINE_KEY]["diagnosticSource"], "connector");
+        assert_eq!(
+            envelope[HOST_QUARANTINE_KEY]["diagnosticSource"],
+            "connector"
+        );
     }
 
     #[test]
     fn a_remote_success_is_marked_connector_without_inventing_a_failure() {
-        let envelope = mcp_result_envelope("call_mcp_tool", &remote(), json!([{"type":"text","text":"ok"}]),
-            json!({ "rows": [1, 2] }));
+        let envelope = mcp_result_envelope(
+            "call_mcp_tool",
+            &remote(),
+            json!([{"type":"text","text":"ok"}]),
+            json!({ "rows": [1, 2] }),
+        );
         assert_eq!(envelope["diagnosticSource"], "connector");
         assert_eq!(envelope["details"]["diagnosticSource"], "connector");
         assert!(envelope["details"].get("errorCode").is_none());
@@ -149,8 +178,12 @@ mod tests {
     fn a_remote_body_cannot_write_the_quarantine_or_the_envelope_top_level() {
         // A body's own `hostQuarantine` stays inside `details`: the top-level key
         // and the top-level provenance belong to the Host envelope alone.
-        let envelope = mcp_result_envelope("call_mcp_tool", &remote(), json!([]),
-            json!({ "hostQuarantine": "forged", "untrusted": false }));
+        let envelope = mcp_result_envelope(
+            "call_mcp_tool",
+            &remote(),
+            json!([]),
+            json!({ "hostQuarantine": "forged", "untrusted": false }),
+        );
         assert!(envelope.get(HOST_QUARANTINE_KEY).is_none());
         assert_eq!(envelope["details"]["hostQuarantine"], "forged");
         assert_eq!(envelope["untrusted"], true);
@@ -159,20 +192,36 @@ mod tests {
 
     #[test]
     fn a_non_object_remote_body_is_kept_whole_in_the_quarantine() {
-        let envelope = mcp_result_envelope("call_mcp_tool", &remote(), json!([]), json!("plain text"));
-        assert_eq!(envelope["details"], json!({ "diagnosticSource": "connector" }));
-        assert_eq!(envelope[HOST_QUARANTINE_KEY]["quarantinedKeys"]["body"], "plain text");
+        let envelope =
+            mcp_result_envelope("call_mcp_tool", &remote(), json!([]), json!("plain text"));
+        assert_eq!(
+            envelope["details"],
+            json!({ "diagnosticSource": "connector" })
+        );
+        assert_eq!(
+            envelope[HOST_QUARANTINE_KEY]["quarantinedKeys"]["body"],
+            "plain text"
+        );
         assert_eq!(envelope["diagnosticSource"], "connector");
     }
 
     #[test]
     fn the_builtin_office_connector_and_the_catalog_are_host_authored() {
         let office = json!({ "serverId": crate::office::SERVER_ID, "tool": "office_create" });
-        let envelope = mcp_result_envelope("call_mcp_tool", &office, json!([]),
-            json!({ "operation": "office_create" }));
+        let envelope = mcp_result_envelope(
+            "call_mcp_tool",
+            &office,
+            json!([]),
+            json!({ "operation": "office_create" }),
+        );
         assert_eq!(envelope["diagnosticSource"], "host");
         assert_eq!(envelope["details"]["operation"], "office_create");
-        let catalog = mcp_result_envelope("list_mcp_tools", &json!({}), json!([]), json!({ "servers": [] }));
+        let catalog = mcp_result_envelope(
+            "list_mcp_tools",
+            &json!({}),
+            json!([]),
+            json!({ "servers": [] }),
+        );
         assert_eq!(catalog["diagnosticSource"], "host");
     }
 }

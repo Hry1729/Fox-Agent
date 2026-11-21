@@ -101,7 +101,8 @@ fn restore_request_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RestoreReque
         state: row.get(6)?,
         result_version_id: row.get(7)?,
         error: row.get(8)?,
-        display_name: row.get::<_, Option<String>>(9)?
+        display_name: row
+            .get::<_, Option<String>>(9)?
             .unwrap_or_else(|| "the file".to_owned()),
     })
 }
@@ -128,27 +129,27 @@ impl Database {
     ) -> Result<RestoreClaim, String> {
         let attempt_owner = uuid::Uuid::new_v4().to_string();
         self.with_connection(|connection| {
-            let transaction = connection
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let inserted = transaction.execute(
-                    "INSERT INTO kernel_restore_requests(
+                "INSERT INTO kernel_restore_requests(
                         conversation_id, request_id, version_id, target_identity,
                         baseline_version, dispatch_id, intent_digest, attempt_owner,
                         state, created_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'running', ?9)
                      ON CONFLICT(conversation_id, request_id) DO NOTHING",
-                    rusqlite::params![
-                        conversation_id,
-                        request_id,
-                        version_id,
-                        target_identity,
-                        baseline_version,
-                        dispatch_id,
-                        intent_digest,
-                        attempt_owner,
-                        now_ms(),
-                    ],
-                )?;
+                rusqlite::params![
+                    conversation_id,
+                    request_id,
+                    version_id,
+                    target_identity,
+                    baseline_version,
+                    dispatch_id,
+                    intent_digest,
+                    attempt_owner,
+                    now_ms(),
+                ],
+            )?;
             let outcome = if inserted == 1 {
                 RestoreClaim::Claimed { attempt_owner }
             } else {
@@ -194,22 +195,24 @@ impl Database {
         }
         let changed = self.with_connection(|connection| {
             connection.execute(
-                    "UPDATE kernel_restore_requests
+                "UPDATE kernel_restore_requests
                         SET state = ?4, result_version_id = NULL, error = ?5, settled_at = ?6
                       WHERE conversation_id = ?1 AND request_id = ?2
                         AND attempt_owner = ?3 AND state = 'running'",
-                    rusqlite::params![
-                        conversation_id,
-                        request_id,
-                        attempt_owner,
-                        state,
-                        error,
-                        now_ms(),
-                    ],
-                )
+                rusqlite::params![
+                    conversation_id,
+                    request_id,
+                    attempt_owner,
+                    state,
+                    error,
+                    now_ms(),
+                ],
+            )
         })?;
         if changed != 1 {
-            return Err("restore_settlement_conflict: request owner or running state changed".into());
+            return Err(
+                "restore_settlement_conflict: request owner or running state changed".into(),
+            );
         }
         Ok(())
     }
@@ -305,12 +308,17 @@ impl Database {
         })
     }
 
-    pub(crate) fn managed_file_version(&self, id: &str) -> Result<Option<ManagedFileVersion>, String> {
+    pub(crate) fn managed_file_version(
+        &self,
+        id: &str,
+    ) -> Result<Option<ManagedFileVersion>, String> {
         self.with_connection(|conn| {
             let mut stmt = conn.prepare(&format!(
                 "SELECT {SELECT_COLUMNS} FROM managed_file_versions WHERE id=?1"
             ))?;
-            Ok(stmt.query_row(params![id], row_to_managed_version).optional()?)
+            Ok(stmt
+                .query_row(params![id], row_to_managed_version)
+                .optional()?)
         })
     }
 
@@ -381,7 +389,10 @@ impl Database {
                  WHERE conversation_id=?1 AND storage_path=?2 ORDER BY version_no DESC LIMIT 1"
             ))?;
             Ok(stmt
-                .query_row(params![conversation_id, storage_path], row_to_managed_version)
+                .query_row(
+                    params![conversation_id, storage_path],
+                    row_to_managed_version,
+                )
                 .optional()?)
         })
     }

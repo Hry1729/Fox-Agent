@@ -51,12 +51,12 @@
 
 #![allow(dead_code)]
 
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
-use super::p2b_decision::{
-    DecisionFact, DecisionResult, DeliveryClass, FactClass, FactOrigin, decide,
-};
 use super::super::delivery_checks_v2::{LimitKind, RecordLocator};
+use super::p2b_decision::{
+    decide, DecisionFact, DecisionResult, DeliveryClass, FactClass, FactOrigin,
+};
 
 /// The durable verdict-record version. Written by this consumer and required on
 /// read, so a v2 verdict record is identified by its **own** version pair rather
@@ -284,7 +284,9 @@ impl DeliveryVerdict {
 
     /// The items that must be retained **without** a terminal write.
     pub(crate) fn pending_items(&self) -> impl Iterator<Item = &ItemDecision> {
-        self.items.iter().filter(|item| !item.may_enter_terminal_stage())
+        self.items
+            .iter()
+            .filter(|item| !item.may_enter_terminal_stage())
     }
 
     /// What a consumer does with this verdict.
@@ -394,7 +396,10 @@ impl DeliveryVerdict {
         );
         envelope.insert("itemKey".into(), json!(item.item_key));
         envelope.insert("class".into(), json!(delivery_class_str(item.class)));
-        envelope.insert("aggregateClass".into(), json!(delivery_class_str(self.class)));
+        envelope.insert(
+            "aggregateClass".into(),
+            json!(delivery_class_str(self.class)),
+        );
         envelope.insert("itemCount".into(), json!(self.items.len()));
         // `terminal` means "this item's class is a final outcome", which is what
         // guards `may_be_passed`. It is deliberately a different predicate from
@@ -442,7 +447,9 @@ pub(crate) enum StoredVerdict {
     Legacy,
     /// An envelope is present but unusable: unknown version, wrong shape, bad
     /// class, truncated fact list. Explicitly not passed.
-    Corrupt { detail: String },
+    Corrupt {
+        detail: String,
+    },
 }
 
 /// A decoded, well-formed v2 verdict record.
@@ -600,9 +607,7 @@ pub(crate) fn decode_verdict(finding: &Value) -> StoredVerdict {
             detail: "verdict envelope is not an object".to_owned(),
         };
     };
-    let version = envelope
-        .get("verdictSchemaVersion")
-        .and_then(Value::as_u64);
+    let version = envelope.get("verdictSchemaVersion").and_then(Value::as_u64);
     let envelope_version = envelope
         .get("verdictEnvelopeVersion")
         .and_then(Value::as_u64);

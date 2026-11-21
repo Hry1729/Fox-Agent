@@ -106,7 +106,10 @@ impl Database {
     /// Whether the user granted full access to this external conversation
     /// when creating it (v96, UX batch ②). A failed read is an error, which
     /// the caller treats as "not granted" (fail-closed: standard).
-    pub(crate) fn conversation_full_access_granted(&self, conversation_id: &str) -> Result<bool, String> {
+    pub(crate) fn conversation_full_access_granted(
+        &self,
+        conversation_id: &str,
+    ) -> Result<bool, String> {
         self.with_connection(|connection| {
             connection
                 .query_row(
@@ -124,7 +127,10 @@ impl Database {
     pub(crate) fn revoke_full_access_grant(&self, conversation_id: &str) -> Result<bool, String> {
         self.with_connection(|connection| {
             connection
-                .execute("DELETE FROM agent_backend_full_access_grants WHERE conversation_id = ?1", [conversation_id])
+                .execute(
+                    "DELETE FROM agent_backend_full_access_grants WHERE conversation_id = ?1",
+                    [conversation_id],
+                )
                 .map(|count| count > 0)
         })
     }
@@ -137,7 +143,8 @@ impl Database {
         event: &str,
         details: &serde_json::Value,
     ) -> Result<(), String> {
-        let details = crate::canonical_json::to_string(details).map_err(|error| error.to_string())?;
+        let details =
+            crate::canonical_json::to_string(details).map_err(|error| error.to_string())?;
         let now = chrono::Utc::now().timestamp_millis();
         self.with_connection(|connection| {
             connection
@@ -155,18 +162,28 @@ impl Database {
     pub(crate) fn known_projects(&self) -> Result<Vec<(String, String)>, String> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare("SELECT id, name FROM projects ORDER BY id")?;
-            let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
             rows.collect::<rusqlite::Result<Vec<(String, String)>>>()
         })
     }
 
     /// A project by id, else by root path: `(id, root_path)`. Used by the
     /// login probe of a NEW conversation (no conversation row yet).
-    pub(crate) fn project_by_id_or_root(&self, project_id: Option<&str>, project_root: Option<&str>) -> Result<Option<(String, String)>, String> {
+    pub(crate) fn project_by_id_or_root(
+        &self,
+        project_id: Option<&str>,
+        project_root: Option<&str>,
+    ) -> Result<Option<(String, String)>, String> {
         self.with_connection(|connection| {
             if let Some(id) = project_id.filter(|id| !id.is_empty()) {
                 let found = connection
-                    .query_row("SELECT id, root_path FROM projects WHERE id = ?1", [id], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .query_row(
+                        "SELECT id, root_path FROM projects WHERE id = ?1",
+                        [id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
                     .optional()?;
                 if found.is_some() {
                     return Ok(found);
@@ -174,7 +191,11 @@ impl Database {
             }
             match project_root.filter(|root| !root.is_empty()) {
                 Some(root) => connection
-                    .query_row("SELECT id, root_path FROM projects WHERE root_path = ?1", [root], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .query_row(
+                        "SELECT id, root_path FROM projects WHERE root_path = ?1",
+                        [root],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
                     .optional(),
                 None => Ok(None),
             }
@@ -208,7 +229,10 @@ impl Database {
     /// `agent_backend.session` run event the external runtime writes when it
     /// opens or reopens a native session). Used to `session/load` it after a
     /// restart. No schema change: the run events are the record.
-    pub(crate) fn latest_native_session(&self, conversation_id: &str) -> Result<Option<String>, String> {
+    pub(crate) fn latest_native_session(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<String>, String> {
         self.with_connection(|connection| {
             let json: Option<String> = connection
                 .query_row(
@@ -221,7 +245,12 @@ impl Database {
                 .optional()?;
             Ok(json
                 .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
-                .and_then(|event| event.get("nativeSessionId").and_then(|id| id.as_str()).map(str::to_owned)))
+                .and_then(|event| {
+                    event
+                        .get("nativeSessionId")
+                        .and_then(|id| id.as_str())
+                        .map(str::to_owned)
+                }))
         })
     }
 
@@ -247,12 +276,17 @@ impl Database {
     /// `repair_interrupted_runs` skips these runs so this code is what they get.
     /// Returns the interrupted run ids; a run that fails to transition is
     /// logged and skipped, never aborting startup.
-    pub(crate) fn interrupt_external_runs_left_active(&self, message: &str) -> Result<Vec<String>, String> {
+    pub(crate) fn interrupt_external_runs_left_active(
+        &self,
+        message: &str,
+    ) -> Result<Vec<String>, String> {
         let mut interrupted = Vec::new();
         for run_id in self.external_runs_left_active()? {
             match self.mark_run_interrupted(&run_id, "agent_backend_host_restarted", message) {
                 Ok(()) => interrupted.push(run_id),
-                Err(error) => eprintln!("fox.external left_active_interrupt_failed run={run_id} error={error:?}"),
+                Err(error) => eprintln!(
+                    "fox.external left_active_interrupt_failed run={run_id} error={error:?}"
+                ),
             }
         }
         Ok(interrupted)
@@ -270,24 +304,54 @@ mod tests {
             .create_conversation(database.default_agent_id(), Some("fox"), None, None)
             .expect("fox conversation");
         assert_eq!(fox.agent_backend, "fox");
-        assert_eq!(database.conversation_agent_backend(&fox.id).unwrap().as_deref(), Some("fox"));
+        assert_eq!(
+            database
+                .conversation_agent_backend(&fox.id)
+                .unwrap()
+                .as_deref(),
+            Some("fox")
+        );
 
         let pi = database
-            .create_conversation_with_backend(database.default_agent_id(), Some("pi"), None, None, "pi")
+            .create_conversation_with_backend(
+                database.default_agent_id(),
+                Some("pi"),
+                None,
+                None,
+                "pi",
+            )
             .expect("pi conversation");
         assert_eq!(pi.agent_backend, "pi");
-        assert_eq!(database.conversation_agent_backend(&pi.id).unwrap().as_deref(), Some("pi"));
+        assert_eq!(
+            database
+                .conversation_agent_backend(&pi.id)
+                .unwrap()
+                .as_deref(),
+            Some("pi")
+        );
 
         let error = database
             .with_connection(|connection| {
-                connection.execute("UPDATE conversations SET agent_backend='fox' WHERE id=?1", [&pi.id])
+                connection.execute(
+                    "UPDATE conversations SET agent_backend='fox' WHERE id=?1",
+                    [&pi.id],
+                )
             })
             .expect_err("frozen");
         assert!(error.contains("agent_backend_immutable"), "{error}");
         assert!(database
-            .create_conversation_with_backend(database.default_agent_id(), None, None, None, "deepseek_harness")
+            .create_conversation_with_backend(
+                database.default_agent_id(),
+                None,
+                None,
+                None,
+                "deepseek_harness"
+            )
             .is_err());
-        assert_eq!(database.conversation_agent_backend("missing").unwrap(), None);
+        assert_eq!(
+            database.conversation_agent_backend("missing").unwrap(),
+            None
+        );
         assert_eq!(database.run_agent_backend("missing").unwrap(), None);
         assert_eq!(database.approval_agent_backend("missing").unwrap(), None);
     }
@@ -300,56 +364,112 @@ mod tests {
         use crate::database::CreateRunError;
         let database = Database::open(std::path::PathBuf::from(":memory:")).expect("database");
         let pi = database
-            .create_conversation_with_backend(database.default_agent_id(), Some("pi"), None, None, "pi")
+            .create_conversation_with_backend(
+                database.default_agent_id(),
+                Some("pi"),
+                None,
+                None,
+                "pi",
+            )
             .expect("pi conversation");
-        let first = database.create_run_checked(&pi.id, "hello", None).expect("first run");
-        database.mark_run_cancelling(&first.run.id).expect("cancelling");
+        let first = database
+            .create_run_checked(&pi.id, "hello", None)
+            .expect("first run");
+        database
+            .mark_run_cancelling(&first.run.id)
+            .expect("cancelling");
         let counts = |database: &Database| -> (i64, i64) {
             database
                 .with_connection(|connection| {
                     Ok((
-                        connection.query_row("SELECT COUNT(*) FROM runs WHERE conversation_id = ?1", [&pi.id], |row| row.get(0))?,
-                        connection.query_row("SELECT COUNT(*) FROM messages WHERE conversation_id = ?1", [&pi.id], |row| row.get(0))?,
+                        connection.query_row(
+                            "SELECT COUNT(*) FROM runs WHERE conversation_id = ?1",
+                            [&pi.id],
+                            |row| row.get(0),
+                        )?,
+                        connection.query_row(
+                            "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1",
+                            [&pi.id],
+                            |row| row.get(0),
+                        )?,
                     ))
                 })
                 .unwrap()
         };
         let before = counts(&database);
-        let busy = database.create_run_checked(&pi.id, "again", None).expect_err("busy");
-        assert!(matches!(&busy, CreateRunError::ConversationBusy { status } if status == "cancelling"), "{busy:?}");
-        assert_eq!(busy.refusal().map(|(code, _)| code), Some("run.conversation_busy"));
+        let busy = database
+            .create_run_checked(&pi.id, "again", None)
+            .expect_err("busy");
+        assert!(
+            matches!(&busy, CreateRunError::ConversationBusy { status } if status == "cancelling"),
+            "{busy:?}"
+        );
+        assert_eq!(
+            busy.refusal().map(|(code, _)| code),
+            Some("run.conversation_busy")
+        );
         assert!(!busy.refusal().unwrap().1.contains("数据库"));
         assert_eq!(counts(&database), before, "no Run and no message written");
         // The legacy String form keeps working for its callers.
         assert!(database.create_run(&pi.id, "again", None).is_err());
 
         database
-            .record_external_event(&first.run.id, &serde_json::json!({ "type": "run.cancelled" }))
+            .record_external_event(
+                &first.run.id,
+                &serde_json::json!({ "type": "run.cancelled" }),
+            )
             .expect("cancelled");
-        database.create_run_checked(&pi.id, "after cancel", None).expect("a settled conversation takes the next send");
+        database
+            .create_run_checked(&pi.id, "after cancel", None)
+            .expect("a settled conversation takes the next send");
 
         let fox = database
             .create_conversation(database.default_agent_id(), Some("fox"), None, None)
             .expect("fox conversation");
         database.archive_conversation(&fox.id).expect("archive");
-        let archived = database.create_run_checked(&fox.id, "hi", None).expect_err("archived");
+        let archived = database
+            .create_run_checked(&fox.id, "hi", None)
+            .expect_err("archived");
         assert_eq!(archived, CreateRunError::ConversationNotFound);
-        assert_eq!(archived.refusal().map(|(code, _)| code), Some("conversation.not_found"));
-        assert_eq!(database.create_run_checked("missing", "hi", None).expect_err("missing"), CreateRunError::ConversationNotFound);
+        assert_eq!(
+            archived.refusal().map(|(code, _)| code),
+            Some("conversation.not_found")
+        );
+        assert_eq!(
+            database
+                .create_run_checked("missing", "hi", None)
+                .expect_err("missing"),
+            CreateRunError::ConversationNotFound
+        );
     }
 
     #[test]
     fn external_lookups_read_context_native_session_and_left_runs() {
         let database = Database::open(std::path::PathBuf::from(":memory:")).expect("database");
         let pi = database
-            .create_conversation_with_backend(database.default_agent_id(), Some("pi"), None, None, "pi")
+            .create_conversation_with_backend(
+                database.default_agent_id(),
+                Some("pi"),
+                None,
+                None,
+                "pi",
+            )
             .expect("pi conversation");
-        let context = database.external_conversation_context(&pi.id).unwrap().expect("context");
+        let context = database
+            .external_conversation_context(&pi.id)
+            .unwrap()
+            .expect("context");
         assert_eq!(context.project_id, None);
-        assert_eq!(database.external_conversation_context("missing").unwrap(), None);
+        assert_eq!(
+            database.external_conversation_context("missing").unwrap(),
+            None
+        );
         assert_eq!(database.latest_native_session(&pi.id).unwrap(), None);
         let started = database.create_run(&pi.id, "hello", None).expect("run");
-        assert_eq!(database.external_runs_left_active().unwrap(), vec![started.run.id.clone()]);
+        assert_eq!(
+            database.external_runs_left_active().unwrap(),
+            vec![started.run.id.clone()]
+        );
         let run_id = started.run.id.clone();
         database
             .record_external_event(&run_id, &serde_json::json!({ "type": "run.started" }))
@@ -360,7 +480,10 @@ mod tests {
                 &serde_json::json!({ "type": "agent_backend.session", "nativeSessionId": "sess-1" }),
             )
             .expect("session event");
-        assert_eq!(database.latest_native_session(&pi.id).unwrap().as_deref(), Some("sess-1"));
+        assert_eq!(
+            database.latest_native_session(&pi.id).unwrap().as_deref(),
+            Some("sess-1")
+        );
         database
             .record_external_event(&run_id, &serde_json::json!({ "type": "run.completed" }))
             .expect("completed");
@@ -369,7 +492,10 @@ mod tests {
             .create_conversation(database.default_agent_id(), Some("fox"), None, None)
             .expect("fox conversation");
         database.create_run(&fox.id, "hi", None).expect("fox run");
-        assert!(database.external_runs_left_active().unwrap().is_empty(), "Fox runs are never touched");
+        assert!(
+            database.external_runs_left_active().unwrap().is_empty(),
+            "Fox runs are never touched"
+        );
     }
 
     /// External runs carry no `run_control_bindings` row. The shared approval
@@ -382,7 +508,11 @@ mod tests {
     fn approval_status(database: &Database, approval_id: &str) -> String {
         database
             .with_connection(|connection| {
-                connection.query_row("SELECT status FROM approvals WHERE id = ?1", [approval_id], |row| row.get::<_, String>(0))
+                connection.query_row(
+                    "SELECT status FROM approvals WHERE id = ?1",
+                    [approval_id],
+                    |row| row.get::<_, String>(0),
+                )
             })
             .expect("approval status")
     }
@@ -390,10 +520,17 @@ mod tests {
     fn approval_reason(database: &Database, approval_id: &str) -> String {
         let decision: String = database
             .with_connection(|connection| {
-                connection.query_row("SELECT decision_json FROM approvals WHERE id = ?1", [approval_id], |row| row.get::<_, String>(0))
+                connection.query_row(
+                    "SELECT decision_json FROM approvals WHERE id = ?1",
+                    [approval_id],
+                    |row| row.get::<_, String>(0),
+                )
             })
             .expect("approval decision");
-        serde_json::from_str::<serde_json::Value>(&decision).expect("decision json")["reason"].as_str().unwrap_or_default().to_owned()
+        serde_json::from_str::<serde_json::Value>(&decision).expect("decision json")["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
     }
 
     #[test]
@@ -403,19 +540,39 @@ mod tests {
         // One conversation per case so no case depends on another run having ended.
         let approve_once = |key: &str| {
             let pi = database
-                .create_conversation_with_backend(database.default_agent_id(), Some(key), None, None, "pi")
+                .create_conversation_with_backend(
+                    database.default_agent_id(),
+                    Some(key),
+                    None,
+                    None,
+                    "pi",
+                )
                 .expect("pi conversation");
             let started = database.create_run(&pi.id, "hello", None).expect("run");
             let run_id = started.run.id.clone();
             database
                 .record_external_event(&run_id, &serde_json::json!({ "type": "run.started" }))
                 .expect("started");
-            assert!(database.run_control_binding(&run_id).unwrap().is_none(), "external runs are never bound");
+            assert!(
+                database.run_control_binding(&run_id).unwrap().is_none(),
+                "external runs are never bound"
+            );
             let (tool, _) = database
-                .create_host_tool_call_once(&run_id, key, "agent_permission", &serde_json::json!({}), "pending", true)
+                .create_host_tool_call_once(
+                    &run_id,
+                    key,
+                    "agent_permission",
+                    &serde_json::json!({}),
+                    "pending",
+                    true,
+                )
                 .expect("permission tool call");
             let approval = database
-                .create_approval(&tool.id, "run a command", &serde_json::json!({ "availableDecisions": ["allow_once", "deny"] }))
+                .create_approval(
+                    &tool.id,
+                    "run a command",
+                    &serde_json::json!({ "availableDecisions": ["allow_once", "deny"] }),
+                )
                 .expect("approval");
             (run_id, approval.id)
         };
@@ -427,7 +584,11 @@ mod tests {
             .expect("resolved");
         assert_eq!(resolved.status, "approved");
         assert_eq!(
-            database.approval_agent_backend(&approved_id).unwrap().map(|identity| identity.agent_backend).as_deref(),
+            database
+                .approval_agent_backend(&approved_id)
+                .unwrap()
+                .map(|identity| identity.agent_backend)
+                .as_deref(),
             Some("pi")
         );
 
@@ -444,10 +605,17 @@ mod tests {
         let (_late_run, late_id) = approve_once("perm-late");
         database
             .with_connection(|connection| {
-                connection.execute("UPDATE approvals SET requested_at = requested_at - 36000000 WHERE id = ?1", [&late_id])
+                connection.execute(
+                    "UPDATE approvals SET requested_at = requested_at - 36000000 WHERE id = ?1",
+                    [&late_id],
+                )
             })
             .expect("age the approval by ten hours");
-        assert_eq!(approval_status(&database, &late_id), "pending", "a long unanswered approval stays pending");
+        assert_eq!(
+            approval_status(&database, &late_id),
+            "pending",
+            "a long unanswered approval stays pending"
+        );
         let late = database
             .resolve_approval(&late_id, ApprovalDecision::AllowOnce)
             .expect("late approval without binding")
@@ -456,9 +624,15 @@ mod tests {
 
         // Cancelling the turn ends its open approval as cancelled.
         let (cancel_run, cancel_id) = approve_once("perm-cancel");
-        database.mark_run_cancelling(&cancel_run).expect("cancelling").expect("was running");
+        database
+            .mark_run_cancelling(&cancel_run)
+            .expect("cancelling")
+            .expect("was running");
         assert_eq!(approval_status(&database, &cancel_id), "cancelled");
-        assert!(database.resolve_approval(&cancel_id, ApprovalDecision::AllowOnce).unwrap().is_none());
+        assert!(database
+            .resolve_approval(&cancel_id, ApprovalDecision::AllowOnce)
+            .unwrap()
+            .is_none());
 
         // Closing the conversation (archive / trash / delete: backend session
         // closed, the turn ends interrupted) ends its open approval as
@@ -471,8 +645,14 @@ mod tests {
             )
             .expect("run.interrupted");
         assert_eq!(approval_status(&database, &closed_id), "cancelled");
-        assert_eq!(approval_reason(&database, &closed_id), "conversation_closed");
-        assert!(database.resolve_approval(&closed_id, ApprovalDecision::AllowOnce).unwrap().is_none());
+        assert_eq!(
+            approval_reason(&database, &closed_id),
+            "conversation_closed"
+        );
+        assert!(database
+            .resolve_approval(&closed_id, ApprovalDecision::AllowOnce)
+            .unwrap()
+            .is_none());
 
         // Fox exited with the approval open; the restart interrupts the run
         // and the approval ends `cancelled` too.
@@ -482,7 +662,10 @@ mod tests {
             .expect("interrupted at startup");
         assert_eq!(approval_status(&database, &restarted_id), "cancelled");
         assert_eq!(approval_reason(&database, &restarted_id), "app_restarted");
-        assert!(database.resolve_approval(&restarted_id, ApprovalDecision::AllowOnce).unwrap().is_none());
+        assert!(database
+            .resolve_approval(&restarted_id, ApprovalDecision::AllowOnce)
+            .unwrap()
+            .is_none());
 
         // Any other interruption still records `expired` + `run_interrupted`.
         let (other_run, other_id) = approve_once("perm-other");
@@ -493,7 +676,10 @@ mod tests {
         assert_eq!(approval_reason(&database, &other_id), "run_interrupted");
 
         database
-            .record_external_event(&approved_run, &serde_json::json!({ "type": "run.completed" }))
+            .record_external_event(
+                &approved_run,
+                &serde_json::json!({ "type": "run.completed" }),
+            )
             .expect("run.completed without a binding")
             .expect("applied");
     }
@@ -504,8 +690,13 @@ mod tests {
         let conversation = database
             .create_conversation(database.default_agent_id(), Some("run"), None, None)
             .expect("conversation");
-        let started = database.create_run(&conversation.id, "hello", None).expect("run");
-        let identity = database.run_agent_backend(&started.run.id).unwrap().expect("identity");
+        let started = database
+            .create_run(&conversation.id, "hello", None)
+            .expect("run");
+        let identity = database
+            .run_agent_backend(&started.run.id)
+            .unwrap()
+            .expect("identity");
         assert_eq!(identity.conversation_id, conversation.id);
         assert_eq!(identity.run_id, started.run.id);
         assert_eq!(identity.agent_backend, "fox");
@@ -520,53 +711,106 @@ mod tests {
     fn restart_leaves_external_runs_to_the_external_host() {
         let database = Database::open(std::path::PathBuf::from(":memory:")).expect("database");
         let pi = database
-            .create_conversation_with_backend(database.default_agent_id(), Some("restart"), None, None, "pi")
+            .create_conversation_with_backend(
+                database.default_agent_id(),
+                Some("restart"),
+                None,
+                None,
+                "pi",
+            )
             .expect("pi conversation");
-        let pi_run = database.create_run(&pi.id, "hello", None).expect("pi run").run.id;
+        let pi_run = database
+            .create_run(&pi.id, "hello", None)
+            .expect("pi run")
+            .run
+            .id;
         database
             .record_external_event(&pi_run, &serde_json::json!({ "type": "run.started" }))
             .expect("started");
         let (tool, _) = database
-            .create_host_tool_call_once(&pi_run, "perm-restart-gen", "agent_permission", &serde_json::json!({}), "pending", true)
+            .create_host_tool_call_once(
+                &pi_run,
+                "perm-restart-gen",
+                "agent_permission",
+                &serde_json::json!({}),
+                "pending",
+                true,
+            )
             .expect("permission tool call");
         let approval = database
-            .create_approval(&tool.id, "run a command", &serde_json::json!({ "availableDecisions": ["allow_once", "deny"] }))
+            .create_approval(
+                &tool.id,
+                "run a command",
+                &serde_json::json!({ "availableDecisions": ["allow_once", "deny"] }),
+            )
             .expect("approval");
         let fox = database
             .create_conversation(database.default_agent_id(), Some("fox"), None, None)
             .expect("fox conversation");
-        let fox_run = database.create_run(&fox.id, "hello", None).expect("fox run").run.id;
+        let fox_run = database
+            .create_run(&fox.id, "hello", None)
+            .expect("fox run")
+            .run
+            .id;
 
         let run_state = |run_id: &str| -> (String, Option<String>) {
             database
                 .with_connection(|connection| {
-                    connection.query_row("SELECT status, error_code FROM runs WHERE id = ?1", [run_id], |row| {
-                        Ok((row.get(0)?, row.get(1)?))
-                    })
+                    connection.query_row(
+                        "SELECT status, error_code FROM runs WHERE id = ?1",
+                        [run_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
                 })
                 .expect("run state")
         };
 
         database.repair_interrupted_runs().expect("generic repair");
-        assert_eq!(run_state(&fox_run), ("interrupted".to_owned(), Some("runtime.application_restarted".to_owned())));
+        assert_eq!(
+            run_state(&fox_run),
+            (
+                "interrupted".to_owned(),
+                Some("runtime.application_restarted".to_owned())
+            )
+        );
         let (pi_status, pi_code) = run_state(&pi_run);
-        assert!(matches!(pi_status.as_str(), "queued" | "running"), "generic repair must skip external runs: {pi_status}");
+        assert!(
+            matches!(pi_status.as_str(), "queued" | "running"),
+            "generic repair must skip external runs: {pi_status}"
+        );
         assert_eq!(pi_code, None);
-        assert_eq!(approval_status(&database, &approval.id), "pending", "generic repair must not expire external approvals");
+        assert_eq!(
+            approval_status(&database, &approval.id),
+            "pending",
+            "generic repair must not expire external approvals"
+        );
 
-        let interrupted = database.interrupt_external_runs_left_active("Fox 已重启").expect("external host step");
+        let interrupted = database
+            .interrupt_external_runs_left_active("Fox 已重启")
+            .expect("external host step");
         assert_eq!(interrupted, vec![pi_run.clone()]);
-        assert_eq!(run_state(&pi_run), ("interrupted".to_owned(), Some("agent_backend_host_restarted".to_owned())));
+        assert_eq!(
+            run_state(&pi_run),
+            (
+                "interrupted".to_owned(),
+                Some("agent_backend_host_restarted".to_owned())
+            )
+        );
         assert_eq!(approval_status(&database, &approval.id), "cancelled");
         assert_eq!(approval_reason(&database, &approval.id), "app_restarted");
-        assert!(database.resolve_approval(&approval.id, crate::database::ApprovalDecision::AllowOnce).unwrap().is_none());
+        assert!(database
+            .resolve_approval(&approval.id, crate::database::ApprovalDecision::AllowOnce)
+            .unwrap()
+            .is_none());
         // Idempotent on a second startup.
-        assert!(database.interrupt_external_runs_left_active("Fox 已重启").expect("second pass").is_empty());
+        assert!(database
+            .interrupt_external_runs_left_active("Fox 已重启")
+            .expect("second pass")
+            .is_empty());
     }
 }
 
 #[cfg(test)]
 mod full_access_grant_tests {
     use crate::database::Database;
-
 }

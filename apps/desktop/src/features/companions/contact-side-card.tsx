@@ -204,7 +204,7 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
             {tab === 'details' && <div className="fox-contact-side-details">
               <section className="fox-contact-side-group" aria-label="定时任务">
                 <h3>定时任务</h3>
-                <div className="fox-library-card">
+                <div className="fox-contact-list-card">
                   <button type="button" className="fox-contact-side-item" onClick={() => setView('tasks')}>
                     <CalendarClock size={16} aria-hidden="true" /><span className="fox-contact-side-lab">定时任务</span>
                     <ContactTaskSummary count={scheduledTasks.tasks.length} pending={scheduledTasks.pending} due={scheduledTasks.due} loaded={scheduledTasks.loaded} />

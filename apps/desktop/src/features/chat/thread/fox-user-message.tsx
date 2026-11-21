@@ -12,6 +12,7 @@ import { File as MessageFile } from '@/components/assistant-ui/elements/file'
 import { copyMessageResponse } from '@/components/assistant-ui/elements/message-actions'
 import { FoxCopyMessageButton } from './fox-message-actions'
 import { formatDateTime } from '@/lib/time-format'
+import { CompanionCommunicationBefore } from '@/features/companions/assignment-timeline'
 
 /** Raw user text — never markdown-rendered, same as the legacy bubble. */
 function FoxUserText(part: TextMessagePartProps) {
@@ -65,6 +66,7 @@ export function FoxUserMessage() {
   </div>
   return (
     <div id={`fox-turn-${messageId}`} data-turn-message-id={messageId} className="fox-turn-anchor">
+      <CompanionCommunicationBefore messageId={messageId} />
       {contactChat && <ContactTimeDivider messageId={messageId} />}
       <MessagePrimitive.Root className={`fox-thread-msg is-user${companion?.privateChat ? ' is-contact-user' : ''}`}>
         <MessagePrimitive.If hasAttachments>

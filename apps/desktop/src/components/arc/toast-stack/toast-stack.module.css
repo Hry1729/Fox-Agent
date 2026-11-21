@@ -24,6 +24,8 @@
 
 .content { display: flex; align-items: flex-start; gap: 8px; padding: 8px 8px 8px 12px; }
 .icon { position: relative; display: grid; width: 18px; height: 20px; flex: none; place-items: center; color: var(--muted-foreground); transition: color 160ms cubic-bezier(.22,1,.36,1); }
+.icon[data-avatar="true"] { width: 32px; height: 32px; }
+.glyph :global(.fox-contact-avatar) { width: 32px; height: 32px; }
 .icon[data-type="success"] { color: var(--success); }
 .icon[data-type="info"] { color: var(--brand); }
 .icon[data-type="warning"] { color: var(--warning); }

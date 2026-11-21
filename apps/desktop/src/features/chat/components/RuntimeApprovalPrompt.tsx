@@ -25,6 +25,7 @@ import { desktopClient } from '@/features/conversations/api/desktop-client'
 import { useContacts } from '@/features/companions/context'
 import { ContactApprovalCard } from '@/features/companions/chat-decision'
 import { approvalInvalidation, approvalStatusLabel, APPROVAL_INVALIDATED_HINT, APPROVAL_INVALIDATED_TITLE } from '@/features/conversations/model/approval-labels'
+import { DecisionPagination } from '../composer/decision-pagination'
 
 /** A1: the Host's offer to save "always allow in this project" for a command. */
 export function projectRuleOffer(request: Record<string, unknown>): { tool: string; suggestedPrefix: string } | null {
@@ -71,16 +72,38 @@ function isReadScopeRequest(approval: ApprovalRecord, presentation: ReturnType<t
     && Object.keys(input).every(key => ['path', 'file_path', 'cwd'].includes(key))
 }
 
+export function RuntimeApprovalQueue({ approvals, onResolve, contactStyle }: {
+  approvals: readonly ApprovalRecord[]
+  onResolve: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>
+  contactStyle?: boolean
+}) {
+  const pending = approvals.filter(approval => approval.status === 'pending')
+    .sort((a, b) => a.requestedAt - b.requestedAt || a.id.localeCompare(b.id))
+  const [selected, setSelected] = useState<{ id: string; index: number }>()
+  const selectedIndex = pending.findIndex(approval => approval.id === selected?.id)
+  const page = selectedIndex < 0 ? Math.min(selected?.index ?? 0, pending.length - 1) : selectedIndex
+  const approval = pending[page]
+  if (!approval) return null
+  return <RuntimeApprovalPrompt key={approval.id} approval={approval} onResolve={onResolve} contactStyle={contactStyle}
+    navigation={pending.length > 1 ? busy => <DecisionPagination page={page} total={pending.length} item="项审批" disabled={busy}
+      onPage={index => setSelected({ id: pending[index].id, index })} /> : undefined} />
+}
+
 export function RuntimeApprovalPrompt({
   approval,
   onResolve,
   readOnly = false,
+  contactStyle = false,
+  navigation,
 }: {
   approval: ApprovalRecord
   onResolve: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>
   readOnly?: boolean
+  contactStyle?: boolean
+  navigation?: (busy: boolean) => ReactNode
 }) {
-  const contactMode = useContacts()?.privateChat
+  const contacts = useContacts()
+  const contactMode = contactStyle || contacts?.privateChat
   const invalidation = approvalInvalidation(approval.decision)
   const invalidated = invalidation !== null
   const active = !readOnly && !invalidated && (!contactMode || approval.status === 'pending')
@@ -96,6 +119,9 @@ export function RuntimeApprovalPrompt({
   const ruleOffer = projectRuleOffer(request as Record<string, unknown>)
   const [rulePrefix, setRulePrefix] = useState(ruleOffer?.suggestedPrefix ?? '')
   const policyNote = commandPolicyNote(request as Record<string, unknown>)
+  const withNavigation = (card: ReactNode) => navigation
+    ? <div className="fox-paged-approval">{navigation(submitting)}{card}</div>
+    : card
   const allowWithProjectRule = async () => {
     if (!active || submittingRef.current || !rulePrefix.trim()) return
     submittingRef.current = true
@@ -136,9 +162,9 @@ export function RuntimeApprovalPrompt({
     const decisionScopes: Partial<Record<ApprovalDecision, GrantScope>> = { deny: 'denied', allow_once: 'once', allow_conversation: 'conversation' }
     const scopes = (['deny', 'allow_conversation', 'allow_once'] as const).filter(decision => allowedDecisions.includes(decision)).map(decision => decisionScopes[decision]).filter((scope): scope is GrantScope => Boolean(scope))
     const target = presentation.target
-    return <PermissionGrant className="aui-permission-grant fox-confirmation fox-runtime-confirmation is-compact max-w-none" capability="读取文件" requester="Fox" reach={[target]} scope="pending" allowedScopes={scopes} busy={submitting}
+    return withNavigation(<PermissionGrant className="aui-permission-grant fox-confirmation fox-runtime-confirmation is-compact max-w-none" capability="读取文件" requester="Fox" reach={[target]} scope="pending" allowedScopes={scopes} busy={submitting}
       onGrant={scope => { const decision = scope === 'denied' ? 'deny' : scope === 'once' ? 'allow_once' : scope === 'conversation' ? 'allow_conversation' : null; if (decision) void resolve(decision) }}
-      detailsContent={<>{allowedDecisions.includes('allow_conversation') && <FoxDisclosure className="fox-approval-details-scroll fox-approval-disclosure" summary="查看授权详情"><div role="region" aria-label="授权详情"><p>{presentation.summary}</p><p className="fox-approval-scope-note">“本次对话内允许”仅授权当前对话中的该工具和此目标，可随时撤销；权限模式变化后失效，不包含写入或执行命令。</p></div></FoxDisclosure>}{error && <p role="alert" className="fox-approval-error">{error}</p>}</>} />
+      detailsContent={<>{allowedDecisions.includes('allow_conversation') && <FoxDisclosure className="fox-approval-details-scroll fox-approval-disclosure" summary="查看授权详情"><div role="region" aria-label="授权详情"><p>{presentation.summary}</p><p className="fox-approval-scope-note">“本次对话内允许”仅授权当前对话中的该工具和此目标，可随时撤销；权限模式变化后失效，不包含写入或执行命令。</p></div></FoxDisclosure>}{error && <p role="alert" className="fox-approval-error">{error}</p>}</>} />)
   }
   const replacement = presentation.wholeFileReplacement
   const title = repairOverride ? '追加修复' : replacement ? replacement.baselineVersion === 'missing' ? '新建文件' : '替换文件'
@@ -162,7 +188,7 @@ export function RuntimeApprovalPrompt({
     : approval.status === 'approved'
       ? scopeHistory ? `已选择：${scopeHistory}` : '已选择：仅允许这一次'
       : approval.status === 'pending' ? '此确认已结束' : approvalStatusLabel(approval.status)
-  return (
+  return withNavigation(
     <Card state={active ? 'request' : approval.status === 'denied' && !invalidated ? 'denied' : 'done'} invalidated={invalidated} statusLabel={receipt} title={title} icon={approvalCardIcon(title, approval.toolName)} subtitle={presentation.command ? '需要确认这条命令' : operationSummary} command={operation} description={repairOverride || replacement || presentation.officeReuse ? briefScope : undefined} busy={submitting} className="aui-approval-card fox-confirmation fox-runtime-confirmation is-compact"
       onDeny={() => void resolve('deny')}
       onAllowOnce={allowedDecisions.includes('allow_once') ? () => void resolve('allow_once') : undefined}

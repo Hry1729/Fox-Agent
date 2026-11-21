@@ -1,0 +1,741 @@
+<!doctype html>
+<html lang="zh-CN" data-color-theme="paper">
+<head>
+<meta charset="utf-8" />
+<title>Fox 伙伴页面 · 原型</title>
+<link rel="stylesheet" href="../../../apps/desktop/node_modules/harmonyos-sans-sc-webfont-splitted/dist/Regular.css" />
+<link rel="stylesheet" href="../../../apps/desktop/node_modules/harmonyos-sans-sc-webfont-splitted/dist/Medium.css" />
+<link rel="stylesheet" href="../../../apps/desktop/node_modules/harmonyos-sans-sc-webfont-splitted/dist/Semibold.css" />
+<!-- Colours and radii come straight from the app; this mockup only covers Paper light. -->
+<link rel="stylesheet" href="../../../apps/desktop/src/styles/themes.css" />
+<script src="icons.js"></script>
+<style>
+/* Derived tokens, same recipes as apps/desktop/src/styles/globals.css. */
+:root {
+  --fox-canvas: var(--chat-background, var(--background));
+  --fox-card: var(--card);
+  --fox-panel: var(--muted);
+  --fox-border: var(--border);
+  --fox-border-strong: color-mix(in oklch, var(--border) 72%, var(--foreground) 28%);
+  --fox-text: var(--foreground);
+  --fox-muted: var(--muted-foreground);
+  --fox-faint: color-mix(in oklch, var(--muted-foreground) 78%, var(--fox-canvas));
+  --fox-hover: color-mix(in oklch, var(--fox-panel) 78%, var(--fox-card));
+  --fox-selected: color-mix(in oklch, var(--foreground) 6%, transparent);
+  --fox-accent: var(--brand);
+  --fox-accent-soft: var(--brand-soft);
+  --fox-control-xs: 24px;
+  --fox-control-sm: 28px;
+  --fox-control-md: 32px;
+  --fox-type-ui: 13px;
+  --fox-type-meta: 12px;
+  --fox-type-caption: 12px;
+
+  /* Sidebar geometry: rail 16, icon column 24, action column 18 from the edge. */
+  --fox-sidebar-width: 260px;
+  --fox-sidebar-gutter: 12px;
+  --fox-sidebar-inset: 8px;
+  --fox-sidebar-row-height: 32px;
+  --fox-sidebar-action-size: 28px;
+  --fox-sidebar-action-inset: 2px;
+  --fox-sidebar-action-gap: 2px;
+  --fox-sidebar-section-gap: 8px;
+  --fox-sidebar-rich-row-height: 44px;
+  --fox-sidebar-avatar-size: 32px;
+  /* New for the companions page. */
+  --fox-sidebar-companion-row-height: 56px;
+  --fox-sidebar-companion-avatar-size: 40px;
+
+  --side-hover: color-mix(in oklch, var(--sidebar-accent) 62%, var(--sidebar));
+  --side-selected: var(--background);
+  /* Contact chat: the user's bubble is the strong one. */
+  --ub: var(--primary);
+  --ub-fg: var(--primary-foreground);
+  --cb: var(--muted);
+  --shadow-sm: 0 1px 2px color-mix(in oklch, oklch(0.2 0 0) 6%, transparent);
+  --shadow-md: 0 4px 16px color-mix(in oklch, oklch(0.2 0 0) 9%, transparent);
+  --shadow-lg: 0 16px 45px color-mix(in oklch, oklch(0.2 0 0) 12%, transparent);
+  font-family: "HarmonyOS Sans SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  font-synthesis: none;
+  color: var(--foreground);
+  -webkit-font-smoothing: antialiased;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: color-mix(in oklch, var(--shell) 70%, var(--muted)); }
+svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.grow { flex: 1; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 1.1s linear infinite; }
+/* 伙伴 tab glyph: mirrors the Motion keyframes in cat-paw.tsx. */
+.paw { transform-box: fill-box; transform-origin: 50% 60%; }
+@keyframes paw-stamp {
+  0% { opacity: 0; transform: translateY(-3px) scale(1.6) rotate(-8deg); }
+  40% { opacity: 1; transform: translateY(.6px) scale(.86) rotate(0); }
+  62% { transform: translateY(0) scale(1.06); }
+  80% { transform: scale(.98); }
+  100% { opacity: 1; transform: none; }
+}
+.tabs span:hover .paw, .ab:hover .paw, .paw-live:hover .paw { animation: paw-stamp .5s cubic-bezier(.3,.7,.4,1) both; }
+.paw-frame .paw { animation: paw-stamp .5s cubic-bezier(.3,.7,.4,1) both paused; }
+.icon-sheet { padding: 32px 36px; border-radius: 14px; background: var(--background); box-shadow: var(--shadow-md); display: grid; gap: 28px; }
+.icon-sheet h5 { margin: 0 0 12px; font-size: 13px; font-weight: 600; color: var(--muted-foreground); }
+.icon-row { display: flex; align-items: flex-end; gap: 40px; }
+.icon-cell { display: flex; flex-direction: column; align-items: center; gap: 8px; font-size: 12px; color: var(--muted-foreground); }
+.icon-cell code { color: var(--foreground); }
+.icon-cell .big { width: 72px; height: 72px; stroke-width: 2; padding: 10px; border-radius: 12px; background: var(--muted); }
+svg.paw-frame { width: 56px; height: 56px; padding: 8px; border-radius: 10px; background: var(--muted); }
+.icon-tabs { display: flex; gap: 32px; align-items: center; }
+.icon-tabs .mode-row { margin: 0; }
+code { font: 12px "Cascadia Mono", Consolas, monospace; }
+
+/* ---------- Doc shell ---------- */
+.doc { width: 1360px; margin: 0 auto; padding: 56px 40px 120px; }
+.doc-hero h1 { margin: 0 0 8px; font-size: 32px; font-weight: 600; letter-spacing: -.02em; }
+.doc-hero p { margin: 0; max-width: 920px; color: var(--muted-foreground); font-size: 14px; line-height: 1.75; }
+.toc { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 24px; }
+.toc a { padding: 6px 12px; border-radius: 8px; background: var(--card); border: 1px solid var(--border); color: var(--muted-foreground); font-size: 13px; text-decoration: none; }
+.toc a:hover { color: var(--foreground); }
+.frame { margin-top: 64px; scroll-margin-top: 40px; }
+.frame-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 18px; }
+.frame-head .no { color: var(--fox-faint); font-size: 13px; font-variant-numeric: tabular-nums; }
+.frame-head h2 { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -.01em; }
+.frame-head p { margin: 0; color: var(--muted-foreground); font-size: 14px; }
+.notes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 20px; }
+.notes div { padding: 16px 18px; border-radius: 16px; background: var(--card); border: 1px solid var(--border); }
+.notes h4 { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+.notes h4 svg { width: 14px; height: 14px; color: var(--muted-foreground); }
+.notes ul { margin: 0; padding-left: 18px; color: var(--muted-foreground); font-size: 13px; line-height: 1.75; }
+body.single .doc { width: auto; padding: 24px; }
+
+/* ---------- Window ---------- */
+.win { position: relative; width: 1280px; height: 800px; display: flex; flex-direction: column; overflow: hidden; border-radius: 10px; background: var(--shell); border: 1px solid var(--border); box-shadow: var(--shadow-lg); color: var(--foreground); font-size: 13px; }
+.titlebar { height: 36px; flex: none; display: flex; align-items: center; justify-content: space-between; }
+.tb-left { display: flex; align-items: center; gap: 2px; padding-left: 10px; color: var(--muted-foreground); }
+.tb-left img { width: 20px; height: 20px; margin-right: 6px; border-radius: 5px; }
+.tb-left span { width: 28px; height: 28px; display: grid; place-items: center; }
+.tb-left span.off { opacity: .45; }
+.wctl { display: flex; height: 100%; }
+.wctl span { width: 46px; display: grid; place-items: center; color: var(--muted-foreground); }
+.wctl svg { width: 15px; height: 15px; }
+.app { position: relative; flex: 1; min-height: 0; display: flex; }
+.card { position: relative; flex: 1; min-width: 0; display: flex; margin: 0 6px 6px 0; border-radius: var(--fox-radius-large); background: var(--fox-canvas); box-shadow: var(--shadow-sm); overflow: hidden; }
+
+/* ---------- Sidebar ---------- */
+.side { position: relative; width: var(--fox-sidebar-width); flex: none; display: flex; flex-direction: column; padding: 2px var(--fox-sidebar-gutter) 10px; background: var(--sidebar); }
+.mode-row { display: flex; align-items: center; gap: var(--fox-sidebar-action-gap); height: 32px; margin-bottom: 12px; padding-right: var(--fox-sidebar-action-inset); }
+.tabs { width: 148px; height: var(--fox-control-md); display: flex; padding: 3px; border-radius: var(--fox-radius-card); background: var(--muted); }
+.tabs span { height: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 9px; border-radius: var(--fox-radius-control); color: var(--muted-foreground); font-weight: 500; white-space: nowrap; }
+.tabs span svg { width: 15px; height: 15px; stroke-width: 1.8; }
+.tabs span.on { flex: 1; background: var(--background); color: var(--foreground); box-shadow: var(--shadow-sm); }
+.ab { position: relative; width: var(--fox-sidebar-action-size); height: var(--fox-sidebar-action-size); flex: none; display: grid; place-items: center; border-radius: var(--fox-radius-control); color: var(--muted-foreground); }
+.ab svg { width: 16px; height: 16px; }
+.ab.on, .ab.hover { background: var(--side-hover); color: var(--foreground); }
+.ab .dot { position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--destructive); box-shadow: 0 0 0 2px var(--sidebar); }
+.nav { display: flex; flex-direction: column; gap: 2px; }
+.row { position: relative; height: var(--fox-sidebar-row-height); display: flex; align-items: center; gap: 8px; padding: 0 var(--fox-sidebar-inset); border-radius: var(--fox-radius-control); color: color-mix(in oklch, var(--foreground) 90%, var(--muted-foreground)); font-size: 13.5px; white-space: nowrap; }
+.row svg { width: 16px; height: 16px; color: var(--muted-foreground); }
+.row kbd { margin-left: auto; color: var(--fox-faint); font: inherit; font-size: 12px; }
+.row.on { background: var(--side-selected); color: var(--foreground); font-weight: 500; }
+.row.hover { background: var(--side-hover); }
+.row .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.row.child { padding-left: 32px; }
+.row .run { width: 13px; height: 13px; }
+.sec { position: relative; height: var(--fox-sidebar-row-height); display: flex; align-items: center; margin-top: var(--fox-sidebar-section-gap); padding: 0 var(--fox-sidebar-action-inset) 0 var(--fox-sidebar-inset); color: var(--muted-foreground); font-size: 12.5px; }
+.sec .cnt { margin-left: 6px; color: var(--fox-faint); font-variant-numeric: tabular-nums; }
+.sec .acts { margin-left: auto; display: flex; gap: var(--fox-sidebar-action-gap); }
+.daylbl { height: 28px; display: flex; align-items: center; padding: 0 var(--fox-sidebar-inset); color: var(--fox-faint); font-size: 12px; }
+.scroll { flex: 1; min-height: 0; overflow-x: visible; overflow-y: clip; margin: 0 calc(-1 * var(--fox-sidebar-gutter)); padding: 0 var(--fox-sidebar-gutter); }
+.foot { display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 var(--fox-sidebar-action-inset) 0 var(--fox-sidebar-inset); }
+.foot img { width: 26px; height: 26px; border-radius: 50%; }
+.foot b { font-weight: 500; font-size: 13.5px; }
+.foot .chev { width: 14px; height: 14px; color: var(--muted-foreground); }
+
+/* Avatar with status marks. */
+.av { position: relative; flex: none; display: block; }
+.av img { width: 100%; height: 100%; display: block; border-radius: 50%; object-fit: cover; background: var(--muted); }
+.av .run-dot { position: absolute; right: -1px; bottom: -1px; width: 10px; height: 10px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 2px var(--sidebar); }
+.av .wait { position: absolute; right: -3px; bottom: -3px; width: 16px; height: 16px; display: grid; place-items: center; border-radius: 50%; background: var(--warning); color: white; font-size: 11px; font-weight: 700; box-shadow: 0 0 0 2px var(--sidebar); }
+.av .unread-dot { position: absolute; top: -1px; right: -1px; width: 9px; height: 9px; border-radius: 50%; background: var(--fox-accent); box-shadow: 0 0 0 2px var(--sidebar); }
+
+/* Work page: rich row, 44px with a 32px avatar. */
+.rrow { position: relative; height: var(--fox-sidebar-rich-row-height); display: flex; align-items: center; gap: 10px; padding: 0 var(--fox-sidebar-inset); border-radius: var(--fox-radius-control); }
+.rrow .av { width: var(--fox-sidebar-avatar-size); height: var(--fox-sidebar-avatar-size); }
+.rrow .tx { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.rrow .nm { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13.5px; font-weight: 500; }
+.rrow .pv { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted-foreground); font-size: 12px; }
+.rrow .pv.warn { color: var(--warning); }
+.rrow.on { background: var(--side-selected); }
+.rrow.hover { background: var(--side-hover); }
+.badge-n { min-width: 18px; height: 18px; flex: none; display: inline-grid; place-items: center; padding: 0 5px; border-radius: 9px; background: var(--foreground); color: var(--background); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.badge-n.quiet { background: color-mix(in oklch, var(--muted-foreground) 30%, transparent); color: var(--muted-foreground); }
+.rrow .more, .crow .more { position: absolute; right: var(--fox-sidebar-action-inset); top: 50%; transform: translateY(-50%); }
+.rrow .more.on, .crow .more.on { background: color-mix(in oklch, var(--foreground) 7%, transparent); color: var(--foreground); }
+
+/* Companions page: 56px row with a 40px avatar. */
+.crow { position: relative; height: var(--fox-sidebar-companion-row-height); display: flex; align-items: center; gap: 10px; padding: 0 var(--fox-sidebar-inset); border-radius: var(--fox-radius-control); }
+.crow .av { width: var(--fox-sidebar-companion-avatar-size); height: var(--fox-sidebar-companion-avatar-size); }
+.crow .tx { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.crow .l1, .crow .l2 { min-width: 0; display: flex; align-items: center; gap: 6px; }
+.crow .nm { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13.5px; font-weight: 500; }
+.crow .nm-ic { width: 12px; height: 12px; color: var(--fox-faint); }
+.crow time { margin-left: auto; flex: none; color: var(--fox-faint); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.crow .pv { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted-foreground); font-size: 12px; }
+.crow .pv.warn { color: var(--warning); }
+.crow .pv.err { color: var(--destructive); }
+.crow.on { background: var(--side-selected); }
+.crow.hover { background: var(--side-hover); }
+.crow.hover time, .crow.hover .badge-n, .crow.menu-open time, .crow.menu-open .badge-n { visibility: hidden; }
+.crow.menu-open { background: var(--side-hover); }
+.crow.hover .tx, .crow.menu-open .tx, .rrow.hover .tx { padding-right: 26px; }
+.crow.arch.hover .tx { padding-right: 58px; }
+.crow .restore { position: absolute; right: calc(var(--fox-sidebar-action-inset) + var(--fox-sidebar-action-size) + var(--fox-sidebar-action-gap)); top: 50%; transform: translateY(-50%); }
+.crow.arch .nm { color: color-mix(in oklch, var(--foreground) 80%, var(--muted-foreground)); }
+.crow.arch .av img { filter: grayscale(.35); opacity: .85; }
+.rename { flex: 1; min-width: 0; height: 26px; display: flex; align-items: center; margin: -3px 0 -3px -6px; padding: 0 6px; border-radius: var(--fox-radius-small); background: var(--background); box-shadow: 0 0 0 1px var(--fox-border-strong), 0 0 0 3px color-mix(in oklch, var(--ring) 30%, transparent); font-size: 13.5px; font-weight: 500; }
+.rename::after { content: ''; width: 1.5px; height: 15px; margin-left: 1px; background: var(--foreground); }
+.rename sel { background: color-mix(in oklch, var(--ring) 32%, transparent); }
+
+.search { display: flex; align-items: center; gap: 8px; height: 32px; margin: 6px 0 2px; padding: 0 8px; border-radius: var(--fox-radius-control); background: color-mix(in oklch, var(--background) 70%, var(--sidebar)); box-shadow: inset 0 0 0 1px var(--fox-border); color: var(--fox-faint); font-size: 13px; }
+.search svg { width: 15px; height: 15px; color: var(--muted-foreground); }
+.search.typed { color: var(--foreground); background: var(--background); box-shadow: inset 0 0 0 1px var(--fox-border-strong); }
+.search.typed .q::after { content: ''; display: inline-block; width: 1.5px; height: 15px; margin-left: 1px; vertical-align: -3px; background: var(--foreground); }
+.search .x { margin-left: auto; width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; color: var(--muted-foreground); }
+.search .x svg { width: 13px; height: 13px; }
+.empty-q { padding: 18px 8px; color: var(--muted-foreground); font-size: 12.5px; }
+/* Pinned companions: big tiles, three per row at most (3 × 76 + 2 × 4 = the 236px track). */
+.ptiles { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; margin: 6px 0 8px; }
+.ptile { width: 76px; height: 92px; display: flex; flex-direction: column; align-items: center; padding: 8px 4px 0; border-radius: var(--fox-radius-control); }
+.ptile .av { width: 56px; height: 56px; }
+.ptile .pn { width: 100%; margin-top: 6px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; text-align: center; font-size: 13px; font-weight: 500; line-height: 16px; }
+.ptile.on { background: var(--side-selected); }
+.ptile.hover { background: var(--side-hover); }
+.ptile .av .run-dot { width: 12px; height: 12px; }
+.ptile .av .unread-dot { top: 1px; right: 1px; width: 11px; height: 11px; }
+/* Global search dialog, mirrors .fox-global-search-* in workbench.css. */
+.gs-wrap { position: absolute; inset: 0; z-index: 20; background: color-mix(in oklch, var(--foreground) 6%, transparent); }
+.gs { position: absolute; top: 96px; left: 50%; width: 520px; transform: translateX(-50%); border-radius: var(--fox-radius-large); background: var(--popover); box-shadow: var(--shadow-lg); overflow: hidden; }
+.gs-in { height: 48px; display: flex; align-items: center; gap: 8px; padding: 0 16px; border-bottom: 1px solid var(--fox-border); color: var(--muted-foreground); }
+.gs-in .q { flex: 1; color: var(--foreground); font-size: 14px; }
+.gs-in .q::after { content: ''; display: inline-block; width: 1.5px; height: 16px; margin-left: 1px; vertical-align: -3px; background: var(--foreground); }
+.gs-res { padding: 8px; }
+.gs-res section + section { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--fox-border); }
+.gs-res header { display: flex; justify-content: space-between; padding: 0 8px 6px; color: var(--muted-foreground); font-size: 12px; font-weight: 600; }
+.gs-res header span { font-weight: 400; }
+.gr { position: relative; display: flex; align-items: center; gap: 10px; padding: 8px 72px 8px 8px; border-radius: var(--fox-radius-control); }
+.gr.on { background: var(--side-hover); }
+.gr img { width: 28px; height: 28px; flex: none; border-radius: 50%; background: var(--muted); }
+.gr div { min-width: 0; display: grid; gap: 2px; }
+.gr strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13px; font-weight: 500; }
+.gr small { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted-foreground); font-size: 12px; }
+.gr time { position: absolute; top: 8px; right: 8px; color: var(--fox-faint); font-size: 12px; }
+mark { background: color-mix(in oklch, var(--warning) 42%, transparent); color: inherit; border-radius: 2px; }
+
+.pane-head { height: 32px; display: flex; align-items: center; gap: 4px; margin-bottom: 4px; padding: 0 var(--fox-sidebar-action-inset) 0 0; }
+.pane-head b { font-size: 13.5px; font-weight: 600; }
+.pane-head .cnt { color: var(--fox-faint); font-size: 12.5px; }
+
+/* Collapsed rail. */
+.rail { width: 52px; flex: none; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 2px 0 10px; background: var(--sidebar); }
+.rail .ab.sel { background: var(--background); color: var(--foreground); box-shadow: var(--shadow-sm); }
+.rail .sep { width: 24px; height: 1px; margin: 6px 0; background: var(--fox-border); }
+.rail .av { width: 32px; height: 32px; margin: 4px 0; }
+.rail .tile { width: 40px; height: 40px; display: grid; place-items: center; border-radius: var(--fox-radius-control); }
+.rail .tile.on { background: var(--side-selected); }
+.rail .foot-r { margin-top: auto; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.rail .foot-r img { width: 26px; height: 26px; border-radius: 50%; }
+
+/* ---------- Floating surfaces ---------- */
+.menu { position: absolute; z-index: 20; width: 220px; padding: 4px; border: 1px solid var(--fox-border); border-radius: var(--fox-radius-card); background: var(--popover); box-shadow: var(--shadow-md); font-size: 13px; }
+.menu .it { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px; border-radius: var(--fox-radius-control); white-space: nowrap; }
+.menu .it svg { width: 15px; height: 15px; color: var(--fox-muted); }
+.menu .it.on { background: var(--fox-hover); }
+.menu .it.danger, .menu .it.danger svg { color: var(--destructive); }
+.menu .it .chk { margin-left: auto; width: 14px; height: 14px; color: var(--foreground); }
+.menu .it small { margin-left: auto; color: var(--fox-faint); font-size: 12px; }
+.menu .it .sub { display: block; color: var(--fox-faint); font-size: 11.5px; line-height: 1.3; }
+.menu .it.two { height: 44px; }
+.menu .sep { height: 1px; margin: 4px 0; background: var(--fox-border); }
+.menu .lbl { padding: 6px 8px 4px; color: var(--fox-muted); font-size: 12px; }
+
+.pop { position: absolute; z-index: 20; width: 280px; padding: 10px; border: 1px solid var(--fox-border); border-radius: var(--fox-radius-card); background: var(--popover); box-shadow: var(--shadow-md); font-size: 13px; }
+.pop-h { display: flex; align-items: center; height: 26px; margin: 0 2px 8px 4px; }
+.pop-h b { font-size: 13.5px; font-weight: 600; }
+.pop-h small { margin-left: auto; color: var(--fox-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.pop .search { margin: 0 0 8px; background: var(--background); }
+.pop .lbl { padding: 6px 4px 4px; color: var(--fox-muted); font-size: 12px; }
+.prow { height: 40px; display: flex; align-items: center; gap: 8px; padding: 0 4px; border-radius: var(--fox-radius-control); }
+.prow .grip { width: 16px; height: 16px; color: var(--fox-faint); }
+.prow .grip.off { visibility: hidden; }
+.prow img { width: 26px; height: 26px; border-radius: 50%; }
+.prow .pn { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.prow .tag { flex: none; color: var(--fox-faint); font-size: 12px; }
+.prow.hover { background: var(--fox-hover); }
+.tb { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px; border-radius: var(--fox-radius-control); color: var(--fox-muted); font-size: 12px; white-space: nowrap; }
+.tb svg { width: 13px; height: 13px; }
+.tb.hover { background: var(--fox-hover); color: var(--fox-text); }
+.tb.strong { color: var(--fox-text); }
+.tb.off { opacity: .45; }
+
+.toast { position: absolute; z-index: 10; top: 60px; right: 20px; width: 320px; display: flex; gap: 12px; padding: 14px 16px; border-radius: var(--fox-radius-card); background: var(--popover); border: 1px solid var(--border); box-shadow: var(--shadow-lg); }
+.toast img { width: 32px; height: 32px; flex: none; border-radius: 50%; }
+.toast .tx { flex: 1; min-width: 0; }
+.toast .l1 { display: flex; gap: 8px; }
+.toast b { font-size: 13px; font-weight: 600; }
+.toast time { margin-left: auto; color: var(--fox-faint); font-size: 11.5px; }
+.toast p { margin: 3px 0 0; color: var(--muted-foreground); font-size: 12px; line-height: 1.6; }
+.toast .acts { display: flex; gap: 6px; margin-top: 10px; }
+.btn { display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 12px; border: 1px solid var(--fox-border); border-radius: var(--fox-radius-control); background: var(--fox-card); color: var(--fox-text); font-size: 12.5px; font-weight: 500; white-space: nowrap; }
+.btn.primary { border-color: transparent; background: var(--primary); color: var(--primary-foreground); }
+
+/* Notification pane in the sidebar. */
+.nday { height: 28px; display: flex; align-items: center; padding: 0 var(--fox-sidebar-inset); color: var(--fox-faint); font-size: 12px; }
+.nitem { position: relative; display: flex; align-items: flex-start; gap: 10px; padding: 8px var(--fox-sidebar-inset); border-radius: var(--fox-radius-control); }
+.nitem.unread { background: color-mix(in oklch, var(--fox-accent-soft) 40%, var(--sidebar)); }
+.nitem.hover { background: var(--side-hover); }
+.nitem .ic { width: 28px; height: 28px; flex: none; display: grid; place-items: center; color: var(--muted-foreground); }
+.nitem .av { width: 28px; height: 28px; }
+.nitem .av .unread-dot { box-shadow: 0 0 0 2px color-mix(in oklch, var(--fox-accent-soft) 40%, var(--sidebar)); }
+.nitem .tx { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.nitem .l1 { display: flex; align-items: center; gap: 6px; }
+.nitem b { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12.5px; font-weight: 600; }
+.nitem time { margin-left: auto; flex: none; color: var(--fox-faint); font-size: 11.5px; }
+.nitem small { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted-foreground); font-size: 12px; }
+.nitem small.warn { color: var(--warning); }
+
+/* ---------- Main: work conversation ---------- */
+.chat { position: relative; flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.wtop { flex: none; height: 52px; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 14px; }
+.wtop strong { font-size: 14px; font-weight: 600; }
+.ib { width: 28px; height: 28px; flex: none; display: grid; place-items: center; border-radius: var(--fox-radius-control); color: var(--fox-muted); }
+.ib svg { width: 16px; height: 16px; }
+.ib.sm { width: 24px; height: 24px; }
+.ib.sm svg { width: 14px; height: 14px; }
+.col { max-width: 680px; margin: 0 auto; padding: 0 32px; }
+.thread { flex: 1; min-height: 0; overflow: hidden; padding-top: 8px; }
+.umsg { display: flex; justify-content: flex-end; margin: 8px 0 22px; }
+.umsg div { max-width: 82%; padding: 10px 16px; border-radius: 20px; background: var(--muted); font-size: 14px; line-height: 1.7; }
+.amsg { font-size: 14px; line-height: 1.85; color: color-mix(in oklch, var(--foreground) 92%, var(--muted-foreground)); }
+.amsg p { margin: 0 0 10px; }
+.amsg ul { margin: 0 0 10px; padding-left: 20px; }
+.amsg h4 { margin: 14px 0 6px; font-size: 14px; }
+.proc { display: inline-flex; align-items: center; gap: 6px; margin-bottom: 8px; color: var(--muted-foreground); font-size: 13px; }
+.proc svg { width: 14px; height: 14px; }
+.wcomp { flex: none; width: calc(100% - 64px); max-width: 680px; margin: 0 auto 16px; display: flex; align-items: center; gap: 8px; height: 52px; padding: 0 8px 0 10px; border-radius: 26px; background: var(--background); border: 1px solid var(--border); box-shadow: var(--shadow-md); color: var(--muted-foreground); font-size: 14px; }
+.wcomp .plus { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--border); }
+.send { width: 34px; height: 34px; flex: none; display: grid; place-items: center; border-radius: 50%; background: var(--primary); color: var(--primary-foreground); }
+.send.off { opacity: .45; }
+.wcomp .mode { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; }
+.wcomp .mode svg { width: 14px; height: 14px; }
+
+/* ---------- Main: companion chat ---------- */
+.ctop { position: absolute; top: 0; left: 0; right: 0; z-index: 3; height: 76px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: start; padding: 10px 12px 0 16px; background: linear-gradient(var(--fox-canvas) 40%, transparent); }
+.ctop .r { height: 36px; display: flex; align-items: center; justify-content: flex-end; gap: 2px; }
+.who { height: 36px; display: inline-flex; align-items: center; gap: 8px; padding: 0 14px 0 5px; border-radius: 18px; background: var(--popover); box-shadow: 0 0 0 1px var(--border), var(--shadow-sm); }
+.who img { width: 26px; height: 26px; border-radius: 50%; }
+.who b { font-size: 14px; font-weight: 600; white-space: nowrap; }
+.stream { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.lane { max-width: 720px; margin: 0 auto; padding: 0 32px; }
+.stream .lane { position: absolute; left: 0; right: 0; bottom: 8px; }
+.stream.top .lane { top: 64px; bottom: auto; }
+.day { margin: 22px 0 6px; color: var(--fox-faint); font-size: 12px; text-align: center; }
+.g { display: flex; gap: 10px; margin-top: 16px; }
+.g.me { justify-content: flex-end; }
+.gav { width: 28px; height: 28px; flex: none; border-radius: 50%; }
+.gcol { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; max-width: 72%; }
+.g.me .gcol { align-items: flex-end; }
+.b { padding: 10px 16px; border-radius: 18px; background: var(--cb); font-size: 14px; line-height: 22px; }
+.g.me .b { background: var(--ub); color: var(--ub-fg); }
+.b p { margin: 0; }
+.b p + p, .b p + ul { margin-top: 8px; }
+.b ul { margin: 0; padding-left: 18px; }
+.b .tip { color: var(--muted-foreground); }
+.art { width: 300px; display: flex; align-items: center; gap: 10px; padding: 9px 8px 9px 12px; border-radius: var(--fox-radius-card); background: var(--fox-canvas); box-shadow: 0 0 0 1px var(--border) inset; }
+.art > svg { width: 20px; height: 20px; color: var(--muted-foreground); }
+.art div { flex: 1; min-width: 0; }
+.art b { display: block; font-size: 13px; font-weight: 500; }
+.art small { color: var(--fox-faint); font-size: 12px; }
+.notice { display: flex; justify-content: center; align-items: center; gap: 6px; margin: 16px 0 2px; color: var(--muted-foreground); font-size: 12px; }
+.notice svg { width: 13px; height: 13px; color: var(--success); }
+
+/* Greeting guide card. */
+.guide { width: 420px; padding: 14px 14px 12px; border-radius: var(--fox-radius-large); background: var(--fox-canvas); box-shadow: 0 0 0 1px var(--border) inset, var(--shadow-sm); }
+.guide header { margin: 0 2px 10px; font-size: 13.5px; font-weight: 600; }
+.guide .ops { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.guide .op { height: 40px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: var(--fox-radius-control); background: var(--muted); font-size: 13px; }
+.guide .op svg { width: 15px; height: 15px; color: var(--muted-foreground); }
+.guide .op.hover { background: var(--accent); box-shadow: inset 0 0 0 1px var(--fox-border-strong); }
+.guide-done { display: inline-flex; align-items: center; gap: 6px; margin: 2px 0 0 2px; color: var(--muted-foreground); font-size: 12px; }
+.guide-done svg { width: 13px; height: 13px; color: var(--success); }
+
+.dock { flex: none; padding: 0 0 12px; }
+.comp { display: flex; align-items: center; gap: 4px; min-height: 50px; padding: 6px; border-radius: 25px; border: 1px solid var(--input); background: var(--background); box-shadow: var(--shadow-md); }
+.comp.focus { border-color: var(--fox-border-strong); box-shadow: var(--shadow-md), 0 0 0 3px color-mix(in oklch, var(--ring) 22%, transparent); }
+.comp .plus { width: 36px; height: 36px; display: grid; place-items: center; flex: none; color: var(--muted-foreground); }
+.comp .plus svg { width: 20px; height: 20px; stroke-width: 1.6; }
+.comp .tx { flex: 1; min-width: 0; padding: 0 4px; color: var(--muted-foreground); font-size: 14px; }
+.comp.focus .tx::before { content: ''; display: inline-block; width: 1.5px; height: 17px; margin-right: 2px; vertical-align: -3px; background: var(--foreground); }
+.cfoot { display: flex; align-items: center; justify-content: space-between; padding: 8px 6px 0; color: var(--muted-foreground); font-size: 12px; }
+.cfoot span { display: inline-flex; align-items: center; gap: 6px; }
+.cfoot svg { width: 13px; height: 13px; }
+.cfoot img { width: 16px; height: 16px; border-radius: 50%; }
+.wstat { display: flex; align-items: center; gap: 8px; height: 32px; margin-bottom: 6px; padding: 0 6px; color: var(--muted-foreground); font-size: 12px; }
+.wstat img { width: 20px; height: 20px; border-radius: 50%; }
+.arch-bar { display: flex; align-items: center; justify-content: center; gap: 10px; height: 50px; border-radius: 25px; background: var(--muted); color: var(--muted-foreground); font-size: 13px; }
+
+/* Side-by-side sidebars with alignment guides. */
+.gallery { position: relative; display: flex; gap: 32px; padding: 28px; border-radius: 16px; background: var(--shell); }
+.gallery .cell { position: relative; }
+.gallery .cap { margin: 0 0 8px; color: var(--muted-foreground); font-size: 12.5px; }
+.gallery .solo { position: relative; height: 720px; display: flex; overflow: hidden; border: 1px solid var(--fox-border); border-radius: 10px; }
+.guide-line { position: absolute; top: 0; bottom: 0; z-index: 30; width: 0; border-left: 1px dashed color-mix(in oklch, var(--destructive) 60%, transparent); pointer-events: none; }
+.guide-line.gl-icon { border-left-color: color-mix(in oklch, oklch(0.6 0.15 255) 70%, transparent); }
+.guide-line.gl-action { border-left-color: color-mix(in oklch, oklch(0.62 0.13 160) 75%, transparent); }
+.legend { display: flex; gap: 18px; margin-top: 14px; color: var(--muted-foreground); font-size: 12.5px; }
+.legend i { display: inline-block; width: 18px; margin-right: 6px; vertical-align: middle; border-top: 2px dashed; }
+</style>
+</head>
+<body>
+<div class="doc" id="doc"></div>
+<script>
+const ASSET = '../../../apps/desktop/public/avatars'
+let maskSeq = 0
+const glyph = (name) => (window.FOX_ICONS[name] || '').replaceAll('__MID__', `pm${++maskSeq}`)
+const I = (name, cls = '', style = '') => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true" ${style ? `style="${style}"` : ''}>${glyph(name)}</svg>`
+const E = (f) => `${ASSET}/experts/${f}.png`
+const ME = `${ASSET}/defaults/fox_big_smile.png`
+
+/* ---------- Data ---------- */
+const C = {
+  fox: { name: '小狐', img: `${ASSET}/fox-assistant.png`, pv: '有什么需要我帮忙的？', time: '09:12', def: true },
+  zl: { name: '资料伙伴', img: E('Fox_ResearchAnalyst'), pv: '整理好了，含税价最低的是华东机电。', time: '14:32', unread: 2 },
+  zb: { name: '周报助手', role: '每周五汇总日报，整理成周报', img: E('Fox_ContentWriter'), pv: '正在处理：汇总本周 6 份日报', time: '14:20', state: 'run' },
+  fw: { name: '法务顾问', img: E('Fox_PolicyAdvisor'), pv: '等待你确认：发送「采购合同修改意见」', time: '13:05', state: 'wait' },
+  sj: { name: '数据伙伴', img: E('Fox_DataAnalyst'), pv: '11 月销售表已更新，新增 3 个门店。', time: '昨天' },
+  hy: { name: '会议纪要', img: E('Fox_MeetingNotes'), pv: '定时任务失败：没有找到本周的录音文件', time: '周二', state: 'fail' },
+  xm: { name: '项目助理', role: '跟进项目进度，每周一提醒交材料', img: E('Fox_ProjectManager'), pv: '下周一提醒你提交验收材料。', time: '11/08', muted: true, unread: 1 },
+  xx: { name: '学习搭子', img: E('Fox_StudyPlanner'), pv: '今天的复习完成了，明天继续第 4 章。', time: '11/06' },
+  nw: { name: 'Fox', img: `${ASSET}/defaults/fox_wave.png`, pv: '你好，我是 Fox。我刚来，还没有固定的职责…', time: '刚刚' },
+}
+const ARCH = [
+  { name: '旧报价助手', img: E('Fox_Consultant'), pv: '归档于 11 月 3 日' },
+  { name: '招聘助理', img: E('Fox_TeamCoach'), pv: '归档于 10 月 21 日' },
+  { name: '年会策划', img: E('Fox_CreativeDirector'), pv: '归档于 2 月 10 日' },
+]
+const FAV = ['fox', 'zl', 'zb']
+// 小狐 is always the first pinned tile and cannot be unpinned.
+const PINNED = ['fox', 'zl', 'zb', 'fw']
+const ALL = ['sj', 'hy', 'xm', 'xx']
+
+/* ---------- Sidebar pieces ---------- */
+const MODES = { work: ['square-kanban', '工作'], companions: ['cat-paw', '伙伴'], knowledge: ['book-copy', '资料'] }
+const modeRow = (mode, { bell = false, bellOn = false, searchOn = false } = {}) => `<div class="mode-row">
+  <div class="tabs">${Object.entries(MODES).map(([k, [ic, l]]) => `<span class="${k === mode ? 'on' : ''}" title="${l}">${I(ic)}${k === mode ? l : ''}</span>`).join('')}</div>
+  <div class="grow"></div><span class="ab ${searchOn ? 'on' : ''}">${I('search')}</span><span class="ab ${bellOn ? 'on' : ''}">${I('bell')}${bell ? '<i class="dot"></i>' : ''}</span>
+</div>`
+const foot = () => `<div class="foot"><img src="${ME}" alt=""><b>Hury</b>${I('chevron-down', 'chev')}<div class="grow"></div><span class="ab">${I('sun')}</span><span class="ab">${I('settings')}</span></div>`
+const avatar = (c, { dot = true } = {}) => `<span class="av"><img src="${c.img}" alt="">${c.state === 'run' ? '<i class="run-dot"></i>' : ''}${c.state === 'wait' ? '<i class="wait">!</i>' : ''}${dot && c.dotUnread ? '<i class="unread-dot"></i>' : ''}</span>`
+const pvClass = (c) => c.state === 'wait' ? 'warn' : c.state === 'fail' ? 'err' : ''
+
+// Work page rich row: 44px, 32px avatar.
+const rrow = (k, o = {}) => {
+  const c = C[k]
+  const tail = o.hover || o.menu ? `<span class="ab more ${o.menu ? 'on' : ''}">${I('ellipsis')}</span>` : c.unread ? `<span class="badge-n ${c.muted ? 'quiet' : ''}">${c.unread}</span>` : ''
+  return `<div class="rrow ${o.on ? 'on' : ''} ${o.hover || o.menu ? 'hover' : ''}">${avatar(c)}<span class="tx"><span class="nm">${c.name}</span><span class="pv ${pvClass(c)}">${c.pv}</span></span>${tail}${o.pop || ''}</div>`
+}
+// Companions page row: 56px, 40px avatar.
+const crow = (k, o = {}) => {
+  const c = typeof k === 'string' ? C[k] : k
+  const name = o.rename ? `<span class="rename"><sel>${c.name}</sel></span>` : `<span class="nm">${o.hl ? c.name.replace(o.hl, `<mark>${o.hl}</mark>`) : c.name}</span>${c.muted ? I('bell-off', 'nm-ic') : ''}`
+  const right = o.arch ? '' : `<time>${c.time}</time>`
+  const badge = c.unread && !o.arch ? `<span class="badge-n ${c.muted ? 'quiet' : ''}">${c.unread}</span>` : ''
+  const more = o.hover || o.menu ? `<span class="ab more ${o.menu ? 'on' : ''}">${I('ellipsis')}</span>` : ''
+  const restore = o.arch && o.hover ? `<span class="ab restore" title="恢复">${I('archive-restore')}</span>` : ''
+  return `<div class="crow ${o.on ? 'on' : ''} ${o.hover ? 'hover' : ''} ${o.menu ? 'menu-open' : ''} ${o.arch ? 'arch' : ''}">${avatar(c)}
+    <span class="tx"><span class="l1">${name}${o.rename ? '' : right}</span><span class="l2"><span class="pv ${pvClass(c)}">${c.pv}</span>${badge}</span></span>${restore}${more}${o.pop || ''}</div>`
+}
+const sec = (label, acts = [], { cnt = '', extra = '' } = {}) => `<div class="sec"><span>${label}</span>${cnt !== '' ? `<span class="cnt">${cnt}</span>` : ''}<span class="acts">${acts.map((a) => typeof a === 'string' ? `<span class="ab">${I(a)}</span>` : `<span class="ab ${a.on ? 'on' : ''}">${I(a.icon)}</span>`).join('')}</span>${extra}</div>`
+
+function workSide({ active = 'conv', hover = '', menu = '', manage = false, bell = false } = {}) {
+  const rowMenu = menu ? `<div class="menu" style="top:40px;right:-4px">
+      <div class="it">${I('user-round')}伙伴资料</div>
+      <div class="it on">${I('cat-paw')}在伙伴页面中查看</div>
+      <div class="sep"></div>
+      <div class="it">${I('star-off')}从常用中移除</div>
+    </div>` : ''
+  const managePop = manage ? `<div class="pop" style="top:-6px;left:calc(100% + 14px)">
+      <div class="pop-h"><b>常用伙伴</b><small>已选 2 / 3</small></div>
+      <div class="search">${I('search')}搜索伙伴</div>
+      <div class="prow">${I('grip-vertical', 'grip off')}<img src="${C.fox.img}" alt=""><span class="pn">小狐</span><em class="tag" style="font-style:normal">默认</em></div>
+      <div class="prow hover">${I('grip-vertical', 'grip')}<img src="${C.zl.img}" alt=""><span class="pn">资料伙伴</span><span class="tb">移除</span></div>
+      <div class="prow">${I('grip-vertical', 'grip')}<img src="${C.zb.img}" alt=""><span class="pn">周报助手</span><span class="tb">移除</span></div>
+      <div class="lbl">其他伙伴</div>
+      ${['fw', 'sj', 'hy', 'xm'].map((k) => `<div class="prow">${I('grip-vertical', 'grip off')}<img src="${C[k].img}" alt=""><span class="pn">${C[k].name}</span><span class="tb strong">${I('plus')}添加</span></div>`).join('')}
+    </div>` : ''
+  return `<aside class="side">
+    ${modeRow('work', { bell })}
+    <div class="nav"><div class="row">${I('message-circle-plus')}<span class="lbl">新建对话</span><kbd>Ctrl+N</kbd></div><div class="row">${I('users')}<span class="lbl">专家</span></div><div class="row">${I('blocks')}<span class="lbl">插件</span></div></div>
+    <div class="scroll">
+      ${sec('伙伴', [{ icon: 'ellipsis', on: manage }], { extra: managePop })}
+      ${FAV.map((k) => rrow(k, { on: active === k, hover: hover === k, menu: menu === k, pop: menu === k ? rowMenu : '' })).join('')}
+      ${sec('项目', ['plus', 'ellipsis'])}
+      <div class="row">${I('folder-open')}<span class="lbl">Fox</span></div>
+      <div class="row child ${active === 'conv' ? 'on' : ''}"><span class="lbl">整理 2026 项目申报材料</span>${I('loader-circle', 'run spin')}</div>
+      <div class="row child"><span class="lbl">请你了解一下该项目</span></div>
+      ${sec('对话', ['plus', 'ellipsis'])}
+      <div class="daylbl">今天</div>
+      <div class="row"><span class="lbl">帮我整理本周周报</span></div>
+      <div class="row"><span class="lbl">解释一下这个报错</span></div>
+    </div>
+    ${foot()}
+  </aside>`
+}
+
+function companionSide({ active = 'zl', hover = '', menu = '', newMenu = false, rename = '', fresh = false, bell = false, searchOn = false } = {}) {
+  const rowMenu = (k) => {
+    const def = C[k].def
+    return `<div class="menu" style="top:48px;right:-4px">
+      <div class="it">${I('user-round')}伙伴资料</div>
+      <div class="it on">${I('star')}显示在工作页${FAV.includes(k) ? I('check', 'chk') : ''}</div>
+      ${def ? '' : `<div class="it">${I(PINNED.includes(k) ? 'pin-off' : 'pin')}${PINNED.includes(k) ? '取消置顶' : '置顶'}</div>`}
+      <div class="it">${I('pencil')}重命名</div>
+      <div class="it">${I('mail')}标记为未读</div>
+      ${def ? '' : `<div class="sep"></div><div class="it">${I('archive')}归档</div><div class="it danger">${I('trash-2')}删除…</div>`}
+    </div>`
+  }
+  const newPop = newMenu ? `<div class="menu" style="top:36px;left:0;width:228px">
+      <div class="it two on">${I('user-plus')}<span>新建伙伴<span class="sub">直接创建，聊天中再告诉它做什么</span></span></div>
+      <div class="it two">${I('users')}<span>从专家创建…<span class="sub">复制一位专家的工作要求</span></span></div>
+    </div>` : ''
+  const r = (k) => crow(k, { on: active === k, hover: hover === k, menu: menu === k, rename: rename === k, pop: menu === k ? rowMenu(k) : '' })
+  const tile = (k) => `<div class="ptile ${active === k ? 'on' : ''} ${hover === k ? 'hover' : ''}" title="${C[k].name}">${avatar({ ...C[k], dotUnread: !!C[k].unread })}<span class="pn">${C[k].name}</span></div>`
+  const rest = fresh ? ['nw', ...ALL] : ALL
+  const list = `${PINNED.length ? `<div class="ptiles">${PINNED.map(tile).join('')}</div>` : ''}${rest.map(r).join('')}
+      <div class="row" style="margin-top:6px">${I('archive')}<span class="lbl">已归档</span><kbd>${ARCH.length}</kbd></div>`
+  return `<aside class="side">
+    ${modeRow('companions', { bell, searchOn })}
+    <div class="nav" style="position:relative"><div class="row ${newMenu ? 'hover' : ''}">${I('user-plus')}<span class="lbl">新建伙伴</span></div>${newPop}</div>
+    <div class="scroll">${list}</div>
+    ${foot()}
+  </aside>`
+}
+function archivedSide({ hover = 0 } = {}) {
+  return `<aside class="side">
+    ${modeRow('companions')}
+    <div class="pane-head"><span class="ab">${I('arrow-left')}</span><b>已归档</b><span class="cnt">${ARCH.length}</span></div>
+    <div class="scroll">${ARCH.map((a, i) => crow(a, { arch: true, hover: hover === i })).join('')}</div>
+    ${foot()}
+  </aside>`
+}
+
+function notifySide() {
+  const n = (c, title, sub, time, { unread = false, warn = false, hover = false, icon = '' } = {}) => `<div class="nitem ${unread ? 'unread' : ''} ${hover ? 'hover' : ''}">
+      ${icon ? `<span class="ic">${I(icon)}</span>` : `<span class="av"><img src="${c.img}" alt="">${unread ? '<i class="unread-dot"></i>' : ''}</span>`}
+      <span class="tx"><span class="l1"><b>${title}</b><time>${time}</time></span><small class="${warn ? 'warn' : ''}">${sub}</small></span>
+    </div>`
+  return `<aside class="side">
+    ${modeRow('work', { bellOn: true })}
+    <div class="pane-head" style="padding-left:var(--fox-sidebar-inset)"><b>通知</b><div class="grow"></div><span class="ab">${I('check-check')}</span><span class="ab">${I('ellipsis')}</span></div>
+    <div class="scroll">
+      <div class="nday">需要处理</div>
+      ${n(C.fw, '法务顾问', '等待你确认：发送「采购合同修改意见」', '13:05', { unread: true, warn: true })}
+      <div class="nday">今天</div>
+      ${n(C.zl, '资料伙伴', '整理好了，含税价最低的是华东机电。', '14:32', { unread: true, hover: true })}
+      ${n(C.zb, '周报助手', '定时任务「每周五整理周报」已开始', '14:20')}
+      ${n(null, '任务已完成', '整理 2026 项目申报材料', '11:48', { icon: 'circle-check' })}
+      <div class="nday">更早</div>
+      ${n(C.hy, '会议纪要', '定时任务失败：没有找到本周的录音文件', '周二')}
+      ${n(null, '已下载 报价单.zip', '资料库', '周一', { icon: 'file-text' })}
+    </div>
+    ${foot()}
+  </aside>`
+}
+
+function railSide() {
+  const t = (k, on) => `<span class="tile ${on ? 'on' : ''}">${avatar({ ...C[k], dotUnread: !!C[k].unread })}</span>`
+  return `<aside class="rail">
+    <span class="ab">${I('square-kanban')}</span><span class="ab sel">${I('cat-paw')}</span><span class="ab">${I('book-copy')}</span>
+    <span class="ab">${I('search')}</span><span class="ab">${I('bell')}</span>
+    <div class="sep"></div>
+    <span class="ab">${I('user-plus')}</span>
+    ${[...PINNED, ...ALL].map((k) => t(k, k === 'zl')).join('')}
+    <div class="foot-r"><img src="${ME}" alt=""><span class="ab">${I('settings')}</span></div>
+  </aside>`
+}
+
+/* ---------- Window ---------- */
+const titlebar = () => `<header class="titlebar">
+  <div class="tb-left"><img src="${ASSET}/fox-assistant.png" alt=""><span>${I('menu')}</span><span>${I('panel-left')}</span><span>${I('arrow-left')}</span><span class="off">${I('arrow-right')}</span></div>
+  <div class="wctl"><span>${I('minus')}</span><span>${I('square')}</span><span>${I('x')}</span></div>
+</header>`
+const win = (side, main, overlay = '') => `<div class="win">${titlebar()}<div class="app">${side}<div class="card">${main}${overlay}</div></div></div>`
+
+/* ---------- Main areas ---------- */
+const workChat = () => `<main class="chat">
+  <header class="wtop"><span class="ib">${I('folder-open')}</span><strong>整理 2026 项目申报材料</strong><span class="ib">${I('ellipsis')}</span><div class="grow"></div><span class="ib">${I('panel-right')}</span></header>
+  <div class="thread"><div class="col">
+    <div class="umsg"><div>帮我把「申报材料」资料库里的内容整理成申报书初稿，预算部分按附件里的明细表核对一遍。</div></div>
+    <div class="amsg">
+      <div class="proc">${I('chevron-right')}已处理 2 分 14 秒</div>
+      <p>我先读了申报指南和去年的申报书，确定了章节结构。预算部分以《项目预算明细表》为准，和正文里出现的金额逐项核对。</p>
+      <h4>已完成</h4>
+      <ul><li>第一章到第四章初稿</li><li>附件清单（12 份）</li></ul>
+      <p>我请「资料伙伴」帮忙核对 12 份附件里的金额，核对完会把差异列给你。</p>
+    </div>
+  </div></div>
+  <div class="wcomp"><span class="plus">${I('plus')}</span><span class="grow">给 Fox 发消息，输入 / 查看命令，@ 引用文件或伙伴</span><span class="mode">自动${I('chevron-down')}</span><span class="send">${I('arrow-up')}</span></div>
+</main>`
+const them = (c, list, extra = '') => `<div class="g"><img class="gav" src="${c.img}" alt=""><div class="gcol">${list.map((t) => `<div class="b">${t}</div>`).join('')}${extra}</div></div>`
+const me = (list) => `<div class="g me"><div class="gcol">${list.map((t) => `<div class="b">${t}</div>`).join('')}</div></div>`
+const ctop = (c) => `<div class="ctop"><div></div><div class="who"><img src="${c.img}" alt=""><b>${c.name}</b></div><div class="r"><span class="ib">${I('search')}</span><span class="ib">${I('ellipsis')}</span><span class="ib">${I('panel-right')}</span></div></div>`
+const dock = (c, { focus = false, status = '', archived = false } = {}) => `<div class="dock"><div class="lane">
+  ${status}
+  ${archived ? `<div class="arch-bar">${I('archive')}已归档<span class="tb strong hover">${I('archive-restore')}恢复</span></div>` : `<div class="comp ${focus ? 'focus' : ''}"><span class="plus">${I('plus')}</span><div class="tx">给${c.name}发消息</div><span class="send off">${I('arrow-up')}</span></div>`}
+  <div class="cfoot"><span>${I('folder-lock')}工作目录</span><span><img src="${c.img}" alt="">${c.name}</span></div>
+</div></div>`
+const companionChat = (c, body, opts = {}) => `<main class="chat">${ctop(c)}<div class="stream ${opts.top ? 'top' : ''}"><div class="lane">${body}</div></div>${dock(c, opts)}</main>`
+
+const zlBody = () => `
+  <div class="day">昨天</div>
+  ${me(['下周要交采购比价，三家供应商的报价单我晚点发你。'])}
+  ${them(C.zl, ['好的。收到后我会先核对税率和运费，再整理成一张表。'])}
+  <div class="day">今天</div>
+  ${me(['帮我把这三家供应商的报价整理成对比表，含税价单独列一列。'])}
+  ${them(C.zl, ['华东机电的报价单没写税率，我先按 13% 估算，表里做了标注。', '<p>整理好了。含税价最低的是华东机电，<b>12,800 元</b>。</p><ul><li>华东机电：12,800 元（税率为估算）</li><li>恒信设备：13,450 元</li><li>远航工业：14,020 元</li></ul>'],
+    `<div class="art">${I('file-spreadsheet')}<div><b>供应商报价对比.xlsx</b><small>Excel · 18 KB · 刚刚生成</small></div><span class="ib sm">${I('external-link')}</span></div>`)}`
+const greetText = `<p>你好，我是 Fox。我刚来，还没有固定的职责，你想让我先帮你做什么？</p><p class="tip">你也可以直接告诉我：「以后你叫小周」「主要帮我准备周报」「每周五下午提醒我交材料」，我会记下来。</p>`
+const guideCard = (hover = '') => `<div class="guide"><header>先给我定个方向</header><div class="ops">
+  ${[['folder-open', '整理文件和资料'], ['file-text', '写材料和汇报'], ['calendar-clock', '定期提醒和跟进'], ['file-spreadsheet', '处理表格和数据']].map(([ic, l]) => `<div class="op ${hover === l ? 'hover' : ''}">${I(ic)}${l}</div>`).join('')}
+</div></div>`
+
+/* ---------- Screens ---------- */
+const screens = [
+  { id: 'work', title: '工作页 · 伙伴分组', desc: '「助手」改名「工作」。伙伴分组固定显示小狐，再加上用户选的常用伙伴。',
+    render: () => win(workSide({ hover: '' }), workChat()),
+    notes: { focus: ['顶部三个模式：工作、伙伴、资料。选中的显示文字，其余只显示图标', '小狐固定在第一行，后面是常用伙伴（这里是资料伙伴、周报助手）', '运行中：头像右下角绿点；未读：右侧数字徽章'],
+      tucked: ['分组标题的「…」：管理常用伙伴、打开伙伴页面', '行悬停时，「…」出现在动作列（见第 3 帧）'],
+      removed: ['分组标题旁的「+」和「新建 Fox / 从专家创建」菜单', '分组标题「Fox」改为「伙伴」'] } },
+  { id: 'work-manage', title: '工作页 · 管理常用伙伴', desc: '从伙伴分组标题的「…」打开。改动立即保存，最多 3 个。',
+    render: () => win(workSide({ manage: true }), workChat()),
+    notes: { focus: ['已选列表在上，可以拖动排序；小狐固定第一行，标「默认」', '右上角「已选 2 / 3」', '其他伙伴一行一个「添加」'],
+      tucked: ['选满 3 个后「添加」不可点，悬停提示「最多 3 个常用伙伴」', '伙伴页行菜单的「显示在工作页」写同一个字段'],
+      removed: ['确认 / 取消按钮', '说明文字'] } },
+  { id: 'work-menu', title: '工作页 · 伙伴行菜单', desc: '悬停资料伙伴并打开「…」。点击行本身在工作页打开私聊，模式不切换。',
+    render: () => win(workSide({ active: 'zl', menu: 'zl' }), companionChat(C.zl, zlBody())),
+    notes: { focus: ['「…」在动作列，和分组标题的「…」对齐', '在工作页打开的私聊与伙伴页是同一条'],
+      tucked: ['伙伴资料：打开右侧资料栏', '在伙伴页面中查看：切到伙伴页并选中'],
+      removed: ['小狐没有「从常用中移除」', '工作页不提供归档、删除、重命名'] } },
+  { id: 'companions', title: '伙伴页', desc: '参考 OpenMausBot：新建伙伴、置顶大头像、伙伴列表、已归档。不再有侧栏搜索框和分组标题。',
+    render: () => win(companionSide({ active: 'zl' }), companionChat(C.zl, zlBody())),
+    notes: { focus: ['置顶伙伴显示为大头像：56px 头像 + 名字，一排最多 3 个，多了换行，最后一行居中', '小狐固定是第一个大头像，不能取消置顶、归档、删除或隐藏', '置顶下面直接接其他伙伴：56px 行、40px 头像，名称 + 时间，第二行预览 + 未读数', '状态写在头像上：运行中绿点、等待确认橙色「!」；大头像的未读用右上角圆点，不显示数字'],
+      tucked: ['大头像右键打开和列表行相同的菜单，「取消置顶」在里面', '免打扰的伙伴名称后显示静音图标，徽章变灰'],
+      removed: ['侧栏搜索框：用顶部的全局搜索（见第 10 帧）', '「置顶」「全部伙伴」分组标题和「全部伙伴」的排序菜单', '没有不选伙伴的空页面：默认打开上次选中的伙伴，没有就打开小狐', '小狐不出现在下面的列表里'] } },
+  { id: 'companion-menu', title: '伙伴页 · 行菜单', desc: '列表行悬停后点「…」或右键单击，打开同一个菜单。置顶大头像只能右键。',
+    render: () => win(companionSide({ active: 'zl', menu: 'sj' }), companionChat(C.zl, zlBody())),
+    notes: { focus: ['悬停时时间和徽章让位给「…」', '「显示在工作页」是勾选项'],
+      tucked: ['重命名在行内编辑（见第 7 帧）', '删除沿用现有的删除确认'],
+      removed: ['小狐的菜单里没有「置顶 / 取消置顶」「归档」「删除…」，「显示在工作页」固定勾选'] } },
+  { id: 'new', title: '新建伙伴', desc: '点击「新建伙伴」弹出两个选项。',
+    render: () => win(companionSide({ active: 'zl', newMenu: true }), companionChat(C.zl, zlBody())),
+    notes: { focus: ['新建伙伴：直接创建，默认名称「Fox」，重名时为「Fox 2」', '从专家创建：打开现有的专家选择对话框'],
+      tucked: ['创建后切到伙伴页、选中新伙伴、光标进入输入框'],
+      removed: ['创建向导和配置表单'] } },
+  { id: 'rename', title: '行内重命名', desc: '菜单里的「重命名」直接在行内编辑，Enter 保存，Esc 取消。',
+    render: () => win(companionSide({ active: 'sj', rename: 'sj' }), companionChat(C.sj, `<div class="day">昨天</div>${me(['把 11 月销售表更新一下，新开的门店也加进去。'])}${them(C.sj, ['11 月销售表已更新，新增 3 个门店。'], `<div class="art">${I('file-spreadsheet')}<div><b>11 月销售汇总.xlsx</b><small>Excel · 42 KB · 昨天 18:20</small></div><span class="ib sm">${I('external-link')}</span></div>`)}`)),
+    notes: { focus: ['输入框只替换名称，头像、时间、预览不动', '名称默认全选'],
+      tucked: ['重名或超过 40 字时，在输入框下方用红字提示，不保存'],
+      removed: ['原来「重命名」只打开资料卡的做法'] } },
+  { id: 'greeting', title: '新伙伴 · 第一次问候', desc: '新建后立即打开私聊：问候 + 引导卡，光标在输入框。',
+    render: () => win(companionSide({ active: 'nw', fresh: true }), companionChat(C.nw, `<div class="day">刚刚</div>${them(C.nw, [greetText], guideCard('写材料和汇报'))}`, { focus: true })),
+    notes: { focus: ['问候是固定文字，不调用模型', '引导卡四个选项，点击后以用户身份发出「以后主要帮我…」', '第二句告诉用户可以直接在对话里起名、定职责、建定时任务'],
+      tucked: ['从专家创建时，问候带上专家职责，选项取专家示例任务（最多 3 个，没有就不显示卡片）'],
+      removed: ['原来只有一句「有什么需要我帮忙的？」'] } },
+  { id: 'greeting-done', title: '新伙伴 · 选择方向之后', desc: '用户点了「写材料和汇报」。引导卡收起成一行，职责已保存。',
+    render: () => win(companionSide({ active: 'nw', fresh: true }), companionChat(C.nw, `<div class="day">刚刚</div>${them(C.nw, [greetText], `<div class="guide-done">${I('check')}已选择：写材料和汇报</div>`)}${me(['以后主要帮我写材料和汇报'])}<div class="notice">${I('circle-check')}职责已更新</div>${them(C.nw, ['好的，以后我主要帮你写材料和汇报。要不要顺便给我起个名字？比如「材料助手」。'])}`)),
+    notes: { focus: ['引导卡收起为「已选择：…」，不能再次点击', '配置更新走对话配置工具，界面显示「职责已更新」'],
+      tucked: ['用户自己输入而不点选项时，卡片收起为「已开始对话」'],
+      removed: ['已有伙伴不补发问候和引导卡'] } },
+  { id: 'search', title: '全局搜索 · 伙伴', desc: '伙伴页不单独放搜索框。点顶部的搜索按钮，输入「周」，结果里新增「伙伴」分类，排在最前。',
+    render: () => win(companionSide({ active: 'zl', searchOn: true }), companionChat(C.zl, zlBody()), `<div class="gs-wrap"><div class="gs">
+      <div class="gs-in">${I('search')}<span class="q">周</span><span class="ib sm">${I('x')}</span></div>
+      <div class="gs-res">
+        <section><header>伙伴<span>2</span></header>
+          <div class="gr on"><img src="${C.zb.img}" alt=""><div><strong><mark>周</mark>报助手</strong><small>${C.zb.role}</small></div><time>14:20</time></div>
+          <div class="gr"><img src="${C.xm.img}" alt=""><div><strong>项目助理</strong><small>${C.xm.role.replace('周', '<mark>周</mark>')}</small></div><time>11/08</time></div>
+        </section>
+        <section><header>对话<span>1</span></header>
+          <div class="gr"><div><strong>帮我整理本<mark>周</mark>周报</strong><small>普通对话</small></div><time>今天</time></div>
+        </section>
+      </div></div></div>`),
+    notes: { focus: ['「伙伴」分类排第一：28px 头像、名称，第二行是职责', '按伙伴的名称和职责匹配，命中的字高亮', '点击后切到伙伴页，选中这个伙伴，打开私聊'],
+      tucked: ['输入框占位文字改为「搜索对话、伙伴、项目、资料、文件或任务」', '已归档的伙伴不出现在结果里'],
+      removed: ['伙伴页侧栏的搜索框和「搜索结果」列表', '私聊消息不进全局搜索，沿用现有规则'] } },
+  { id: 'archived', title: '已归档', desc: '点列表底部的「已归档」进入，结构和通知面板相同。',
+    render: () => win(archivedSide({ hover: 0 }), companionChat(ARCH[0], `<div class="day">11 月 3 日</div>${me(['这批报价先不用跟了。'])}${them(ARCH[0], ['好的，资料我都留在工作目录里。'])}`, { archived: true })),
+    notes: { focus: ['悬停时显示「恢复」图标按钮和「…」，与项目行的两个动作按钮同宽', '点开可以只读查看私聊，输入框位置显示「已归档 · 恢复」'],
+      tucked: ['「…」里只有「删除…」', '恢复后保留原来的常用和置顶状态'],
+      removed: ['没有已归档伙伴时，列表底部的入口不显示'] } },
+  { id: 'notify', title: '通知 · 伙伴头像', desc: '通知中心沿用现有卡片；伙伴来源的卡片左侧换成头像。右上角是同时弹出的通知。',
+    render: () => win(notifySide(), workChat(), `<div class="toast"><img src="${C.fw.img}" alt=""><div class="tx"><div class="l1"><b>法务顾问需要你确认</b><time>13:05</time></div><p>要发送「采购合同修改意见」给对方吗？</p><div class="acts"><span class="btn primary">查看</span><span class="btn">稍后</span></div></div></div>`),
+    notes: { focus: ['伙伴卡片：28px 头像，未读点在头像右上角', '第一行伙伴名 + 时间，第二行消息预览或状态', '弹出通知同样带 32px 头像'],
+      tucked: ['点击：在工作页且是小狐或常用伙伴时，就在工作页打开，否则切到伙伴页'],
+      removed: ['顶部「伙伴」标签不加角标', '其他来源的卡片保持原样（如「任务已完成」）'] } },
+  { id: 'collapsed', title: '侧栏收起 · 伙伴页', desc: '三个模式图标竖排，下面是新建和伙伴头像，全部居中在一条轴上。',
+    render: () => win(railSide(), companionChat(C.zl, zlBody())),
+    notes: { focus: ['选中的模式用白底', '未读用头像右上角圆点'],
+      tucked: ['悬停头像显示名称 tooltip', '顺序和展开时一致：先置顶，再其他伙伴；头像多时可以滚动，用户栏固定在底部'],
+      removed: ['原来单个「切换到资料」按钮'] } },
+  { id: 'align', title: '对齐检查', desc: '四种侧栏并排，1:1。三条线：红色为轨道（12），蓝色为图标列（20），绿色为动作列右边缘（距右 14）。',
+    render: () => alignGallery() },
+  { id: 'icons', title: '模式图标', desc: '工作用 Animate UI 的 square-kanban；伙伴是自绘的猫爪动画图标；资料沿用 book-copy。悬停任意模式标签可以看到动画。',
+    render: () => iconSheet(),
+    notes: { focus: ['伙伴：一只空心猫爪，一个掌垫加四个趾垫，向左倾斜 10°，线宽和其他图标一致', '动画像猫爪拍在屏幕上：从上方以 1.6 倍大小落下，压扁到 0.86 倍后回弹，0.5 秒', '工作：看板三列依次弹动，0.6 秒，官方组件'],
+      tucked: ['悬停标签时播放，移开后回到静止', '收起侧栏后的竖排模式图标也使用同样的动画'],
+      removed: ['lucide 的 briefcase-business 和 paw-print：Animate UI 没有这两个图标，lucide 的猫爪也只有三个趾垫', '双猫爪方案：两段动画显得乱'] } },
+]
+
+function iconSheet() {
+  const big = (n) => `<svg class="i big" viewBox="0 0 24 24">${glyph(n)}</svg>`
+  const at = (t) => glyph('cat-paw').replace('class="paw"', `class="paw" style="animation-delay:${(-t).toFixed(2)}s"`)
+  const frames = [0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5]
+  return `<div class="icon-sheet">
+    <div><h5>三个模式图标</h5><div class="icon-row">
+      <div class="icon-cell">${big('square-kanban')}<span>工作 · <code>square-kanban</code></span></div>
+      <div class="icon-cell paw-live">${big('cat-paw')}<span>伙伴 · <code>cat-paw</code>（自绘）</span></div>
+      <div class="icon-cell">${big('book-copy')}<span>资料 · <code>book-copy</code></span></div>
+    </div></div>
+    <div><h5>在模式切换里（1:1 和 2 倍）</h5><div class="icon-tabs">${modeRow('companions')}<div style="zoom:2">${modeRow('companions')}</div></div></div>
+    <div><h5>伙伴图标动画逐帧</h5><div class="icon-row" style="gap:16px">${frames.map((t) => `<div class="icon-cell"><svg class="i paw-frame" viewBox="0 0 24 24">${at(t)}</svg><span>${Math.round(t * 1000)}ms</span></div>`).join('')}</div></div>
+  </div>`
+}
+
+function alignGallery() {
+  const cells = [['工作页', workSide({ hover: 'zl' })], ['伙伴页', companionSide({ active: 'zl', hover: 'sj' })], ['已归档', archivedSide({ hover: 1 })], ['通知', notifySide()]]
+  return `<div class="gallery">${cells.map(([cap, s]) => `<div class="cell"><p class="cap">${cap}</p><div class="solo">${s}
+    <i class="guide-line" style="left:var(--fox-sidebar-gutter)"></i><i class="guide-line" style="left:calc(var(--fox-sidebar-width) - var(--fox-sidebar-gutter))"></i>
+    <i class="guide-line gl-icon" style="left:calc(var(--fox-sidebar-gutter) + var(--fox-sidebar-inset))"></i><i class="guide-line gl-action" style="left:calc(var(--fox-sidebar-width) - var(--fox-sidebar-gutter) - var(--fox-sidebar-action-inset))"></i></div></div>`).join('')}</div>
+    <div class="legend"><span><i style="color:color-mix(in oklch, var(--destructive) 60%, transparent)"></i>轨道 12</span><span><i style="color:oklch(0.6 0.15 255)"></i>图标列 20</span><span><i style="color:oklch(0.62 0.13 160)"></i>动作列右边缘 14</span></div>`
+}
+
+/* ---------- Render ---------- */
+const params = new URLSearchParams(location.search)
+function render() {
+  const only = params.get('frame')
+  const doc = document.getElementById('doc')
+  if (only) { document.body.classList.add('single'); doc.innerHTML = screens.find((s) => s.id === only).render(); return }
+  doc.innerHTML = `
+  <header class="doc-hero"><h1>伙伴页面 · 原型</h1><p>顶部模式改为「工作｜伙伴｜资料」。伙伴页参考 OpenMausBot 的机器人列表，新建、管理、归档都在这里；工作页保留「伙伴」分组，只显示小狐和用户选的常用伙伴。原型只做暖纸主题的浅色模式，颜色和圆角直接引用 <code>apps/desktop/src/styles/themes.css</code>，侧栏尺寸沿用 <code>globals.css</code> 的 <code>--fox-sidebar-*</code> token。方案见同目录《伙伴页面方案.md》。</p></header>
+  <nav class="toc">${screens.map((s, i) => `<a href="#${s.id}">${String(i + 1).padStart(2, '0')} ${s.title}</a>`).join('')}</nav>
+  ${screens.map((s, i) => `<section class="frame" id="${s.id}">
+    <div class="frame-head"><span class="no">${String(i + 1).padStart(2, '0')}</span><h2>${s.title}</h2><p>${s.desc}</p></div>
+    ${s.render()}
+    ${s.notes ? `<div class="notes">
+      <div><h4>${I('check')}突出</h4><ul>${s.notes.focus.map((x) => `<li>${x}</li>`).join('')}</ul></div>
+      <div><h4>${I('ellipsis')}收进菜单 / 悬停</h4><ul>${s.notes.tucked.map((x) => `<li>${x}</li>`).join('')}</ul></div>
+      <div><h4>${I('x')}去掉 / 不做</h4><ul>${s.notes.removed.map((x) => `<li>${x}</li>`).join('')}</ul></div>
+    </div>` : ''}
+  </section>`).join('')}`
+}
+render()
+</script>
+</body>
+</html>

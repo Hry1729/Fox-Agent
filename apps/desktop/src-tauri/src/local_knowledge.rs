@@ -240,7 +240,17 @@ pub struct LocalKnowledgeStore {
     pub(crate) zvec_resource_dir: Arc<Option<PathBuf>>,
     database_path: Arc<PathBuf>,
     #[cfg(feature = "zvec")]
-    pub(crate) generation_checks: Arc<Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<(PathBuf, u64, Option<std::time::SystemTime>)>)>>>,
+    pub(crate) generation_checks: Arc<
+        Mutex<
+            std::collections::HashMap<
+                String,
+                (
+                    std::time::Instant,
+                    Vec<(PathBuf, u64, Option<std::time::SystemTime>)>,
+                ),
+            >,
+        >,
+    >,
     storage_migration_active: Arc<Mutex<Option<String>>>,
     pending_root_path: Arc<Mutex<Option<PathBuf>>>,
     /// Set when startup could not open the configured storage for writing
@@ -682,13 +692,18 @@ impl LocalKnowledgeStore {
         }
         let probe = |connection: Connection| -> Option<Connection> {
             connection
-                .query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get::<_, i64>(0))
+                .query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+                    row.get::<_, i64>(0)
+                })
                 .ok()?;
             connection.pragma_update(None, "query_only", "ON").ok()?;
             Some(connection)
         };
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_FULL_MUTEX;
-        if let Some(connection) = Connection::open_with_flags(database_path, flags).ok().and_then(probe) {
+        if let Some(connection) = Connection::open_with_flags(database_path, flags)
+            .ok()
+            .and_then(probe)
+        {
             return Some(connection);
         }
         let uri = url::Url::from_file_path(database_path).ok()?;
@@ -714,11 +729,15 @@ impl LocalKnowledgeStore {
         path: Option<&str>,
     ) -> Result<LocalKnowledgeStorageStatus, LocalKnowledgeError> {
         if self.startup_issue().is_none() {
-            return Err(LocalKnowledgeError::invalid("知识库存储正常，请使用「迁移存储位置」更改路径"));
+            return Err(LocalKnowledgeError::invalid(
+                "知识库存储正常，请使用「迁移存储位置」更改路径",
+            ));
         }
         let target = match path.map(str::trim).filter(|value| !value.is_empty()) {
-            Some(value) => crate::local_knowledge_storage::normalize_storage_path(Path::new(value), None)
-                .map_err(LocalKnowledgeError::storage_migration)?,
+            Some(value) => {
+                crate::local_knowledge_storage::normalize_storage_path(Path::new(value), None)
+                    .map_err(LocalKnowledgeError::storage_migration)?
+            }
             None => default_root.to_path_buf(),
         };
         if let Err(error) = probe_writable_directory(&target) {
@@ -728,18 +747,26 @@ impl LocalKnowledgeStore {
                 retryable: false,
             });
         }
-        let value = if path.map(str::trim).filter(|value| !value.is_empty()).is_some() {
+        let value = if path
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some()
+        {
             target.to_string_lossy().into_owned()
         } else {
             String::new()
         };
         database
-            .set_app_setting(crate::local_knowledge_storage::LOCAL_KNOWLEDGE_STORAGE_PATH_KEY, &value)
+            .set_app_setting(
+                crate::local_knowledge_storage::LOCAL_KNOWLEDGE_STORAGE_PATH_KEY,
+                &value,
+            )
             .map_err(LocalKnowledgeError::storage)?;
         *self
             .pending_root_path
             .lock()
-            .map_err(|_| LocalKnowledgeError::storage("storage migration lock is poisoned"))? = Some(target);
+            .map_err(|_| LocalKnowledgeError::storage("storage migration lock is poisoned"))? =
+            Some(target);
         self.storage_status()
     }
 
@@ -1609,9 +1636,12 @@ impl LocalKnowledgeStore {
         let now = crate::database::now_ms();
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
-        transaction.execute_batch("CREATE TEMP TABLE catalog_scan_paths (path TEXT PRIMARY KEY COLLATE NOCASE);")?;
+        transaction.execute_batch(
+            "CREATE TEMP TABLE catalog_scan_paths (path TEXT PRIMARY KEY COLLATE NOCASE);",
+        )?;
         {
-            let mut paths = transaction.prepare("INSERT INTO catalog_scan_paths(path) VALUES (?1)")?;
+            let mut paths =
+                transaction.prepare("INSERT INTO catalog_scan_paths(path) VALUES (?1)")?;
             let mut statement = transaction.prepare(
                 "INSERT INTO local_file_catalog(
                      id, source_id, absolute_path, relative_path, display_name,
@@ -1691,7 +1721,12 @@ impl LocalKnowledgeStore {
         let changed = self.connection()?.execute(
             "UPDATE local_file_sources SET display_name = ?1, updated_at = ?2,
              description = COALESCE(?4, description) WHERE id = ?3",
-            params![display_name, updated_at, source_id, request.description.as_deref().map(str::trim)],
+            params![
+                display_name,
+                updated_at,
+                source_id,
+                request.description.as_deref().map(str::trim)
+            ],
         )?;
         if changed == 0 {
             return Err(LocalKnowledgeError::not_found("local file source"));
@@ -1989,9 +2024,13 @@ impl LocalKnowledgeStore {
         control.check()?;
         let base = self.get_base(knowledge_base_id)?;
         // 检索路径复用这一次读到的资料库，不再在 search_retrieval 里重复 get_base。
-        self.search_for_agent_with(&base, query, requested_limit, requested_max_chars, |request| {
-            self.search_retrieval_for_base(&base, request, control)
-        })
+        self.search_for_agent_with(
+            &base,
+            query,
+            requested_limit,
+            requested_max_chars,
+            |request| self.search_retrieval_for_base(&base, request, control),
+        )
     }
 
     /// [`LocalKnowledgeStore::search_for_agent`] with the retrieval call
@@ -2031,7 +2070,9 @@ impl LocalKnowledgeStore {
                             requested_max_chars,
                         )
                     })
-                    .map_err(|error| error.with_prefix("向量检索失败（索引已就绪，不会改用关键词检索）："));
+                    .map_err(|error| {
+                        error.with_prefix("向量检索失败（索引已就绪，不会改用关键词检索）：")
+                    });
             }
             AgentSearchPlan::Lexical(fallback) => fallback,
         };
@@ -2134,7 +2175,10 @@ impl LocalKnowledgeStore {
                 "source": "local",
                 "sourceMetadata": source_metadata(knowledge_base_id, chunk),
             });
-            for (from, to) in [("vectorScore", "vectorScore"), ("lexicalScore", "lexicalScore")] {
+            for (from, to) in [
+                ("vectorScore", "vectorScore"),
+                ("lexicalScore", "lexicalScore"),
+            ] {
                 if let Some(score) = hit.get(from).filter(|score| !score.is_null()) {
                     item[to] = score.clone();
                 }
@@ -4248,7 +4292,9 @@ impl AgentSearchFallback {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AgentSearchPlan {
     /// Run `search_retrieval` in this mode (`vector` or `hybrid`).
-    Retrieval { mode: String },
+    Retrieval {
+        mode: String,
+    },
     Lexical(AgentSearchFallback),
 }
 
@@ -4732,17 +4778,24 @@ mod tests {
         // The configured storage path exists but is a file: create_dir_all
         // fails. Startup must still get a store (empty, query-only) plus a
         // readable issue naming the path, never an Err.
-        let base = std::env::temp_dir().join(format!("fox-local-knowledge-file-{}", Uuid::new_v4()));
+        let base =
+            std::env::temp_dir().join(format!("fox-local-knowledge-file-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&base).unwrap();
         let root = base.join("not-a-directory");
         std::fs::write(&root, b"x").unwrap();
         let store = LocalKnowledgeStore::open_for_startup(&root, None);
         let issue = store.startup_issue().expect("degraded");
         assert!(!issue.read_only);
-        assert_eq!(issue.message, format!("知识库路径不可写：{}", root.display()));
+        assert_eq!(
+            issue.message,
+            format!("知识库路径不可写：{}", root.display())
+        );
         let status = store.storage_status().unwrap();
         assert!(!status.writable);
-        assert_eq!(status.degraded_reason.as_deref(), Some(issue.message.as_str()));
+        assert_eq!(
+            status.degraded_reason.as_deref(),
+            Some(issue.message.as_str())
+        );
         assert!(store.list_bases().unwrap().is_empty());
         // Writes fail with an error instead of landing in memory.
         assert!(store.ensure_default_fox_guide().is_err());
@@ -4769,7 +4822,10 @@ mod tests {
         // Elevated accounts (e.g. root on Linux) may still write; then the
         // store opens normally, which is also not a crash.
         if let Some(issue) = store.startup_issue() {
-            assert!(issue.read_only, "readable database stays readable: {issue:?}");
+            assert!(
+                issue.read_only,
+                "readable database stays readable: {issue:?}"
+            );
             assert!(issue.message.starts_with("知识库路径不可写："));
             assert!(!store.list_bases().unwrap().is_empty());
             assert!(!store.storage_status().unwrap().writable);
@@ -4786,7 +4842,8 @@ mod tests {
         // Windows `icacls /deny user:(OI)(CI)(W)`: canonicalize of the
         // configured directory fails. The store must start degraded at the
         // configured path (never the default root) with the path in the reason.
-        let base = std::env::temp_dir().join(format!("fox-local-knowledge-unresolved-{}", Uuid::new_v4()));
+        let base =
+            std::env::temp_dir().join(format!("fox-local-knowledge-unresolved-{}", Uuid::new_v4()));
         let configured = base.join("custom-knowledge");
         std::fs::create_dir_all(&configured).unwrap();
         let root = crate::local_knowledge_storage::resolve_startup_root_with(
@@ -4803,12 +4860,18 @@ mod tests {
         let store = LocalKnowledgeStore::open_for_startup_root(&root, None);
         let issue = store.startup_issue().expect("degraded");
         assert_eq!(issue.root, configured);
-        assert_eq!(issue.message, format!("知识库路径不可写：{}", configured.display()));
+        assert_eq!(
+            issue.message,
+            format!("知识库路径不可写：{}", configured.display())
+        );
         assert!(issue.cause.contains("拒绝访问"));
         let status = store.storage_status().unwrap();
         assert!(!status.writable);
         assert_eq!(status.root_path, configured.to_string_lossy());
-        assert_eq!(status.degraded_reason.as_deref(), Some(issue.message.as_str()));
+        assert_eq!(
+            status.degraded_reason.as_deref(),
+            Some(issue.message.as_str())
+        );
         assert!(store.ensure_default_fox_guide().is_err());
         assert!(!base.join("app-data").join("local-knowledge").exists());
         drop(store);
@@ -4835,10 +4898,16 @@ mod tests {
         // Elevated accounts bypass the permission; then the store opens normally.
         if std::fs::write(root.join(".fox-perm-check"), b"x").is_err() {
             let issue = store.startup_issue().expect("degraded");
-            assert_eq!(issue.message, format!("知识库路径不可写：{}", root.display()));
+            assert_eq!(
+                issue.message,
+                format!("知识库路径不可写：{}", root.display())
+            );
             let status = store.storage_status().unwrap();
             assert!(!status.writable);
-            assert_eq!(status.degraded_reason.as_deref(), Some(issue.message.as_str()));
+            assert_eq!(
+                status.degraded_reason.as_deref(),
+                Some(issue.message.as_str())
+            );
         }
         drop(store);
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -4847,7 +4916,8 @@ mod tests {
 
     #[test]
     fn degraded_store_can_point_storage_at_another_directory() {
-        let base = std::env::temp_dir().join(format!("fox-local-knowledge-reset-{}", Uuid::new_v4()));
+        let base =
+            std::env::temp_dir().join(format!("fox-local-knowledge-reset-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&base).unwrap();
         let root = base.join("blocked");
         std::fs::write(&root, b"x").unwrap();
@@ -4855,7 +4925,11 @@ mod tests {
         let (database, database_path) = test_database();
         let next = base.join("next");
         let status = store
-            .reset_degraded_storage_path(&database, &base.join("default"), Some(next.to_str().unwrap()))
+            .reset_degraded_storage_path(
+                &database,
+                &base.join("default"),
+                Some(next.to_str().unwrap()),
+            )
             .unwrap();
         assert!(status.restart_required);
         let saved = database
@@ -4865,12 +4939,18 @@ mod tests {
         assert!(Path::new(&saved).ends_with("next"));
         // An unwritable target (a file) is refused with the path in the text.
         let error = store
-            .reset_degraded_storage_path(&database, &base.join("default"), Some(root.to_str().unwrap()))
+            .reset_degraded_storage_path(
+                &database,
+                &base.join("default"),
+                Some(root.to_str().unwrap()),
+            )
             .unwrap_err();
         assert!(error.message.contains("知识库路径不可写"));
         // A healthy store refuses: use the storage migration instead.
         let (healthy, healthy_root) = test_store();
-        assert!(healthy.reset_degraded_storage_path(&database, &base, None).is_err());
+        assert!(healthy
+            .reset_degraded_storage_path(&database, &base, None)
+            .is_err());
         drop((store, healthy, database));
         let _ = std::fs::remove_file(database_path);
         let _ = std::fs::remove_dir_all(healthy_root);
@@ -4958,7 +5038,10 @@ mod tests {
             .unwrap();
         assert_eq!(before.len(), after.len());
         for original in before {
-            let document = after.iter().find(|document| document.id == original.id).unwrap();
+            let document = after
+                .iter()
+                .find(|document| document.id == original.id)
+                .unwrap();
             assert_eq!(document.relative_path, original.relative_path);
             assert_eq!(document.knowledge_base_id, original.knowledge_base_id);
             assert_eq!(document.current_revision, original.current_revision);
@@ -4996,9 +5079,13 @@ mod tests {
         assert_eq!(source.file_count, 2);
         assert_eq!(store.list_file_sources().unwrap().len(), 1);
         assert_eq!(source.description, "");
-        let edited = store.update_file_source(LocalKnowledgeFileSourceUpdateRequest {
-            id: source.id.clone(), display_name: "项目资料".into(), description: Some("  测试简介  ".into()),
-        }).unwrap();
+        let edited = store
+            .update_file_source(LocalKnowledgeFileSourceUpdateRequest {
+                id: source.id.clone(),
+                display_name: "项目资料".into(),
+                description: Some("  测试简介  ".into()),
+            })
+            .unwrap();
         assert_eq!(edited.display_name, "项目资料");
         assert_eq!(edited.description, "测试简介");
         assert_eq!(edited.root_path, source.root_path);
@@ -5071,20 +5158,37 @@ mod tests {
         assert_eq!(rescanned.file_count, 2);
         assert_eq!(rescanned.display_name, "项目资料");
         assert_eq!(rescanned.description, "测试简介");
-        let renamed = store.update_file_source(LocalKnowledgeFileSourceUpdateRequest {
-            id: source.id.clone(), display_name: "保留简介".into(), description: None,
-        }).unwrap();
+        let renamed = store
+            .update_file_source(LocalKnowledgeFileSourceUpdateRequest {
+                id: source.id.clone(),
+                display_name: "保留简介".into(),
+                description: None,
+            })
+            .unwrap();
         assert_eq!(renamed.description, "测试简介");
-        store.update_file_source(LocalKnowledgeFileSourceUpdateRequest {
-            id: source.id.clone(), display_name: "保留简介".into(), description: Some("".into()),
-        }).unwrap();
+        store
+            .update_file_source(LocalKnowledgeFileSourceUpdateRequest {
+                id: source.id.clone(),
+                display_name: "保留简介".into(),
+                description: Some("".into()),
+            })
+            .unwrap();
         assert_eq!(store.get_file_source(&source.id).unwrap().description, "");
-        let updated = store.list_catalog_files(LocalKnowledgeCatalogFilesRequest {
-            source_id: Some(source.id.clone()), query: None, category: None, limit: None, offset: None,
-        }).unwrap();
+        let updated = store
+            .list_catalog_files(LocalKnowledgeCatalogFilesRequest {
+                source_id: Some(source.id.clone()),
+                query: None,
+                category: None,
+                limit: None,
+                offset: None,
+            })
+            .unwrap();
         assert!(updated.iter().all(|file| file.display_name != "report.pdf"));
         assert!(updated.iter().any(|file| file.display_name == "new.md"));
-        let same_notes = updated.iter().find(|file| file.display_name == "notes.md").unwrap();
+        let same_notes = updated
+            .iter()
+            .find(|file| file.display_name == "notes.md")
+            .unwrap();
         assert_eq!(same_notes.id, notes.id);
         assert_eq!(same_notes.file_size, 7);
 
@@ -5194,9 +5298,20 @@ mod tests {
         assert_eq!(listed[0].chunk_count, Some(1));
         assert_eq!(listed[0].vector_count, None);
         assert_eq!(listed[0].fallback_reason.as_deref(), Some("未配置向量模型"));
-        let picker_base = store.list_bases().unwrap().into_iter().find(|item| item.id == base.id).unwrap();
-        assert!(picker_base.text_index_ready, "the chat picker must receive the keyword capability");
-        assert!(picker_base.active_index_generation.is_none(), "keyword imports do not require a vector generation");
+        let picker_base = store
+            .list_bases()
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == base.id)
+            .unwrap();
+        assert!(
+            picker_base.text_index_ready,
+            "the chat picker must receive the keyword capability"
+        );
+        assert!(
+            picker_base.active_index_generation.is_none(),
+            "keyword imports do not require a vector generation"
+        );
 
         let search = store
             .search_lexical(&base.id, "第二段", Some(3), Some(1_000))
@@ -5329,11 +5444,17 @@ mod library_latency_probe {
     fn measure_actual_library_reads() {
         let root = std::env::var("FOX_LIBRARY_BENCH_ROOT").expect("snapshot root");
         let resources = std::env::var("FOX_LIBRARY_BENCH_DLL").expect("Zvec DLL directory");
-        let store = LocalKnowledgeStore::open_retrieval_worker(&root, Some(Path::new(&resources))).unwrap();
+        let store =
+            LocalKnowledgeStore::open_retrieval_worker(&root, Some(Path::new(&resources))).unwrap();
         for iteration in 0..5 {
             let started = std::time::Instant::now();
             let bases = store.list_bases().unwrap();
-            println!("LIBRARY_BENCH list iteration={} elapsed_ms={:.3} bases={}", iteration, started.elapsed().as_secs_f64()*1000.0, bases.len());
+            println!(
+                "LIBRARY_BENCH list iteration={} elapsed_ms={:.3} bases={}",
+                iteration,
+                started.elapsed().as_secs_f64() * 1000.0,
+                bases.len()
+            );
             for base in bases {
                 let started = std::time::Instant::now();
                 let detail = store.get_base(&base.id).unwrap();
@@ -5345,13 +5466,32 @@ mod library_latency_probe {
         let count = base.vector_count.unwrap() as usize;
         let dimension = base.embedding_model.as_ref().unwrap().dimension as usize;
         let started = std::time::Instant::now();
-        store.zvec_vector_store().unwrap().open_generation(&base.id, generation, dimension, count).unwrap();
-        println!("LIBRARY_BENCH raw_index_open_check_close elapsed_ms={:.3}", started.elapsed().as_secs_f64()*1000.0);
-        assert!(store.validate_zvec_generation_readable(&base.id, generation, dimension, count + 1).is_err(), "changed count must not reuse a successful check");
+        store
+            .zvec_vector_store()
+            .unwrap()
+            .open_generation(&base.id, generation, dimension, count)
+            .unwrap();
+        println!(
+            "LIBRARY_BENCH raw_index_open_check_close elapsed_ms={:.3}",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        assert!(
+            store
+                .validate_zvec_generation_readable(&base.id, generation, dimension, count + 1)
+                .is_err(),
+            "changed count must not reuse a successful check"
+        );
         let expired = std::time::Instant::now() - std::time::Duration::from_secs(31);
-        for entry in store.generation_checks.lock().unwrap().values_mut() { entry.0 = expired; }
+        for entry in store.generation_checks.lock().unwrap().values_mut() {
+            entry.0 = expired;
+        }
         assert!(store.get_base(&base.id).unwrap().vector_index_ready);
-        assert!(store.generation_checks.lock().unwrap().values().any(|entry| entry.0 > expired));
+        assert!(store
+            .generation_checks
+            .lock()
+            .unwrap()
+            .values()
+            .any(|entry| entry.0 > expired));
         println!("LIBRARY_BENCH invalidation=count-change,expiry passed");
     }
 }
@@ -5363,7 +5503,8 @@ pub(crate) mod agent_search_test_support {
     use super::*;
 
     pub(crate) fn temp_store(label: &str) -> (LocalKnowledgeStore, PathBuf) {
-        let root = std::env::temp_dir().join(format!("fox-agent-search-{label}-{}", Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("fox-agent-search-{label}-{}", Uuid::new_v4()));
         (LocalKnowledgeStore::open(&root).unwrap(), root)
     }
 
@@ -5407,7 +5548,13 @@ pub(crate) mod agent_search_test_support {
                     "INSERT INTO local_kb_chunks(
                         id, document_id, document_revision, chunk_index, text, anchor
                      ) VALUES (?1, ?2, 1, ?3, ?4, ?5)",
-                    params![chunk_id, document_id, index as i64, text, format!("chunk-{index}")],
+                    params![
+                        chunk_id,
+                        document_id,
+                        index as i64,
+                        text,
+                        format!("chunk-{index}")
+                    ],
                 )
                 .unwrap();
             chunk_ids.push(chunk_id);
@@ -5418,7 +5565,11 @@ pub(crate) mod agent_search_test_support {
     /// The base as `get_base` reports it, then marked as having a ready
     /// vector index in `mode`. A real ready Zvec index needs an installed
     /// ONNX embedding model, which test builds cannot download.
-    pub(crate) fn ready_base(store: &LocalKnowledgeStore, id: &str, mode: &str) -> LocalKnowledgeBase {
+    pub(crate) fn ready_base(
+        store: &LocalKnowledgeStore,
+        id: &str,
+        mode: &str,
+    ) -> LocalKnowledgeBase {
         let mut base = store.get_base(id).unwrap();
         base.vector_index_ready = true;
         base.search_mode = mode.to_owned();
@@ -5428,7 +5579,12 @@ pub(crate) mod agent_search_test_support {
 
     /// A `search_retrieval` result in the shape `search_retrieval_in_process`
     /// returns, one hit per chunk id, best first.
-    pub(crate) fn retrieval_result(base_id: &str, query: &str, mode: &str, chunk_ids: &[String]) -> Value {
+    pub(crate) fn retrieval_result(
+        base_id: &str,
+        query: &str,
+        mode: &str,
+        chunk_ids: &[String],
+    ) -> Value {
         let items = chunk_ids
             .iter()
             .enumerate()
@@ -5479,7 +5635,9 @@ mod agent_search_tests {
         for mode in ["vector", "hybrid"] {
             assert_eq!(
                 plan_agent_search(&ready_base(&store, &base_id, mode)),
-                AgentSearchPlan::Retrieval { mode: mode.to_owned() }
+                AgentSearchPlan::Retrieval {
+                    mode: mode.to_owned()
+                }
             );
         }
         drop(store);
@@ -5500,7 +5658,12 @@ mod agent_search_tests {
         let result = store
             .search_for_agent_with(&base, "  向量检索  ", Some(5), None, |request| {
                 seen_request = Some(request.clone());
-                Ok(retrieval_result(&base_id, &request.query, "hybrid", &chunk_ids))
+                Ok(retrieval_result(
+                    &base_id,
+                    &request.query,
+                    "hybrid",
+                    &chunk_ids,
+                ))
             })
             .unwrap();
         let request = seen_request.expect("retrieval was called");
@@ -5529,15 +5692,32 @@ mod agent_search_tests {
         assert!(items[0]["score"].is_number());
         assert!(items[1].get("lexicalScore").is_none());
         assert!(items[1]["vectorScore"].is_number());
-        assert_eq!(items[0]["sourceMetadata"]["relativePath"], "guide/hybrid.md");
-        assert_eq!(items[0]["sourceMetadata"]["knowledgeBaseId"], base_id.as_str());
+        assert_eq!(
+            items[0]["sourceMetadata"]["relativePath"],
+            "guide/hybrid.md"
+        );
+        assert_eq!(
+            items[0]["sourceMetadata"]["knowledgeBaseId"],
+            base_id.as_str()
+        );
         assert_eq!(items[0]["sourceMetadata"]["chunkIndex"], 0);
 
         let vector = store
-            .search_for_agent_with(&ready_base(&store, &base_id, "vector"), "向量", None, None, |request| {
-                assert_eq!(request.mode.as_deref(), Some("vector"));
-                Ok(retrieval_result(&base_id, &request.query, "vector", &chunk_ids))
-            })
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "vector"),
+                "向量",
+                None,
+                None,
+                |request| {
+                    assert_eq!(request.mode.as_deref(), Some("vector"));
+                    Ok(retrieval_result(
+                        &base_id,
+                        &request.query,
+                        "vector",
+                        &chunk_ids,
+                    ))
+                },
+            )
             .unwrap();
         assert_eq!(vector["mode"], "vector");
         assert!(vector["fusionVersion"].is_null());
@@ -5552,7 +5732,9 @@ mod agent_search_tests {
             base_with_document(&store, "未就绪", "notes.md", &["第一段知识", "第二段知识"]);
         // The public entry point reads the real base, whose vector index is
         // not ready, so retrieval is never attempted.
-        let result = store.search_for_agent(&base_id, "第二段", Some(3), Some(1_000)).unwrap();
+        let result = store
+            .search_for_agent(&base_id, "第二段", Some(3), Some(1_000))
+            .unwrap();
         assert_eq!(result["source"], "local");
         assert!(result.get("mode").is_none());
         assert_eq!(result["fallback"]["active"], true);
@@ -5565,7 +5747,9 @@ mod agent_search_tests {
         assert_eq!(items[0]["content"], "第二段知识");
 
         // Other callers of search_lexical keep the historical marker.
-        let lexical = store.search_lexical(&base_id, "第二段", Some(3), Some(1_000)).unwrap();
+        let lexical = store
+            .search_lexical(&base_id, "第二段", Some(3), Some(1_000))
+            .unwrap();
         assert_eq!(lexical["fallback"]["reason"], "vector_index_unavailable");
         assert_eq!(lexical["items"], result["items"]);
         drop(store);
@@ -5577,26 +5761,42 @@ mod agent_search_tests {
         let (store, root) = temp_store("fallbacks");
         let (base_id, _, _) = base_with_document(&store, "回退", "fallback.md", &["回退原因测试"]);
         let keyword = store
-            .search_for_agent_with(&ready_base(&store, &base_id, "keyword"), "回退", None, None, |_| {
-                panic!("keyword mode must not call vector retrieval")
-            })
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "keyword"),
+                "回退",
+                None,
+                None,
+                |_| panic!("keyword mode must not call vector retrieval"),
+            )
             .unwrap();
         assert_eq!(keyword["fallback"]["reason"], "keyword_mode");
         assert_eq!(keyword["items"].as_array().map(Vec::len), Some(1));
 
         // R4: a worker failure on a ready index is an error, never keyword results.
         let failed = store
-            .search_for_agent_with(&ready_base(&store, &base_id, "hybrid"), "回退", None, None, |_| {
-                Err(LocalKnowledgeError::storage("无法启动向量检索隔离进程：boom"))
-            })
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "hybrid"),
+                "回退",
+                None,
+                None,
+                |_| {
+                    Err(LocalKnowledgeError::storage(
+                        "无法启动向量检索隔离进程：boom",
+                    ))
+                },
+            )
             .unwrap_err();
         assert_eq!(failed.code(), "local_knowledge.storage_failed");
         assert!(failed.to_string().contains("boom"));
         assert!(failed.to_string().contains("不会改用关键词检索"));
         let cancelled = store
-            .search_for_agent_with(&ready_base(&store, &base_id, "vector"), "回退", None, None, |_| {
-                Err(LocalKnowledgeError::cancelled("知识库检索已取消"))
-            })
+            .search_for_agent_with(
+                &ready_base(&store, &base_id, "vector"),
+                "回退",
+                None,
+                None,
+                |_| Err(LocalKnowledgeError::cancelled("知识库检索已取消")),
+            )
             .unwrap_err();
         assert_eq!(cancelled.code(), "local_knowledge.cancelled");
         drop(store);
@@ -5611,9 +5811,13 @@ mod agent_search_tests {
         // A retrieval answer for A that names a chunk of B: the B hit is dropped.
         let mixed = [chunks_b[0].clone(), chunks_a[0].clone()];
         let result = store
-            .search_for_agent_with(&ready_base(&store, &base_a, "hybrid"), "私有知识", None, None, |request| {
-                Ok(retrieval_result(&base_a, &request.query, "hybrid", &mixed))
-            })
+            .search_for_agent_with(
+                &ready_base(&store, &base_a, "hybrid"),
+                "私有知识",
+                None,
+                None,
+                |request| Ok(retrieval_result(&base_a, &request.query, "hybrid", &mixed)),
+            )
             .unwrap();
         assert_eq!(result["mode"], "hybrid");
         assert_eq!(result["items"].as_array().map(Vec::len), Some(1));
@@ -5622,9 +5826,20 @@ mod agent_search_tests {
 
         // A retrieval answer for another base is rejected as an error (R4).
         let foreign = store
-            .search_for_agent_with(&ready_base(&store, &base_a, "hybrid"), "私有知识", None, None, |request| {
-                Ok(retrieval_result(&base_b, &request.query, "hybrid", &chunks_b))
-            })
+            .search_for_agent_with(
+                &ready_base(&store, &base_a, "hybrid"),
+                "私有知识",
+                None,
+                None,
+                |request| {
+                    Ok(retrieval_result(
+                        &base_b,
+                        &request.query,
+                        "hybrid",
+                        &chunks_b,
+                    ))
+                },
+            )
             .unwrap_err();
         assert!(!foreign.to_string().contains("B 项目私有知识"));
         drop(store);
@@ -5644,7 +5859,12 @@ mod agent_search_tests {
         let top_k = store
             .search_for_agent_with(&base, "检索", Some(2), None, |request| {
                 assert_eq!(request.limit, Some(3));
-                Ok(retrieval_result(&base_id, &request.query, "hybrid", &chunk_ids))
+                Ok(retrieval_result(
+                    &base_id,
+                    &request.query,
+                    "hybrid",
+                    &chunk_ids,
+                ))
             })
             .unwrap();
         assert_eq!(top_k["items"].as_array().map(Vec::len), Some(2));
@@ -5653,7 +5873,12 @@ mod agent_search_tests {
 
         let max_chars = store
             .search_for_agent_with(&base, "检索", Some(3), Some(10), |request| {
-                Ok(retrieval_result(&base_id, &request.query, "hybrid", &chunk_ids))
+                Ok(retrieval_result(
+                    &base_id,
+                    &request.query,
+                    "hybrid",
+                    &chunk_ids,
+                ))
             })
             .unwrap();
         let items = max_chars["items"].as_array().unwrap();
@@ -5671,7 +5896,12 @@ mod agent_search_tests {
         store
             .search_for_agent_with(&base, "检索", Some(500), None, |request| {
                 assert_eq!(request.limit, Some(MAX_LOCAL_SEARCH_RESULTS + 1));
-                Ok(retrieval_result(&base_id, &request.query, "hybrid", &chunk_ids))
+                Ok(retrieval_result(
+                    &base_id,
+                    &request.query,
+                    "hybrid",
+                    &chunk_ids,
+                ))
             })
             .unwrap();
         drop(store);
@@ -5738,7 +5968,14 @@ mod agent_search_tests {
                 "留下",
                 None,
                 None,
-                |request| Ok(retrieval_result(&base_id, &request.query, "vector", &chunk_ids)),
+                |request| {
+                    Ok(retrieval_result(
+                        &base_id,
+                        &request.query,
+                        "vector",
+                        &chunk_ids,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(kept["droppedHits"], 0);
@@ -5758,7 +5995,14 @@ mod agent_search_tests {
                 "尺度",
                 None,
                 None,
-                |request| Ok(retrieval_result(&base_id, &request.query, "vector", &chunk_ids)),
+                |request| {
+                    Ok(retrieval_result(
+                        &base_id,
+                        &request.query,
+                        "vector",
+                        &chunk_ids,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(vector["scoreKind"], "cosine");
@@ -5770,7 +6014,14 @@ mod agent_search_tests {
                 "尺度",
                 None,
                 None,
-                |request| Ok(retrieval_result(&base_id, &request.query, "hybrid", &chunk_ids)),
+                |request| {
+                    Ok(retrieval_result(
+                        &base_id,
+                        &request.query,
+                        "hybrid",
+                        &chunk_ids,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(hybrid["scoreKind"], "rrf");
@@ -5811,7 +6062,14 @@ mod agent_search_tests {
                 "甲",
                 Some(2),
                 None,
-                |request| Ok(retrieval_result(&base_id, &request.query, "vector", &chunk_ids)),
+                |request| {
+                    Ok(retrieval_result(
+                        &base_id,
+                        &request.query,
+                        "vector",
+                        &chunk_ids,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(vector["items"].as_array().map(Vec::len), Some(2));
@@ -5827,7 +6085,14 @@ mod agent_search_tests {
                 "甲",
                 Some(5),
                 Some(3),
-                |request| Ok(retrieval_result(&base_id, &request.query, "hybrid", &chunk_ids[..2])),
+                |request| {
+                    Ok(retrieval_result(
+                        &base_id,
+                        &request.query,
+                        "hybrid",
+                        &chunk_ids[..2],
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(within["total"], 2);
@@ -5950,7 +6215,10 @@ mod agent_search_tests {
             crate::local_knowledge_vector::clamp_ui_retrieval_limit(Some(8)),
             Some(8)
         );
-        assert_eq!(crate::local_knowledge_vector::clamp_ui_retrieval_limit(None), None);
+        assert_eq!(
+            crate::local_knowledge_vector::clamp_ui_retrieval_limit(None),
+            None
+        );
 
         drop(store);
         let _ = std::fs::remove_dir_all(root);
@@ -5999,7 +6267,9 @@ mod agent_search_tests {
         assert_eq!(second_chunks.len(), 2);
         assert_eq!(second_chunks[0]["chunkIndex"], 1);
         assert_eq!(second_chunks[1]["chunkIndex"], 2);
-        assert!(second_chunks.iter().all(|item| item.get("content").is_none()));
+        assert!(second_chunks
+            .iter()
+            .all(|item| item.get("content").is_none()));
         drop(store);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -6053,7 +6323,14 @@ mod agent_search_tests {
                 "词法",
                 None,
                 None,
-                |request| Ok(retrieval_result(&base_id, &request.query, "hybrid", &chunk_ids)),
+                |request| {
+                    Ok(retrieval_result(
+                        &base_id,
+                        &request.query,
+                        "hybrid",
+                        &chunk_ids,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(mapped["items"][0]["lexicalScore"], 1.5);

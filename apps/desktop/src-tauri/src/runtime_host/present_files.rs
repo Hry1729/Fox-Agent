@@ -1,18 +1,11 @@
 //! Explicit file delivery: the model declares which existing files the user is
 //! actually being handed, and the Host records that declaration.
 //!
-//! This tool does not produce, convert, or repair a file, and it never inspects
-//! what is inside one. A declaration means "this file is the result", not "this
-//! content passed a check". Content verification, delivery checklists and
-//! acceptance review are a different mechanism that the ordinary task path no
-//! longer enters; keeping the two apart is the point of this module.
-//!
-//! What the Host does check is that the file can actually be handed over: the
-//! path resolves inside the authorized project root, the target exists, and it
-//! is a regular file. An empty or otherwise surprising file is still a legal
-//! delivery — zero bytes is a fact about the file, not a reason to refuse it.
+//! The Host resolves paths, reads supported Office files back from disk, and
+//! verifies shared labeled numbers when the task requests a matching XLSX/DOCX pair.
 
 use serde_json::{json, Value};
+use std::path::Path;
 
 /// Maximum files one call may declare. The model is told to prefer the one or
 /// two most important files; this is the enforced ceiling above that advice.
@@ -112,14 +105,13 @@ pub fn resolve_declared_files(
             files.len()
         )));
     }
-    let root = project_root
-        .map(std::path::Path::new)
-        .ok_or_else(|| {
-            PresentError::NotAuthorized(
-                "present_files needs an authorized project folder; this task has none".into(),
-            )
-        })?;
-    let root = crate::tool_host::canonical_project_root(root).map_err(PresentError::NotAuthorized)?;
+    let root = project_root.map(std::path::Path::new).ok_or_else(|| {
+        PresentError::NotAuthorized(
+            "present_files needs an authorized project folder; this task has none".into(),
+        )
+    })?;
+    let root =
+        crate::tool_host::canonical_project_root(root).map_err(PresentError::NotAuthorized)?;
 
     let mut resolved = Vec::with_capacity(files.len());
     let mut seen = std::collections::BTreeSet::new();
@@ -133,7 +125,9 @@ pub fn resolve_declared_files(
             .map(str::trim)
             .filter(|path| !path.is_empty())
             .ok_or_else(|| {
-                PresentError::InvalidInput(format!("files[{index}].path must be a non-empty string"))
+                PresentError::InvalidInput(format!(
+                    "files[{index}].path must be a non-empty string"
+                ))
             })?;
         if requested.len() > MAX_PATH_BYTES {
             return Err(PresentError::InvalidInput(format!(
@@ -160,8 +154,8 @@ pub fn resolve_declared_files(
                 )))
             }
         };
-        let target = crate::tool_host::resolve_present_target(&root, requested).map_err(|error| {
-            match error {
+        let target = crate::tool_host::resolve_present_target(&root, requested).map_err(
+            |error| match error {
                 crate::tool_host::PresentTargetError::NotAuthorized(message) => {
                     PresentError::NotAuthorized(message)
                 }
@@ -171,8 +165,8 @@ pub fn resolve_declared_files(
                 crate::tool_host::PresentTargetError::NotAFile(message) => {
                     PresentError::NotAFile(message)
                 }
-            }
-        })?;
+            },
+        )?;
         // Two spellings of one file are one declaration. Recording both would
         // put the same file on the card twice under two different strings.
         if !seen.insert(target.clone()) {
@@ -228,11 +222,29 @@ pub fn execute(
     project_root: &Option<String>,
     input: &Value,
 ) -> Result<Value, String> {
+    if database.run_steering_messages(run_id)?.iter().any(|message|
+        message.lane == "current" && matches!(message.status.as_str(), "received" | "delivered"))
+    {
+        return Err("[tool.invalid_input] 本轮还有待应用的追加要求，请按更新后的要求交付。".into());
+    }
     let files = resolve_declared_files(input, project_root.as_deref()).map_err(|error| {
         // The code prefix is the same `[tool.…]` convention every other Host
         // tool uses, so the model sees a class it can branch on.
         format!("[{}] {}", error.code(), error.message())
     })?;
+    let task = database.run_task_text(run_id)?.unwrap_or_default();
+    let root = crate::tool_host::canonical_project_root(Path::new(project_root.as_deref().unwrap_or_default()))?;
+    for file in &files {
+        if let Ok(relative) = file.resolved_path.strip_prefix(&root) {
+            super::delivery::check_csv_placement(&task, &root, relative)?;
+        }
+        if has_extension(&file.resolved_path, "csv") {
+            verify_csv_width(&file.resolved_path)
+                .map_err(|error| format!("[tool.invalid_input] CSV 交付校验失败，{}：{error}。请修复原文件后再次调用 present_files。", file.display_name))?;
+        }
+    }
+    let office_checks = verify_office_deliveries(&root, &task, &files)
+        .map_err(|error| format!("[tool.invalid_input] 交付校验失败：{error}。请修复原文件并再次调用 present_files。"))?;
     let rows: Vec<(String, String, Option<String>)> = files
         .iter()
         .map(|file| {
@@ -243,7 +255,7 @@ pub fn execute(
             )
         })
         .collect();
-    database
+    let ids = database
         .record_present_files_declaration(
             conversation_id,
             run_id,
@@ -253,10 +265,217 @@ pub fn execute(
         )
         .map_err(|error| format!("[tool.unknown] the delivery could not be recorded: {error}"))?;
     let mut result = success_result(&files);
+    for (file, id) in result["files"].as_array_mut().unwrap().iter_mut().zip(ids) {
+        file["artifactId"] = json!(id);
+    }
     // The declaration is what the user sees. Naming that fact keeps the model
     // from promising a card for a file it never declared.
     result["recorded"] = json!(true);
+    if !office_checks.opened.is_empty() {
+        result["officeVerification"] = json!({
+            "opened": office_checks.opened,
+            "sharedNumbersMatch": office_checks.shared_numbers_match,
+        });
+    }
     Ok(result)
+}
+
+pub(super) fn finalization_candidates(database: &crate::database::Database, run_id: &str) -> Result<Vec<String>, String> {
+    let binding = database.run_control_binding(run_id)?.ok_or("missing delivery Run binding")?;
+    let Some(root) = binding.permission.project_root.as_deref() else { return Ok(Vec::new()) };
+    let latest = database.run_steering_messages(run_id)?.into_iter().rev()
+        .find(|message| message.lane == "current" && message.status == "applied");
+    let task = database.run_task_text(run_id)?.unwrap_or_default();
+    let task_context = json!({"projectRoot": root});
+    let has_delivery = |text: &str| super::delivery::task_delivery_reference(text, &task_context)["recognition"] == "recognized";
+    if !has_delivery(&task) && !latest.as_ref().is_some_and(|message| has_delivery(&message.content)) {
+        return Ok(Vec::new());
+    }
+    let since = latest.and_then(|message| message.applied_at).unwrap_or_default();
+    let paths = database.with_connection(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT storage_path, declared_at FROM artifacts WHERE run_id=?1
+             AND status='ready' AND artifact_origin='project' AND artifact_class IN ('process','deliverable')
+             AND updated_at>=?2 ORDER BY updated_at DESC, id LIMIT 16",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![run_id, since],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+    })?;
+    let root = crate::tool_host::canonical_project_root(Path::new(root))?;
+    let mut candidates = Vec::new();
+    for (path, declared) in paths {
+        let Ok(target) = crate::tool_host::resolve_present_target(&root, &path) else { continue };
+        if declared.is_some_and(|time| time >= since) { return Ok(Vec::new()); }
+        if let Ok(relative) = target.strip_prefix(&root) {
+            candidates.push(relative.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    candidates.dedup();
+    Ok(candidates)
+}
+
+fn verify_csv_width(path: &Path) -> Result<(), String> {
+    use super::delivery_checks_v2::{text_csv::parse_table, CheckLimits, TableDialect};
+    use std::io::Read;
+
+    let limits = CheckLimits::P0;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(limits.max_bytes + 1).read_to_end(&mut bytes))
+        .map_err(|error| format!("无法读取文件：{error}"))?;
+    let parsed = parse_table(&bytes, &TableDialect::default(), &limits)
+        .map_err(|error| format!("{}，{}", error.locator().display(), error.detail()))?;
+    if let Some((first, rows)) = parsed.records.split_first() {
+        let expected = first.fields.len();
+        if let Some(row) = rows.iter().find(|row| row.fields.len() != expected) {
+            return Err(format!("第 {} 行应有 {expected} 列，实际 {} 列", row.line, row.fields.len()));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct OfficeVerification {
+    opened: Vec<String>,
+    shared_numbers_match: bool,
+}
+
+fn verify_office_deliveries(root: &Path, task: &str, files: &[DeclaredFile]) -> Result<OfficeVerification, String> {
+    use std::collections::BTreeSet;
+
+    let lower = task.to_ascii_lowercase();
+    let expects_match = ["数字应与表格一致", "数字与表格一致", "数字一致", "数据一致", "numbers match", "figures match", "same numbers"]
+        .iter().any(|phrase| lower.contains(phrase));
+    let explicit = super::delivery::expectations_from_task(task);
+    let named: Vec<_> = explicit.iter().filter_map(|item| item.target_path.as_deref()).collect();
+    let named_of_type = |ext: &str| named.iter().filter(move |file| has_extension(Path::new(file), ext)).copied().collect::<Vec<_>>();
+    let (xlsx_targets, docx_targets) = (named_of_type("xlsx"), named_of_type("docx"));
+    let mut candidates: BTreeSet<_> = files.iter().map(|file| file.resolved_path.clone()).collect();
+    let pair = if expects_match && xlsx_targets.len() == 1 && docx_targets.len() == 1 {
+        let resolve = |name: &str| crate::tool_host::resolve_present_target(root, name)
+            .map_err(|_| format!("需要先保存并提供 {name}"));
+        let pair = (resolve(xlsx_targets[0])?, resolve(docx_targets[0])?);
+        candidates.extend([pair.0.clone(), pair.1.clone()]);
+        Some(pair)
+    } else if expects_match {
+        let xlsx = candidates.iter().filter(|path| has_extension(path, "xlsx")).collect::<Vec<_>>();
+        let docx = candidates.iter().filter(|path| has_extension(path, "docx")).collect::<Vec<_>>();
+        (xlsx.len() == 1 && docx.len() == 1).then(|| (xlsx[0].clone(), docx[0].clone()))
+    } else {
+        None
+    };
+    let mut checks = OfficeVerification::default();
+    let mut numbers = Vec::new();
+    let mut report = String::new();
+    for path in candidates {
+        if has_extension(&path, "xlsx") {
+            let parsed = workbook_numbers(&path)?;
+            if pair.as_ref().is_some_and(|(workbook, _)| workbook == &path) {
+                numbers = parsed;
+            }
+        } else if has_extension(&path, "docx") {
+            let text = super::extract_docx_text(&read_office_package(&path)?)
+                .map_err(|error| format!("{} 无法读取：{error}", path.display()))?;
+            if pair.as_ref().is_some_and(|(_, word)| word == &path) {
+                report = text;
+            }
+        } else {
+            continue;
+        }
+        checks.opened.push(path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/"));
+    }
+    if let Some((xlsx, docx)) = pair {
+        check_shared_numbers(&numbers, &report)
+            .map_err(|error| format!("{} 与 {}：{error}", xlsx.display(), docx.display()))?;
+        checks.shared_numbers_match = true;
+    }
+    Ok(checks)
+}
+
+fn has_extension(path: &Path, expected: &str) -> bool {
+    path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case(expected))
+}
+
+fn read_office_package(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    const MAX_PACKAGE_BYTES: u64 = 64 * 1024 * 1024;
+    let file = std::fs::File::open(path).map_err(|error| format!("{} 无法打开：{error}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_PACKAGE_BYTES + 1).read_to_end(&mut bytes)
+        .map_err(|error| format!("{} 无法读取：{error}", path.display()))?;
+    if bytes.len() as u64 > MAX_PACKAGE_BYTES {
+        return Err(format!("{} 超出交付校验的 64 MiB 文件限制", path.display()));
+    }
+    crate::data_compute::validate_zip_expansion(&path.to_string_lossy(), &bytes)?;
+    Ok(bytes)
+}
+
+fn workbook_numbers(path: &Path) -> Result<Vec<(String, f64)>, String> {
+    use calamine::{open_workbook_auto_from_rs, Data, Reader};
+    let invalid = |error: calamine::Error| format!("{} 无法读取：{error}", path.display());
+    let mut workbook = open_workbook_auto_from_rs(std::io::Cursor::new(read_office_package(path)?))
+        .map_err(invalid)?;
+    let mut values = Vec::new();
+    for sheet in workbook.sheet_names().to_vec() {
+        let cells = workbook.worksheet_range(&sheet).map_err(invalid)?;
+        for row in cells.rows() {
+            if let Some(label) = row.iter().find_map(|cell| match cell {
+                Data::String(label) if !label.trim().is_empty() => Some(label.trim()),
+                _ => None,
+            }) {
+                if let Some(value) = row.iter().find_map(cell_number) {
+                    values.push((label.to_owned(), value));
+                }
+            }
+        }
+        if let (Some(headers), Some(row)) = (cells.rows().next(), cells.rows().last()) {
+            for (header, cell) in headers.iter().zip(row) {
+                if let (Data::String(label), Some(value)) = (header, cell_number(cell)) {
+                    values.push((label.trim().to_owned(), value));
+                }
+            }
+        }
+    }
+    Ok(values)
+}
+
+fn cell_number(cell: &calamine::Data) -> Option<f64> {
+    match cell {
+        calamine::Data::Int(value) => Some(*value as f64),
+        calamine::Data::Float(value) => Some(*value),
+        calamine::Data::String(value) => value.trim().replace(',', "").parse().ok(),
+        _ => None,
+    }
+}
+
+fn check_shared_numbers(numbers: &[(String, f64)], report: &str) -> Result<(), String> {
+    let mut matched = false;
+    for (label, expected) in numbers {
+        if label.is_empty() || label.chars().count() > 64 || label.parse::<f64>().is_ok() {
+            continue;
+        }
+        let aliases = match label.to_ascii_lowercase().as_str() {
+            "收入" | "revenue" => r"收入|\brevenue\b".to_owned(),
+            "成本" | "cost" => r"成本|\bcost\b".to_owned(),
+            "利润" | "profit" => r"利润|\bprofit\b".to_owned(),
+            _ => regex::escape(label),
+        };
+        let field = regex::Regex::new(&format!(
+            r"(?i)(?:{aliases})(?:\s|[*：:=]|为|是|合计|总计|[￥¥$])*([+\-−]?[0-9][0-9,]*(?:\.[0-9]+)?)",
+        )).map_err(|error| error.to_string())?;
+        for captures in field.captures_iter(report) {
+            let Ok(actual) = captures[1].replace(',', "").replace('−', "-").parse::<f64>() else { continue };
+            matched = true;
+            if (actual - expected).abs() > 1e-8 * expected.abs().max(1.0) {
+                return Err(format!("{label}在 Excel 中为 {expected}，在 Word 中出现 {actual}"));
+            }
+        }
+    }
+    if !matched {
+        return Err("未找到两份文件共有的带名称数字。请检查工作簿数据，并在报告中明确标注数字对应的项目".to_owned());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -301,6 +520,36 @@ mod tests {
     }
 
     #[test]
+    fn detects_ragged_csv_and_preserves_quoted_records() {
+        let fixture = Fixture::new("csv-width");
+        let path = fixture.write("summary.csv", b"\xef\xbb\xbfsource,amount,note\r\na,10,\"one,two\r\nthree\"\r\nTOTAL,,10,\r\n");
+        assert_eq!(verify_csv_width(&path).unwrap_err(), "第 4 行应有 3 列，实际 4 列");
+        fixture.write("summary.csv", b"source,amount,note\na,10,\"one,two\nthree\"\nTOTAL,10,\n");
+        assert!(verify_csv_width(&path).is_ok());
+    }
+
+    #[test]
+    fn refuses_a_truncated_workbook_before_recording_delivery() {
+        let fixture = Fixture::new("truncated-workbook");
+        fixture.write("output/summary.xlsx", b"PK\x03\x04truncated");
+        let files = resolve_declared_files(
+            &json!({"files":[{"path":"output/summary.xlsx"}]}),
+            Some(&fixture.root_text()),
+        ).unwrap();
+        let root = crate::tool_host::canonical_project_root(&fixture.root).unwrap();
+        let error = verify_office_deliveries(&root, "交付 output/summary.xlsx", &files).unwrap_err();
+        assert!(error.contains("summary.xlsx"));
+    }
+
+    #[test]
+    fn checks_every_occurrence_of_shared_numbers_in_word() {
+        let numbers = [("revenue".to_owned(), 1000.0), ("利润".to_owned(), 400.0)];
+        assert!(check_shared_numbers(&numbers, "收入：1,000 元。利润为400元。\n利润\n400").is_ok());
+        let error = check_shared_numbers(&numbers, "收入：1,000 元。利润为400元。\n利润\n450").unwrap_err();
+        assert!(error.contains("450"));
+    }
+
+    #[test]
     fn a_regular_file_is_declared_with_its_own_name_and_description() {
         let fixture = Fixture::new("regular");
         fixture.write("reports/summary.md", b"# Summary\n");
@@ -329,7 +578,8 @@ mod tests {
     fn a_missing_file_is_refused_and_names_the_path() {
         let fixture = Fixture::new("missing");
         let input = json!({"files":[{"path":"nope.md"}]});
-        let error = resolve_declared_files(&input, Some(&fixture.root_text())).expect_err("refused");
+        let error =
+            resolve_declared_files(&input, Some(&fixture.root_text())).expect_err("refused");
         assert_eq!(error.code(), "tool.invalid_input");
         assert!(error.message().contains("nope.md"), "{}", error.message());
     }
@@ -339,7 +589,8 @@ mod tests {
         let fixture = Fixture::new("dir");
         fs::create_dir_all(fixture.root.join("folder")).expect("folder");
         let input = json!({"files":[{"path":"folder"}]});
-        let error = resolve_declared_files(&input, Some(&fixture.root_text())).expect_err("refused");
+        let error =
+            resolve_declared_files(&input, Some(&fixture.root_text())).expect_err("refused");
         assert!(
             matches!(error, PresentError::NotAFile(_)),
             "a directory must not be presented as a file: {error:?}"
@@ -350,9 +601,13 @@ mod tests {
     fn a_path_outside_the_authorized_root_is_refused() {
         let fixture = Fixture::new("escape");
         let input = json!({"files":[{"path":"../outside.md"}]});
-        let error = resolve_declared_files(&input, Some(&fixture.root_text())).expect_err("refused");
+        let error =
+            resolve_declared_files(&input, Some(&fixture.root_text())).expect_err("refused");
         assert!(
-            matches!(error, PresentError::NotAuthorized(_) | PresentError::NotFound(_)),
+            matches!(
+                error,
+                PresentError::NotAuthorized(_) | PresentError::NotFound(_)
+            ),
             "an escaping path must not resolve: {error:?}"
         );
     }
@@ -373,8 +628,13 @@ mod tests {
         let fixture = Fixture::new("batch");
         fixture.write("good.md", b"good");
         let input = json!({"files":[{"path":"good.md"},{"path":"missing.md"}]});
-        let error = resolve_declared_files(&input, Some(&fixture.root_text())).expect_err("refused");
-        assert!(error.message().contains("missing.md"), "{}", error.message());
+        let error =
+            resolve_declared_files(&input, Some(&fixture.root_text())).expect_err("refused");
+        assert!(
+            error.message().contains("missing.md"),
+            "{}",
+            error.message()
+        );
     }
 
     #[test]
@@ -408,7 +668,8 @@ mod tests {
     fn a_blank_path_is_refused_rather_than_resolved_to_the_root() {
         let fixture = Fixture::new("blank");
         let input = json!({"files":[{"path":"   "}]});
-        let error = resolve_declared_files(&input, Some(&fixture.root_text())).expect_err("refused");
+        let error =
+            resolve_declared_files(&input, Some(&fixture.root_text())).expect_err("refused");
         assert!(matches!(error, PresentError::InvalidInput(_)), "{error:?}");
     }
 
@@ -455,7 +716,11 @@ mod tests {
                     Ok(())
                 })
                 .expect("seed conversation");
-            Self { database, path, root }
+            Self {
+                database,
+                path,
+                root,
+            }
         }
 
         fn declare(&self, turn: &str, paths: &[&str]) -> Result<Value, String> {
@@ -476,7 +741,16 @@ mod tests {
         /// Read the declarations back as durable rows. Deliberately a direct
         /// query: this asserts what is *stored*, not what some accessor chooses
         /// to expose, so a serializer change cannot hide a persistence bug.
-        fn declared(&self) -> Vec<(String, String, Option<String>, Option<i64>, Option<String>, i64)> {
+        fn declared(
+            &self,
+        ) -> Vec<(
+            String,
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+            i64,
+        )> {
             self.database
                 .with_connection(|connection| {
                     let mut statement = connection.prepare(
@@ -534,7 +808,11 @@ mod tests {
         stored.root.write("report.md", b"# R\n");
         stored.declare("call-1", &["report.md"]).expect("first");
         stored.declare("call-1", &["report.md"]).expect("retry");
-        assert_eq!(stored.declared().len(), 1, "a retry must not duplicate the card");
+        assert_eq!(
+            stored.declared().len(),
+            1,
+            "a retry must not duplicate the card"
+        );
     }
 
     #[test]
@@ -542,8 +820,15 @@ mod tests {
         let stored = Stored::new("note");
         stored.root.write("summary.md", "# 汇总\n".as_bytes());
         let files = json!({"files":[{"path":"summary.md","description":"本季度汇总"}]});
-        execute(&stored.database, "conv-1", "run-1", "call-9", &Some(stored.root.root_text()), &files)
-            .expect("declared");
+        execute(
+            &stored.database,
+            "conv-1",
+            "run-1",
+            "call-9",
+            &Some(stored.root.root_text()),
+            &files,
+        )
+        .expect("declared");
         let rows = stored.declared();
         assert_eq!(rows.len(), 1);
         let (_, _, _, _, description, size) = &rows[0];
@@ -573,7 +858,10 @@ mod tests {
             .declare("call-1", &["good.md", "missing.md"])
             .expect_err("refused");
         assert!(error.contains("missing.md"), "{error}");
-        assert!(stored.declared().is_empty(), "a refused call must write nothing");
+        assert!(
+            stored.declared().is_empty(),
+            "a refused call must write nothing"
+        );
     }
 
     /// Restart persistence: the declaration is read back from a freshly opened
@@ -607,7 +895,10 @@ mod tests {
             })
             .expect("the declaration must still be there after reopen");
         let (display_name, turn_call_id, storage_path) = rows;
-        assert_eq!(display_name, "report.md", "the declaration must survive a restart");
+        assert_eq!(
+            display_name, "report.md",
+            "the declaration must survive a restart"
+        );
         assert_eq!(turn_call_id.as_deref(), Some("call-1"));
         // The stored path carries the Windows extended-length prefix, so the
         // assertion trims it rather than comparing against the plain fixture root.

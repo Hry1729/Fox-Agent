@@ -1,16 +1,16 @@
 //! Finite content contracts derived by Host from user-authorized source bytes.
 //! Material text is data: only content restrictions are extracted, never tools,
 //! permissions or instructions about the agent. No model assertion proves one.
+use super::*;
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub(super) use crate::runtime_host::delivery_checks_v2::merge_rule::{self, MergeRule};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all="camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct Source {
     path: String,
     sha256: String,
@@ -20,12 +20,22 @@ pub(super) struct Source {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag="type", rename_all="camelCase", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub(super) enum Contract {
-    Unbound { reason: String },
-    ForbiddenMention { source: Source, literal: String },
-    ForbiddenAvailability { source: Source, literal: String },
-    FactQualifiers { sources: Vec<Source> },
+    Unbound {
+        reason: String,
+    },
+    ForbiddenMention {
+        source: Source,
+        literal: String,
+    },
+    ForbiddenAvailability {
+        source: Source,
+        literal: String,
+    },
+    FactQualifiers {
+        sources: Vec<Source>,
+    },
     Concat {
         sources: Vec<Source>,
         selected: Vec<String>,
@@ -35,11 +45,20 @@ pub(super) enum Contract {
         #[serde(default)]
         read_only: bool,
     },
-    DataSource { source: Source, sheet: Option<String>, headers: Vec<String>, date_required: bool, metrics: Vec<Metric> },
+    DataSource {
+        source: Source,
+        sheet: Option<String>,
+        headers: Vec<String>,
+        date_required: bool,
+        metrics: Vec<Metric>,
+    },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all="camelCase",deny_unknown_fields)]
-pub(super) struct Metric { column:String, operation:String }
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct Metric {
+    column: String,
+    operation: String,
+}
 
 // ===========================================================================
 // Host-side strict spec decoding (package 2-A, internal only).
@@ -344,9 +363,7 @@ pub(super) fn decode_spec(spec: &Value) -> DecodedSpec {
         }
         Some(value) => match value.as_u64() {
             Some(version) if (1..=2).contains(&version) => version as u32,
-            Some(_) => {
-                return DecodedSpec::Invalid("内容契约 schemaVersion 不受支持".to_owned())
-            }
+            Some(_) => return DecodedSpec::Invalid("内容契约 schemaVersion 不受支持".to_owned()),
             // String, float, object, array — keep parity with the production
             // `!= 1` numeric gate instead of coercing.
             None => return DecodedSpec::Invalid("内容契约 schemaVersion 不是整数".to_owned()),
@@ -369,9 +386,7 @@ pub(super) fn decode_spec(spec: &Value) -> DecodedSpec {
             };
             match serde_json::from_value::<Contract>(spec["rule"].clone()) {
                 Ok(contract) => DecodedSpec::V1(contract, rule),
-                Err(error) => {
-                    DecodedSpec::Invalid(format!("内容契约字段不完整或不支持：{error}"))
-                }
+                Err(error) => DecodedSpec::Invalid(format!("内容契约字段不完整或不支持：{error}")),
             }
         }
         2 => {
@@ -382,14 +397,10 @@ pub(super) fn decode_spec(spec: &Value) -> DecodedSpec {
                 }
             };
             if envelope.envelope_version != 2 {
-                return DecodedSpec::Invalid(
-                    "v2 内容契约要求 envelopeVersion == 2".to_owned(),
-                );
+                return DecodedSpec::Invalid("v2 内容契约要求 envelopeVersion == 2".to_owned());
             }
             if envelope.checker_version != 2 {
-                return DecodedSpec::Invalid(
-                    "v2 内容契约要求 checkerVersion == 2".to_owned(),
-                );
+                return DecodedSpec::Invalid("v2 内容契约要求 checkerVersion == 2".to_owned());
             }
             // The envelope must carry a rule the existing strict `Contract`
             // reader can decode; v1 and v2 agree on the rule family.
@@ -399,9 +410,7 @@ pub(super) fn decode_spec(spec: &Value) -> DecodedSpec {
             let contract: Contract = match serde_json::from_value(rule.clone()) {
                 Ok(contract) => contract,
                 Err(error) => {
-                    return DecodedSpec::Invalid(format!(
-                        "v2 内容契约 rule 无法解码：{error}"
-                    ))
+                    return DecodedSpec::Invalid(format!("v2 内容契约 rule 无法解码：{error}"))
                 }
             };
             // The separator marker is validated with the same strictness as the
@@ -411,9 +420,7 @@ pub(super) fn decode_spec(spec: &Value) -> DecodedSpec {
             // would then have to choose a rule for itself.
             if let Some(literal) = envelope.merge_rule.as_deref() {
                 if literal != merge_rule::SEPARATOR_V1 && literal != merge_rule::SEPARATOR_V2 {
-                    return DecodedSpec::Invalid(format!(
-                        "内容契约分隔规则不受支持：{literal}"
-                    ));
+                    return DecodedSpec::Invalid(format!("内容契约分隔规则不受支持：{literal}"));
                 }
             }
             DecodedSpec::V2(V2Rule { envelope, contract })
@@ -443,7 +450,15 @@ pub(super) fn decode_spec(spec: &Value) -> DecodedSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn reference()->Source{Source{path:"policy.md".into(),sha256:"a".repeat(64),bytes:1,first_line:1,last_line:1}}
+    fn reference() -> Source {
+        Source {
+            path: "policy.md".into(),
+            sha256: "a".repeat(64),
+            bytes: 1,
+            first_line: 1,
+            last_line: 1,
+        }
+    }
 
     // ---- compat: the marker is read from the frozen record ----------------
     //
@@ -490,7 +505,12 @@ mod tests {
     #[test]
     fn d1_compat_an_unusable_marker_is_refused_on_both_chains() {
         for schema in [1u64, 2] {
-            for bad in [json!("separator-v3"), json!(2), json!(null), json!("SEPARATOR-V2")] {
+            for bad in [
+                json!("separator-v3"),
+                json!(2),
+                json!(null),
+                json!("SEPARATOR-V2"),
+            ] {
                 let spec = json!({
                     "schemaVersion": schema,
                     "envelopeVersion": 2,
@@ -507,9 +527,7 @@ mod tests {
             }
         }
     }
-
 }
 
 #[path = "p2c2_execution.rs"]
 pub(super) mod execution;
-

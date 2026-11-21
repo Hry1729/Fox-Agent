@@ -1,12 +1,12 @@
+pub(crate) mod agent_backend_routing;
+pub(crate) mod companion_files;
 pub(crate) mod companion_notes;
 pub(crate) mod companion_tasks;
-pub(crate) mod companion_files;
 pub(crate) mod companions;
-pub(crate) mod agent_backend_routing;
-mod kernel_reliability;
 mod kernel_reconciliation;
-pub use kernel_reliability::*;
-pub use kernel_reconciliation::*;
+mod kernel_reliability;
+pub mod project_files;
+pub mod project_terminal;
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
 use crate::model_service::{
@@ -19,50 +19,51 @@ use crate::yuxi::{
 use crate::{
     app_state::AppState,
     database::{
-        AgentIdRequest, AgentRecord, ApiResponse, AttachmentRecord, CancelRunRequest,
-        CleanupDataRequest, CompanionChatSearchRequest, ContactBubbleSearchPage,
-        ConversationContextReset, ConversationDetail,
-        ConversationExpertBindRequest,
-        ConversationExpertBinding, ConversationExpertBindingError, ConversationForkRequest,
-        ConversationHistoryPage, ConversationHistoryRequest, ConversationIdRequest,
-        ConversationSearchRequest, ConversationSummary, CopyAgentRequest,
-        CreateConversationRequest, CreateMemoryRequest, DeleteKnowledgeDocumentActivityItemRequest,
-        EvaluationRunSummary, GoalIdRequest, GraphQueryRequest, KnowledgeBaseRecord,
-        KnowledgeBindingInput, KnowledgeDetailRecord, KnowledgeDocumentActivity,
-        KnowledgeDocumentAnnotation, KnowledgeDocumentBookmark, KnowledgeDocumentDownloadRequest,
-        KnowledgeDocumentDownloadResult, KnowledgeDocumentRangeRequest,
-        KnowledgeDocumentReadingState, KnowledgeDocumentRequest, KnowledgeDocumentSourceMetadata,
-        KnowledgeDownloadCancelRequest, KnowledgeDownloadProgress, KnowledgeIdRequest,
-        KnowledgePreviewCacheAcquireRequest, KnowledgePreviewCacheCancelRequest,
-        KnowledgePreviewCacheEntry, KnowledgePreviewCacheLease, KnowledgePreviewCacheLimitRequest,
-        KnowledgePreviewCacheOpenRequest, KnowledgePreviewCacheReadRequest,
-        KnowledgePreviewCacheReleaseRequest, KnowledgeQueryRequest, KnowledgeReference,
-        KnowledgeReferenceBindingRecord, LifecycleHookIdRequest, LifecycleHookRecord,
-        McpServerIdRequest, McpServerRecord, MemoryEntityRecord, MemoryIdRequest,
-        MemoryListRequest, MemoryMutationRequest, MemoryRecallListRequest, MemoryRecallRecord,
-        MemoryRevisionRecord, ModelConnectionTest, ModelProviderIdRequest, ModelProviderRecord,
-        ModelServiceRecord, ObservabilityStatistics, OpenDownloadedFileRequest, ProjectFileEntry,
-        ProjectFilePreview, ProjectFileReadRequest, ProjectFilesRequest, ProjectIdRequest,
-        ProjectRecord, ProviderModelRecord, RecordUiMetricRequest, RenameConversationRequest, ChangeConversationProjectRequest,
-        ResolveApprovalRequest, ResolveMemoryConflictRequest, RestoreBackupRequest,
-        ResumeYuxiRunRequest, RewindRunRequest, RuntimeInitialization, SaveAgentRequest,
-        SaveAttachmentsRequest, SaveKnowledgeDocumentAnnotationRequest,
-        SaveKnowledgeDocumentBookmarkRequest, SaveKnowledgeDocumentReadingStateRequest,
-        SaveLifecycleHookRequest, SaveMcpServerRequest, SaveModelProviderRequest,
-        SaveModelServiceRequest, SaveUserProfileRequest, SaveYuxiServiceRequest,
-        SetGoalRunningRequest, SetGoalRunningResult, SetMemoryEnabledRequest,
-        SetSkillEnabledRequest, SkillRecord, StartRunRequest, StartRunResult,
-        TestModelServiceRequest, TestYuxiServiceRequest, UpdateConversationPermissionRequest,
-        AllowProjectRuleRequest, PermissionAuditListRequest, PermissionRuleRevokeRequest, PermissionRulesListRequest,
-        UpdateConversationPinnedRequest, UpdateLifecycleHookEnabledRequest,
-        UpdateMcpServerEnabledRequest, UpdateMemoryRequest, UpdateProjectPermissionRequest,
-        UsageStatistics, UserProfileRecord, YuxiAgentRecord, YuxiConnectionTest, YuxiLoginRequest,
-        YuxiModelRecord, YuxiServiceRecord, YuxiUserRecord,
+        AgentIdRequest, AgentRecord, AllowProjectRuleRequest, ApiResponse, AttachmentRecord,
+        CancelRunRequest, ChangeConversationProjectRequest, CleanupDataRequest,
+        CompanionChatSearchRequest, ContactBubbleSearchPage, ConversationContextReset,
+        ConversationDetail, ConversationExpertBindRequest, ConversationExpertBinding,
+        ConversationExpertBindingError, ConversationForkRequest, ConversationHistoryPage,
+        ConversationHistoryRequest, ConversationIdRequest, ConversationSearchRequest,
+        ConversationSummary, CopyAgentRequest, CreateConversationRequest, CreateMemoryRequest,
+        DeleteKnowledgeDocumentActivityItemRequest, EvaluationRunSummary, GoalIdRequest,
+        GraphQueryRequest, KnowledgeBaseRecord, KnowledgeBindingInput, KnowledgeDetailRecord,
+        KnowledgeDocumentActivity, KnowledgeDocumentAnnotation, KnowledgeDocumentBookmark,
+        KnowledgeDocumentDownloadRequest, KnowledgeDocumentDownloadResult,
+        KnowledgeDocumentRangeRequest, KnowledgeDocumentReadingState, KnowledgeDocumentRequest,
+        KnowledgeDocumentSourceMetadata, KnowledgeDownloadCancelRequest, KnowledgeDownloadProgress,
+        KnowledgeIdRequest, KnowledgePreviewCacheAcquireRequest,
+        KnowledgePreviewCacheCancelRequest, KnowledgePreviewCacheEntry, KnowledgePreviewCacheLease,
+        KnowledgePreviewCacheLimitRequest, KnowledgePreviewCacheOpenRequest,
+        KnowledgePreviewCacheReadRequest, KnowledgePreviewCacheReleaseRequest,
+        KnowledgeQueryRequest, KnowledgeReference, KnowledgeReferenceBindingRecord,
+        LifecycleHookIdRequest, LifecycleHookRecord, McpServerIdRequest, McpServerRecord,
+        MemoryEntityRecord, MemoryIdRequest, MemoryListRequest, MemoryMutationRequest,
+        MemoryRecallListRequest, MemoryRecallRecord, MemoryRevisionRecord, ModelConnectionTest,
+        ModelProviderIdRequest, ModelProviderRecord, ModelServiceRecord, ObservabilityStatistics,
+        OpenDownloadedFileRequest, PermissionAuditListRequest, PermissionRuleRevokeRequest,
+        PermissionRulesListRequest, ProjectFileEntry, ProjectFilePreview, ProjectFileReadRequest,
+        ProjectFilesRequest, ProjectIdRequest, ProjectRecord, ProviderModelRecord,
+        RecordUiMetricRequest, RenameConversationRequest, ResolveApprovalRequest,
+        ResolveMemoryConflictRequest, RestoreBackupRequest, ResumeRunRequest, RewindRunRequest,
+        RuntimeInitialization, SaveAgentRequest, SaveAttachmentsRequest,
+        SaveKnowledgeDocumentAnnotationRequest, SaveKnowledgeDocumentBookmarkRequest,
+        SaveKnowledgeDocumentReadingStateRequest, SaveLifecycleHookRequest, SaveMcpServerRequest,
+        SaveModelProviderRequest, SaveModelServiceRequest, SaveUserProfileRequest,
+        SaveYuxiServiceRequest, SetGoalRunningRequest, SetGoalRunningResult,
+        SetMemoryEnabledRequest, SetSkillEnabledRequest, SkillRecord, StartRunRequest,
+        StartRunResult, TestModelServiceRequest, TestYuxiServiceRequest,
+        UpdateConversationPermissionRequest, UpdateConversationPinnedRequest,
+        UpdateLifecycleHookEnabledRequest, UpdateMcpServerEnabledRequest, UpdateMemoryRequest,
+        UpdateProjectPermissionRequest, UsageStatistics, UserProfileRecord, YuxiAgentRecord,
+        YuxiConnectionTest, YuxiLoginRequest, YuxiModelRecord, YuxiServiceRecord, YuxiUserRecord,
     },
     runtime_host::{RuntimeDiagnostics, RuntimeStatus},
     work_mode_gate::{self, ResolveWorkModeConfirmationRequest, WorkModeDecision},
 };
 use base64::Engine;
+pub use kernel_reconciliation::*;
+pub use kernel_reliability::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -70,14 +71,14 @@ use std::{
     fs,
     path::{Component, Path, PathBuf},
     sync::atomic::Ordering,
-    time::{Duration, Instant, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, State};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
 
-pub(crate) mod plugin_center;
 pub(crate) mod companion_deletions;
+pub(crate) mod plugin_center;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -380,29 +381,7 @@ fn safe_download_filename(value: &str, fallback: &str) -> String {
     }
 }
 
-const PROJECT_FILE_LIMIT: usize = 2_000;
-const PROJECT_FILE_MAX_DEPTH: usize = 8;
 const PROJECT_PREVIEW_LIMIT: usize = 512 * 1024;
-
-fn ignored_project_directory(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        ".git"
-            | ".idea"
-            | ".next"
-            | ".nuxt"
-            | ".turbo"
-            | ".venv"
-            | ".vscode"
-            | "__pycache__"
-            | "build"
-            | "coverage"
-            | "dist"
-            | "node_modules"
-            | "target"
-            | "venv"
-    )
-}
 
 fn project_root(state: &AppState, conversation_id: &str) -> Result<PathBuf, String> {
     let root = state
@@ -455,13 +434,6 @@ mod project_file_tests {
     }
 
     #[test]
-    fn skips_large_generated_directories() {
-        assert!(ignored_project_directory("node_modules"));
-        assert!(ignored_project_directory("TARGET"));
-        assert!(!ignored_project_directory("src"));
-    }
-
-    #[test]
     fn sanitizes_download_filenames_without_losing_unicode() {
         assert_eq!(
             safe_download_filename("报告:2026?.docx", "fallback"),
@@ -483,59 +455,6 @@ fn relative_project_path(root: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")
-}
-
-fn collect_project_files(
-    root: &Path,
-    directory: &Path,
-    depth: usize,
-    entries: &mut Vec<ProjectFileEntry>,
-) -> Result<(), String> {
-    if depth > PROJECT_FILE_MAX_DEPTH || entries.len() >= PROJECT_FILE_LIMIT {
-        return Ok(());
-    }
-    let mut children = fs::read_dir(directory)
-        .map_err(|error| format!("无法读取项目目录：{error}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("无法读取项目目录项：{error}"))?;
-    children.sort_by_key(|entry| entry.file_name().to_string_lossy().to_ascii_lowercase());
-
-    for child in children {
-        if entries.len() >= PROJECT_FILE_LIMIT {
-            break;
-        }
-        let name = child.file_name().to_string_lossy().into_owned();
-        let metadata = fs::symlink_metadata(child.path())
-            .map_err(|error| format!("无法读取文件信息：{error}"))?;
-        if metadata.file_type().is_symlink()
-            || (metadata.is_dir() && ignored_project_directory(&name))
-        {
-            continue;
-        }
-        let path = child.path();
-        let relative = relative_project_path(root, &path);
-        let parent = path
-            .parent()
-            .map(|value| relative_project_path(root, value))
-            .unwrap_or_default();
-        let modified_at = metadata
-            .modified()
-            .ok()
-            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-            .map(|value| value.as_millis() as i64);
-        entries.push(ProjectFileEntry {
-            path: relative,
-            name,
-            parent,
-            is_directory: metadata.is_dir(),
-            byte_size: metadata.len().min(i64::MAX as u64) as i64,
-            modified_at,
-        });
-        if metadata.is_dir() {
-            collect_project_files(root, &path, depth + 1, entries)?;
-        }
-    }
-    Ok(())
 }
 
 #[tauri::command]
@@ -748,22 +667,6 @@ pub fn project_folder_open(
 }
 
 #[tauri::command]
-pub fn project_files_list(
-    state: State<'_, AppState>,
-    request: ProjectFilesRequest,
-) -> ApiResponse<Vec<ProjectFileEntry>> {
-    let root = match project_root(&state, &request.conversation_id) {
-        Ok(root) => root,
-        Err(error) => return ApiResponse::failure("project.root_unavailable", error, false),
-    };
-    let mut entries = Vec::new();
-    match collect_project_files(&root, &root, 0, &mut entries) {
-        Ok(()) => ApiResponse::success(entries),
-        Err(error) => ApiResponse::failure("project.files_failed", error, true),
-    }
-}
-
-#[tauri::command]
 pub fn project_file_read(
     state: State<'_, AppState>,
     request: ProjectFileReadRequest,
@@ -809,6 +712,62 @@ pub fn project_file_read(
         byte_size: bytes.len().min(i64::MAX as usize) as i64,
         truncated,
     })
+}
+
+#[tauri::command]
+pub async fn conversation_office_preview_read(
+    state: State<'_, AppState>,
+    request: ConversationOfficePreviewRequest,
+) -> Result<tauri::ipc::Response, String> {
+    let path = match request.source {
+        ConversationOfficePreviewSource::Project { path } => {
+            let root = project_root(&state, &request.conversation_id)?;
+            safe_project_target(&root, &path)?
+        }
+        ConversationOfficePreviewSource::Artifact { artifact_id } => {
+            crate::artifact_gateway::validated_path(
+                &state.database, &state.data_dir, &request.conversation_id, &artifact_id,
+            ).map_err(|error| error.message)?
+        }
+    };
+    let bytes = read_office_preview(&path).await?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationOfficePreviewRequest {
+    conversation_id: String,
+    source: ConversationOfficePreviewSource,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ConversationOfficePreviewSource {
+    Project { path: String },
+    Artifact { #[serde(rename = "artifactId")] artifact_id: String },
+}
+
+async fn read_office_preview(path: &Path) -> Result<Vec<u8>, String> {
+    const MAX_BYTES: u64 = 64 * 1024 * 1024;
+    let extension = path.extension().and_then(|extension| extension.to_str()).unwrap_or_default();
+    if !extension.eq_ignore_ascii_case("docx") && !extension.eq_ignore_ascii_case("xlsx") {
+        return Err("文件格式不支持 Office 预览".into());
+    }
+    let file = tokio::fs::File::open(path).await.map_err(|error| format!("无法打开文件：{error}"))?;
+    let metadata = file.metadata().await.map_err(|error| format!("无法读取文件属性：{error}"))?;
+    if !metadata.is_file() {
+        return Err("所选路径不是文件".into());
+    }
+    if metadata.len() > MAX_BYTES {
+        return Err("文件超过 64 MB，无法在侧栏预览".into());
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_BYTES + 1).read_to_end(&mut bytes).await.map_err(|error| format!("无法读取文件：{error}"))?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err("文件超过 64 MB，无法在侧栏预览".into());
+    }
+    Ok(bytes)
 }
 
 #[tauri::command]
@@ -1266,8 +1225,12 @@ pub fn mcp_server_set_enabled(
             // D1-2: disabling a connector invalidates the matching companion
             // approvals in the same transaction; refresh their cards best-effort.
             if !request.enabled {
-                if let Ok(affected) = state.database.invalidated_companion_approvals_for_server(&server.id) {
-                    let ids: Vec<String> = affected.into_iter().map(|approval| approval.id).collect();
+                if let Ok(affected) = state
+                    .database
+                    .invalidated_companion_approvals_for_server(&server.id)
+                {
+                    let ids: Vec<String> =
+                        affected.into_iter().map(|approval| approval.id).collect();
                     state.runtime_host.refresh_invalidated_approvals(&ids);
                 }
             }
@@ -1291,8 +1254,12 @@ pub fn mcp_server_delete(
             // approval inputs still carry the serverId, so the refresh can find
             // them. Best-effort — the persistent facts are authoritative.
             if deleted {
-                if let Ok(affected) = state.database.invalidated_companion_approvals_for_server(&request.server_id) {
-                    let ids: Vec<String> = affected.into_iter().map(|approval| approval.id).collect();
+                if let Ok(affected) = state
+                    .database
+                    .invalidated_companion_approvals_for_server(&request.server_id)
+                {
+                    let ids: Vec<String> =
+                        affected.into_iter().map(|approval| approval.id).collect();
                     state.runtime_host.refresh_invalidated_approvals(&ids);
                 }
             }
@@ -1442,7 +1409,9 @@ pub fn projects_set_pinned(
 /// Only the bundled main desktop document may mutate user authority. The
 /// Window is supplied by Tauri; no request field can assert this provenance.
 pub(crate) fn require_trusted_local_window(window: &tauri::WebviewWindow) -> Result<(), String> {
-    let location = window.url().map_err(|_| "无法核验权限操作来源".to_owned())?;
+    let location = window
+        .url()
+        .map_err(|_| "无法核验权限操作来源".to_owned())?;
     if trusted_permission_origin(window.label(), &location, cfg!(debug_assertions)) {
         Ok(())
     } else {
@@ -1454,13 +1423,16 @@ fn trusted_permission_origin(label: &str, url: &url::Url, development: bool) -> 
     if label != "main" || !url.username().is_empty() || url.password().is_some() {
         return false;
     }
-    let bundled = url.port().is_none() && match (url.scheme(), url.host_str()) {
-        ("tauri", Some("localhost")) => true,
-        ("http" | "https", Some("tauri.localhost")) => true,
-        _ => false,
-    };
+    let bundled = url.port().is_none()
+        && match (url.scheme(), url.host_str()) {
+            ("tauri", Some("localhost")) => true,
+            ("http" | "https", Some("tauri.localhost")) => true,
+            _ => false,
+        };
     // Exact development origins from tauri.conf.json and tauri.profile.conf.json.
-    let dev = development && url.scheme() == "http" && url.host_str() == Some("127.0.0.1")
+    let dev = development
+        && url.scheme() == "http"
+        && url.host_str() == Some("127.0.0.1")
         && matches!(url.port(), Some(1421 | 1422));
     bundled || dev
 }
@@ -1474,7 +1446,10 @@ pub fn project_permission_update(
     if let Err(error) = require_trusted_local_window(&window) {
         return ApiResponse::failure("permission.untrusted_window", error, false);
     }
-    match state.database.update_project_permission_mode(&request.project_id, &request.permission_mode) {
+    match state
+        .database
+        .update_project_permission_mode(&request.project_id, &request.permission_mode)
+    {
         Ok(Some(project)) => ApiResponse::success(project),
         Ok(None) => ApiResponse::failure("project.not_found", "未找到项目", false),
         Err(error) => ApiResponse::failure("project.invalid_permission_mode", error, false),
@@ -1521,15 +1496,20 @@ pub fn conversation_permission_update(
     if request.request_id.trim().is_empty() || request.request_id.len() > 200 {
         return ApiResponse::failure("permission.invalid_request", "权限请求标识无效", false);
     }
-    let mode = match crate::runtime_host::approval_policy::AccessMode::parse(&request.permission_mode) {
-        Ok(mode) => mode,
-        Err(error) => return ApiResponse::failure("conversation.invalid_permission_mode", error, false),
-    };
+    let mode =
+        match crate::runtime_host::approval_policy::AccessMode::parse(&request.permission_mode) {
+            Ok(mode) => mode,
+            Err(error) => {
+                return ApiResponse::failure("conversation.invalid_permission_mode", error, false)
+            }
+        };
     // A1: the first full access in a project needs the user's explicit second
     // confirmation; the project remembers it afterwards. A conversation with
     // no project confirms every time.
     if mode.full_access() {
-        if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false) {
+        if let Some(refusal) =
+            protect_companion_chat(&state.database, &request.conversation_id, false)
+        {
             return refusal;
         }
         let access = match state.database.conversation_access(&request.conversation_id) {
@@ -1551,16 +1531,27 @@ pub fn conversation_permission_update(
             }
         }
     }
-    match state.database.change_execution_policy_with_access(&request.conversation_id, &request.request_id,
-        request.expected_version, mode.stored_mode(), mode.full_access()) {
+    match state.database.change_execution_policy_with_access(
+        &request.conversation_id,
+        &request.request_id,
+        request.expected_version,
+        mode.stored_mode(),
+        mode.full_access(),
+    ) {
         Ok(_) => match conversation_access_json(&state, &request.conversation_id) {
             Ok(value) => ApiResponse::success(value),
             Err(error) => storage_error(error),
         },
         Err(error) if error.contains("policy_version_conflict") => ApiResponse::failure(
-            "permission.version_conflict", "权限已在其他操作中变更，请刷新后重新选择", false),
+            "permission.version_conflict",
+            "权限已在其他操作中变更，请刷新后重新选择",
+            false,
+        ),
         Err(error) if error.contains("policy_request_identity_conflict") => ApiResponse::failure(
-            "permission.request_identity_conflict", "同一权限请求标识不能用于不同请求", false),
+            "permission.request_identity_conflict",
+            "同一权限请求标识不能用于不同请求",
+            false,
+        ),
         Err(error) => ApiResponse::failure("conversation.invalid_permission_mode", error, false),
     }
 }
@@ -1574,7 +1565,10 @@ pub fn permission_rules_list(
     if let Err(error) = require_trusted_local_window(&window) {
         return ApiResponse::failure("permission.untrusted_window", error, false);
     }
-    match state.database.permission_rules_for_project(&request.project_id) {
+    match state
+        .database
+        .permission_rules_for_project(&request.project_id)
+    {
         Ok(rules) => ApiResponse::success(rules),
         Err(error) => storage_error(error),
     }
@@ -1621,10 +1615,18 @@ pub fn approval_allow_project_rule(
         }
         Err(failure) => return failure,
     }
-    match state.runtime_host.allow_approval_with_project_rules(&request.approval_id, &request.pattern) {
+    match state
+        .runtime_host
+        .allow_approval_with_project_rules(&request.approval_id, &request.pattern)
+    {
         Ok(resolved) => ApiResponse::success(resolved),
         Err(error) => {
-            let code = error.split(':').next().filter(|code| code.starts_with("permission.")).unwrap_or("approval.resolve_failed").to_owned();
+            let code = error
+                .split(':')
+                .next()
+                .filter(|code| code.starts_with("permission."))
+                .unwrap_or("approval.resolve_failed")
+                .to_owned();
             ApiResponse::failure(&code, error, false)
         }
     }
@@ -1639,7 +1641,11 @@ pub fn permission_audit_list(
     if let Err(error) = require_trusted_local_window(&window) {
         return ApiResponse::failure("permission.untrusted_window", error, false);
     }
-    match state.database.permission_audit_list(request.run_id.as_deref(), request.conversation_id.as_deref(), request.limit.unwrap_or(200)) {
+    match state.database.permission_audit_list(
+        request.run_id.as_deref(),
+        request.conversation_id.as_deref(),
+        request.limit.unwrap_or(200),
+    ) {
         Ok(rows) => ApiResponse::success(rows),
         Err(error) => storage_error(error),
     }
@@ -1650,7 +1656,9 @@ mod permission_window_tests {
     use super::trusted_permission_origin;
     #[test]
     fn authority_changes_require_the_bundled_main_document() {
-        let permitted = |label, address, dev| trusted_permission_origin(label, &url::Url::parse(address).unwrap(), dev);
+        let permitted = |label, address, dev| {
+            trusted_permission_origin(label, &url::Url::parse(address).unwrap(), dev)
+        };
         assert!(permitted("main", "tauri://localhost/index.html", false));
         assert!(permitted("main", "http://tauri.localhost/", false));
         assert!(permitted("main", "http://127.0.0.1:1421/", true));
@@ -1734,7 +1742,10 @@ pub async fn conversation_create(
     // pick in the new conversation's permission list was confirmed there; an
     // explicit request needs a project that already confirmed it.
     let full_access_project = if external_backend && native_full_access {
-        match state.database.project_by_id_or_root(None, project_root.as_deref()) {
+        match state
+            .database
+            .project_by_id_or_root(None, project_root.as_deref())
+        {
             Ok(project) => project.map(|(id, _)| id),
             Err(error) => return Ok(storage_error(error)),
         }
@@ -1744,7 +1755,12 @@ pub async fn conversation_create(
     if external_backend
         && native_full_access
         && draft_full != Some(true)
-        && !full_access_project.as_deref().is_some_and(|project| state.database.project_full_access_confirmed(project).unwrap_or(false))
+        && !full_access_project.as_deref().is_some_and(|project| {
+            state
+                .database
+                .project_full_access_confirmed(project)
+                .unwrap_or(false)
+        })
     {
         return Ok(ApiResponse::failure(
             agent_backend_routing::FULL_ACCESS_CONFIRMATION_REQUIRED,
@@ -1857,7 +1873,10 @@ pub async fn conversation_create(
                 mode,
             );
         }
-        let explicit_native = request.native_permission.as_deref().is_some_and(|value| !value.trim().is_empty());
+        let explicit_native = request
+            .native_permission
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
         let _ = state.database.append_agent_backend_audit(
             Some(&conversation.id),
             agent_backend.as_str(),
@@ -1952,7 +1971,8 @@ pub fn conversation_expert_bind(
     state: State<'_, AppState>,
     request: ConversationExpertBindRequest,
 ) -> ApiResponse<ConversationExpertBinding> {
-    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false) {
+    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false)
+    {
         return refusal;
     }
     match state.database.bind_conversation_expert(
@@ -1970,7 +1990,8 @@ pub fn conversation_expert_remove(
     state: State<'_, AppState>,
     request: ConversationIdRequest,
 ) -> ApiResponse<ConversationExpertBinding> {
-    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false) {
+    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false)
+    {
         return refusal;
     }
     match state
@@ -1992,7 +2013,8 @@ pub async fn conversation_rename(
     state: State<'_, AppState>,
     request: RenameConversationRequest,
 ) -> Result<ApiResponse<ConversationSummary>, String> {
-    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false) {
+    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false)
+    {
         return Ok(refusal);
     }
     let title = request.title.trim();
@@ -2076,43 +2098,67 @@ pub fn conversation_change_project(
     state: State<'_, AppState>,
     request: ChangeConversationProjectRequest,
 ) -> ApiResponse<ConversationSummary> {
-    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false) {
+    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false)
+    {
         return refusal;
     }
     let project_root = match normalize_project_root(request.project_root.as_deref()) {
         Ok(project_root) => project_root,
-        Err(error) => return ApiResponse::failure("conversation.invalid_project_root", error, false),
+        Err(error) => {
+            return ApiResponse::failure("conversation.invalid_project_root", error, false)
+        }
     };
     let permission_mode = request.permission_mode.as_deref().unwrap_or("ask");
     if !matches!(permission_mode, "read_only" | "ask" | "allow") {
-        return ApiResponse::failure("project.invalid_permission_mode", "项目权限模式不合法", false);
+        return ApiResponse::failure(
+            "project.invalid_permission_mode",
+            "项目权限模式不合法",
+            false,
+        );
     }
-    let run_active = match state.database.conversation_has_active_run(&request.conversation_id) {
+    let run_active = match state
+        .database
+        .conversation_has_active_run(&request.conversation_id)
+    {
         Ok(active) => active,
         Err(error) => return storage_error(error),
     };
-    let backend = match state.database.conversation_agent_backend(&request.conversation_id) {
+    let backend = match state
+        .database
+        .conversation_agent_backend(&request.conversation_id)
+    {
         Ok(Some(backend)) => backend,
         Ok(None) => return ApiResponse::failure("conversation.not_found", "未找到对话", false),
         Err(error) => return storage_error(error),
     };
     // Only an external Agent's conversation can be locked to its project, so
     // the run history and native session are read for those alone.
-    let external_started = if backend != fox_agent_backend::port::AgentBackend::Fox.as_str() && !run_active {
-        match (
-            state.database.conversation_has_completed_run(&request.conversation_id),
-            state.database.latest_native_session(&request.conversation_id),
-        ) {
-            (Ok(completed), Ok(session)) => completed || session.is_some(),
-            (Err(error), _) | (_, Err(error)) => return storage_error(error),
-        }
-    } else {
-        false
-    };
-    if let Some((code, message, retryable)) = change_project_refusal(run_active, &backend, external_started) {
+    let external_started =
+        if backend != fox_agent_backend::port::AgentBackend::Fox.as_str() && !run_active {
+            match (
+                state
+                    .database
+                    .conversation_has_completed_run(&request.conversation_id),
+                state
+                    .database
+                    .latest_native_session(&request.conversation_id),
+            ) {
+                (Ok(completed), Ok(session)) => completed || session.is_some(),
+                (Err(error), _) | (_, Err(error)) => return storage_error(error),
+            }
+        } else {
+            false
+        };
+    if let Some((code, message, retryable)) =
+        change_project_refusal(run_active, &backend, external_started)
+    {
         return ApiResponse::failure(code, message, retryable);
     }
-    match state.database.change_conversation_project(&request.conversation_id, project_root.as_deref(), permission_mode) {
+    match state.database.change_conversation_project(
+        &request.conversation_id,
+        project_root.as_deref(),
+        permission_mode,
+    ) {
         Ok(Some(conversation)) => ApiResponse::success(conversation),
         Ok(None) => ApiResponse::failure("conversation.not_found", "未找到对话", false),
         Err(error) => storage_error(error),
@@ -2124,9 +2170,17 @@ pub fn conversation_change_project(
 /// round or an open native session (its private HOME and session follow the
 /// original project). Fox's own conversations can change project whenever
 /// no Run is active.
-pub(crate) fn change_project_refusal(run_active: bool, backend: &str, external_started: bool) -> Option<(&'static str, &'static str, bool)> {
+pub(crate) fn change_project_refusal(
+    run_active: bool,
+    backend: &str,
+    external_started: bool,
+) -> Option<(&'static str, &'static str, bool)> {
     if run_active {
-        return Some(("conversation.run_active", "这个对话正在运行：等它结束或先停止，再更换项目", true));
+        return Some((
+            "conversation.run_active",
+            "这个对话正在运行：等它结束或先停止，再更换项目",
+            true,
+        ));
     }
     if backend != fox_agent_backend::port::AgentBackend::Fox.as_str() && external_started {
         return Some((
@@ -2143,7 +2197,8 @@ pub fn conversation_pin(
     state: State<'_, AppState>,
     request: UpdateConversationPinnedRequest,
 ) -> ApiResponse<ConversationSummary> {
-    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false) {
+    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false)
+    {
         return refusal;
     }
     match state
@@ -2162,7 +2217,8 @@ pub fn conversation_archive(
     external: State<'_, crate::external_backend::ExternalBackendHost>,
     request: ConversationIdRequest,
 ) -> ApiResponse<ConversationSummary> {
-    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false) {
+    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false)
+    {
         return refusal;
     }
     match state
@@ -2229,7 +2285,8 @@ pub fn conversation_fork(
     state: State<'_, AppState>,
     request: ConversationForkRequest,
 ) -> ApiResponse<ConversationSummary> {
-    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false) {
+    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false)
+    {
         return refusal;
     }
     match state
@@ -2289,9 +2346,10 @@ pub fn conversation_load(
     match state.database.load_conversation(&request.conversation_id) {
         Ok(detail) => {
             let kernel_snapshot = match detail.last_run.as_ref() {
-                Some(run) => match state.database.kernel_conversation_snapshot(
-                    &request.conversation_id, &run.id,
-                ) {
+                Some(run) => match state
+                    .database
+                    .kernel_conversation_snapshot(&request.conversation_id, &run.id)
+                {
                     Ok(snapshot) => snapshot,
                     Err(error) => return storage_error(error),
                 },
@@ -2308,22 +2366,37 @@ pub fn conversation_load(
                     {
                         Ok(availability) => availability,
                         Err(error) => {
-                            return ApiResponse::failure("session.reset_status_unavailable", error, true)
+                            return ApiResponse::failure(
+                                "session.reset_status_unavailable",
+                                error,
+                                true,
+                            )
                         }
                     };
-                    let companion_id = match state.database.conversation_companion_id(&request.conversation_id) {
+                    let companion_id = match state
+                        .database
+                        .conversation_companion_id(&request.conversation_id)
+                    {
                         Ok(id) => id,
                         Err(error) => return storage_error(error),
                     };
-                    let context_repair = match state.runtime_host.companion_repair_availability(&request.conversation_id) {
-                        Ok(status) => ContextRepair { available: status.supported, reason: status.reason },
+                    let context_repair = match state
+                        .runtime_host
+                        .companion_repair_availability(&request.conversation_id)
+                    {
+                        Ok(status) => ContextRepair {
+                            available: status.supported,
+                            reason: status.reason,
+                        },
                         Err(error) => return storage_error(error),
                     };
                     let context_reset_blocked_reason = match state
                         .database
                         .conversation_has_active_run(&request.conversation_id)
                     {
-                        Ok(true) => Some("当前对话正在运行，请先停止生成再重置会话上下文".to_owned()),
+                        Ok(true) => {
+                            Some("当前对话正在运行，请先停止生成再重置会话上下文".to_owned())
+                        }
                         Ok(false) => None,
                         Err(error) => return storage_error(error),
                     };
@@ -2397,7 +2470,8 @@ pub async fn conversation_delete(
     external: State<'_, crate::external_backend::ExternalBackendHost>,
     request: ConversationIdRequest,
 ) -> Result<ApiResponse<bool>, String> {
-    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false) {
+    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false)
+    {
         return Ok(refusal);
     }
     match state
@@ -2433,7 +2507,8 @@ pub async fn conversation_purge(
     state: State<'_, AppState>,
     request: ConversationIdRequest,
 ) -> Result<ApiResponse<bool>, String> {
-    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false) {
+    if let Some(refusal) = protect_companion_chat(&state.database, &request.conversation_id, false)
+    {
         return Ok(refusal);
     }
     match state
@@ -2562,14 +2637,19 @@ pub async fn companion_context_repair(
     state: State<'_, AppState>,
     request: ConversationIdRequest,
 ) -> Result<ApiResponse<ConversationContextReset>, String> {
-    Ok(match state.runtime_host.repair_companion_context(&request.conversation_id) {
-        Ok(outcome) => ApiResponse::success(ConversationContextReset {
-            conversation_id: request.conversation_id,
-            context_generation: outcome.context_generation,
-            runtime_session_id: outcome.runtime_session_id,
-        }),
-        Err(refusal) => ApiResponse::failure(&refusal.code, refusal.message, false),
-    })
+    Ok(
+        match state
+            .runtime_host
+            .repair_companion_context(&request.conversation_id)
+        {
+            Ok(outcome) => ApiResponse::success(ConversationContextReset {
+                conversation_id: request.conversation_id,
+                context_generation: outcome.context_generation,
+                runtime_session_id: outcome.runtime_session_id,
+            }),
+            Err(refusal) => ApiResponse::failure(&refusal.code, refusal.message, false),
+        },
+    )
 }
 
 fn remove_managed_file(data_dir: &std::path::Path, path: &std::path::Path) -> Result<(), String> {
@@ -2606,22 +2686,50 @@ mod command_tests {
         let root = std::env::temp_dir().join(format!("fox-companion-guard-{}", Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
         let database = crate::database::Database::open(root.join("fox.db")).unwrap();
-        let private = database.seed_default_companion(&root).unwrap();
-        let ordinary = database.create_conversation("fox-general", Some("普通对话"), None, None).unwrap();
+        let chief = database.seed_default_companion(&root).unwrap();
+        assert!(database.archive_companion(&chief.profile.id).is_err());
+        let private = database.create_blank_companion(&root).unwrap();
+        let ordinary = database
+            .create_conversation("fox-general", Some("普通对话"), None, None)
+            .unwrap();
         let chat = &private.conversation_id;
         assert!(super::protect_companion_chat::<()>(&database, &ordinary.id, false).is_none());
         let refusal = super::protect_companion_chat::<()>(&database, chat, true).unwrap();
         assert_eq!(refusal.error.unwrap().code, "companion.chat_append_only");
-        assert!(database.list_conversations().unwrap().iter().all(|c| &c.id != chat));
-        assert!(database.search_conversations("小狐", 20).unwrap().iter().all(|c| &c.id != chat));
-        assert!(database.global_search("小狐", 20).unwrap().iter().all(|hit| &hit.id != chat));
-        assert!(database.rewind_run(chat, "missing", "补充说明", None).is_err());
+        assert!(database
+            .list_conversations()
+            .unwrap()
+            .iter()
+            .all(|c| &c.id != chat));
+        assert!(database
+            .search_conversations("小狐", 20)
+            .unwrap()
+            .iter()
+            .all(|c| &c.id != chat));
+        assert!(database
+            .global_search("小狐", 20)
+            .unwrap()
+            .iter()
+            .all(|hit| &hit.id != chat));
+        assert!(database
+            .rewind_run(chat, "missing", "补充说明", None)
+            .is_err());
         let messages_before = database.load_conversation(chat).unwrap().messages;
         database.archive_companion(&private.profile.id).unwrap();
-        assert!(database.create_run_checked(chat, "归档期间不能发送", None).is_err());
+        assert!(database
+            .create_run_checked(chat, "归档期间不能发送", None)
+            .is_err());
         let messages_after = database.load_conversation(chat).unwrap().messages;
-        assert_eq!(messages_after.iter().map(|message| &message.id).collect::<Vec<_>>(),
-            messages_before.iter().map(|message| &message.id).collect::<Vec<_>>());
+        assert_eq!(
+            messages_after
+                .iter()
+                .map(|message| &message.id)
+                .collect::<Vec<_>>(),
+            messages_before
+                .iter()
+                .map(|message| &message.id)
+                .collect::<Vec<_>>()
+        );
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2630,14 +2738,40 @@ mod command_tests {
     fn kernel_cancel_command_routes_before_legacy_writes_and_never_falls_back() {
         let path = std::env::temp_dir().join(format!("fox-command-cancel-{}.db", Uuid::new_v4()));
         let db = crate::database::Database::open(path).unwrap();
-        let conversation = db.create_conversation("fox-general", Some("cancel routing"), None, None).unwrap();
-        let run = db.create_run(&conversation.id, "cancel test", None).unwrap().run;
-        assert_eq!(super::cancel_kernel_owned_run(&db, &run.id, || panic!("unbound Legacy Run must not route to Kernel")).unwrap(), None);
-        db.freeze_kernel_run_control(&run.id, "legacy", fox_engine_protocol::TimeBudgets::default()).unwrap();
+        let conversation = db
+            .create_conversation("fox-general", Some("cancel routing"), None, None)
+            .unwrap();
+        let run = db
+            .create_run(&conversation.id, "cancel test", None)
+            .unwrap()
+            .run;
+        assert_eq!(
+            super::cancel_kernel_owned_run(&db, &run.id, || panic!(
+                "unbound Legacy Run must not route to Kernel"
+            ))
+            .unwrap(),
+            None
+        );
+        db.freeze_kernel_run_control(
+            &run.id,
+            "legacy",
+            fox_engine_protocol::TimeBudgets::default(),
+        )
+        .unwrap();
         assert!(db.mark_run_cancelling(&run.id).is_err());
-        assert_eq!(super::cancel_kernel_owned_run(&db, &run.id, || Ok(true)).unwrap(), Some(true));
-        assert_eq!(super::cancel_kernel_owned_run(&db, &run.id, || Ok(false)).unwrap(), Some(false));
-        assert_eq!(super::cancel_kernel_owned_run(&db, &run.id, || Err("owner unavailable".into())).unwrap_err(), "owner unavailable");
+        assert_eq!(
+            super::cancel_kernel_owned_run(&db, &run.id, || Ok(true)).unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            super::cancel_kernel_owned_run(&db, &run.id, || Ok(false)).unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            super::cancel_kernel_owned_run(&db, &run.id, || Err("owner unavailable".into()))
+                .unwrap_err(),
+            "owner unavailable"
+        );
         let detail = db.load_conversation(&conversation.id).unwrap();
         assert_eq!(detail.last_run.unwrap().status, "queued");
     }
@@ -2845,7 +2979,9 @@ pub(crate) fn create_run_refusal<T: serde::Serialize>(
     error: &crate::database::CreateRunError,
 ) -> ApiResponse<T> {
     match error.refusal() {
-        Some((code, message)) => ApiResponse::failure(code, message, code == "run.conversation_busy"),
+        Some((code, message)) => {
+            ApiResponse::failure(code, message, code == "run.conversation_busy")
+        }
         None => ApiResponse::failure(
             "run.create_failed",
             crate::data_paths::run_create_failure(data_dir, &error.to_string()),
@@ -2865,8 +3001,16 @@ pub(crate) fn fox_model_service_refusal<T: serde::Serialize>(
 ) -> Option<ApiResponse<T>> {
     match configured {
         Ok(true) => None,
-        Ok(false) => Some(ApiResponse::failure("model.connection_required", FOX_MODEL_SERVICE_MISSING, true)),
-        Err(error) => Some(ApiResponse::failure("storage.operation_failed", error, true)),
+        Ok(false) => Some(ApiResponse::failure(
+            "model.connection_required",
+            FOX_MODEL_SERVICE_MISSING,
+            true,
+        )),
+        Err(error) => Some(ApiResponse::failure(
+            "storage.operation_failed",
+            error,
+            true,
+        )),
     }
 }
 
@@ -2876,17 +3020,43 @@ pub fn run_start(
     state: State<'_, AppState>,
     request: StartRunRequest,
 ) -> ApiResponse<StartRunResult> {
-    match state.database.companion_chat_state(&request.conversation_id) {
-        Ok(Some(crate::database::CompanionChatState::Archived)) =>
-            return ApiResponse::failure("companion.archived", "请先恢复这个联系人再发送消息。", false),
-        Ok(Some(crate::database::CompanionChatState::Deleting)) =>
-            return ApiResponse::failure("companion.deleting", "联系人正在删除，无法发送消息。", false),
+    match state
+        .database
+        .companion_chat_state(&request.conversation_id)
+    {
+        Ok(Some(crate::database::CompanionChatState::Archived)) => {
+            return ApiResponse::failure(
+                "companion.archived",
+                "请先恢复这个联系人再发送消息。",
+                false,
+            )
+        }
+        Ok(Some(crate::database::CompanionChatState::Deleting)) => {
+            return ApiResponse::failure(
+                "companion.deleting",
+                "联系人正在删除，无法发送消息。",
+                false,
+            )
+        }
         Ok(Some(crate::database::CompanionChatState::Active)) => {
-            if let Err(error) = crate::companion_workspace::require_for_chat(&state.database, &state.data_dir, &request.conversation_id) {
+            if let Err(error) = crate::companion_workspace::require_for_chat(
+                &state.database,
+                &state.data_dir,
+                &request.conversation_id,
+            ) {
                 return ApiResponse::failure("companion.workspace_unavailable", error, false);
             }
-            match state.runtime_host.companion_context_issue(&request.conversation_id) {
-                Ok(Some((code, reason))) => return ApiResponse::failure(code, format!("{reason}。请先修复私聊上下文。"), false),
+            match state
+                .runtime_host
+                .companion_context_issue(&request.conversation_id)
+            {
+                Ok(Some((code, reason))) => {
+                    return ApiResponse::failure(
+                        code,
+                        format!("{reason}。请先修复私聊上下文。"),
+                        false,
+                    )
+                }
                 Err(error) => return storage_error(error),
                 Ok(None) => {}
             }
@@ -2933,9 +3103,14 @@ pub fn run_start(
     // snapshot frozen onto the run below. A broken override refuses the send
     // with its own reason instead of silently falling back to another model.
     let effective_model = if runtime.runtime_type != "yuxi" {
-        let service = match state.database.resolve_effective_model(&request.conversation_id) {
+        let service = match state
+            .database
+            .resolve_effective_model(&request.conversation_id)
+        {
             Ok(service) => service,
-            Err(message) => return ApiResponse::failure("model.companion_unavailable", message, false),
+            Err(message) => {
+                return ApiResponse::failure("model.companion_unavailable", message, false)
+            }
         };
         // A Fox (PiNative) Run needs a model service. Without one the Run used
         // to be created and then failed with an English "model service is not
@@ -2948,7 +3123,9 @@ pub fn run_start(
         // 13.38 B4-5: an address that cannot be reached (refused, DNS, timeout)
         // is refused here, before any Run or message exists, so the draft stays.
         if let Some(service) = &service {
-            if let Some((code, message)) = crate::model_reachability::send_refusal(&service.base_url) {
+            if let Some((code, message)) =
+                crate::model_reachability::send_refusal(&service.base_url)
+            {
                 return ApiResponse::failure(code, message, true);
             }
         }
@@ -2975,11 +3152,13 @@ pub fn run_start(
             };
             pending_attachments.push(attachment);
         }
-        if let Err(error) = state
-            .runtime_host
-            .validate_run_attachments(&request.conversation_id, &pending_attachments,
-                effective_model.as_ref().is_some_and(|service| service.supports_image_input))
-        {
+        if let Err(error) = state.runtime_host.validate_run_attachments(
+            &request.conversation_id,
+            &pending_attachments,
+            effective_model
+                .as_ref()
+                .is_some_and(|service| service.supports_image_input),
+        ) {
             return ApiResponse::failure("attachment.image_invalid", error, false);
         }
     }
@@ -2999,7 +3178,10 @@ pub fn run_start(
     // message by comparing the two).
     let mut quote = None;
     if request.quote_bubble_id.is_some() {
-        match state.database.contact_message_quote(&started.user_message.id) {
+        match state
+            .database
+            .contact_message_quote(&started.user_message.id)
+        {
             Ok(Some(stored)) => {
                 runtime_text = format!(
                     "{}{runtime_text}",
@@ -3009,9 +3191,11 @@ pub fn run_start(
             }
             Ok(None) => {}
             Err(error) => {
-                let _ = state
-                    .database
-                    .mark_run_failed(&started.run.id, "companion.quote_read_failed", &error);
+                let _ = state.database.mark_run_failed(
+                    &started.run.id,
+                    "companion.quote_read_failed",
+                    &error,
+                );
                 return ApiResponse::failure("companion.quote_read_failed", error, true);
             }
         }
@@ -3019,10 +3203,14 @@ pub fn run_start(
     // Freeze the resolved model before dispatch: queueing, retry and restart
     // reuse this snapshot instead of re-reading the global model.
     if let Some(service) = &effective_model {
-        if let Err(error) = state.database.freeze_run_model_snapshot(&started.run.id, service) {
-            let _ = state
-                .database
-                .mark_run_failed(&started.run.id, "model.snapshot_failed", &error);
+        if let Err(error) = state
+            .database
+            .freeze_run_model_snapshot(&started.run.id, service)
+        {
+            let _ =
+                state
+                    .database
+                    .mark_run_failed(&started.run.id, "model.snapshot_failed", &error);
             return ApiResponse::failure("model.snapshot_failed", error, true);
         }
     }
@@ -3226,13 +3414,18 @@ pub async fn run_rewind(
 
     let mut replacement_thread: Option<(String, String, String, String)> = None;
     if runtime.runtime_type != "yuxi" {
-        match state.database.conversation_requires_native_recovery(&request.conversation_id) {
-            Ok(true) => return Ok(ApiResponse::failure(
-                "session.native_unavailable",
-                "会话上下文无法恢复，请先重置会话上下文；重试不会替换原会话或删除失败记录",
-                false,
-            )),
-            Ok(false) => {},
+        match state
+            .database
+            .conversation_requires_native_recovery(&request.conversation_id)
+        {
+            Ok(true) => {
+                return Ok(ApiResponse::failure(
+                    "session.native_unavailable",
+                    "会话上下文无法恢复，请先重置会话上下文；重试不会替换原会话或删除失败记录",
+                    false,
+                ))
+            }
+            Ok(false) => {}
             Err(error) => return Ok(storage_error(error)),
         }
     }
@@ -3380,8 +3573,9 @@ pub async fn run_rewind(
 
 #[tauri::command]
 pub fn run_resume(
+    app: AppHandle,
     state: State<'_, AppState>,
-    request: ResumeYuxiRunRequest,
+    request: ResumeRunRequest,
 ) -> ApiResponse<StartRunResult> {
     if request.text.trim().is_empty() || !request.answers.is_object() {
         return ApiResponse::failure("yuxi.resume_invalid", "请先完成需要补充的事项", false);
@@ -3401,6 +3595,17 @@ pub fn run_resume(
         .database
         .conversation_runtime(&request.conversation_id)
     {
+        Ok(runtime) if runtime.runtime_type == "pi" => {
+            let started = match state.database.create_resumed_run(
+                &request.conversation_id,
+                &request.parent_run_id,
+                &request.text,
+            ) {
+                Ok(started) => started,
+                Err(error) => return ApiResponse::failure("runtime.resume_invalid", error, false),
+            };
+            return dispatch_started_run(&app, &state, started, request.text, false);
+        }
         Ok(runtime) if runtime.runtime_type == "yuxi" => runtime,
         Ok(_) => {
             return ApiResponse::failure(
@@ -3467,15 +3672,21 @@ pub async fn run_cancel(
     ) {
         Ok(agent_backend_routing::Route::Fox) => {}
         // ACP `session/cancel`; the result may be "unknown" (see the runtime).
-        Ok(agent_backend_routing::Route::External(_)) => return Ok(external.cancel_run(&request.run_id)),
+        Ok(agent_backend_routing::Route::External(_)) => {
+            return Ok(external.cancel_run(&request.run_id))
+        }
         Err(failure) => return Ok(failure),
     }
     // Frozen authority must be selected before touching Legacy read models.
     // This is a user stop, not the archive sweep: an unowned restored PiNative
     // approval Run must reach the lease-guarded `runtime.user_cancelled` cancel.
-    match cancel_kernel_owned_run(&state.database, &request.run_id, || state.runtime_host.cancel_managed_run_by_user(&request.run_id)) {
+    match cancel_kernel_owned_run(&state.database, &request.run_id, || {
+        state
+            .runtime_host
+            .cancel_managed_run_by_user(&request.run_id)
+    }) {
         Ok(Some(cancelled)) => return Ok(ApiResponse::success(cancelled)),
-        Ok(None) => {},
+        Ok(None) => {}
         Err(error) => return Ok(ApiResponse::failure("runtime.cancel_failed", error, true)),
     }
     let conversation = match state.database.mark_run_cancelling(&request.run_id) {
@@ -3527,8 +3738,12 @@ pub(crate) fn cancel_kernel_owned_run(
     run_id: &str,
     cancel: impl FnOnce() -> Result<bool, String>,
 ) -> Result<Option<bool>, String> {
-    if database.run_control_binding(run_id)?.is_some_and(|binding|
-        binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative) {
+    if database
+        .run_control_binding(run_id)?
+        .is_some_and(|binding| {
+            binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative
+        })
+    {
         cancel().map(Some)
     } else {
         Ok(None)
@@ -3581,7 +3796,10 @@ pub fn child_run_cancel_by_user(
         Ok(None) => {}
         Err(error) => return storage_error(error),
     }
-    match state.runtime_host.cancel_managed_run_by_user(&request.child_run_id) {
+    match state
+        .runtime_host
+        .cancel_managed_run_by_user(&request.child_run_id)
+    {
         Ok(cancelled) => ApiResponse::success(cancelled),
         Err(error) => ApiResponse::failure("child_run.cancel_failed", error, true),
     }
@@ -3597,7 +3815,10 @@ pub fn attachments_save(
     if !result.ok {
         for path in created {
             if let Err(error) = fs::remove_file(&path) {
-                eprintln!("Fox could not remove an incomplete attachment {}: {error}", path.display());
+                eprintln!(
+                    "Fox could not remove an incomplete attachment {}: {error}",
+                    path.display()
+                );
             }
         }
     }
@@ -3613,7 +3834,9 @@ fn save_attachments(
     let inbox = match database.conversation_companion_id(&request.conversation_id) {
         Ok(Some(id)) => match crate::companion_workspace::inbox(database, data_dir, &id) {
             Ok(path) => Some(path),
-            Err(error) => return ApiResponse::failure("companion.workspace_unavailable", error, true),
+            Err(error) => {
+                return ApiResponse::failure("companion.workspace_unavailable", error, true)
+            }
         },
         Ok(None) => None,
         Err(error) => return storage_error(error),
@@ -3642,10 +3865,16 @@ fn save_attachments(
         let id = Uuid::new_v4().to_string();
         let filename_path = Path::new(&file.filename);
         let display_name = if let Some(inbox) = &inbox {
-            if crate::local_knowledge_import::validate_path_component(filename_path, "attachment name").is_err() {
+            if crate::local_knowledge_import::validate_path_component(
+                filename_path,
+                "attachment name",
+            )
+            .is_err()
+            {
                 return ApiResponse::failure("attachment.invalid_name", "附件文件名无效", false);
             }
-            match crate::companion_workspace::copy_to_inbox(inbox, filename_path, bytes.as_slice()) {
+            match crate::companion_workspace::copy_to_inbox(inbox, filename_path, bytes.as_slice())
+            {
                 Ok(path) => {
                     let name = path.file_name().unwrap().to_string_lossy().into_owned();
                     created.push(path);
@@ -3766,7 +3995,11 @@ pub async fn approval_resolve(
     request: ResolveApprovalRequest,
 ) -> Result<ApiResponse<bool>, String> {
     if let Err(error) = require_trusted_local_window(&window) {
-        return Ok(ApiResponse::failure("permission.untrusted_origin", error, false));
+        return Ok(ApiResponse::failure(
+            "permission.untrusted_origin",
+            error,
+            false,
+        ));
     }
     match agent_backend_routing::gate_run_identity(
         fox_agent_backend::host_routing::HostEntry::Approve,
@@ -3868,20 +4101,17 @@ pub fn delivery_acceptance_resolve(
         Ok(_) => {
             // Re-read the row's state so the caller sees what actually happened,
             // including the terminal the acceptance may have just committed.
-            let state = u1::delivery_acceptance_state(
-                &state.database,
-                &request.run_id,
-                &request.item_key,
-            )
-            .unwrap_or_else(|_| u1::AcceptanceState {
-                run_id: request.run_id.clone(),
-                item_key: request.item_key.clone(),
-                verification_class: "unknown".to_owned(),
-                blocked: None,
-                accepted: None,
-                rejected: false,
-                run_terminal: false,
-            });
+            let state =
+                u1::delivery_acceptance_state(&state.database, &request.run_id, &request.item_key)
+                    .unwrap_or_else(|_| u1::AcceptanceState {
+                        run_id: request.run_id.clone(),
+                        item_key: request.item_key.clone(),
+                        verification_class: "unknown".to_owned(),
+                        blocked: None,
+                        accepted: None,
+                        rejected: false,
+                        run_terminal: false,
+                    });
             ApiResponse::success(DeliveryAcceptanceOutcome {
                 run_id: request.run_id,
                 item_key: request.item_key,
@@ -4038,7 +4268,7 @@ pub fn run_steering_enqueue(
     }
     let run_id = match state
         .database
-        .active_kernel_run_for_conversation(&request.conversation_id)
+        .active_steerable_run_for_conversation(&request.conversation_id)
     {
         Ok(Some(run_id)) => run_id,
         Ok(None) => {
@@ -4095,8 +4325,7 @@ pub fn run_steering_discard(
         .discard_queued_next_turn_steering_for_conversation(
             &request.conversation_id,
             &request.message_id,
-        )
-    {
+        ) {
         Ok(true) => ApiResponse::success(RunSteeringDiscardResponse { removed: true }),
         Ok(false) => ApiResponse::failure(
             "steering.not_discardable",
@@ -4122,7 +4351,7 @@ pub fn run_steering_list(
 ) -> ApiResponse<RunSteeringListResponse> {
     let active = match state
         .database
-        .active_kernel_run_for_conversation(&conversation_id)
+        .active_steerable_run_for_conversation(&conversation_id)
     {
         Ok(active) => active,
         Err(error) => return ApiResponse::failure("steering.lookup_failed", error, true),
@@ -4131,7 +4360,7 @@ pub fn run_steering_list(
         Some(run_id) => (Some(run_id), true),
         None => match state
             .database
-            .latest_kernel_run_for_conversation(&conversation_id)
+            .latest_steerable_run_for_conversation(&conversation_id)
         {
             Ok(Some((run_id, _state))) => (Some(run_id), false),
             Ok(None) => (None, false),
@@ -4146,14 +4375,11 @@ pub fn run_steering_list(
             messages: Vec::new(),
         });
     };
-    let run_state = state
-        .database
-        .kernel_host_run_state(&run_id)
-        .ok()
-        .flatten();
+    let run_state = state.database.kernel_host_run_state(&run_id).ok().flatten();
     match state.database.run_steering_messages(&run_id) {
         Ok(rows) => {
-            let mut records: Vec<RunSteeringRecord> = rows.into_iter().map(to_steering_record).collect();
+            let mut records: Vec<RunSteeringRecord> =
+                rows.into_iter().map(to_steering_record).collect();
             // The `next-turn` queue outlives the Run that received it, including
             // across the start of the next task (a new Run). Carry every still
             // held row of this conversation into the listing, or a queue the user
@@ -4163,7 +4389,10 @@ pub fn run_steering_list(
                 .queued_next_turn_steering_for_conversation(&conversation_id)
             {
                 for row in queued {
-                    if !records.iter().any(|record| record.message_id == row.message_id) {
+                    if !records
+                        .iter()
+                        .any(|record| record.message_id == row.message_id)
+                    {
                         records.push(to_steering_record(row));
                     }
                 }
@@ -4242,10 +4471,9 @@ fn managed_version_dto(
         .as_deref()
         .map(|path| std::path::Path::new(path).is_file())
         .unwrap_or(false);
-    let current_hash = crate::runtime_host::managed_files::hash_file(std::path::Path::new(
-        &row.storage_path,
-    ))
-    .map(|(hash, _)| hash);
+    let current_hash =
+        crate::runtime_host::managed_files::hash_file(std::path::Path::new(&row.storage_path))
+            .map(|(hash, _)| hash);
     let drifted = match (&current_hash, latest_after_hash) {
         (Some(current), Some(latest)) => current != latest,
         (None, Some(_)) => true, // file deleted after the last recorded change
@@ -4579,46 +4807,48 @@ pub async fn goal_running_set(
         let _ = app.emit("fox://work-event", event);
     }
     if let Some(run_id) = active_run_id {
-        let kernel_cancelled = match cancel_kernel_owned_run(&state.database, &run_id, || state.runtime_host.cancel_managed_run_by_user(&run_id)) {
+        let kernel_cancelled = match cancel_kernel_owned_run(&state.database, &run_id, || {
+            state.runtime_host.cancel_managed_run_by_user(&run_id)
+        }) {
             Ok(result) => result.is_some(),
             Err(error) => return Ok(ApiResponse::failure("runtime.cancel_failed", error, true)),
         };
         if !kernel_cancelled {
-        let marked = match state.database.mark_run_cancelling(&run_id) {
-            Ok(marked) => marked.is_some(),
-            Err(error) => return Ok(storage_error(error)),
-        };
-        if marked {
-            let is_yuxi = state
-                .database
-                .external_run(&run_id)
-                .ok()
-                .flatten()
-                .is_some_and(|run| run.runtime_type == "yuxi");
-            let cancelled = if is_yuxi {
-                state.yuxi_runtime.cancel_run(&run_id).await
-            } else {
-                state.runtime_host.cancel_run(&run_id)
+            let marked = match state.database.mark_run_cancelling(&run_id) {
+                Ok(marked) => marked.is_some(),
+                Err(error) => return Ok(storage_error(error)),
             };
-            match cancelled {
-                Ok(true) => {}
-                Ok(false) => {
-                    let _ = state.database.mark_run_interrupted(
-                        &run_id,
-                        "runtime.cancel_not_active",
-                        "Runtime 未找到正在执行的任务",
-                    );
-                }
-                Err(error) => {
-                    let _ = state.database.mark_run_interrupted(
-                        &run_id,
-                        "runtime.cancel_failed",
-                        &error,
-                    );
-                    return Ok(ApiResponse::failure("runtime.cancel_failed", error, true));
+            if marked {
+                let is_yuxi = state
+                    .database
+                    .external_run(&run_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|run| run.runtime_type == "yuxi");
+                let cancelled = if is_yuxi {
+                    state.yuxi_runtime.cancel_run(&run_id).await
+                } else {
+                    state.runtime_host.cancel_run(&run_id)
+                };
+                match cancelled {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let _ = state.database.mark_run_interrupted(
+                            &run_id,
+                            "runtime.cancel_not_active",
+                            "Runtime 未找到正在执行的任务",
+                        );
+                    }
+                    Err(error) => {
+                        let _ = state.database.mark_run_interrupted(
+                            &run_id,
+                            "runtime.cancel_failed",
+                            &error,
+                        );
+                        return Ok(ApiResponse::failure("runtime.cancel_failed", error, true));
+                    }
                 }
             }
-        }
         }
     }
 
@@ -4666,14 +4896,22 @@ pub async fn goal_running_set(
     }))
 }
 
-fn protect_companion_chat<T: Serialize>(db: &crate::database::Database, chat: &str, rewind: bool) -> Option<ApiResponse<T>> {
+fn protect_companion_chat<T: Serialize>(
+    db: &crate::database::Database,
+    chat: &str,
+    rewind: bool,
+) -> Option<ApiResponse<T>> {
     match db.companion_chat_state(chat) {
         Ok(None) => None,
         Ok(Some(_)) if rewind => Some(ApiResponse::failure(
-            "companion.chat_append_only", "固定私聊保留原消息，请发送新消息纠正。", false,
+            "companion.chat_append_only",
+            "固定私聊保留原消息，请发送新消息纠正。",
+            false,
         )),
         Ok(Some(_)) => Some(ApiResponse::failure(
-            "companion.chat_protected", "请在联系人资料页管理固定私聊。", false,
+            "companion.chat_protected",
+            "请在联系人资料页管理固定私聊。",
+            false,
         )),
         Err(error) => Some(storage_error(error)),
     }
@@ -5513,7 +5751,11 @@ pub async fn knowledge_preview_cache_acquire(
     // this preview with 「预览缓存目录：<路径> 应为目录但是文件」 instead of
     // aborting startup.
     if let Err(error) = crate::data_paths::ensure_directory(&cache_dir, "预览缓存目录") {
-        return Ok(ApiResponse::failure("knowledge.preview_cache_dir_invalid", error, false));
+        return Ok(ApiResponse::failure(
+            "knowledge.preview_cache_dir_invalid",
+            error,
+            false,
+        ));
     }
     let final_path =
         knowledge_preview_cache_path(&cache_dir, &cache_key, request.filename.as_deref());
@@ -6087,11 +6329,13 @@ fn open_project_folder(path: &Path) -> Result<(), String> {
     if !path.is_dir() {
         return Err("项目路径不是文件夹".to_owned());
     }
-    fox_agent_backend::console::HideConsole::hide_console(&mut std::process::Command::new("explorer.exe"))
-        .arg(path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("系统无法打开项目文件夹：{error}"))
+    fox_agent_backend::console::HideConsole::hide_console(&mut std::process::Command::new(
+        "explorer.exe",
+    ))
+    .arg(path)
+    .spawn()
+    .map(|_| ())
+    .map_err(|error| format!("系统无法打开项目文件夹：{error}"))
 }
 
 #[cfg(not(windows))]
@@ -6360,8 +6604,15 @@ pub fn model_providers_list(state: State<'_, AppState>) -> ApiResponse<Vec<Model
                     provider.credential_configured = api_key_configured(&provider.base_url);
                     for profile in &mut provider.protocol_profiles {
                         profile.credential_configured = if profile.separate_credential {
-                            api_key_configured(&fox_agent_backend::provider_protocol::credential_id(&provider.id, &profile.id))
-                        } else { provider.credential_configured };
+                            api_key_configured(
+                                &fox_agent_backend::provider_protocol::credential_id(
+                                    &provider.id,
+                                    &profile.id,
+                                ),
+                            )
+                        } else {
+                            provider.credential_configured
+                        };
                     }
                     provider
                 })
@@ -6440,7 +6691,9 @@ pub fn model_provider_save(
     // Checked before any Key is written: the base URL is UNIQUE and is also
     // the Key id, so a duplicate must never touch the other service's Key.
     if crate::model_service::duplicate_base_url_owner(
-        existing_providers.iter().map(|p| (p.id.as_str(), p.base_url.as_str())),
+        existing_providers
+            .iter()
+            .map(|p| (p.id.as_str(), p.base_url.as_str())),
         &provider_id,
         &base_url,
     )
@@ -6452,7 +6705,11 @@ pub fn model_provider_save(
             false,
         );
     }
-    let old_profiles = existing_providers.into_iter().find(|p| p.id == provider_id).map(|p| p.protocol_profiles).unwrap_or_default();
+    let old_profiles = existing_providers
+        .into_iter()
+        .find(|p| p.id == provider_id)
+        .map(|p| p.protocol_profiles)
+        .unwrap_or_default();
     let mut protocol_profiles = match request.protocol_profiles {
         Some(profiles) => profiles,
         None => old_profiles.clone(),
@@ -6468,8 +6725,16 @@ pub fn model_provider_save(
     if let Err(error) = fox_agent_backend::provider_protocol::validate(&protocol_profiles) {
         return ApiResponse::failure("model.invalid_protocol", error, false);
     }
-    if request.protocol_keys.keys().any(|id| !protocol_profiles.iter().any(|p| &p.id == id && p.separate_credential)) {
-        return ApiResponse::failure("model.invalid_protocol", "凭据必须属于当前独立凭据协议配置", false);
+    if request.protocol_keys.keys().any(|id| {
+        !protocol_profiles
+            .iter()
+            .any(|p| &p.id == id && p.separate_credential)
+    }) {
+        return ApiResponse::failure(
+            "model.invalid_protocol",
+            "凭据必须属于当前独立凭据协议配置",
+            false,
+        );
     }
     let mut models = Vec::new();
     for (index, model) in request.models.into_iter().enumerate() {
@@ -6515,10 +6780,13 @@ pub fn model_provider_save(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        key_plan.before_record.push((base_url.clone(), Some(api_key.to_owned())));
+        key_plan
+            .before_record
+            .push((base_url.clone(), Some(api_key.to_owned())));
     }
     for (profile_id, key) in &request.protocol_keys {
-        let credential = fox_agent_backend::provider_protocol::credential_id(&provider_id, profile_id);
+        let credential =
+            fox_agent_backend::provider_protocol::credential_id(&provider_id, profile_id);
         key_plan
             .before_record
             .push((credential, (!key.is_empty()).then(|| key.trim().to_owned())));
@@ -6558,18 +6826,35 @@ pub fn model_provider_save(
         Err(error) => return credential_save_error(error),
     };
     // A changed Key invalidates every connection test made with the old one.
-    let mut changed_keys: Vec<String> = key_plan.before_record.iter().map(|(id, _)| id.clone()).chain(key_plan.after_record.iter().cloned()).collect();
+    let mut changed_keys: Vec<String> = key_plan
+        .before_record
+        .iter()
+        .map(|(id, _)| id.clone())
+        .chain(key_plan.after_record.iter().cloned())
+        .collect();
     for old in &old_profiles {
-        if old.separate_credential && !saved.protocol_profiles.iter().any(|p| p.id == old.id && p.separate_credential) {
-            let credential = fox_agent_backend::provider_protocol::credential_id(&saved.id, &old.id);
+        if old.separate_credential
+            && !saved
+                .protocol_profiles
+                .iter()
+                .any(|p| p.id == old.id && p.separate_credential)
+        {
+            let credential =
+                fox_agent_backend::provider_protocol::credential_id(&saved.id, &old.id);
             if let Err(error) = clear_api_key(&credential) {
-                return ApiResponse::failure("model.credential_delete_failed", format!("配置已保存，但旧协议凭据清理失败：{error}"), true);
+                return ApiResponse::failure(
+                    "model.credential_delete_failed",
+                    format!("配置已保存，但旧协议凭据清理失败：{error}"),
+                    true,
+                );
             }
             changed_keys.push(credential);
         }
     }
     for credential in &changed_keys {
-        if let Err(error) = crate::external_model::bump_credential_revision(&state.database, credential) {
+        if let Err(error) =
+            crate::external_model::bump_credential_revision(&state.database, credential)
+        {
             return storage_error(format!("配置已保存，但连接测试记录没有更新：{error}"));
         }
     }
@@ -6601,12 +6886,20 @@ pub fn model_provider_save(
                 return storage_error(error);
             }
             if let Err(error) = state.runtime_host.reload_configuration() {
-                return ApiResponse::failure("model.runtime_busy", configuration_saved_but_busy(&error), true);
+                return ApiResponse::failure(
+                    "model.runtime_busy",
+                    configuration_saved_but_busy(&error),
+                    true,
+                );
             }
         }
     }
     // After the Fox model sync: a cleanup problem is only a warning.
-    warn_managed_model_cleanup(&external, "model_provider_save", &external.provider_bound_backends(&saved.id));
+    warn_managed_model_cleanup(
+        &external,
+        "model_provider_save",
+        &external.provider_bound_backends(&saved.id),
+    );
     let mut saved = saved;
     saved.credential_configured = api_key_configured(&saved.base_url);
     ApiResponse::success(saved)
@@ -6615,16 +6908,29 @@ pub fn model_provider_save(
 /// Remove Fox-generated login files of every project (best effort). Failures
 /// never undo or block the save / delete that asked for it: they are logged
 /// and recorded in the external-backend audit log as a warning.
-fn warn_managed_model_cleanup(external: &crate::external_backend::ExternalBackendHost, source: &str, backends: &[fox_agent_backend::port::AgentBackend]) {
-    let errors: Vec<_> = backends.iter().flat_map(|backend| external.clear_managed_model_files(*backend)).collect();
+fn warn_managed_model_cleanup(
+    external: &crate::external_backend::ExternalBackendHost,
+    source: &str,
+    backends: &[fox_agent_backend::port::AgentBackend],
+) {
+    let errors: Vec<_> = backends
+        .iter()
+        .flat_map(|backend| external.clear_managed_model_files(*backend))
+        .collect();
     if errors.is_empty() {
         return;
     }
-    eprintln!("fox.model cleanup_warning source={source} failures={}", errors.len());
+    eprintln!(
+        "fox.model cleanup_warning source={source} failures={}",
+        errors.len()
+    );
     for error in &errors {
         eprintln!("fox.model cleanup_warning source={source} detail={error:?}");
     }
-    external.audit_warning("model.cleanup_failed", &serde_json::json!({ "source": source, "failures": errors.len() }));
+    external.audit_warning(
+        "model.cleanup_failed",
+        &serde_json::json!({ "source": source, "failures": errors.len() }),
+    );
 }
 
 #[tauri::command]
@@ -6659,7 +6965,10 @@ pub fn model_provider_delete(
     let key_ids = fox_agent_backend::credential_delete::provider_key_ids(
         &provider.id,
         &provider.base_url,
-        provider.protocol_profiles.iter().map(|profile| profile.id.as_str()),
+        provider
+            .protocol_profiles
+            .iter()
+            .map(|profile| profile.id.as_str()),
     );
     let outcome = match fox_agent_backend::credential_delete::delete_with_keys(
         &mut crate::model_service::KeyringStore,
@@ -6677,16 +6986,27 @@ pub fn model_provider_delete(
     }
     if let Some(audit) = outcome.audit(&provider.id) {
         if audit.warning {
-            eprintln!("fox.model provider_key_delete_failed keys_left={}", outcome.key_failures.len());
+            eprintln!(
+                "fox.model provider_key_delete_failed keys_left={}",
+                outcome.key_failures.len()
+            );
             external.audit_warning(audit.event, &audit.details);
         } else {
             external.audit_host(audit.event, &audit.details);
         }
     }
     if outcome.record_deleted && provider.is_default {
-        if let Err(error) = state.runtime_host.reload_configuration() { return ApiResponse::failure("model.runtime_busy", configuration_saved_but_busy(&error), true); }
+        if let Err(error) = state.runtime_host.reload_configuration() {
+            return ApiResponse::failure(
+                "model.runtime_busy",
+                configuration_saved_but_busy(&error),
+                true,
+            );
+        }
     }
-    if outcome.record_deleted { warn_managed_model_cleanup(&external, "model_provider_delete", &bound_backends); }
+    if outcome.record_deleted {
+        warn_managed_model_cleanup(&external, "model_provider_delete", &bound_backends);
+    }
     ApiResponse::success(outcome.record_deleted)
 }
 
@@ -6736,7 +7056,9 @@ pub fn model_service_save(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        key_plan.before_record.push((base_url.clone(), Some(api_key.to_owned())));
+        key_plan
+            .before_record
+            .push((base_url.clone(), Some(api_key.to_owned())));
     }
     let record = ModelServiceRecord {
         name: name.to_owned(),
@@ -6761,12 +7083,22 @@ pub fn model_service_save(
         || state.database.save_model_service(&record),
     ) {
         Ok(mut service) => {
-            for credential in key_plan.before_record.iter().map(|(id, _)| id).chain(key_plan.after_record.iter()) {
-                let _ = crate::external_model::bump_credential_revision(&state.database, credential);
+            for credential in key_plan
+                .before_record
+                .iter()
+                .map(|(id, _)| id)
+                .chain(key_plan.after_record.iter())
+            {
+                let _ =
+                    crate::external_model::bump_credential_revision(&state.database, credential);
             }
             if request.clear_api_key {
                 if let Ok(Some(provider)) = crate::external_model::current(&state.database) {
-                    warn_managed_model_cleanup(&external, "model_service_save", &external.provider_bound_backends(&provider.id));
+                    warn_managed_model_cleanup(
+                        &external,
+                        "model_service_save",
+                        &external.provider_bound_backends(&provider.id),
+                    );
                 }
             }
             service.credential_configured = api_key_configured(&service.base_url);
@@ -6785,15 +7117,40 @@ fn credential_save_error<T: serde::Serialize>(
     if !rollback.is_empty() {
         eprintln!("fox.model key_rollback_failed failures={}", rollback.len());
     }
-    let suffix = if rollback.is_empty() { String::new() } else { format!("（Key 恢复失败：{}）", rollback.join("；")) };
+    let suffix = if rollback.is_empty() {
+        String::new()
+    } else {
+        format!("（Key 恢复失败：{}）", rollback.join("；"))
+    };
     match error {
-        SaveError::KeySnapshot { error, .. } => ApiResponse::failure("model.credential_save_failed", format!("无法读取已保存的 Key，未做任何修改：{error}"), true),
-        SaveError::KeyWrite { error, .. } => ApiResponse::failure("model.credential_save_failed", format!("{error}{suffix}"), true),
-        SaveError::Record { error, .. } if crate::model_service::is_duplicate_base_url_error(&error) => {
-            ApiResponse::failure(crate::model_service::DUPLICATE_BASE_URL_CODE, format!("{}{suffix}", crate::model_service::DUPLICATE_BASE_URL_MESSAGE), false)
+        SaveError::KeySnapshot { error, .. } => ApiResponse::failure(
+            "model.credential_save_failed",
+            format!("无法读取已保存的 Key，未做任何修改：{error}"),
+            true,
+        ),
+        SaveError::KeyWrite { error, .. } => ApiResponse::failure(
+            "model.credential_save_failed",
+            format!("{error}{suffix}"),
+            true,
+        ),
+        SaveError::Record { error, .. }
+            if crate::model_service::is_duplicate_base_url_error(&error) =>
+        {
+            ApiResponse::failure(
+                crate::model_service::DUPLICATE_BASE_URL_CODE,
+                format!(
+                    "{}{suffix}",
+                    crate::model_service::DUPLICATE_BASE_URL_MESSAGE
+                ),
+                false,
+            )
         }
         SaveError::Record { error, .. } => storage_error(format!("{error}{suffix}")),
-        SaveError::KeyDeleteAfterSave { error, .. } => ApiResponse::failure("model.credential_delete_failed", format!("配置已保存，但 Key 删除失败：{error}"), true),
+        SaveError::KeyDeleteAfterSave { error, .. } => ApiResponse::failure(
+            "model.credential_delete_failed",
+            format!("配置已保存，但 Key 删除失败：{error}"),
+            true,
+        ),
     }
 }
 
@@ -6802,13 +7159,22 @@ pub async fn model_service_test(
     state: State<'_, AppState>,
     request: TestModelServiceRequest,
 ) -> Result<ApiResponse<ModelConnectionTest>, String> {
-    let is_profile_test = request.credential_provider_id.is_some() || request.api_type.as_deref() == Some("openai-responses");
+    let is_profile_test = request.credential_provider_id.is_some()
+        || request.api_type.as_deref() == Some("openai-responses");
     // The saved Key this test may use: (its id, its value).
     let profile_credential = request.credential_provider_id.as_ref().and_then(|id| {
-        let provider = state.database.list_model_providers().ok()?.into_iter().find(|p| &p.id == id)?;
+        let provider = state
+            .database
+            .list_model_providers()
+            .ok()?
+            .into_iter()
+            .find(|p| &p.id == id)?;
         let credential = match request.credential_profile_id.as_ref() {
             Some(profile_id) => {
-                provider.protocol_profiles.iter().find(|p| &p.id == profile_id)?;
+                provider
+                    .protocol_profiles
+                    .iter()
+                    .find(|p| &p.id == profile_id)?;
                 fox_agent_backend::provider_protocol::credential_id(id, profile_id)
             }
             None => provider.base_url,
@@ -6825,10 +7191,25 @@ pub async fn model_service_test(
                 Ok(url) => url,
                 Err(error) => return Ok(ApiResponse::failure("model.invalid_url", error, false)),
             };
-            let saved = profile_credential.or_else(|| if request.credential_provider_id.is_none() && request.credential_profile_id.is_none() { get_api_key(&normalized).map(|key| (normalized.clone(), key)) } else { None });
+            let saved = profile_credential.or_else(|| {
+                if request.credential_provider_id.is_none()
+                    && request.credential_profile_id.is_none()
+                {
+                    get_api_key(&normalized).map(|key| (normalized.clone(), key))
+                } else {
+                    None
+                }
+            });
             let typed = request.api_key.filter(|value| !value.trim().is_empty());
             // A typed Key counts only when it is the saved one.
-            tested_credential = saved.as_ref().filter(|(_, key)| typed.as_deref().is_none_or(|typed| typed.trim() == key.trim())).map(|(credential, _)| credential.clone());
+            tested_credential = saved
+                .as_ref()
+                .filter(|(_, key)| {
+                    typed
+                        .as_deref()
+                        .is_none_or(|typed| typed.trim() == key.trim())
+                })
+                .map(|(credential, _)| credential.clone());
             let key = typed.or(saved.map(|(_, key)| key));
             (
                 normalized,
@@ -6856,22 +7237,44 @@ pub async fn model_service_test(
     };
     let result = if is_profile_test {
         let started = std::time::Instant::now();
-        state.model_service_client.test_output(&base_url, api_key.as_deref(), &api_type, &model_id).await.map(|()| ModelConnectionTest {
-            ok: true, base_url: base_url.clone(), connection_type: "external".into(), status: "connected".into(), latency_ms: started.elapsed().as_millis() as i64, models: vec![model_id.clone()],
-        })
+        state
+            .model_service_client
+            .test_output(&base_url, api_key.as_deref(), &api_type, &model_id)
+            .await
+            .map(|()| ModelConnectionTest {
+                ok: true,
+                base_url: base_url.clone(),
+                connection_type: "external".into(),
+                status: "connected".into(),
+                latency_ms: started.elapsed().as_millis() as i64,
+                models: vec![model_id.clone()],
+            })
     } else {
-        state.model_service_client.test(&base_url, api_key.as_deref(), &api_type, &model_id).await
+        state
+            .model_service_client
+            .test(&base_url, api_key.as_deref(), &api_type, &model_id)
+            .await
     };
     match result {
         Ok(result) => {
-            if !is_profile_test { let _ = state.database.record_model_connection_test(&result); }
-            if let Err(error) = crate::external_model::record_connection_test(&state.database, &api_type, &base_url, &model_id, tested_credential.as_deref()) {
+            if !is_profile_test {
+                let _ = state.database.record_model_connection_test(&result);
+            }
+            if let Err(error) = crate::external_model::record_connection_test(
+                &state.database,
+                &api_type,
+                &base_url,
+                &model_id,
+                tested_credential.as_deref(),
+            ) {
                 eprintln!("fox.model verification_record_failed error={error:?}");
             }
             Ok(ApiResponse::success(result))
         }
         Err(error) => {
-            if !is_profile_test { let _ = state.database.record_model_connection_failure(&base_url); }
+            if !is_profile_test {
+                let _ = state.database.record_model_connection_failure(&base_url);
+            }
             Ok(ApiResponse::failure("model.connection_failed", error, true))
         }
     }
@@ -6884,21 +7287,45 @@ mod e2e1101_send_refusal_tests {
     #[test]
     fn send_refusals_name_the_reason_instead_of_a_database_error() {
         let data = std::env::temp_dir();
-        let busy: ApiResponse<()> = create_run_refusal(&data, &crate::database::CreateRunError::ConversationBusy { status: "cancelling".into() });
+        let busy: ApiResponse<()> = create_run_refusal(
+            &data,
+            &crate::database::CreateRunError::ConversationBusy {
+                status: "cancelling".into(),
+            },
+        );
         let error = busy.error.expect("refused");
         assert_eq!(error.code, "run.conversation_busy");
         assert!(error.retryable);
         assert!(!error.message.contains("数据库"), "{}", error.message);
-        let missing: ApiResponse<()> = create_run_refusal(&data, &crate::database::CreateRunError::ConversationNotFound);
-        assert_eq!(missing.error.expect("refused").code, "conversation.not_found");
-        let storage: ApiResponse<()> = create_run_refusal(&data, &crate::database::CreateRunError::Storage("disk full".into()));
+        let missing: ApiResponse<()> = create_run_refusal(
+            &data,
+            &crate::database::CreateRunError::ConversationNotFound,
+        );
+        assert_eq!(
+            missing.error.expect("refused").code,
+            "conversation.not_found"
+        );
+        let storage: ApiResponse<()> = create_run_refusal(
+            &data,
+            &crate::database::CreateRunError::Storage("disk full".into()),
+        );
         assert_eq!(storage.error.expect("refused").code, "run.create_failed");
 
         assert!(fox_model_service_refusal::<()>(Ok(true)).is_none());
-        let none = fox_model_service_refusal::<()>(Ok(false)).expect("refused").error.expect("error");
+        let none = fox_model_service_refusal::<()>(Ok(false))
+            .expect("refused")
+            .error
+            .expect("error");
         assert_eq!(none.code, "model.connection_required");
         assert!(none.message.contains("设置 → 模型服务"));
-        assert_eq!(fox_model_service_refusal::<()>(Err("locked".into())).expect("refused").error.expect("error").code, "storage.operation_failed");
+        assert_eq!(
+            fox_model_service_refusal::<()>(Err("locked".into()))
+                .expect("refused")
+                .error
+                .expect("error")
+                .code,
+            "storage.operation_failed"
+        );
     }
 
     #[test]
@@ -6917,7 +7344,8 @@ mod r2_4_change_project_tests {
     #[test]
     fn a_running_conversation_cannot_change_project() {
         for backend in ["fox", "pi", "deepseek", "codex"] {
-            let (code, message, retryable) = change_project_refusal(true, backend, false).expect("运行中拒绝");
+            let (code, message, retryable) =
+                change_project_refusal(true, backend, false).expect("运行中拒绝");
             assert_eq!(code, "conversation.run_active");
             assert!(retryable, "停止后可以再换");
             assert!(message.contains("正在运行"), "{message}");
@@ -6927,10 +7355,15 @@ mod r2_4_change_project_tests {
     #[test]
     fn an_external_agent_conversation_is_locked_once_started() {
         for backend in ["pi", "deepseek", "codex"] {
-            let (code, _, retryable) = change_project_refusal(false, backend, true).expect("已开始的外部会话锁定");
+            let (code, _, retryable) =
+                change_project_refusal(false, backend, true).expect("已开始的外部会话锁定");
             assert_eq!(code, "conversation.project_locked");
             assert!(!retryable);
-            assert_eq!(change_project_refusal(false, backend, false), None, "第一轮被取消、没有原生会话：可以换");
+            assert_eq!(
+                change_project_refusal(false, backend, false),
+                None,
+                "第一轮被取消、没有原生会话：可以换"
+            );
         }
     }
 

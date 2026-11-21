@@ -184,6 +184,7 @@ export function createPiEventMapper(emit, options = {}) {
   let answerBase = 0
   let reasoningEmittedUntil = 0
   let answerEmittedUntil = 0
+  let hasEmittedAnswer = false
   const providerReasoningByIndex = new Map()
   const accountedUsageEvents = new WeakSet()
   let cumulativeUsage = {
@@ -244,7 +245,10 @@ export function createPiEventMapper(emit, options = {}) {
     if (from >= pendingText.length) return
     const delta = pendingText.slice(from)
     answerEmittedUntil = pendingText.length
-    if (delta) emit('message.delta', { delta })
+    if (delta) {
+      hasEmittedAnswer = true
+      emit('message.delta', { delta })
+    }
   }
 
   function streamPendingText() {
@@ -370,6 +374,7 @@ export function createPiEventMapper(emit, options = {}) {
           break
         }
         case 'tool_execution_start':
+          if (options.isLocalTool?.(event.toolName)) break
           // Pi emits start/end even for a name it rejects as "not found".
           // That is not a Host tool execution. Keep the SDK error in the model
           // transcript, without advertising an undeclared Runtime capability.
@@ -533,13 +538,23 @@ export function createPiEventMapper(emit, options = {}) {
       finished = true
       emit('run.cancelled')
     },
-    finish() {
+    finish(contactQuestion) {
       if (!deferCompletion || finished || !agentEnded) return
       finished = true
       const terminal = deferredTerminal ?? pendingTerminal ?? finalTerminalFromLastAssistant()
       deferredTerminal = null
       pendingTerminal = null
       ensureMessageStarted()
+      if (contactQuestion && terminal.type === 'run.completed') {
+        if (contactQuestion.explanation) {
+          const separator = hasEmittedAnswer ? '\n\n' : ''
+          emit('message.delta', { delta: separator + contactQuestion.explanation })
+        }
+        emit('message.completed')
+        emit('user.question.requested', { source: 'ask_user', questions: contactQuestion.questions })
+        emit('run.completed', { completionReason: 'awaiting_user' })
+        return
+      }
       emit('message.completed')
       emitTerminal(terminal)
     },

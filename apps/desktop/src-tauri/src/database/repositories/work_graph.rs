@@ -1,6 +1,6 @@
+use super::{now_ms, Database};
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::{now_ms, Database};
 use crate::database::{
     AcceptanceRecord, AppendContinuationDecisionInput, ContinuationDecisionKind,
     ContinuationDecisionRecord, ContinuationIngestDiagnosticRecord, ContinuationReasonCode,
@@ -947,8 +947,9 @@ impl Database {
             let policy = eligibility.policy;
             let normal_repair_used = eligibility.normal_repair_used;
             let normal_repair_budget = eligibility.normal_repair_budget;
-            let kernel_owned=super::native_route::writer_route(transaction,&input.run_id)
-                .map_err(RepositoryError::database)?==super::native_route::WriterRoute::Kernel;
+            let kernel_owned = super::native_route::writer_route(transaction, &input.run_id)
+                .map_err(RepositoryError::database)?
+                == super::native_route::WriterRoute::Kernel;
             if kernel_owned {
                 // The desktop approval row is only a projection. Require the
                 // exact Kernel decision and a currently leased dispatch too.
@@ -967,8 +968,10 @@ impl Database {
                         WHERE c.run_id=t.run_id AND c.kind='cancel'))",
                     params![input.run_id,input.tool_call_id,input.approval_id],|row|row.get(0))
                     .map_err(RepositoryError::database)?;
-                if !authorized { return Err(RepositoryError::ConstraintViolation(
-                    "Kernel repair override requires its one-time decision and active dispatch lease".into())); }
+                if !authorized {
+                    return Err(RepositoryError::ConstraintViolation(
+                    "Kernel repair override requires its one-time decision and active dispatch lease".into()));
+                }
             }
 
             let approval = transaction
@@ -1042,7 +1045,9 @@ impl Database {
             ) {
                 // Kernel alone settles the tool and Run; do not publish a
                 // Legacy failed ToolCall or consume a projection-only grant.
-                if kernel_owned { return Err(RepositoryError::database(error)); }
+                if kernel_owned {
+                    return Err(RepositoryError::database(error));
+                }
                 let error_message = error.to_string();
                 let claimed = transaction
                     .execute(
@@ -1181,13 +1186,17 @@ impl Database {
                     params![input.approval_id, now, input.run_id],
                 )
                 .map_err(RepositoryError::database)?;
-            let tool_claimed = if kernel_owned { 1 } else { transaction
-                .execute(
-                    "UPDATE tool_calls SET status = 'running', updated_at = ?2
+            let tool_claimed = if kernel_owned {
+                1
+            } else {
+                transaction
+                    .execute(
+                        "UPDATE tool_calls SET status = 'running', updated_at = ?2
                      WHERE id = ?1 AND status = 'pending' AND requires_approval = 1",
-                    params![input.tool_call_id, now],
-                )
-                .map_err(RepositoryError::database)? };
+                        params![input.tool_call_id, now],
+                    )
+                    .map_err(RepositoryError::database)?
+            };
             if claimed != 1 || tool_claimed != 1 {
                 return Err(RepositoryError::ConstraintViolation(
                     "repair override approval claim lost its one-time CAS".to_owned(),
@@ -1219,8 +1228,9 @@ impl Database {
     ) -> Result<(), RepositoryError> {
         validate_preflight_task_repair_override(&input)?;
         with_read_transaction(self, |transaction| {
-            let kernel_owned=super::native_route::writer_route(transaction,&input.run_id)
-                .map_err(RepositoryError::database)?==super::native_route::WriterRoute::Kernel;
+            let kernel_owned = super::native_route::writer_route(transaction, &input.run_id)
+                .map_err(RepositoryError::database)?
+                == super::native_route::WriterRoute::Kernel;
             super::validate_managed_tool_acquisition_with_clock(
                 transaction,
                 &input.run_id,
@@ -6479,7 +6489,12 @@ fn not_found(entity: &'static str, id: &str) -> RepositoryError {
 
 #[cfg(test)]
 impl Database {
-    pub(crate) fn native_repair_override_fixture_for_test() -> (Database,StartTaskRepairOverrideInput,super::super::ToolCallRecord,super::super::ApprovalRecord) {
+    pub(crate) fn native_repair_override_fixture_for_test() -> (
+        Database,
+        StartTaskRepairOverrideInput,
+        super::super::ToolCallRecord,
+        super::super::ApprovalRecord,
+    ) {
         tests::native_repair_override_fixture()
     }
 }
@@ -6507,18 +6522,28 @@ mod tests {
         );
         let (snapshot, hash) = canonical_run_execution_profile("durable_v2").unwrap();
         assert_eq!(snapshot, r#"{"id":"durable_v2","schemaVersion":1}"#);
-        assert_eq!(hash, "ae08f4dc8c1327cbd3de30879f01aa7475d9a728a3c0f738579086435d714f7e");
+        assert_eq!(
+            hash,
+            "ae08f4dc8c1327cbd3de30879f01aa7475d9a728a3c0f738579086435d714f7e"
+        );
         let (snapshot, hash) = canonical_run_execution_profile("graph_reviewer_v1").unwrap();
         assert_eq!(snapshot, r#"{"id":"graph_reviewer_v1","schemaVersion":1}"#);
-        assert_eq!(hash, "24a66ac5c9d85eeacabaf662192815995c600ff77703231624d2971e191b1c18");
+        assert_eq!(
+            hash,
+            "24a66ac5c9d85eeacabaf662192815995c600ff77703231624d2971e191b1c18"
+        );
         for profile in ["legacy", "durable_v2_shadow", "graph_readonly_preview"] {
             let (snapshot, hash) = canonical_run_execution_profile(profile).unwrap();
-            assert_eq!(snapshot, format!(r#"{{"id":"{profile}","schemaVersion":1}}"#));
+            assert_eq!(
+                snapshot,
+                format!(r#"{{"id":"{profile}","schemaVersion":1}}"#)
+            );
             assert_eq!(hash, format!("{:x}", Sha256::digest(snapshot.as_bytes())));
         }
         let migrations = include_str!("../migrations.rs");
         assert!(migrations.contains(r#"snapshot_json = '{"id":"durable_v2","schemaVersion":1}'"#));
-        assert!(migrations.contains("'ae08f4dc8c1327cbd3de30879f01aa7475d9a728a3c0f738579086435d714f7e'"));
+        assert!(migrations
+            .contains("'ae08f4dc8c1327cbd3de30879f01aa7475d9a728a3c0f738579086435d714f7e'"));
     }
 
     fn test_database() -> (Database, PathBuf) {
@@ -6650,20 +6675,54 @@ mod tests {
         evidence
     }
 
-    pub(super) fn native_repair_override_fixture() -> (Database,StartTaskRepairOverrideInput,super::super::super::ToolCallRecord,super::super::super::ApprovalRecord) {
-        use fox_engine_protocol::{ExecutionAuthority,ExecutorRoute,FrozenPermission,PermissionMode,ResourceExecutor,RunControlBinding,TimeBudgets};
-        let database=Database::open(":memory:".into()).unwrap();
-        database.create_conversation("fox-general",Some("native repair override"),None,Some("ask")).unwrap();
-        let fixture=repair_override_fixture(&database,"durable_v2",true);
-        let permission=FrozenPermission { mode:PermissionMode::Ask,project_root:None,grants:Vec::new(),approval_epoch:None };
-        database.freeze_run_control(&RunControlBinding {
-            schema_version:1,run_id:fixture.run_id.clone(),conversation_id:fixture.conversation_id.clone(),engine_id:"pi".into(),
-            execution_profile_id:"durable_v2".into(),authority:ExecutionAuthority::Authoritative,executor_route:Some(ExecutorRoute::PiNative),
-            read_only_executor:ResourceExecutor::Rust,permission_snapshot_id:Database::run_control_permission_hash(&permission).unwrap(),
-            permission,budgets:TimeBudgets::default(),
-        }).unwrap();
-        let (input,tool,approval)=approved_repair_override(&database,&fixture,"native-override-attempt","native-override-call");
-        (database,input,tool,approval)
+    pub(super) fn native_repair_override_fixture() -> (
+        Database,
+        StartTaskRepairOverrideInput,
+        super::super::super::ToolCallRecord,
+        super::super::super::ApprovalRecord,
+    ) {
+        use fox_engine_protocol::{
+            ExecutionAuthority, ExecutorRoute, FrozenPermission, PermissionMode, ResourceExecutor,
+            RunControlBinding, TimeBudgets,
+        };
+        let database = Database::open(":memory:".into()).unwrap();
+        database
+            .create_conversation(
+                "fox-general",
+                Some("native repair override"),
+                None,
+                Some("ask"),
+            )
+            .unwrap();
+        let fixture = repair_override_fixture(&database, "durable_v2", true);
+        let permission = FrozenPermission {
+            mode: PermissionMode::Ask,
+            project_root: None,
+            grants: Vec::new(),
+            approval_epoch: None,
+        };
+        database
+            .freeze_run_control(&RunControlBinding {
+                schema_version: 1,
+                run_id: fixture.run_id.clone(),
+                conversation_id: fixture.conversation_id.clone(),
+                engine_id: "pi".into(),
+                execution_profile_id: "durable_v2".into(),
+                authority: ExecutionAuthority::Authoritative,
+                executor_route: Some(ExecutorRoute::PiNative),
+                read_only_executor: ResourceExecutor::Rust,
+                permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(),
+                permission,
+                budgets: TimeBudgets::default(),
+            })
+            .unwrap();
+        let (input, tool, approval) = approved_repair_override(
+            &database,
+            &fixture,
+            "native-override-attempt",
+            "native-override-call",
+        );
+        (database, input, tool, approval)
     }
 
     struct RepairOverrideFixture {
@@ -8232,10 +8291,12 @@ mod tests {
         ];
         for evidence_type in &types {
             for ref_kind in &kinds {
-                let listed = EVIDENCE_REFERENCE_PAIRS.iter().any(|(listed_type, listed_kinds)| {
-                    *listed_type == evidence_type_text(evidence_type)
-                        && listed_kinds.contains(&reference_kind_text(ref_kind))
-                });
+                let listed = EVIDENCE_REFERENCE_PAIRS
+                    .iter()
+                    .any(|(listed_type, listed_kinds)| {
+                        *listed_type == evidence_type_text(evidence_type)
+                            && listed_kinds.contains(&reference_kind_text(ref_kind))
+                    });
                 assert_eq!(
                     validate_evidence_pair(evidence_type, ref_kind).is_ok(),
                     listed,
@@ -8308,7 +8369,10 @@ mod tests {
 
         // A unique provider id from an earlier Run of the same conversation.
         let stored = add("call_unique", &third_run).unwrap();
-        assert_eq!(stored.ref_id, "kernel-tool:r1:call_unique", "stored canonically");
+        assert_eq!(
+            stored.ref_id, "kernel-tool:r1:call_unique",
+            "stored canonically"
+        );
         assert_eq!(
             repository.validate(&stored.id).unwrap(),
             EvidenceValidityStatus::Valid,

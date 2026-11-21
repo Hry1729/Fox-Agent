@@ -1,8 +1,8 @@
 //! Post-terminal evidence is separate from execution facts. Confirmation never
 //! manufactures a tool result, reopens a lease, or changes an old Run outcome.
+use super::{now_ms, Database};
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::{now_ms, Database};
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

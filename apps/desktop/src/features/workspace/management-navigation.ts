@@ -69,6 +69,8 @@ export const SETTINGS_WORKSPACE_VIEWS: readonly WorkspaceView[] = [
   'settings-yuxi',
   'settings-projects',
   'settings-conversation',
+  'settings-companions',
+  'settings-security',
   'settings-shortcuts',
   'settings-usage',
   'settings-extensions',
@@ -83,12 +85,12 @@ export const SETTINGS_WORKSPACE_VIEWS: readonly WorkspaceView[] = [
 ]
 
 /**
- * The settings sidebar has seven destinations. Older view ids (deep links,
+ * The settings sidebar has nine destinations. Older view ids (deep links,
  * command palette entries, history entries, other pages' "go to" buttons) stay
  * valid and land on the page that now hosts their content, scrolled to the
  * matching section.
  */
-export type SettingsSectionAnchor = 'shortcuts' | 'projects' | 'usage' | 'maintenance' | 'about' | 'skills' | 'mcp'
+export type SettingsSectionAnchor = 'shortcuts' | 'projects' | 'usage' | 'maintenance' | 'about' | 'search' | 'skills' | 'mcp'
 
 export interface SettingsRouteRedirect {
   view: WorkspaceView
@@ -97,10 +99,11 @@ export interface SettingsRouteRedirect {
 
 const legacySettingsRedirects: Partial<Record<WorkspaceView, SettingsRouteRedirect>> = {
   'settings-shortcuts': { view: 'settings-conversation', section: 'shortcuts' },
-  'settings-projects': { view: 'settings-ai', section: 'projects' },
+  'settings-projects': { view: 'settings-security', section: 'projects' },
   'settings-usage': { view: 'settings-data', section: 'usage' },
   maintenance: { view: 'settings-data', section: 'maintenance' },
   'settings-about': { view: 'settings-data', section: 'about' },
+  'settings-search': { view: 'settings-extensions', section: 'search' },
   // 技能 / 连接器 now live on the 插件 page, the single plugin entry in settings.
   skills: { view: 'settings-extensions', section: 'skills' },
   mcp: { view: 'settings-extensions', section: 'mcp' },
@@ -121,7 +124,7 @@ export function settingsNavigationView(view: WorkspaceView): WorkspaceView {
 }
 
 export function isSettingsSectionAnchor(value: unknown): value is SettingsSectionAnchor {
-  return value === 'shortcuts' || value === 'projects' || value === 'usage' || value === 'maintenance' || value === 'about' || value === 'skills' || value === 'mcp'
+  return value === 'shortcuts' || value === 'projects' || value === 'usage' || value === 'maintenance' || value === 'about' || value === 'search' || value === 'skills' || value === 'mcp'
 }
 
 export function managementSection(view: WorkspaceView): 'settings' | 'knowledge' | null {

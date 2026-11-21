@@ -22,9 +22,16 @@ const SUFFIX: &str = ".db";
 /// The schema version an existing database is at when it still has migrations
 /// to apply (`Some(old)`), or `None` when nothing would be migrated or there is
 /// nothing to back up (no tables yet).
-pub(crate) fn pending_migration_from(connection: &Connection, latest: i64) -> Result<Option<i64>, String> {
+pub(crate) fn pending_migration_from(
+    connection: &Connection,
+    latest: i64,
+) -> Result<Option<i64>, String> {
     let tables: i64 = connection
-        .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table'", [], |row| row.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
+            [],
+            |row| row.get(0),
+        )
         .map_err(|error| format!("无法读取数据库结构：{error}"))?;
     if tables == 0 {
         return Ok(None);
@@ -41,7 +48,9 @@ pub(crate) fn pending_migration_from(connection: &Connection, latest: i64) -> Re
         return Ok(Some(0));
     }
     let current: Option<i64> = connection
-        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
         .optional()
         .map_err(|error| format!("无法读取数据库版本：{error}"))?
         .flatten();
@@ -72,7 +81,9 @@ pub(crate) fn backup_before_migration(
     // without changing journal mode or anything else about the live file.
     let connection = Connection::open_with_flags(
         db_path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI,
     )
     .map_err(|error| format!("无法打开数据库以备份：{error}"))?;
     connection
@@ -92,7 +103,8 @@ pub(crate) fn backup_before_migration(
     }
     let partial = target.with_extension("db.partial");
     if partial.exists() {
-        std::fs::remove_file(&partial).map_err(|error| format!("无法清理残留的未完成备份：{error}"))?;
+        std::fs::remove_file(&partial)
+            .map_err(|error| format!("无法清理残留的未完成备份：{error}"))?;
     }
     let result = (|| {
         connection
@@ -112,8 +124,11 @@ pub(crate) fn backup_before_migration(
 
 /// The copy opens, passes SQLite's quick check and carries the old version.
 fn verify_copy(path: &Path, old_version: i64) -> Result<(), String> {
-    let copy = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
-        .map_err(|error| format!("备份文件无法打开：{error}"))?;
+    let copy = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| format!("备份文件无法打开：{error}"))?;
     let check: String = copy
         .query_row("PRAGMA quick_check", [], |row| row.get(0))
         .map_err(|error| format!("备份文件校验失败：{error}"))?;
@@ -122,10 +137,16 @@ fn verify_copy(path: &Path, old_version: i64) -> Result<(), String> {
     }
     if old_version > 0 {
         let version: i64 = copy
-            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_migrations", [], |row| row.get(0))
+            .query_row(
+                "SELECT COALESCE(MAX(version),0) FROM schema_migrations",
+                [],
+                |row| row.get(0),
+            )
             .map_err(|error| format!("备份文件缺少版本记录：{error}"))?;
         if version != old_version {
-            return Err(format!("备份文件版本 {version} 与原库 {old_version} 不一致"));
+            return Err(format!(
+                "备份文件版本 {version} 与原库 {old_version} 不一致"
+            ));
         }
     }
     Ok(())
@@ -146,7 +167,8 @@ fn prune(backups_dir: &Path, keep: usize) -> Result<(), String> {
     copies.sort();
     let excess = copies.len().saturating_sub(keep.max(1));
     for old in copies.into_iter().take(excess) {
-        std::fs::remove_file(&old).map_err(|error| format!("无法删除旧备份 {}：{error}", old.display()))?;
+        std::fs::remove_file(&old)
+            .map_err(|error| format!("无法删除旧备份 {}：{error}", old.display()))?;
     }
     Ok(())
 }
@@ -156,23 +178,37 @@ mod tests {
     use super::*;
 
     fn temp_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("fox-migration-backup-{label}-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!(
+            "fox-migration-backup-{label}-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
     fn database_at(path: &Path, version: Option<i64>) {
         let connection = Connection::open(path).unwrap();
-        connection.pragma_update(None, "journal_mode", "WAL").unwrap();
-        connection.execute_batch("CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT NOT NULL);").unwrap();
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        connection
+            .execute_batch("CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT NOT NULL);")
+            .unwrap();
         if let Some(version) = version {
             connection
                 .execute_batch("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);")
                 .unwrap();
-            connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?1, 0)", [version]).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, 0)",
+                    [version],
+                )
+                .unwrap();
         }
         // Left in the WAL (no checkpoint) on purpose: the copy must include it.
-        connection.execute("INSERT INTO notes(body) VALUES ('only in the wal')", []).unwrap();
+        connection
+            .execute("INSERT INTO notes(body) VALUES ('only in the wal')", [])
+            .unwrap();
         std::mem::forget(connection);
     }
 
@@ -182,13 +218,23 @@ mod tests {
         let db = dir.join("fox.db");
         database_at(&db, Some(94));
         let backups = dir.join("backups");
-        let copy = backup_before_migration(&db, &backups, 95, 5, 1_760_000_000_000).unwrap().expect("a copy");
+        let copy = backup_before_migration(&db, &backups, 95, 5, 1_760_000_000_000)
+            .unwrap()
+            .expect("a copy");
         let name = copy.file_name().unwrap().to_str().unwrap().to_owned();
-        assert!(name.starts_with("fox-pre-migration-20251009T") && name.ends_with("-v94.db"), "{name}");
+        assert!(
+            name.starts_with("fox-pre-migration-20251009T") && name.ends_with("-v94.db"),
+            "{name}"
+        );
         let restored = Connection::open(&copy).unwrap();
-        let body: String = restored.query_row("SELECT body FROM notes", [], |row| row.get(0)).unwrap();
+        let body: String = restored
+            .query_row("SELECT body FROM notes", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(body, "only in the wal");
-        assert!(!copy.with_extension("db-wal").exists(), "a self-contained copy");
+        assert!(
+            !copy.with_extension("db-wal").exists(),
+            "a self-contained copy"
+        );
     }
 
     #[test]
@@ -197,15 +243,30 @@ mod tests {
         let backups = dir.join("backups");
         let current = dir.join("current.db");
         database_at(&current, Some(95));
-        assert_eq!(backup_before_migration(&current, &backups, 95, 5, 1).unwrap(), None);
+        assert_eq!(
+            backup_before_migration(&current, &backups, 95, 5, 1).unwrap(),
+            None
+        );
         let newer = dir.join("newer.db");
         database_at(&newer, Some(96));
-        assert_eq!(backup_before_migration(&newer, &backups, 95, 5, 1).unwrap(), None);
+        assert_eq!(
+            backup_before_migration(&newer, &backups, 95, 5, 1).unwrap(),
+            None
+        );
         let empty = dir.join("empty.db");
         Connection::open(&empty).unwrap();
-        assert_eq!(backup_before_migration(&empty, &backups, 95, 5, 1).unwrap(), None);
-        assert_eq!(backup_before_migration(&dir.join("missing.db"), &backups, 95, 5, 1).unwrap(), None);
-        assert!(!dir.join("missing.db").exists(), "never created by the backup step");
+        assert_eq!(
+            backup_before_migration(&empty, &backups, 95, 5, 1).unwrap(),
+            None
+        );
+        assert_eq!(
+            backup_before_migration(&dir.join("missing.db"), &backups, 95, 5, 1).unwrap(),
+            None
+        );
+        assert!(
+            !dir.join("missing.db").exists(),
+            "never created by the backup step"
+        );
         assert!(!backups.exists() || std::fs::read_dir(&backups).unwrap().next().is_none());
     }
 
@@ -219,7 +280,11 @@ mod tests {
         std::fs::write(backups.join("fox-backup-1.foxbackup"), b"user archive").unwrap();
         let mut made = Vec::new();
         for step in 0..7_i64 {
-            made.push(backup_before_migration(&db, &backups, 95, 5, 1_760_000_000_000 + step * 1_000).unwrap().unwrap());
+            made.push(
+                backup_before_migration(&db, &backups, 95, 5, 1_760_000_000_000 + step * 1_000)
+                    .unwrap()
+                    .unwrap(),
+            );
         }
         let mut left = std::fs::read_dir(&backups)
             .unwrap()
@@ -228,7 +293,10 @@ mod tests {
             .collect::<Vec<_>>();
         left.sort();
         assert_eq!(left.len(), 5);
-        let expected = made[2..].iter().map(|path| path.file_name().unwrap().to_str().unwrap().to_owned()).collect::<Vec<_>>();
+        let expected = made[2..]
+            .iter()
+            .map(|path| path.file_name().unwrap().to_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
         assert_eq!(left, expected, "the two oldest copies were removed");
         assert!(backups.join("fox-backup-1.foxbackup").exists());
     }
@@ -253,14 +321,28 @@ mod tests {
             crate::database::migrations::run_to_v74_for_test(&mut connection, 1).unwrap();
         }
         let backups = dir.join("backups");
-        let database = crate::database::Database::open_with_migration_backup(db.clone(), &backups).unwrap();
-        assert_eq!(database.schema_version().unwrap(), crate::database::DATABASE_SCHEMA_VERSION);
+        let database =
+            crate::database::Database::open_with_migration_backup(db.clone(), &backups).unwrap();
+        assert_eq!(
+            database.schema_version().unwrap(),
+            crate::database::DATABASE_SCHEMA_VERSION
+        );
         drop(database);
-        let copies = std::fs::read_dir(&backups).unwrap().map(|entry| entry.unwrap().path()).collect::<Vec<_>>();
+        let copies = std::fs::read_dir(&backups)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
         assert_eq!(copies.len(), 1);
-        assert!(copies[0].to_string_lossy().ends_with("-v74.db"), "{copies:?}");
+        assert!(
+            copies[0].to_string_lossy().ends_with("-v74.db"),
+            "{copies:?}"
+        );
         let copy = Connection::open(&copies[0]).unwrap();
-        let version: i64 = copy.query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0)).unwrap();
+        let version: i64 = copy
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert_eq!(version, 74, "the copy is the pre-migration database");
         // Current now: reopening makes no further copy.
         drop(crate::database::Database::open_with_migration_backup(db, &backups).unwrap());
@@ -277,10 +359,16 @@ mod tests {
         }
         let blocked = dir.join("backups");
         std::fs::write(&blocked, b"not a directory").unwrap();
-        let error = crate::database::Database::open_with_migration_backup(db.clone(), &blocked).err().expect("refused");
+        let error = crate::database::Database::open_with_migration_backup(db.clone(), &blocked)
+            .err()
+            .expect("refused");
         assert!(error.contains("自动备份失败"), "{error}");
-        let version: i64 = Connection::open(&db).unwrap()
-            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0)).unwrap();
+        let version: i64 = Connection::open(&db)
+            .unwrap()
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert_eq!(version, 74, "not migrated");
     }
 }

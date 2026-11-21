@@ -10,20 +10,47 @@ const MAX_SKILL_BYTES: u64 = 128 * 1024;
 const SKILL_CATALOG_RESERVE_CHARS: usize = 3_200;
 
 pub(crate) fn install_bundled_office_skills(root: &Path) -> Result<(), String> {
-    for (id, instructions) in [
-        ("fox-office-word", include_str!("../resources/office-skills/word/SKILL.md")),
-        ("fox-office-excel", include_str!("../resources/office-skills/excel/SKILL.md")),
-        ("fox-office-ppt", include_str!("../resources/office-skills/ppt/SKILL.md")),
+    // Fingerprints of the shipped 1.0.0 files, using LF on all platforms.
+    for (id, instructions, previous_hash) in [
+        (
+            "fox-office-word",
+            include_str!("../resources/office-skills/word/SKILL.md"),
+            "sha256:d5bd27c3e86f3da39ec026c833d14ed69ef94dfedd2d97a1438586d06b1bc823",
+        ),
+        (
+            "fox-office-excel",
+            include_str!("../resources/office-skills/excel/SKILL.md"),
+            "sha256:6b7fac510d2d643b1d3ea4de95e8027bbf2e4dc16cb090f60217b2d815f57824",
+        ),
+        (
+            "fox-office-ppt",
+            include_str!("../resources/office-skills/ppt/SKILL.md"),
+            "sha256:1e2b88dca405442aa9ae4662d56ca70e9489587e7479e09398fb3f01695746cf",
+        ),
     ] {
-        let directory = root.join(id);
-        let path = directory.join("SKILL.md");
-        // Preserve local edits. Future updates must compare a version/hash first.
-        if !path.exists() {
-            std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-            std::fs::write(path, instructions).map_err(|error| error.to_string())?;
-        }
+        install_bundled_skill(&root.join(id), instructions, previous_hash)?;
     }
     Ok(())
+}
+
+fn install_bundled_skill(
+    directory: &Path,
+    instructions: &str,
+    previous_hash: &str,
+) -> Result<(), String> {
+    let path = directory.join("SKILL.md");
+    if path.exists() {
+        let Ok(installed) = std::fs::read_to_string(&path) else {
+            return Ok(());
+        };
+        if installed == instructions
+            || content_hash(&installed.replace("\r\n", "\n")) != previous_hash
+        {
+            return Ok(());
+        }
+    }
+    std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    std::fs::write(path, instructions).map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -264,8 +291,14 @@ pub fn skill_prompt_plan(
     // assembly the final prompt uses, including the module preamble.
     let render_len = |blocks: &[String], omitted: &[OmittedSkill], catalog_text: &str| -> usize {
         let mut total = MODULE_PREAMBLE.chars().count() + catalog_text.chars().count();
-        total += blocks.iter().map(|block| block.chars().count()).sum::<usize>();
-        total += blocks.len().saturating_add(if omitted.is_empty() { 0 } else { 1 }) * 2;
+        total += blocks
+            .iter()
+            .map(|block| block.chars().count())
+            .sum::<usize>();
+        total += blocks
+            .len()
+            .saturating_add(if omitted.is_empty() { 0 } else { 1 })
+            * 2;
         if !omitted.is_empty() {
             total += diagnostics_text(omitted).chars().count();
         }
@@ -281,8 +314,7 @@ pub fn skill_prompt_plan(
             "## Skill: {} ({})\n{}",
             skill.record.name, skill.record.id, skill.instructions
         );
-        let mut trial_blocks: Vec<String> =
-            chosen.iter().map(|(_, block)| block.clone()).collect();
+        let mut trial_blocks: Vec<String> = chosen.iter().map(|(_, block)| block.clone()).collect();
         trial_blocks.push(block.clone());
         if render_len(&trial_blocks, &omitted, &catalog_text) <= limit {
             chosen.push((index, block));
@@ -325,7 +357,10 @@ pub fn skill_prompt_plan(
     // prompt fits. `skill_load` remains available for every enabled skill.
     let mut catalog_text = catalog_text;
     while render_len(
-        &chosen.iter().map(|(_, block)| block.clone()).collect::<Vec<_>>(),
+        &chosen
+            .iter()
+            .map(|(_, block)| block.clone())
+            .collect::<Vec<_>>(),
         &omitted,
         &catalog_text,
     ) > limit
@@ -433,7 +468,8 @@ fn diagnostics_text(omitted: &[OmittedSkill]) -> String {
 }
 
 /// Fixed preamble always present in an injected skill section.
-const MODULE_PREAMBLE: &str = "## Skills\n以下 Skill 指令由用户按需启用；技能文字只提供方法，不会扩大任何权限。";
+const MODULE_PREAMBLE: &str =
+    "## Skills\n以下 Skill 指令由用户按需启用；技能文字只提供方法，不会扩大任何权限。";
 
 fn assemble_prompt(sections: &[String]) -> String {
     if sections.is_empty() {
@@ -641,15 +677,17 @@ pub fn on_demand_skill(
 }
 
 pub(crate) fn content_hash(instructions: &str) -> String {
-    format!("sha256:{}", hex::encode(Sha256::digest(instructions.as_bytes())))
+    format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(instructions.as_bytes()))
+    )
 }
 
 fn catalog_line(entry: &CatalogEntry) -> String {
     let state = match &entry.state {
-        SkillToolState::Available if !entry.required_tools.is_empty() => format!(
-            "可加载；需要工具：{}",
-            entry.required_tools.join(",")
-        ),
+        SkillToolState::Available if !entry.required_tools.is_empty() => {
+            format!("可加载；需要工具：{}", entry.required_tools.join(","))
+        }
         SkillToolState::Available => "可加载".to_owned(),
         SkillToolState::MissingTools(missing) => {
             format!("缺少工具：{}", missing.join(","))
@@ -706,7 +744,11 @@ fn load_skill(path: &Path, directory_id: Option<&str>) -> Result<LoadedSkill, St
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) => {
-            return Ok(invalid_skill(invalid_id, &source_path, &format!("无法读取 SKILL.md：{error}")))
+            return Ok(invalid_skill(
+                invalid_id,
+                &source_path,
+                &format!("无法读取 SKILL.md：{error}"),
+            ))
         }
     };
     let source = match String::from_utf8(bytes) {
@@ -720,7 +762,10 @@ fn load_skill(path: &Path, directory_id: Option<&str>) -> Result<LoadedSkill, St
         }
     };
     let (frontmatter, instructions) = split_frontmatter(&source);
-    let metadata = match frontmatter.map(serde_yaml::from_str::<SkillMetadata>).transpose() {
+    let metadata = match frontmatter
+        .map(serde_yaml::from_str::<SkillMetadata>)
+        .transpose()
+    {
         Ok(metadata) => metadata.unwrap_or_default(),
         Err(error) => {
             return Ok(invalid_skill(
@@ -829,6 +874,25 @@ mod tests {
         std::env::temp_dir().join(format!("fox-skill-test-{}", uuid::Uuid::new_v4()))
     }
 
+    #[test]
+    fn bundled_skill_update_preserves_local_edits() {
+        let root = temp_root();
+        let path = root.join("SKILL.md");
+        let previous = "version: 1.0.0\nOriginal instructions\n";
+        let current = "version: 1.0.1\nRevised instructions\n";
+        let previous_hash = content_hash(previous);
+        install_bundled_skill(&root, current, &previous_hash).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), current);
+        std::fs::write(&path, previous.replace('\n', "\r\n")).unwrap();
+        install_bundled_skill(&root, current, &previous_hash).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), current);
+        let custom = "version: 1.0.0\nMy instructions\n";
+        std::fs::write(&path, custom).unwrap();
+        install_bundled_skill(&root, current, &previous_hash).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), custom);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// R7: the audit ledger must name the REAL skill id. A skill whose display
     /// name differs from its id used to have its full text dropped from the
     /// prompt while `included` still announced it — the ledger then claimed an
@@ -876,9 +940,14 @@ mod tests {
             );
         }
         assert!(
-            plan.included.iter().all(|item| item.id.ends_with("-real-id")),
+            plan.included
+                .iter()
+                .all(|item| item.id.ends_with("-real-id")),
             "the ledger must identify skills by real id, got {:?}",
-            plan.included.iter().map(|item| &item.id).collect::<Vec<_>>()
+            plan.included
+                .iter()
+                .map(|item| &item.id)
+                .collect::<Vec<_>>()
         );
         // No dropped skill is still announced as included.
         for item in &plan.omitted {
@@ -953,7 +1022,11 @@ mod tests {
         // diagnostics cannot fit; that must surface as an error.
         let result = skill_prompt_plan(
             &root,
-            &["tiny-0".to_owned(), "tiny-1".to_owned(), "tiny-2".to_owned()],
+            &[
+                "tiny-0".to_owned(),
+                "tiny-1".to_owned(),
+                "tiny-2".to_owned(),
+            ],
             None,
             "",
             128,
@@ -964,10 +1037,7 @@ mod tests {
                 "a successful plan must still be within budget ({} > 128)",
                 plan.prompt.chars().count()
             ),
-            Err(error) => assert!(
-                error.contains("预算"),
-                "unexpected error: {error}"
-            ),
+            Err(error) => assert!(error.contains("预算"), "unexpected error: {error}"),
         }
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1109,22 +1179,53 @@ mod tests {
     #[test]
     fn rt1_a_malformed_skill_is_skipped_with_a_diagnosis_and_never_blocks_the_plan() {
         let root = std::env::temp_dir().join(format!("fox-skill-rt1-{}", uuid::Uuid::new_v4()));
-        write_skill(&root, "good", "---\nid: good\nname: Good\nversion: 1.0\n---\nUse evidence.");
-        write_skill(&root, "badyaml", "---\nid: badyaml\ndescription: Use when: X\n---\nBody.");
-        write_skill(&root, "badlist", "---\nid: badlist\nversion: [1, 2]\n---\nBody.");
+        write_skill(
+            &root,
+            "good",
+            "---\nid: good\nname: Good\nversion: 1.0\n---\nUse evidence.",
+        );
+        write_skill(
+            &root,
+            "badyaml",
+            "---\nid: badyaml\ndescription: Use when: X\n---\nBody.",
+        );
+        write_skill(
+            &root,
+            "badlist",
+            "---\nid: badlist\nversion: [1, 2]\n---\nBody.",
+        );
         std::fs::create_dir_all(root.join("gbk")).unwrap();
-        std::fs::write(root.join("gbk").join("SKILL.md"), [0x2d, 0x2d, 0x2d, 0x0a, 0xd6, 0xd0, 0xce, 0xc4, 0x0a]).unwrap();
-        let enabled = ["good", "badyaml", "badlist", "gbk"].map(str::to_owned).to_vec();
+        std::fs::write(
+            root.join("gbk").join("SKILL.md"),
+            [0x2d, 0x2d, 0x2d, 0x0a, 0xd6, 0xd0, 0xce, 0xc4, 0x0a],
+        )
+        .unwrap();
+        let enabled = ["good", "badyaml", "badlist", "gbk"]
+            .map(str::to_owned)
+            .to_vec();
         let skills = scan_skills(&root, &enabled).expect("a bad skill must not fail the scan");
-        let good = skills.iter().find(|skill| skill.record.id == "good").unwrap();
+        let good = skills
+            .iter()
+            .find(|skill| skill.record.id == "good")
+            .unwrap();
         assert!(good.record.valid);
         assert_eq!(good.record.version, "1.0");
         for id in ["badyaml", "badlist", "gbk"] {
-            let bad = skills.iter().find(|skill| skill.record.id == id).unwrap_or_else(|| panic!("{id} listed"));
+            let bad = skills
+                .iter()
+                .find(|skill| skill.record.id == id)
+                .unwrap_or_else(|| panic!("{id} listed"));
             assert!(!bad.record.valid, "{id}");
-            assert!(bad.record.validation_error.as_deref().is_some_and(|error| !error.is_empty()), "{id}");
+            assert!(
+                bad.record
+                    .validation_error
+                    .as_deref()
+                    .is_some_and(|error| !error.is_empty()),
+                "{id}"
+            );
         }
-        let plan = skill_prompt_plan(&root, &enabled, None, "", 4_000).expect("the plan still builds");
+        let plan =
+            skill_prompt_plan(&root, &enabled, None, "", 4_000).expect("the plan still builds");
         assert!(plan.included.iter().any(|item| item.id == "good"));
         assert!(!plan.included.iter().any(|item| item.id != "good"));
         let _ = std::fs::remove_dir_all(root);
@@ -1171,14 +1272,8 @@ mod tests {
         );
         write_skill(&root, "late", &body);
         // Catalog line survives at 330 chars; the 300+ char full text does not.
-        let plan = skill_prompt_plan(
-            &root,
-            &["late".to_owned()],
-            None,
-            "",
-            330,
-        )
-        .expect("compose plan");
+        let plan =
+            skill_prompt_plan(&root, &["late".to_owned()], None, "", 330).expect("compose plan");
         assert!(!plan.prompt.contains("Load me when charting starts."));
         assert!(plan.prompt.chars().count() <= 330, "{}", plan.prompt.len());
         let loaded = on_demand_skill(

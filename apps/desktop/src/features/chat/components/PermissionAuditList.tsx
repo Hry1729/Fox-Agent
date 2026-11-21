@@ -1,4 +1,5 @@
-// A1: what the Host allowed in a Run without asking (mode, matched rules, risk).
+import { toolRecordPresentation } from '../tool-record-presentation'
+import { SideCard, SideSection } from '@/components/fox-ui/side-section'
 import { useEffect, useState } from 'react'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
 import type { PermissionAuditRecord } from '@/features/conversations/model/types'
@@ -27,14 +28,15 @@ export function PermissionAuditList({ runId }: { runId: string | null | undefine
     return () => { cancelled = true }
   }, [runId])
   if (!runId) return null
-  return <section className="fox-activity-events fox-permission-audit">
-    <div className="fox-activity-section-head"><strong>自动放行记录</strong><small>{entries.length} 条</small></div>
+  return <SideSection title="自动放行" count={entries.length}><SideCard className="fox-activity-events fox-permission-audit">
     {error && <p className="fox-activity-warning">{error}</p>}
     {!error && entries.length === 0 && <p className="fox-activity-empty">这次运行没有未经询问就执行的写入、命令或联网操作。</p>}
-    {entries.map(entry => <p key={entry.id} title={entry.findings.join(', ')}>
-      <span>{entry.tool}{entry.risk === 'high' ? ' · 高风险' : ''}</span>
-      <small>{auditReasonLabel(entry)} · {new Date(entry.createdAt).toLocaleTimeString()}</small>
-      {entry.summary && <code>{entry.summary}</code>}
-    </p>)}
-  </section>
+    {entries.map(entry => {
+      const { action, Icon } = toolRecordPresentation({ toolName: entry.tool, input: {}, status: 'completed' })
+      return <div className="fox-record-row" key={entry.id} title={entry.findings.join(', ')}>
+        <Icon /><span className="fox-record-copy"><strong className={entry.risk === 'high' ? 'is-warning' : undefined}>{action}{entry.risk === 'high' ? ' · 高风险' : ''}</strong>
+        <small>{[entry.summary, auditReasonLabel(entry), new Date(entry.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })].filter(Boolean).join(' · ')}</small></span>
+      </div>
+    })}
+  </SideCard></SideSection>
 }

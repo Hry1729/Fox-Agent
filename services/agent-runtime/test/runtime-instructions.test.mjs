@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 
 test('placement gives named Host targets priority over default placement and exposes unknown recognition', () => {
   assert.match(FOX_RUNTIME_INSTRUCTIONS, /bare filename at the project root/u)
+  assert.match(FOX_RUNTIME_INSTRUCTIONS, /choose a descriptive filename with the correct extension/u)
+  assert.doesNotMatch(FOX_RUNTIME_INSTRUCTIONS, /literal filename summary\.csv/u)
   assert.match(FOX_RUNTIME_INSTRUCTIONS, /Host-frozen target/u)
   assert.match(FOX_RUNTIME_INSTRUCTIONS, /unverified/u)
   assert.doesNotMatch(FOX_RUNTIME_INSTRUCTIONS, /a CSV the user asked for is a deliverable and belongs under deliverableRoot/u)
@@ -33,6 +35,12 @@ test('requires Simplified Chinese for user-facing text and preserves machine tex
   assert.match(FOX_LANGUAGE_CONTRACT, /Private reasoning and internal planning are not user-facing/)
   assert.equal(runtimeSystemPrompt('Base prompt').includes(FOX_LANGUAGE_CONTRACT), true)
   assert.equal(runtimeSystemPrompt('Base prompt', { approvalDemo: true }).includes(FOX_LANGUAGE_CONTRACT), true)
+})
+
+test('puts summary clarification and waiting before calculation in the runtime prompt', () => {
+  const prompt = runtimeSystemPrompt('Base prompt')
+  assert.match(prompt, /chosen or delegated the grouping or output format/)
+  assert.match(prompt, /Wait for the user's reply before calculating a summary or writing a file/)
 })
 
 test('publishes protected tools and truthful approval rules in the system prompt', () => {

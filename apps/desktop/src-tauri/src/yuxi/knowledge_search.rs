@@ -1,7 +1,7 @@
 //! 远程知识库只走服务端原生索引检索；索引不可用时直接报错，不降级为文档关键词扫描。
+use super::{api_url, YuxiClient};
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::{api_url, YuxiClient};
 use reqwest::{Response, StatusCode};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -275,9 +275,7 @@ impl YuxiClient {
         let total_chars = chars.len();
         let start_offset = start_offset.unwrap_or(0);
         if start_offset > total_chars {
-            return Err(
-                "[remote_knowledge.invalid_query] startOffset 超出文档长度".to_owned(),
-            );
+            return Err("[remote_knowledge.invalid_query] startOffset 超出文档长度".to_owned());
         }
         let max_chars = max_chars.unwrap_or(60_000).clamp(1, 60_000);
         let end = start_offset.saturating_add(max_chars).min(total_chars);
@@ -716,22 +714,17 @@ mod tests {
         assert_eq!(text.chars().count(), 10);
         let body = text.as_bytes().to_vec();
         let read = |max_chars: Option<usize>, start_offset: Option<usize>| {
-            let (base, handle) = server(vec![(
-                file_path("file-1"),
-                200,
-                "text/plain",
-                body.clone(),
-            )]);
-            let result = tauri::async_runtime::block_on(
-                YuxiClient::new().unwrap().knowledge_document_text(
+            let (base, handle) =
+                server(vec![(file_path("file-1"), 200, "text/plain", body.clone())]);
+            let result =
+                tauri::async_runtime::block_on(YuxiClient::new().unwrap().knowledge_document_text(
                     &base,
                     "fixture-token",
                     "kb-1",
                     "file-1",
                     max_chars,
                     start_offset,
-                ),
-            );
+                ));
             handle.join().unwrap();
             result
         };

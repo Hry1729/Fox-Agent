@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useState } from 'react'
-import { CornerDownLeft, MoreHorizontal, Quote, Reply, SmilePlus, Star, X } from 'lucide-react'
+import { Bell, BriefcaseBusiness, Check, FileText, FolderOpen, Sparkles, UserPlus, Users, CornerDownLeft, MoreHorizontal, Quote, Reply, SmilePlus, Star, X } from 'lucide-react'
+import { useAuiState } from '@assistant-ui/react'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { copyMessageResponse } from '@/components/assistant-ui/elements/message-actions'
 import { FoxCopyMessageButton, FoxMarkUnreadButton } from '@/features/chat/thread/fox-message-actions'
 import { StreamingText } from '@/features/chat/components/StreamingText'
-import type { ContactBubbleMarkRecord, ContactMessageQuoteRecord } from '@/features/conversations/model/types'
+import type { CompanionGuide, ContactBubbleMarkRecord, ContactMessageQuoteRecord } from '@/features/conversations/model/types'
 import { contacts, REACTIONS, type Companion, type FavoriteEntry } from './api'
 import { ContactAvatar } from './chat-controls'
+import { ContactAnswerChoice, ContactDecision } from './chat-decision'
 import { formatSearchTime } from './chat-search'
 import { showContactError, useContacts } from './context'
 import './contact-chat.css'
@@ -93,6 +95,7 @@ export interface ContactReply {
   createdAt: number
   /** Present only for a committed bubble; a live draft has none. */
   deliveryOrder?: number
+  guide?: CompanionGuide
 }
 
 /** One contact reply: bubble, the user's marks and the hover action row. A live
@@ -109,13 +112,29 @@ export function ContactReplyBubble({ contact, reply, initialMark }: {
   // 一个气泡同时只开一层菜单（SPEC item 11 的互斥）；菜单开在 portal 里，
   // 焦点离开了气泡 DOM，用 data-menu-open 让操作行保持可见。
   const [openMenu, setOpenMenu] = useState<'reaction' | 'more' | null>(null)
+  const [guideBusy, setGuideBusy] = useState(false)
+  const guide = reply.guide
+  const firstUserText = useAuiState(state => guide
+    ? state.thread.messages.find(message => message.role === 'user')?.content.map(part => part.type === 'text' ? part.text : '').join('')
+    : undefined)
+  const selectedIndex = guide?.options.findIndex(option => option.message === firstUserText) ?? -1
+  const sendGuide = async (message: string) => {
+    if (!ctx?.sendPrompt || guideBusy) return
+    setGuideBusy(true)
+    try { await ctx.sendPrompt(message) } finally { setGuideBusy(false) }
+  }
   const favorite = () => contact && run(() => contacts.favorite(contact.id, reply.id, !mark?.favoritedAt))
   const react = (reaction: string) => contact && run(() => contacts.react(contact.id, reply.id, reaction))
-  return <section className="fox-contact-message" data-contact-message-id={reply.id}
+  return <section className={`fox-contact-message ${guide && (firstUserText === undefined || selectedIndex >= 0) ? 'has-guide' : ''}`} data-contact-message-id={reply.id}
     data-menu-open={openMenu ? 'true' : undefined}
     data-bubble-id={durable ? reply.id : undefined}
     data-delivery-order={durable ? reply.deliveryOrder : undefined}>
     <div className="fox-contact-bubble"><StreamingText text={reply.text} streaming={false} className="fox-answer-response" /></div>
+    {guide && (firstUserText === undefined
+      ? <div className="fox-companion-guide"><strong>{guide.title}</strong><div>{guide.options.map((option, index) => { const Icon = (contact?.isDefault ? [option.label.startsWith('伙伴们') ? Users : Sparkles, UserPlus, Bell, FolderOpen] : [FolderOpen, FileText, Bell, BriefcaseBusiness])[index % 4]; return <button type="button" key={option.label} disabled={guideBusy || !ctx?.sendPrompt} onClick={() => void sendGuide(option.message)}><Icon size={15} /><span>{option.label}</span></button> })}</div></div>
+      : selectedIndex >= 0
+        ? <ContactDecision title={guide.title} resolved><ContactAnswerChoice index={selectedIndex}>{guide.options[selectedIndex].label}</ContactAnswerChoice></ContactDecision>
+        : <div className="fox-companion-guide is-collapsed" role="status"><Check size={13} aria-hidden="true" />已开始对话</div>)}
     {mark?.reaction && <ReactionChip reaction={mark.reaction} busy={busy} onClear={() => react(mark.reaction!)} />}
     <div className="fox-contact-message-meta">
       <FoxCopyMessageButton onCopy={() => copyMessageResponse(reply.text)} />

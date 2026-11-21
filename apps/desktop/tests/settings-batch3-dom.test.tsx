@@ -59,7 +59,7 @@ const { ConfirmDialogProvider } = await import('../src/components/ui/confirm-dia
 const { PLUGIN_RETURN_KEY, rememberPluginReturn } = await import('../src/features/settings/settings-shared')
 const { settingsRouteRedirect, settingsNavigationView } = await import('../src/features/workspace/management-navigation')
 
-afterEach(() => { cleanup(); calls.length = 0; window.sessionStorage.clear() })
+afterEach(() => { cleanup(); calls.length = 0; window.sessionStorage.clear(); window.localStorage.clear() })
 
 const text = () => document.body.textContent ?? ''
 const byLabel = (label: string) => document.querySelector(`[aria-label="${label}"]`) as HTMLElement | null
@@ -75,16 +75,18 @@ async function mount(element: React.ReactElement) {
 const base = { sidebarCollapsed: false, onSidebar: () => {} }
 
 describe('Agent page', () => {
-  test('clicking an expert opens its edit Sheet straight away; fake 高风险操作 rows are gone', async () => {
-    await mount(React.createElement(pages.AgentSettingsPage, { ...base, navigate: () => {} }))
-    await waitFor(() => { if (!byLabel('编辑 周报撰写助手')) throw new Error('expert row missing') })
+  test('keeps only conversation engines and assistants; experts open in their center', async () => {
+    const navigated: unknown[][] = []
+    await mount(React.createElement(pages.AgentSettingsPage, { ...base, navigate: (...args: unknown[]) => { navigated.push(args) } }))
+    await waitFor(() => { if (!byLabel('编辑 Fox 通用助手')) throw new Error('general assistant missing') })
+    expect(text()).toContain('新对话')
+    expect(text()).toContain('外部 Agent')
+    expect(document.querySelector('.fox-settings-group-head h2')?.textContent).toBe('新对话')
+    expect(text()).not.toContain('已归档的联系人')
     expect(text()).not.toContain('资料库内容注入')
     expect(text()).not.toContain('每次询问')
-    await act(async () => { fireEvent.click(byLabel('编辑 周报撰写助手')!) })
-    await waitFor(() => { if (!sheet()) throw new Error('sheet not open') })
-    expect(sheet()!.getAttribute('data-side')).toBe('right')
-    expect(sheet()!.className).toContain('fox-settings-sheet')
-    expect((sheet()!.querySelector('input') as HTMLInputElement).value).toBe('周报撰写助手')
+    await act(async () => { fireEvent.click(buttonNamed(document, '打开专家中心')!) })
+    expect(navigated.at(-1)).toEqual(['agents'])
   })
 
   test('an expert id in the route reopens that expert (the way back from 添加技能)', async () => {
@@ -103,6 +105,38 @@ describe('Agent page', () => {
     await act(async () => { fireEvent.click(buttonNamed(sheet()!, '添加技能')!) })
     expect(navigated.at(-1)).toEqual(['skills'])
     expect(JSON.parse(window.sessionStorage.getItem(PLUGIN_RETURN_KEY)!)).toEqual({ view: 'settings-ai', entityId: 'local-writer', label: '周报撰写助手' })
+  })
+})
+
+describe('伙伴 page', () => {
+  test('saves real defaults consumed by the new-companion flow', async () => {
+    await mount(React.createElement(pages.CompanionsSettingsPage, { ...base, navigate: () => {} }))
+    expect(text()).toContain('工作目录')
+    expect(text()).toContain('workspace/')
+    expect(text()).toContain('notes/')
+    expect(text()).toContain('新伙伴默认值')
+    await act(async () => {
+      fireEvent.change(byLabel('新伙伴默认执行方式')!, { target: { value: 'read_only' } })
+      fireEvent.change(byLabel('新伙伴默认提醒方式')!, { target: { value: 'action_only' } })
+    })
+    await act(async () => { fireEvent.click(buttonNamed(document, '保存伙伴默认值')!) })
+    expect(window.localStorage.getItem('fox.preferences.companionDefaultPermission')).toBe('read_only')
+    expect(window.localStorage.getItem('fox.preferences.companionDefaultReminder')).toBe('action_only')
+    expect((buttonNamed(document, '保存伙伴默认值') as HTMLButtonElement).disabled).toBe(true)
+  })
+})
+
+describe('权限与安全 page', () => {
+  test('owns project permissions and global tool rules; the old project route still works', async () => {
+    expect(settingsRouteRedirect('settings-projects')).toEqual({ view: 'settings-security', section: 'projects' })
+    expect(settingsNavigationView('settings-projects')).toBe('settings-security')
+    await mount(React.createElement(pages.SecuritySettingsPage, { ...base, navigate: () => {} }))
+    await waitFor(() => { if (!byLabel('新项目权限')) throw new Error('project default missing') })
+    expect(text()).toContain('项目权限')
+    expect(text()).toContain('全局工具规则')
+    await act(async () => { fireEvent.click(buttonNamed(document, '管理规则')!) })
+    await waitFor(() => { if (!sheet()) throw new Error('hook sheet not open') })
+    expect(sheet()!.textContent).toContain('生命周期 Hook')
   })
 })
 

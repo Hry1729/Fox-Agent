@@ -15,7 +15,7 @@
 // A click-through of the packaged Tauri app against a real Kernel is a separate
 // manual acceptance item; nothing here claims to be that.
 
-import { afterEach, describe, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, describe, expect, mock, test } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 
 if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register()
@@ -48,6 +48,7 @@ const backends = new Map<string, Backend>()
 const enqueueCalls: Array<{ conversationId: string; content: string; messageId?: string; lane?: string }> = []
 const discardCalls: Array<{ conversationId: string; messageId: string }> = []
 let listImpl: ((conversationId: string) => Promise<unknown> | undefined) | null = null
+let loseNextEnqueueReply = false
 
 function backend(conversationId: string): Backend {
   let current = backends.get(conversationId)
@@ -71,12 +72,9 @@ class BoundaryError extends Error {
   }
 }
 
-const actualDesktopClient = await import('../src/features/conversations/api/desktop-client')
+const actualDesktopClient = { ...await import('../src/features/conversations/api/desktop-client') }
 
-mock.module('../src/features/conversations/api/desktop-client', () => ({
-  ...actualDesktopClient,
-  desktopRuntimeAvailable: true,
-  desktopClient: {
+const steeringClient = {
     ...actualDesktopClient.desktopClient,
     listRunSteering: async (conversationId: string) => {
       const injected = listImpl?.(conversationId)
@@ -117,6 +115,10 @@ mock.module('../src/features/conversations/api/desktop-client', () => ({
         appliedDispatchKey: null,
       }
       state.rows.push(row)
+      if (loseNextEnqueueReply) {
+        loseNextEnqueueReply = false
+        throw new BoundaryError('steering.transport_lost', '连接中断')
+      }
       return { runId: state.activeRun, seq: row.seq, messageId: row.messageId, status: row.status, lane: row.lane }
     },
     discardRunSteering: async (conversationId: string, messageId: string) => {
@@ -129,8 +131,14 @@ mock.module('../src/features/conversations/api/desktop-client', () => ({
       state.rows.splice(index, 1)
       return { removed: true }
     },
-  },
+}
+
+mock.module('../src/features/conversations/api/desktop-client', () => ({
+  ...actualDesktopClient,
+  desktopRuntimeAvailable: true,
+  desktopClient: steeringClient,
 }))
+afterAll(() => mock.module('../src/features/conversations/api/desktop-client', () => actualDesktopClient))
 
 const React = await import('react')
 const { act, cleanup, renderHook, waitFor } = await import('@testing-library/react')
@@ -142,6 +150,7 @@ afterEach(() => {
   enqueueCalls.length = 0
   discardCalls.length = 0
   listImpl = null
+  loseNextEnqueueReply = false
   window.localStorage.clear()
 })
 
@@ -264,23 +273,8 @@ describe('repeated submits never deliver twice', () => {
     await waitFor(() => expect(first.result.current.runId).toBe('run-conv-a'))
     // The Host stores the row, but the client never learns of it: the reply is
     // lost to a dropped connection.
-    const lost = new BoundaryError('steering.transport_lost', '连接中断')
     const original = state.rows
-    let failNext = true
-    const boundary = (await import('../src/features/conversations/api/desktop-client')).desktopClient
-    const realEnqueue = boundary.enqueueRunSteering
-    ;(boundary as { enqueueRunSteering: typeof realEnqueue }).enqueueRunSteering = async (
-      conversationId: string,
-      content: string,
-      options?: { messageId?: string; lane?: string },
-    ) => {
-      const result = await realEnqueue(conversationId, content, options)
-      if (failNext) {
-        failNext = false
-        throw lost
-      }
-      return result
-    }
+    loseNextEnqueueReply = true
     await act(async () => {
       expect(await first.result.current.submit('产物放到 D:\\out', 'current')).toBe(false)
     })
@@ -296,7 +290,6 @@ describe('repeated submits never deliver twice', () => {
     })
     expect(enqueueCalls[1].messageId).toBe(enqueueCalls[0].messageId)
     expect(state.rows).toHaveLength(1)
-    ;(boundary as { enqueueRunSteering: typeof realEnqueue }).enqueueRunSteering = realEnqueue
   })
 })
 

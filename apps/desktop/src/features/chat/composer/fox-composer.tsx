@@ -21,13 +21,11 @@ import { useMentionFiles } from './use-mention-files'
 import { ComposerCommandItem, ComposerPersonItem, useMentionMatches, applyMention as insertMention } from '@/components/assistant-ui/upstream/elements/composer'
 import { CommandItem as CommandPrimitiveItem } from 'cmdk'
 import { Attachment, AttachmentInfo, AttachmentPreview, AttachmentRemove, Attachments } from '@/components/ai-elements/attachments'
-import { Confirmation, ConfirmationAction, ConfirmationActions, ConfirmationRequest, ConfirmationTitle } from '@/components/ai-elements/confirmation'
 import { PromptInput, PromptInputActionAddAttachments, PromptInputActionMenu, PromptInputActionMenuContent, PromptInputActionMenuItem, PromptInputActionMenuTrigger, PromptInputBody, PromptInputFooter, PromptInputSelect, PromptInputSelectContent, PromptInputSelectItem, PromptInputSelectTrigger, PromptInputSelectValue, PromptInputSubmit, PromptInputTextarea, PromptInputTools, usePromptInputAttachments } from '@/components/ai-elements/prompt-input'
-import { Suggestion, Suggestions } from '@/components/ai-elements/suggestion'
+import { QuestionPages } from './question-answer-rows'
 import { BorderBeam } from '@/components/effects/border-beam'
 import { Button } from '@/components/ui/button'
 import { Command, CommandEmpty, CommandGroup, CommandItem, CommandList } from '@/components/ui/command'
-import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { type RunSteeringLane, knowledgeReferenceFromLegacyBinding, knowledgeReferenceKey } from '@/features/conversations/api/desktop-client'
@@ -41,15 +39,15 @@ import { AGENT_BACKEND_LABELS, type AgentBackendId } from '@/features/conversati
 import { type ComposerAccessMode } from '../access-mode'
 import { FoxApprovalControl } from './composer-approval-control'
 import type { NativePermissionCatalog } from '@/features/conversations/model/agent-native-permission'
-import { ArrowUp, Eye, Play, Check, ChevronDown, CircleHelp, ShieldAlert, CircleStop, Clock3, CornerDownLeft, FileText, FolderOpen, Library, LoaderCircle, Plus, Sparkles, Terminal, UserRound, X } from 'lucide-react'
+import { ArrowUp, Eye, Play, Check, ChevronDown, ShieldAlert, CircleStop, Clock3, CornerDownLeft, FileText, FolderOpen, Library, LoaderCircle, Plus, Sparkles, Terminal, UserRound, X } from 'lucide-react'
 import { type ChangeEvent, type ComponentProps, type Dispatch, type KeyboardEvent, type ReactNode, type SetStateAction, Suspense, lazy, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { type SlashCommand, slashCommandRuntimeText, slashCommands } from './fox-slash-commands'
 import { ApprovalPrompt, QuestionPrompt } from '../demo/fox-demo-prompts'
-import { type ChatState, ComposerRuntimeContext, type ComposerRuntimeContextValue, isConfirmationQuestion, layoutStorage } from '../fox-shared'
+import { type ChatState, ComposerRuntimeContext, type ComposerRuntimeContextValue, layoutStorage } from '../fox-shared'
 import { compactValue } from '../timeline/fox-runtime-process-model'
 
-const RuntimeApprovalPrompt = lazy(() => import('../components/RuntimeApprovalPrompt').then(module => ({ default: module.RuntimeApprovalPrompt })))
+const RuntimeApprovalQueue = lazy(() => import('../components/RuntimeApprovalPrompt').then(module => ({ default: module.RuntimeApprovalQueue })))
 
 export function ProjectNoteChoices({ runtimeContext }: { runtimeContext: ComposerRuntimeContextValue }) {
   const projectNoteOptions = runtimeContext.projectNoteOptions
@@ -160,7 +158,7 @@ type ComposerReplyDetail = {
 
 /**
  * 模型是否已经开始回复。三条任一即可：assistant 有正文、出现 role 为 tool 的消息、
- * 或 `toolCalls` 非空。Fox 经常先调工具、很久才出正文，这段时间输入框就要收成窄样式。
+ * 或 `toolCalls` 非空。旧会话没有 Run 记录时，用它判断第一轮是否已完成。
  * `message.started` 和发送失败插入的空 assistant 行仍不算。
  */
 export function conversationHasModelReply(detail: ComposerReplyDetail) {
@@ -187,32 +185,24 @@ export function conversationFirstReplyCompleted(detail: ComposerReplyDetail) {
 }
 
 /**
- * 桌面运行时：第一轮回复完成之前用新对话高输入框（项目 / Agent 托盘）。正在回复时
- * （本轮还在跑且模型已经开始输出）收成窄样式；这一轮被取消或失败后托盘回来，项目和
- * Agent 还能换（13.38 R2-4）。第一轮完成后一直是窄样式。
- * 已选中会话但 detail 还不是这一条（null，或仍是上一条）时先保持已有对话形态，避免切换时闪出托盘。
- * 未启用桌面运行时仍按时间线是否为空。
+ * 提交首条消息时，时间线已经有乐观消息。输入框跟随提交状态切换，
+ * 不等待模型响应。切换会话时先等 detail 对上，避免闪出新对话托盘。
  */
 export function composerUsesNewConversation(input: {
   desktopEnabled: boolean
   timelineEmpty: boolean
   selectedConversationId?: string | null
   detail?: ComposerReplyDetail
-  /** 这个会话当前有没有进行中的 Run。 */
-  running?: boolean
 }) {
-  if (!input.desktopEnabled) return input.timelineEmpty
+  if (!input.timelineEmpty) return false
+  if (!input.desktopEnabled) return true
   const selectedId = input.selectedConversationId
   if (selectedId && input.detail?.conversation?.id !== selectedId) return false
-  if (conversationFirstReplyCompleted(input.detail)) return false
-  if (input.running && conversationHasModelReply(input.detail)) return false
-  return true
+  return !input.detail?.messages?.some(message => message.role === 'user')
+    && !conversationFirstReplyCompleted(input.detail)
+    && !conversationHasModelReply(input.detail)
 }
 
-/**
- * 13.37 / 13.38：托盘上的项目和 Agent 什么时候不能再换。只有不再是新对话形态（第一轮已完成，
- * 或正在回复）的已选中会话才冻结；新对话、发送失败后恢复的草稿、第一轮被取消或失败的会话都能改。
- */
 export function composerEntryFrozen(input: { desktopEnabled: boolean; selectedConversationId?: string | null; newConversation: boolean }) {
   return Boolean(input.desktopEnabled && input.selectedConversationId && !input.newConversation)
 }
@@ -227,7 +217,7 @@ function FrozenConversationAgent({ backend }: { backend: AgentBackendId }) {
   )
 }
 
-function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLockedReason = null, initialAttachments, onInitialAttachmentsConsumed, resetKey, draft, setDraft, chatState, centered = false, newConversation, entryFrozen = false, boundAgentBackend = null, dark = false, runtimeControlled = false, runtimeInitializing = false, projectRoot, projectPermissionMode, activeAgent, activeExpert, expertReadOnly = false, expertToolAvailability, agents = [], modelService, runtimeCapabilities, yuxiModels = [], knowledgeBindings = [], questionRequest, goalProgressData, runtimeApprovals = [], approvalsInThread = false, steeringConversationId, steeringActive = false, onProject, onPermissionModeChange, onKnowledge, onAgentChange, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onApprove, onDeny, onAnswer, onResolveApproval, onResolveWorkModeConfirmation, onResolvePlanRevision, onResolveWorkflowGate, onEvidenceClick, onStatusChange, onCancel, sendFailureReason, noticeBackend = null }: { /** Row rendered inside the composer container, directly above the input box (Agent backend bar). */ topSlot?: ReactNode; /** The approval mode selector of an external Agent's conversation (replaces Fox's own). */ approvalControl?: ReactNode; /** Fox / PiNative modes from the Host (`agent_backend_approval_modes`). */ foxApprovalCatalog?: NativePermissionCatalog | null; /** When set, the conversation is read-only: input and send are disabled with this reason. */ inputLockedReason?: string | null; initialAttachments?: ComposerInitialAttachments | null; onInitialAttachmentsConsumed?: (requestId: number) => void; resetKey: number; draft: string; setDraft: Dispatch<SetStateAction<string>>; chatState: ChatState; centered?: boolean; newConversation?: boolean; /** 模型已经回复过的会话：托盘上的项目和 Agent 只展示这个会话自己的值，不能再换。 */ entryFrozen?: boolean; /** 已选中会话自己的 Agent；未选中时仍用草稿里的 Agent。 */ boundAgentBackend?: AgentBackendId | null; dark?: boolean; runtimeControlled?: boolean; runtimeInitializing?: boolean; projectRoot?: string | null; projectPermissionMode?: ComposerAccessMode | null; activeAgent?: AgentRecord | null; activeExpert?: AgentRecord | null; expertReadOnly?: boolean; expertToolAvailability?: ExpertToolAvailability; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; goalProgressData?: GoalProgressData | null; runtimeApprovals?: ApprovalRecord[]; /** UI 1104-07：审批卡由对话流渲染，输入框保持独立，不再切成审批卡。 */ approvalsInThread?: boolean; steeringConversationId?: string; steeringActive?: boolean; onProject?: () => void; onPermissionModeChange?: (permissionMode: ComposerAccessMode, options?: { confirmedFullAccess?: boolean }) => void | Promise<void>; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onViewExpert?: () => void; onChangeExpert?: () => void; onRemoveExpert?: () => void | Promise<void>; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onApprove?: () => void; onDeny?: () => void; onAnswer?: (answer: string) => void; onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>; onResolveWorkModeConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>; onResolvePlanRevision?: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onResolveWorkflowGate?: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => boolean | void | Promise<boolean | void>; /** Why the last send did not start (Host error), read right after onSubmitPrompt returns 'error'. */ sendFailureReason?: () => string | null | undefined; /** 当前草稿或已打开会话的 Agent，用来写「dsh 还没有登录」这种通知标题。 */ noticeBackend?: AgentBackendId | null }) {
+function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLockedReason = null, initialAttachments, onInitialAttachmentsConsumed, resetKey, draft, setDraft, chatState, centered = false, newConversation, entryFrozen = false, boundAgentBackend = null, dark = false, runtimeControlled = false, runtimeInitializing = false, projectRoot, projectPermissionMode, activeAgent, activeExpert, expertReadOnly = false, expertToolAvailability, agents = [], modelService, runtimeCapabilities, yuxiModels = [], knowledgeBindings = [], questionRequest, goalProgressData, runtimeApprovals = [], approvalsInThread = false, steeringConversationId, steeringActive = false, onProject, onPermissionModeChange, onKnowledge, onAgentChange, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onApprove, onDeny, onAnswer, onResolveApproval, onResolveWorkModeConfirmation, onResolvePlanRevision, onResolveWorkflowGate, onEvidenceClick, onStatusChange, onCancel, sendFailureReason, noticeBackend = null }: { /** Row rendered inside the composer container, directly above the input box (Agent backend bar). */ topSlot?: ReactNode; /** The approval mode selector of an external Agent's conversation (replaces Fox's own). */ approvalControl?: ReactNode; /** Fox / PiNative modes from the Host (`agent_backend_approval_modes`). */ foxApprovalCatalog?: NativePermissionCatalog | null; /** When set, the conversation is read-only: input and send are disabled with this reason. */ inputLockedReason?: string | null; initialAttachments?: ComposerInitialAttachments | null; onInitialAttachmentsConsumed?: (requestId: number) => void; resetKey: number; draft: string; setDraft: Dispatch<SetStateAction<string>>; chatState: ChatState; centered?: boolean; newConversation?: boolean; /** 模型已经回复过的会话：托盘上的项目和 Agent 只展示这个会话自己的值，不能再换。 */ entryFrozen?: boolean; /** 已选中会话自己的 Agent；未选中时仍用草稿里的 Agent。 */ boundAgentBackend?: AgentBackendId | null; dark?: boolean; runtimeControlled?: boolean; runtimeInitializing?: boolean; projectRoot?: string | null; projectPermissionMode?: ComposerAccessMode | null; activeAgent?: AgentRecord | null; activeExpert?: AgentRecord | null; expertReadOnly?: boolean; expertToolAvailability?: ExpertToolAvailability; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; goalProgressData?: GoalProgressData | null; runtimeApprovals?: ApprovalRecord[]; approvalsInThread?: boolean; steeringConversationId?: string; steeringActive?: boolean; onProject?: () => void; onPermissionModeChange?: (permissionMode: ComposerAccessMode, options?: { confirmedFullAccess?: boolean }) => void | Promise<void>; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onViewExpert?: () => void; onChangeExpert?: () => void; onRemoveExpert?: () => void | Promise<void>; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onApprove?: () => void; onDeny?: () => void; onAnswer?: (answer: string) => void; onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>; onResolveWorkModeConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>; onResolvePlanRevision?: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onResolveWorkflowGate?: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => boolean | void | Promise<boolean | void>; /** Why the last send did not start (Host error), read right after onSubmitPrompt returns 'error'. */ sendFailureReason?: () => string | null | undefined; /** 当前草稿或已打开会话的 Agent，用来写「dsh 还没有登录」这种通知标题。 */ noticeBackend?: AgentBackendId | null }) {
   const runtimeContext = useContext(ComposerRuntimeContext)
   const companion = useContacts()
   const entry = useContext(ComposerEntryContext)
@@ -264,7 +254,6 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
     ? activeAgent.defaultModel
     : modelService?.modelId ?? (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) ?? '未配置模型'
   const [model, setModel] = useState(defaultModel)
-  const [questionFreeform, setQuestionFreeform] = useState('')
   const [questionSelections, setQuestionSelections] = useState<Record<string, string[]>>({})
   const [questionOtherAnswers, setQuestionOtherAnswers] = useState<Record<string, string>>({})
   const [commandOpen, setCommandOpen] = useState(false)
@@ -284,14 +273,22 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
   const mentionChoices = useMentionFiles(mentionOpen, steeringConversationId, runtimeContext.mentionFiles)
   const mentionQuery = draft.match(/@([^\s@]*)$/u)?.[1].toLocaleLowerCase() ?? ''
   const mentionFiles = useMentionMatches(draft, mentionChoices.files.map(name => ({ name, role: 'file' as const })))
+  const allowsCompanionMentions = Boolean(companion && !companion.privateChat && (!noticeBackend || noticeBackend === 'fox' || noticeBackend === 'pi'))
+  const mentionCompanions = mentionOpen && allowsCompanionMentions
+    ? companion?.list.companions.filter(item => !item.archivedAt && !item.deletingAt && item.displayName.toLocaleLowerCase().includes(mentionQuery)) ?? []
+    : []
+  const mentionItems = [
+    ...mentionCompanions.map(item => ({ id: `companion:${item.id}`, person: { name: item.displayName, role: 'companion' as const } })),
+    ...mentionFiles.map(person => ({ id: `file:${person.name}`, person })),
+  ]
   const commandQuery = draft.trimStart().slice(1).toLocaleLowerCase()
   const matchingCommands = slashCommands.filter(command => command.id.toLocaleLowerCase().startsWith(commandQuery))
   useEffect(() => {
     if (commandView === 'commands' && !matchingCommands.some(command => command.id === commandHighlight)) setCommandHighlight(matchingCommands[0]?.id ?? '')
   }, [commandView, matchingCommands, commandHighlight])
   useEffect(() => {
-    if (!mentionFiles.some(person => person.name === mentionHighlight)) setMentionHighlight(mentionFiles[0]?.name ?? '')
-  }, [mentionFiles, mentionHighlight])
+    if (!mentionItems.some(item => item.id === mentionHighlight)) setMentionHighlight(mentionItems[0]?.id ?? '')
+  }, [mentionItems, mentionHighlight])
   const attachmentDialogRef = useRef<() => void>(() => undefined)
 
   useEffect(() => () => {
@@ -317,7 +314,6 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
   useEffect(() => {
     setQuestionSelections({})
     setQuestionOtherAnswers({})
-    setQuestionFreeform('')
     questionSubmittingRef.current = false
     if (activeQuestionRequest) setStatus('ready')
   }, [activeQuestionRequest?.runId])
@@ -451,6 +447,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
   }
 
   const selectQuestionOption = (question: RuntimeQuestion, value: string) => {
+    setQuestionOtherAnswers(current => ({ ...current, [question.questionId]: '' }))
     setQuestionSelections((current) => {
       const selected = current[question.questionId] ?? []
       return {
@@ -463,7 +460,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
   }
 
   const questionSubmitting = Boolean(activeQuestionRequest && status === 'streaming')
-  const buildQuestionAnswer = (otherText: string) => {
+  const buildQuestionAnswer = (otherText = '') => {
     if (!activeQuestionRequest) return null
     const answers: Record<string, string | string[]> = {}
     const lines: string[] = []
@@ -490,7 +487,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
 
   const submitQuestionAnswer = async () => {
     if (!activeQuestionRequest || questionSubmittingRef.current) return
-    const answer = buildQuestionAnswer(questionFreeform)
+    const answer = buildQuestionAnswer()
     if (!answer) {
       toast.error('请先完成需要补充的事项')
       return
@@ -503,7 +500,6 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
       setStatus('ready')
       return
     }
-    setQuestionFreeform('')
     setQuestionSelections({})
     setQuestionOtherAnswers({})
     onStatusChange?.('streaming')
@@ -511,8 +507,6 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
 
   const pendingApprovals = runtimeApprovals
     .filter((approval) => approval.status === 'pending')
-    .sort((left, right) => left.requestedAt - right.requestedAt || left.id.localeCompare(right.id))
-  const activeApproval = approvalsInThread ? undefined : pendingApprovals[0]
   const demoApprovalPending = !runtimeControlled && chatState === 'approval' && Boolean(onApprove && onDeny)
   const demoQuestionPending = !runtimeControlled && chatState === 'question' && Boolean(onAnswer)
   const goalConfirmationPending = goalProgressData?.goal.status === 'proposed' && Boolean(onResolveWorkModeConfirmation)
@@ -650,7 +644,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
   const sendControls = sendButton
 
   const expertControl = !companion?.privateChat && !(newConversation && entry.draftAgentBackend && entry.draftAgentBackend !== 'fox') && displayExpert && onChangeExpert && <ExpertBindingChip expert={displayExpert} defaultLabel={!activeExpert} directSelection={newConversation} readOnly={expertReadOnly} toolAvailability={expertToolAvailability} onView={activeExpert ? onViewExpert ?? (() => {}) : entry.onViewDefaultExpert ?? (() => {})} onChange={onChangeExpert} />
-  const modelControl = companion?.privateChat ? null : isYuxiAgent ? <Models value={model} disabled={!supportsDynamicModelSwitch || chatState === 'running'} onValueChange={setModel} options={modelOptions.map(item => ({ id: item.spec, name: item.displayName || item.modelId, meta: item.providerDisplayName }))} fallbackLabel={defaultModel} /> : <ComposerModelPicker service={modelService} disabled={!runtimeControlled || chatState === 'running' || runtimeInitializing} onOpenSettings={entry.onOpenModelSettings} />
+  const modelControl = companion?.privateChat ? null : isYuxiAgent ? <Models menuRow={!newConversation} value={model} disabled={!supportsDynamicModelSwitch || chatState === 'running'} onValueChange={setModel} options={modelOptions.map(item => ({ id: item.spec, name: item.displayName || item.modelId, meta: item.providerDisplayName }))} fallbackLabel={defaultModel} /> : <ComposerModelPicker menuRow={!newConversation} service={modelService} disabled={!runtimeControlled || chatState === 'running' || runtimeInitializing} onOpenSettings={entry.onOpenModelSettings} />
 
   return (
     <div ref={composerRef} className={`fox-composer-wrap ${centered ? 'is-empty' : ''} ${newConversation ? 'is-new-conversation' : 'is-history'}`}>
@@ -659,37 +653,16 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
       <div ref={promptRef} className={`fox-prompt-shell ${decisionPending ? 'is-decision' : ''} ${approvalDecisionPending ? 'is-approval' : ''}`} onFocusCapture={() => setFocused(true)} onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false) }}>
         {decisionPending ? <div className="fox-decision-card">
           {demoApprovalPending && onApprove && onDeny && <ApprovalPrompt onApprove={onApprove} onDeny={onDeny} />}
-          {activeApproval && resolveRuntimeApproval && <div className="fox-decision-approval-list">
-            <Suspense fallback={<p role="status">正在读取审批…</p>}><RuntimeApprovalPrompt key={activeApproval.id} approval={activeApproval} onResolve={resolveRuntimeApproval} /></Suspense>
+          {composerApprovalPending && resolveRuntimeApproval && <div className="fox-decision-approval-list">
+            <Suspense fallback={<p role="status">正在读取审批…</p>}><RuntimeApprovalQueue approvals={pendingApprovals} onResolve={resolveRuntimeApproval} /></Suspense>
           </div>}
           {pendingApprovals.length === 0 && !demoApprovalPending && demoQuestionPending && onAnswer && <QuestionPrompt onAnswer={onAnswer} />}
-          {pendingApprovals.length === 0 && !demoApprovalPending && !demoQuestionPending && activeQuestionRequest && <div className="fox-question-decision-content">
-            <header><span><CircleHelp size={15} /></span><div><strong>需要你补充一点信息</strong><small>回答后 Fox 会继续刚才的任务</small></div></header>
-            <div className="fox-question-decision-list">
-              {activeQuestionRequest.questions.map((question, index) => isConfirmationQuestion(question) ? (
-                <Confirmation key={question.questionId} approval={{ id: question.questionId }} state="approval-requested" className="fox-question-confirmation">
-                  <ConfirmationRequest>
-                    <ConfirmationTitle>{question.question}</ConfirmationTitle>
-                    <ConfirmationActions>
-                      {question.options.map((option) => <ConfirmationAction key={option.value} disabled={questionSubmitting} variant={(questionSelections[question.questionId] ?? []).includes(option.value) ? 'default' : 'outline'} onClick={() => selectQuestionOption(question, option.value)}>{option.label}</ConfirmationAction>)}
-                    </ConfirmationActions>
-                  </ConfirmationRequest>
-                </Confirmation>
-              ) : (
-                <section key={question.questionId} className="fox-question-field">
-                  <div><b>{activeQuestionRequest.questions.length > 1 ? `${index + 1}. ` : ''}{question.question}</b>{question.multiSelect && <small>可多选</small>}</div>
-                  <Suggestions className="fox-question-suggestions">
-                    {question.options.map((option) => <Suggestion key={option.value} suggestion={option.value} disabled={questionSubmitting} variant={(questionSelections[question.questionId] ?? []).includes(option.value) ? 'default' : 'outline'} onClick={() => selectQuestionOption(question, option.value)}>{option.label}</Suggestion>)}
-                  </Suggestions>
-                  {question.allowOther && activeQuestionRequest.questions.length > 1 && <Input disabled={questionSubmitting} value={questionOtherAnswers[question.questionId] ?? ''} onChange={(event) => setQuestionOtherAnswers((current) => ({ ...current, [question.questionId]: event.target.value }))} placeholder="输入这一项的补充答案" />}
-                </section>
-              ))}
-            </div>
-            <div className="fox-question-decision-actions">
-              {activeQuestionRequest.questions.length === 1 && activeQuestionRequest.questions[0]?.allowOther && <Input disabled={questionSubmitting} value={questionFreeform} onChange={(event) => setQuestionFreeform(event.currentTarget.value)} placeholder="也可以输入自己的答案" />}
-              <Button disabled={questionSubmitting} onClick={() => void submitQuestionAnswer()}>{questionSubmitting ? '正在提交…' : '确认并继续'}</Button>
-            </div>
-          </div>}
+          {pendingApprovals.length === 0 && !demoApprovalPending && !demoQuestionPending && !questionInThread && activeQuestionRequest &&
+            <QuestionPages key={activeQuestionRequest.runId} questions={activeQuestionRequest.questions} selections={questionSelections} otherAnswers={questionOtherAnswers} submitting={questionSubmitting}
+              onSelect={selectQuestionOption} onOtherChange={(question, value) => {
+                setQuestionOtherAnswers(current => ({ ...current, [question.questionId]: value }))
+                setQuestionSelections(current => ({ ...current, [question.questionId]: [] }))
+              }} onSubmit={() => void submitQuestionAnswer()} />}
           {pendingApprovals.length === 0 && !demoApprovalPending && !demoQuestionPending && !activeQuestionRequest && (goalConfirmationPending || planRevisionPending || workflowGatePending) && goalProgressData && <div className="fox-goal-decision-content">
             <GoalProgress data={goalProgressData} defaultExpanded={false} onEvidenceClick={onEvidenceClick} onResolveConfirmation={onResolveWorkModeConfirmation} onResolvePlanRevision={onResolvePlanRevision} onResolveWorkflowGate={onResolveWorkflowGate} />
           </div>}
@@ -734,7 +707,22 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
             </>}
           </CommandList>
         </Command></ComposerMenu>
-        <ComposerMenu open={mentionOpen}><Command ref={mentionMenuRef} value={mentionHighlight} onValueChange={setMentionHighlight} loop className="fox-mention-menu"><div className="fox-command-title"><span>引用项目文件</span><kbd>@</kbd></div><CommandList><CommandEmpty>{mentionChoices.loading ? '正在读取文件…' : mentionChoices.error || (projectRoot ? '没有匹配的项目文件' : '选择项目后可引用文件')}</CommandEmpty><CommandGroup>{mentionFiles.map(person => <CommandPrimitiveItem asChild key={person.name} value={person.name} onSelect={() => applyMention(person.name)}><ComposerPersonItem person={person} active={mentionHighlight === person.name} title={person.name} onMouseDown={event => event.preventDefault()} className="w-full rounded-[var(--fox-radius-control)]" /></CommandPrimitiveItem>)}</CommandGroup></CommandList></Command></ComposerMenu>
+        <ComposerMenu open={mentionOpen}>
+          <Command ref={mentionMenuRef} value={mentionHighlight} onValueChange={setMentionHighlight} loop className="fox-mention-menu">
+            <div className="fox-command-title"><span>{allowsCompanionMentions ? '提及伙伴或引用文件' : '引用项目文件'}</span><kbd>@</kbd></div>
+            <CommandList>
+              <CommandEmpty>{mentionChoices.loading ? '正在读取文件…' : mentionChoices.error || (allowsCompanionMentions ? '没有匹配的伙伴或文件' : projectRoot ? '没有匹配的项目文件' : '选择项目后可引用文件')}</CommandEmpty>
+              {(['companion', 'file'] as const).map(role => {
+                const items = mentionItems.filter(item => item.person.role === role)
+                return items.length > 0 && <CommandGroup key={role} heading={allowsCompanionMentions ? (role === 'companion' ? '伙伴' : '项目文件') : undefined}>
+                  {items.map(({ id, person }) => <CommandPrimitiveItem asChild key={id} value={id} onSelect={() => applyMention(person.name)}>
+                    <ComposerPersonItem person={person} active={mentionHighlight === id} title={person.name} onMouseDown={event => event.preventDefault()} className="w-full rounded-[var(--fox-radius-control)]" />
+                  </CommandPrimitiveItem>)}
+                </CommandGroup>
+              })}
+            </CommandList>
+          </Command>
+        </ComposerMenu>
         {runtimeControlled && <RunSteeringStrip steering={steering} open={steeringStripOpen} onOpenChange={setSteeringStripOpen} onQueueForNextTask={(content) => setDraft((value) => (value.trim() ? `${value}\n${content}` : content))} />}
         {runtimeControlled && steeringView.retainedForNextTask && steeringView.retainedNotice && (
           <p className="fox-steering-composer-notice" data-testid="fox-steering-retained">
@@ -873,7 +861,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
         <ComposerAttachmentPreview knowledgeChips={runtimeControlled ? knowledgeChips : []} onKnowledge={openKnowledge} />
         {companion?.privateChat && <ContactQuoteDraft />}
         <PromptInputBody>
-          <PromptInputTextarea value={draft} disabled={questionSubmitting || Boolean(inputLockedReason)} aria-disabled={inputLockedReason ? true : undefined} title={inputLockedReason ?? undefined} spellCheck={spellcheckEnabled} onChange={onDraftChange} onKeyDown={onComposerKeyDown} className="fox-prompt-textarea" placeholder={inputLockedReason ? '此会话为只读，不能发送' : activeQuestionRequest ? '补充你的答案，或直接选择上方选项' : (companion?.current ? '给'+companion.current.displayName+'发消息…' : '给 Fox 发消息，输入 / 查看命令，@ 引用文件…')} />
+          <PromptInputTextarea value={draft} disabled={questionSubmitting || Boolean(inputLockedReason)} aria-disabled={inputLockedReason ? true : undefined} title={inputLockedReason ?? undefined} spellCheck={spellcheckEnabled} onChange={onDraftChange} onKeyDown={onComposerKeyDown} className="fox-prompt-textarea" placeholder={inputLockedReason ? '此会话为只读，不能发送' : activeQuestionRequest ? '补充你的答案，或直接选择上方选项' : (companion?.current ? '给'+companion.current.displayName+'发消息…' : allowsCompanionMentions ? '给 Fox 发消息，输入 / 查看命令，@ 提及伙伴或引用文件…' : '给 Fox 发消息，输入 / 查看命令，@ 引用文件…')} />
         </PromptInputBody>
         <PromptInputFooter className="fox-prompt-toolbar">
           <PromptInputTools className="fox-composer-tools">

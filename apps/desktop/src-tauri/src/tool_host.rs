@@ -16,7 +16,6 @@ use std::{
 #[path = "command_environment.rs"]
 mod command_environment;
 
-
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 /// Per-stream hard retention for command output. Everything up to this cap is
 /// kept and handed to the Host result pipeline (which spills large results to
@@ -119,7 +118,10 @@ impl ToolErrorCode {
             (Self::ComputationFailed.as_str(), Self::ComputationFailed),
             (Self::ComputationSyntax.as_str(), Self::ComputationSyntax),
             (Self::ComputationRuntime.as_str(), Self::ComputationRuntime),
-            (Self::ComputationTimedOut.as_str(), Self::ComputationTimedOut),
+            (
+                Self::ComputationTimedOut.as_str(),
+                Self::ComputationTimedOut,
+            ),
             (Self::SandboxUnavailable.as_str(), Self::SandboxUnavailable),
             (Self::Unknown.as_str(), Self::Unknown),
         ]
@@ -150,7 +152,11 @@ pub struct ToolPreview {
 
 #[derive(Debug, Clone)]
 pub enum PreparedToolAction {
-    CommandJob {root:PathBuf,input:Value,preview:ToolPreview},
+    CommandJob {
+        root: PathBuf,
+        input: Value,
+        preview: ToolPreview,
+    },
     WriteFile {
         root: PathBuf,
         path: PathBuf,
@@ -188,9 +194,21 @@ impl PreparedToolAction {
     /// returned unchanged.
     pub fn with_command_environment(self, entries: Vec<(String, String)>) -> Self {
         match self {
-            Self::RunCommand { root, command, cwd, timeout, preview, .. } => {
-                Self::RunCommand { root, command, cwd, timeout, preview, extra_env: entries }
-            }
+            Self::RunCommand {
+                root,
+                command,
+                cwd,
+                timeout,
+                preview,
+                ..
+            } => Self::RunCommand {
+                root,
+                command,
+                cwd,
+                timeout,
+                preview,
+                extra_env: entries,
+            },
             other => other,
         }
     }
@@ -225,7 +243,9 @@ pub fn prepare(
     match tool {
         "write_file" => prepare_write(input, &root),
         "edit_file" => prepare_edit(input, &root),
-        "run_command" if input.get("action").is_some_and(|a|a!="sync") => crate::runtime_host::command_jobs::prepare(input,&root),
+        "run_command" if input.get("action").is_some_and(|a| a != "sync") => {
+            crate::runtime_host::command_jobs::prepare(input, &root)
+        }
         "run_command" => prepare_command(input, &root),
         _ => Err(ToolErrorCode::InvalidInput.error(format!("unsupported host tool: {tool}"))),
     }
@@ -240,7 +260,9 @@ pub(crate) trait FileCommitContext {
     fn capture_before(&mut self, target: &Path) -> Result<(), String>;
     fn record_committed(&mut self, target: &Path) -> Result<(), String>;
     fn mark_applying(&mut self) {}
-    fn mark_directory_creation(&mut self) { self.mark_applying(); }
+    fn mark_directory_creation(&mut self) {
+        self.mark_applying();
+    }
     fn mark_committed(&mut self) {}
     fn mark_not_applied(&mut self) {}
 }
@@ -252,59 +274,155 @@ pub(crate) fn canonical_file_identity(root: &Path, value: &str) -> Result<String
     Ok(target.to_string_lossy().into_owned())
 }
 
-pub(crate) fn prepare_admitted_file(tool: &str, input: &Value, root: &str,
-    baseline: &str) -> Result<PreparedToolAction, String> {
+pub(crate) fn prepare_admitted_file(
+    tool: &str,
+    input: &Value,
+    root: &str,
+    baseline: &str,
+) -> Result<PreparedToolAction, String> {
     let mut trusted = input.clone();
-    let object = trusted.as_object_mut().ok_or("file input must be an object")?;
+    let object = trusted
+        .as_object_mut()
+        .ok_or("file input must be an object")?;
     object.insert("expectedVersion".into(), Value::String(baseline.into()));
     prepare(tool, &trusted, root)
 }
 
 /// Binary/text artifacts are resolved by the Host's own conversation context,
 /// never a model source path. The returned action uses the normal write gate.
-pub(crate) fn prepare_with_artifact_context(tool:&str,input:&Value,root:&str,
-    database:&crate::database::Database,sessions_dir:&Path,conversation_id:&str,
-) -> Result<PreparedToolAction,String> {
-    if tool!="write_file" || input.get("artifactId").is_none(){return prepare(tool,input,root);}
-    if input.get("content").is_some(){return Err(ToolErrorCode::InvalidInput.error("write_file accepts exactly one of content or artifactId"));}
-    let id=required_string(input,"artifactId")?;
-    let artifact=database.artifact_for_conversation(conversation_id,&id)?.ok_or_else(||ToolErrorCode::PermissionDenied.error("Artifact does not belong to this conversation"))?;
-    let owned=crate::runtime_host::attachment_compute::authorized_artifact_root(sessions_dir,conversation_id)?
-        .ok_or_else(||ToolErrorCode::PermissionDenied.error("No computed artifacts exist in this conversation"))?;
-    if artifact.byte_size<0 || artifact.byte_size>crate::data_compute::MAX_FILE_BYTES as i64 {return Err(ToolErrorCode::InvalidInput.error("Artifact exceeds 16 MiB publication limit"));}
-    let source=crate::artifact_gateway::validate_record(&artifact,&[owned]).map_err(|e|ToolErrorCode::InvalidInput.error(e.message))?;
+pub(crate) fn prepare_with_artifact_context(
+    tool: &str,
+    input: &Value,
+    root: &str,
+    database: &crate::database::Database,
+    sessions_dir: &Path,
+    conversation_id: &str,
+) -> Result<PreparedToolAction, String> {
+    if tool != "write_file" || input.get("artifactId").is_none() {
+        return prepare(tool, input, root);
+    }
+    if input.get("content").is_some() {
+        return Err(ToolErrorCode::InvalidInput
+            .error("write_file accepts exactly one of content or artifactId"));
+    }
+    let id = required_string(input, "artifactId")?;
+    let artifact = database
+        .artifact_for_conversation(conversation_id, &id)?
+        .ok_or_else(|| {
+            ToolErrorCode::PermissionDenied.error("Artifact does not belong to this conversation")
+        })?;
+    let owned = crate::runtime_host::attachment_compute::authorized_artifact_root(
+        sessions_dir,
+        conversation_id,
+    )?
+    .ok_or_else(|| {
+        ToolErrorCode::PermissionDenied.error("No computed artifacts exist in this conversation")
+    })?;
+    if artifact.byte_size < 0 || artifact.byte_size > crate::data_compute::MAX_FILE_BYTES as i64 {
+        return Err(ToolErrorCode::InvalidInput.error("Artifact exceeds 16 MiB publication limit"));
+    }
+    let source = crate::artifact_gateway::validate_record(&artifact, &[owned])
+        .map_err(|e| ToolErrorCode::InvalidInput.error(e.message))?;
     crate::data_compute::validate_input_path(&source)?;
-    let mut open=fs::OpenOptions::new();open.read(true);
+    let mut open = fs::OpenOptions::new();
+    open.read(true);
     #[cfg(windows)]
-    {use std::os::windows::fs::OpenOptionsExt;open.share_mode(1).custom_flags(0x200000);}
-    let file=open.open(&source).map_err(|e|ToolErrorCode::InvalidInput.error(format!("Cannot read computed artifact: {e}")))?;
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        open.share_mode(1).custom_flags(0x200000);
+    }
+    let file = open.open(&source).map_err(|e| {
+        ToolErrorCode::InvalidInput.error(format!("Cannot read computed artifact: {e}"))
+    })?;
     #[cfg(windows)]
     if crate::runtime_host::attachment_compute::opened_final_path(&file)? != source {
-        return Err(ToolErrorCode::PermissionDenied.error("Computed artifact identity changed before publication"));
+        return Err(ToolErrorCode::PermissionDenied
+            .error("Computed artifact identity changed before publication"));
     }
-    let mut bytes=Vec::new();file.take(crate::data_compute::MAX_FILE_BYTES as u64+1).read_to_end(&mut bytes)
-        .map_err(|e|ToolErrorCode::InvalidInput.error(format!("Cannot snapshot computed artifact: {e}")))?;
-    if bytes.len()>crate::data_compute::MAX_FILE_BYTES || bytes.len() as i64!=artifact.byte_size
-        || !artifact.sha256.as_deref().is_some_and(|hash|file_version(&bytes).strip_prefix("sha256:").unwrap_or_default().eq_ignore_ascii_case(hash.strip_prefix("sha256:").unwrap_or(hash))) {
-        return Err(ToolErrorCode::InvalidInput.error("Computed artifact changed during publication preparation"));
+    let mut bytes = Vec::new();
+    file.take(crate::data_compute::MAX_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| {
+            ToolErrorCode::InvalidInput.error(format!("Cannot snapshot computed artifact: {e}"))
+        })?;
+    if bytes.len() > crate::data_compute::MAX_FILE_BYTES
+        || bytes.len() as i64 != artifact.byte_size
+        || !artifact.sha256.as_deref().is_some_and(|hash| {
+            file_version(&bytes)
+                .strip_prefix("sha256:")
+                .unwrap_or_default()
+                .eq_ignore_ascii_case(hash.strip_prefix("sha256:").unwrap_or(hash))
+        })
+    {
+        return Err(ToolErrorCode::InvalidInput
+            .error("Computed artifact changed during publication preparation"));
     }
-    let root=canonical_directory(Path::new(root),"project folder")?;
-    let target=resolve_write_target(&root,&required_string(input,"path")?)?;
-    let version=current_version_of(&target,true)?.unwrap_or_else(||"missing".into());
-    let expected=input["expectedVersion"].as_str().filter(|s|!s.trim().is_empty()).unwrap_or("missing");
-    ensure_unchanged(expected,if version=="missing" {None}else{Some(&version)})?;
-    let preview=ToolPreview{tool:"write_file".into(),title:if version=="missing"{"创建文件".into()}else{"修改文件".into()},
-        target:target.to_string_lossy().into_owned(),summary:format!("Publish verified computed artifact {} ({} bytes, {})",artifact.display_name,bytes.len(),file_version(&bytes)),
-        diff:None,command:None,cwd:None};
-    Ok(PreparedToolAction::WriteFile{root,path:target,content:bytes,binary:true,expected_version:expected.into(),
-        create_directories:input["createDirectories"].as_bool().unwrap_or(true),preview})
+    let root = canonical_directory(Path::new(root), "project folder")?;
+    let target = resolve_write_target(&root, &required_string(input, "path")?)?;
+    let version = current_version_of(&target, true)?.unwrap_or_else(|| "missing".into());
+    let expected = input["expectedVersion"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("missing");
+    ensure_unchanged(
+        expected,
+        if version == "missing" {
+            None
+        } else {
+            Some(&version)
+        },
+    )?;
+    let preview = ToolPreview {
+        tool: "write_file".into(),
+        title: if version == "missing" {
+            "创建文件".into()
+        } else {
+            "修改文件".into()
+        },
+        target: target.to_string_lossy().into_owned(),
+        summary: format!(
+            "Publish verified computed artifact {} ({} bytes, {})",
+            artifact.display_name,
+            bytes.len(),
+            file_version(&bytes)
+        ),
+        diff: None,
+        command: None,
+        cwd: None,
+    };
+    Ok(PreparedToolAction::WriteFile {
+        root,
+        path: target,
+        content: bytes,
+        binary: true,
+        expected_version: expected.into(),
+        create_directories: input["createDirectories"].as_bool().unwrap_or(true),
+        preview,
+    })
 }
 
-pub(crate) fn prepare_admitted_file_with_artifact_context(tool:&str,input:&Value,root:&str,baseline:&str,
-    database:&crate::database::Database,sessions_dir:&Path,conversation_id:&str,
-) -> Result<PreparedToolAction,String> {
-    let mut trusted=input.clone();trusted.as_object_mut().ok_or("file input must be an object")?.insert("expectedVersion".into(),json!(baseline));
-    prepare_with_artifact_context(tool,&trusted,root,database,sessions_dir,conversation_id)
+pub(crate) fn prepare_admitted_file_with_artifact_context(
+    tool: &str,
+    input: &Value,
+    root: &str,
+    baseline: &str,
+    database: &crate::database::Database,
+    sessions_dir: &Path,
+    conversation_id: &str,
+) -> Result<PreparedToolAction, String> {
+    let mut trusted = input.clone();
+    trusted
+        .as_object_mut()
+        .ok_or("file input must be an object")?
+        .insert("expectedVersion".into(), json!(baseline));
+    prepare_with_artifact_context(
+        tool,
+        &trusted,
+        root,
+        database,
+        sessions_dir,
+        conversation_id,
+    )
 }
 
 /// The version a managed write may commit against, or the refusal that says why.
@@ -362,9 +480,8 @@ pub(crate) fn ensure_writable_target(
     let Some(text) = task_text else {
         return Ok(());
     };
-    let roles =
-        crate::runtime_host::delivery::read_only_path_roles(text, Some(project_root));
-    if roles.is_empty() {
+    let roles = crate::runtime_host::delivery::read_only_path_roles(text, Some(project_root));
+    if roles.is_empty() && target.extension().is_none_or(|ext| !ext.eq_ignore_ascii_case("csv")) {
         return Ok(());
     }
     let root = canonical_directory(Path::new(project_root), "project folder")?;
@@ -385,6 +502,9 @@ pub(crate) fn ensure_writable_target(
              请把结果写到任务指定的输出路径，不要改动输入文件"
         )));
     }
+    if !canonical_target.exists() {
+        crate::runtime_host::delivery::check_csv_placement(text, &root, &relative)?;
+    }
     Ok(())
 }
 
@@ -394,9 +514,20 @@ pub(crate) fn execute_file_with_context(
     context: &mut dyn FileCommitContext,
 ) -> Result<Value, String> {
     let (root, path, content, create_directories, binary) = match action {
-        PreparedToolAction::WriteFile { root, path, content, create_directories, binary, .. } =>
-            (root, path, content, create_directories, binary),
-        PreparedToolAction::EditFile { root, path, content, .. } => (root, path, content, false, false),
+        PreparedToolAction::WriteFile {
+            root,
+            path,
+            content,
+            create_directories,
+            binary,
+            ..
+        } => (root, path, content, create_directories, binary),
+        PreparedToolAction::EditFile {
+            root,
+            path,
+            content,
+            ..
+        } => (root, path, content, false, false),
         _ => return Err("file admission cannot execute a non-file action".into()),
     };
     check_cancellation(cancellation)?;
@@ -414,10 +545,19 @@ pub(crate) fn execute_file_with_context(
             }
         }
     }
-    atomic_write_with_context_mode(&root, &path, &content, &expected,
-        cancellation, Some(context), binary)?;
-    Ok(text_result(format!("Wrote {} bytes to {}", content.len(), path.display()),
-        json!({"path":path,"bytes":content.len(),"operation":if expected == "missing" { "created" } else { "modified" },"readVersion":file_version(&content)})))
+    atomic_write_with_context_mode(
+        &root,
+        &path,
+        &content,
+        &expected,
+        cancellation,
+        Some(context),
+        binary,
+    )?;
+    Ok(text_result(
+        format!("Wrote {} bytes to {}", content.len(), path.display()),
+        json!({"path":path,"bytes":content.len(),"operation":if expected == "missing" { "created" } else { "modified" },"readVersion":file_version(&content)}),
+    ))
 }
 
 #[cfg(test)]
@@ -431,11 +571,19 @@ pub fn execute_with_cancellation(
 ) -> Result<Value, String> {
     check_cancellation(cancellation)?;
     #[cfg(not(test))]
-    if matches!(&action, PreparedToolAction::WriteFile { .. } | PreparedToolAction::EditFile { .. }) {
-        return Err(ToolErrorCode::PermissionDenied.error("File writes require durable Host admission"));
+    if matches!(
+        &action,
+        PreparedToolAction::WriteFile { .. } | PreparedToolAction::EditFile { .. }
+    ) {
+        return Err(
+            ToolErrorCode::PermissionDenied.error("File writes require durable Host admission")
+        );
     }
     match action {
-        PreparedToolAction::CommandJob { .. } => Err(ToolErrorCode::PermissionDenied.error("Command jobs require the durable Host adapter")),
+        PreparedToolAction::CommandJob { .. } => {
+            Err(ToolErrorCode::PermissionDenied
+                .error("Command jobs require the durable Host adapter"))
+        }
         PreparedToolAction::WriteFile {
             root,
             path,
@@ -451,14 +599,21 @@ pub fn execute_with_cancellation(
                 if let Some(parent) = path.parent() {
                     check_cancellation(cancellation)?;
                     fs::create_dir_all(parent).map_err(|error| {
-                        ToolErrorCode::Unknown.error(format!(
-                            "failed to create parent directory: {error}"
-                        ))
+                        ToolErrorCode::Unknown
+                            .error(format!("failed to create parent directory: {error}"))
                     })?;
                 }
             }
             check_cancellation(cancellation)?;
-            atomic_write_with_context_mode(&root, &path, &content, &expected_version, cancellation, None, binary)?;
+            atomic_write_with_context_mode(
+                &root,
+                &path,
+                &content,
+                &expected_version,
+                cancellation,
+                None,
+                binary,
+            )?;
             Ok(text_result(
                 format!("Wrote {} bytes to {}", content.len(), path.display()),
                 json!({ "path": path, "bytes": content.len(), "operation": operation, "readVersion": file_version(&content) }),
@@ -508,7 +663,9 @@ pub(crate) fn file_version(bytes: &[u8]) -> String {
 /// `current_version` is the version of the bytes on disk (`file_version`),
 /// or `None` for a missing file.
 fn write_precondition(input: &Value, current_version: Option<&str>) -> Result<String, String> {
-    let version = current_version.map(str::to_owned).unwrap_or_else(|| "missing".into());
+    let version = current_version
+        .map(str::to_owned)
+        .unwrap_or_else(|| "missing".into());
     let expected = match input.get("expectedVersion") {
         None if current_version.is_none() => "missing",
         Some(Value::String(value)) => value.as_str(),
@@ -748,14 +905,14 @@ fn store_settled(
     match fault.0 {
         1 => {
             return Err(
-                "injected settlement failure: could not open the settlement record".to_string()
+                "injected settlement failure: could not open the settlement record".to_string(),
             )
         }
         2 => {
             let _ = fs::File::create_new(settled);
             return Err(
                 "injected settlement failure: the write was interrupted mid-body".to_string(),
-            )
+            );
         }
         3 => {
             let mut file = fs::File::create_new(settled)
@@ -831,18 +988,20 @@ fn settle_replace(
         }
         ReplaceVerdict::RecoveryRequired { reason } => {
             record.status = "recovery_required".to_string();
-            record.note = Some(format!("{}; materials pinned: reconcile before any new attempt; do not replay",
-                record.note.as_deref().unwrap_or_default()));
+            record.note = Some(format!(
+                "{}; materials pinned: reconcile before any new attempt; do not replay",
+                record.note.as_deref().unwrap_or_default()
+            ));
             // The applying record is never truncated; the settlement is a
             // separate file. A failed settlement write must not be swallowed:
             // the materials stay, the applying record is still intact and the
             // failure becomes part of the reported error.
-            let settled_gap = store_settled(&settled, record, fault)
-                .err()
-                .map(|error| format!(
+            let settled_gap = store_settled(&settled, record, fault).err().map(|error| {
+                format!(
                     "; the settlement record could not be persisted ({error}), the applying \
                      record is still intact"
-                ));
+                )
+            });
             Err(ToolErrorCode::Unknown.error(format!(
                 "{reason}. Recovery materials are retained next to the target — candidate \
                  {candidate}, backup {backup}, applying record {journal}, settlement {settled}{settled_gap}; \
@@ -880,7 +1039,9 @@ thread_local! {
 fn publish_new_file(staging: &Path, target: &Path) -> std::io::Result<&'static str> {
     match try_publish_hard_link(staging, target) {
         Ok(()) => Ok("hard_link"),
-        Err(error) if hard_link_is_unsupported(&error) => publish_when_hard_link_unsupported(staging, target, error),
+        Err(error) if hard_link_is_unsupported(&error) => {
+            publish_when_hard_link_unsupported(staging, target, error)
+        }
         Err(error) => Err(error),
     }
 }
@@ -981,8 +1142,13 @@ fn append_publish_note(note: &mut Option<String>, method: &str) {
     }
 }
 
-fn atomic_write(root: &Path, path: &Path, bytes: &[u8], expected: &str,
-    cancellation: Option<&crate::kernel::CancellationToken>) -> Result<(), String> {
+fn atomic_write(
+    root: &Path,
+    path: &Path,
+    bytes: &[u8],
+    expected: &str,
+    cancellation: Option<&crate::kernel::CancellationToken>,
+) -> Result<(), String> {
     atomic_write_with_context(root, path, bytes, expected, cancellation, None)
 }
 
@@ -990,9 +1156,14 @@ fn atomic_write(root: &Path, path: &Path, bytes: &[u8], expected: &str,
 /// admitted file dispatches and user restores alike. `binary` selects how the
 /// current version is computed — from the raw bytes (restore of a snapshot that
 /// may not be UTF-8) or from the decoded text (`write_file` / `edit_file`).
-pub(crate) fn atomic_write_with_context(root: &Path, path: &Path, bytes: &[u8], expected: &str,
+pub(crate) fn atomic_write_with_context(
+    root: &Path,
+    path: &Path,
+    bytes: &[u8],
+    expected: &str,
     cancellation: Option<&crate::kernel::CancellationToken>,
-    context: Option<&mut dyn FileCommitContext>) -> Result<(), String> {
+    context: Option<&mut dyn FileCommitContext>,
+) -> Result<(), String> {
     atomic_write_with_context_mode(root, path, bytes, expected, cancellation, context, false)
 }
 
@@ -1001,11 +1172,19 @@ struct RecoveryMaterials {
     paths: Vec<PathBuf>,
 }
 
-pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[u8], expected: &str,
+pub(crate) fn atomic_write_with_context_mode(
+    root: &Path,
+    path: &Path,
+    bytes: &[u8],
+    expected: &str,
     cancellation: Option<&crate::kernel::CancellationToken>,
-    mut context: Option<&mut dyn FileCommitContext>, binary: bool) -> Result<(), String> {
+    mut context: Option<&mut dyn FileCommitContext>,
+    binary: bool,
+) -> Result<(), String> {
     use std::io::Write;
-    let _guard = FILE_WRITE_LOCK.lock().map_err(|_| ToolErrorCode::Unknown.error("file write lock poisoned"))?;
+    let _guard = FILE_WRITE_LOCK
+        .lock()
+        .map_err(|_| ToolErrorCode::Unknown.error("file write lock poisoned"))?;
     revalidate_target(root, path, None)?;
     if let Some(context) = context.as_deref_mut() {
         context.validate(path)?;
@@ -1013,7 +1192,9 @@ pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[
         ensure_unchanged(expected, current.as_deref())?;
         context.capture_before(path)?;
     }
-    let staging = path.parent().ok_or("missing write parent")?
+    let staging = path
+        .parent()
+        .ok_or("missing write parent")?
         .join(format!(".fox-write-{}.tmp", uuid::Uuid::new_v4()));
     // The guard cleans the candidate only while the write is still before its
     // side-effecting stage. Once the replace has been attempted, its own
@@ -1037,15 +1218,22 @@ pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[
         }
     }
     let mut staging = StagingGuard(Some(staging));
-    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(staging.path())
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(staging.path())
         .map_err(|e| ToolErrorCode::Unknown.error(format!("cannot stage file: {e}")))?;
     // A1 / TX-4: the staged candidate is checked by its open handle before it
     // is published, so a parent directory swapped for a link to somewhere
     // outside the project is refused instead of written through.
-    let canonical_root = root.canonicalize().map_err(|e| ToolErrorCode::PermissionDenied.error(format!("project root is unavailable: {e}")))?;
-    crate::resource_gateway::verify_opened_path(&file, staging.path(), &canonical_root)
-        .map_err(|e| ToolErrorCode::PermissionDenied.error(format!("staged file left the project: {e}")))?;
-    file.write_all(bytes).and_then(|_| file.sync_all())
+    let canonical_root = root.canonicalize().map_err(|e| {
+        ToolErrorCode::PermissionDenied.error(format!("project root is unavailable: {e}"))
+    })?;
+    crate::resource_gateway::verify_opened_path(&file, staging.path(), &canonical_root).map_err(
+        |e| ToolErrorCode::PermissionDenied.error(format!("staged file left the project: {e}")),
+    )?;
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
         .map_err(|e| ToolErrorCode::Unknown.error(format!("cannot flush staged file: {e}")))?;
     drop(file);
     check_cancellation(cancellation)?;
@@ -1058,35 +1246,54 @@ pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[
         let staging_path = staging.path().to_path_buf();
         let (backup, journal, operation_id) = replace_material_paths(path)?;
         let mut record = ReplaceJournal {
-            operation_id, status: "applying".into(), target: path.to_string_lossy().into_owned(),
-            candidate: staging_path.to_string_lossy().into_owned(), backup: backup.to_string_lossy().into_owned(),
-            base_version: "missing".into(), new_version: file_version(bytes), started_at_ms: epoch_ms(),
-            settled_at_ms: None, os_error: None,
-            note: context.as_deref().map(|context| format!("dispatch_id={}", context.dispatch_id())),
+            operation_id,
+            status: "applying".into(),
+            target: path.to_string_lossy().into_owned(),
+            candidate: staging_path.to_string_lossy().into_owned(),
+            backup: backup.to_string_lossy().into_owned(),
+            base_version: "missing".into(),
+            new_version: file_version(bytes),
+            started_at_ms: epoch_ms(),
+            settled_at_ms: None,
+            os_error: None,
+            note: context
+                .as_deref()
+                .map(|context| format!("dispatch_id={}", context.dispatch_id())),
         };
         store_applying(&journal, &record)?;
         let final_check = check_cancellation(cancellation).and_then(|_| {
-            if let Some(context) = context.as_deref_mut() { context.validate(path) } else { Ok(()) }
+            if let Some(context) = context.as_deref_mut() {
+                context.validate(path)
+            } else {
+                Ok(())
+            }
         });
         if let Err(error) = final_check {
             record.status = "not_applied".into();
             record.settled_at_ms = Some(epoch_ms());
-            if let Some(context) = context.as_deref_mut() { context.mark_not_applied(); }
+            if let Some(context) = context.as_deref_mut() {
+                context.mark_not_applied();
+            }
             store_settled(&settled_record_path(&journal), &record, JournalFault::NONE)?;
             return Err(error);
         }
-        if let Some(context) = context.as_deref_mut() { context.mark_applying(); }
+        if let Some(context) = context.as_deref_mut() {
+            context.mark_applying();
+        }
         match publish_new_file(&staging_path, path) {
             Ok(method) => {
                 // Preserve committed evidence even if the settlement disk fails.
-                if let Some(context) = context.as_deref_mut() { context.mark_committed(); }
+                if let Some(context) = context.as_deref_mut() {
+                    context.mark_committed();
+                }
                 staging.hand_off();
                 append_publish_note(&mut record.note, method);
                 record.status = "committed".into();
                 record.settled_at_ms = Some(epoch_ms());
                 let settled = settled_record_path(&journal);
-                store_settled(&settled, &record, JournalFault::NONE)
-                    .map_err(|error| format!("file created but settlement failed; materials retained: {error}"))?;
+                store_settled(&settled, &record, JournalFault::NONE).map_err(|error| {
+                    format!("file created but settlement failed; materials retained: {error}")
+                })?;
                 recovery.paths.push(journal);
                 recovery.paths.push(settled);
                 // move 已经把 staging 改名为目标；硬链接还要卸掉临时名字。
@@ -1095,13 +1302,18 @@ pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[
                 }
             }
             Err(e) => {
-                if let Some(context) = context.as_deref_mut() { context.mark_not_applied(); }
+                if let Some(context) = context.as_deref_mut() {
+                    context.mark_not_applied();
+                }
                 record.status = "not_applied".into();
                 record.settled_at_ms = Some(epoch_ms());
                 store_settled(&settled_record_path(&journal), &record, JournalFault::NONE)?;
                 return Err(if e.kind() == std::io::ErrorKind::AlreadyExists {
-                    ToolErrorCode::Conflict.error("File was created concurrently; read it before retrying")
-                } else { ToolErrorCode::Unknown.error(format!("cannot publish new file: {e}")) })
+                    ToolErrorCode::Conflict
+                        .error("File was created concurrently; read it before retrying")
+                } else {
+                    ToolErrorCode::Unknown.error(format!("cannot publish new file: {e}"))
+                });
             }
         }
     } else {
@@ -1114,19 +1326,34 @@ pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[
         // From here the replace owns the candidate's lifecycle: only its
         // settlement, judged from the verified layout, may remove it.
         let candidate = staging.hand_off();
-        replace_existing_file_with_context(&candidate, path, expected, &file_version(bytes),
-            cancellation, &mut context, &mut recovery.paths)?;
+        replace_existing_file_with_context(
+            &candidate,
+            path,
+            expected,
+            &file_version(bytes),
+            cancellation,
+            &mut context,
+            &mut recovery.paths,
+        )?;
     }
     // A1 / TX-4: and again after publication, by the handle of what now sits
     // at the target path.
-    let published = fs::File::open(path).map_err(|e| ToolErrorCode::Unknown.error(format!("published file cannot be reopened: {e}")))?;
-    crate::resource_gateway::verify_opened_path(&published, path, &canonical_root)
-        .map_err(|e| ToolErrorCode::PermissionDenied.error(format!("published file is outside the project: {e}")))?;
+    let published = fs::File::open(path).map_err(|e| {
+        ToolErrorCode::Unknown.error(format!("published file cannot be reopened: {e}"))
+    })?;
+    crate::resource_gateway::verify_opened_path(&published, path, &canonical_root).map_err(
+        |e| {
+            ToolErrorCode::PermissionDenied
+                .error(format!("published file is outside the project: {e}"))
+        },
+    )?;
     drop(published);
     if let Some(context) = context.as_deref_mut() {
         context.mark_committed();
-        context.record_committed(path).map_err(|error| format!(
-            "file committed but version registration failed; recovery materials retained: {error}"))?;
+        context.record_committed(path).map_err(|error| {
+            format!(
+            "file committed but version registration failed; recovery materials retained: {error}")
+        })?;
         // 登记回执已经成功，恢复材料不再是唯一副本。删不掉只记日志，不改变写入结果。
         for material in &recovery.paths {
             if let Err(error) = fs::remove_file(material) {
@@ -1152,11 +1379,22 @@ fn replace_existing_file(
     base_version: &str,
     new_version: &str,
 ) -> Result<(), String> {
-    replace_existing_file_with_context(candidate, target, base_version, new_version, None, &mut None, &mut Vec::new())
+    replace_existing_file_with_context(
+        candidate,
+        target,
+        base_version,
+        new_version,
+        None,
+        &mut None,
+        &mut Vec::new(),
+    )
 }
 
 fn replace_existing_file_with_context(
-    candidate: &Path, target: &Path, base_version: &str, new_version: &str,
+    candidate: &Path,
+    target: &Path,
+    base_version: &str,
+    new_version: &str,
     cancellation: Option<&crate::kernel::CancellationToken>,
     context: &mut Option<&mut dyn FileCommitContext>,
     materials: &mut Vec<PathBuf>,
@@ -1170,8 +1408,13 @@ fn replace_existing_file_with_context(
         let _ = fs::remove_file(candidate);
         return Err(error);
     }
-    let dispatch_note = context.as_deref().map(|context| format!(
-        "dispatch_id={}; verified_preimage={}", context.dispatch_id(), preimage.display()));
+    let dispatch_note = context.as_deref().map(|context| {
+        format!(
+            "dispatch_id={}; verified_preimage={}",
+            context.dispatch_id(),
+            preimage.display()
+        )
+    });
     let mut record = ReplaceJournal {
         operation_id,
         status: "applying".to_string(),
@@ -1195,28 +1438,48 @@ fn replace_existing_file_with_context(
     }
     let final_check = (|| {
         check_cancellation(cancellation)?;
-        if let Some(context) = context.as_deref_mut() { context.validate(target)?; }
+        if let Some(context) = context.as_deref_mut() {
+            context.validate(target)?;
+        }
         match probe_version(target) {
             Probe::Present(version) if version == base_version => Ok(()),
-            _ => Err(ToolErrorCode::Conflict.error("File changed before atomic replacement; verified pre-image retained")),
+            _ => Err(ToolErrorCode::Conflict
+                .error("File changed before atomic replacement; verified pre-image retained")),
         }
     })();
     if let Err(error) = final_check {
         record.status = "not_applied".into();
         record.settled_at_ms = Some(epoch_ms());
-        if let Some(context) = context.as_deref_mut() { context.mark_not_applied(); }
-        store_settled(&settled_record_path(&journal), &record, JournalFault::NONE)
-            .map_err(|settle| format!("{error}; refusal settlement failed; materials retained: {settle}"))?;
+        if let Some(context) = context.as_deref_mut() {
+            context.mark_not_applied();
+        }
+        store_settled(&settled_record_path(&journal), &record, JournalFault::NONE).map_err(
+            |settle| format!("{error}; refusal settlement failed; materials retained: {settle}"),
+        )?;
         let _ = fs::remove_file(candidate);
         return Err(error);
     }
-    if let Some(context) = context.as_deref_mut() { context.mark_applying(); }
-    let outcome = replace_with_backup(target, candidate, &backup, &journal, &mut record, JournalFault::NONE);
     if let Some(context) = context.as_deref_mut() {
-        match classify_replace_outcome(record.os_error, &inspect_layout(target, candidate, &backup), base_version, new_version) {
+        context.mark_applying();
+    }
+    let outcome = replace_with_backup(
+        target,
+        candidate,
+        &backup,
+        &journal,
+        &mut record,
+        JournalFault::NONE,
+    );
+    if let Some(context) = context.as_deref_mut() {
+        match classify_replace_outcome(
+            record.os_error,
+            &inspect_layout(target, candidate, &backup),
+            base_version,
+            new_version,
+        ) {
             ReplaceVerdict::Committed => context.mark_committed(),
             _ if record.status == "not_applied" => context.mark_not_applied(),
-            _ => {},
+            _ => {}
         }
     }
     if outcome.is_ok() {
@@ -1247,8 +1510,16 @@ fn replace_with_backup(
     fault: JournalFault,
 ) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
-    use windows::{core::PCWSTR, Win32::Storage::FileSystem::{ReplaceFileW, REPLACE_FILE_FLAGS}};
-    let wide = |p: &Path| p.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
+    use windows::{
+        core::PCWSTR,
+        Win32::Storage::FileSystem::{ReplaceFileW, REPLACE_FILE_FLAGS},
+    };
+    let wide = |p: &Path| {
+        p.as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>()
+    };
     let replaced = wide(target);
     let replacement = wide(candidate);
     let backup_name = wide(backup);
@@ -1257,8 +1528,14 @@ fn replace_with_backup(
     // rename fallback: a failed replacement keeps both the original and the
     // candidate for reconciliation ([v1.1] 6.5 rule 7).
     let result = unsafe {
-        ReplaceFileW(PCWSTR(replaced.as_ptr()), PCWSTR(replacement.as_ptr()),
-            PCWSTR(backup_name.as_ptr()), REPLACE_FILE_FLAGS(0), None, None)
+        ReplaceFileW(
+            PCWSTR(replaced.as_ptr()),
+            PCWSTR(replacement.as_ptr()),
+            PCWSTR(backup_name.as_ptr()),
+            REPLACE_FILE_FLAGS(0),
+            None,
+            None,
+        )
     };
     // Freeze the OS error code before any additional file check can overwrite
     // the thread-local last-error value ([v1.1] 6.5 rule 4).
@@ -1314,9 +1591,7 @@ fn prepare_verified_preimage(
             ));
         }
         Probe::Absent => {
-            return Err(
-                "the staged pre-image vanished before it could be verified".to_string()
-            )
+            return Err("the staged pre-image vanished before it could be verified".to_string())
         }
         Probe::Unknown(error) => {
             let _ = fs::remove_file(&staged);
@@ -1351,7 +1626,8 @@ fn replace_with_verified_preimage(
             // states `ReplaceFileW` can; the record and the layout check are
             // kept so the same recovery discipline applies on every platform.
             if probe_version(target).present_version() != Some(record.base_version.as_str()) {
-                return Err(ToolErrorCode::Conflict.error("File changed before rename; recovery materials retained"));
+                return Err(ToolErrorCode::Conflict
+                    .error("File changed before rename; recovery materials retained"));
             }
             let os_error = match fs::rename(candidate, target) {
                 Ok(()) => None,
@@ -1363,16 +1639,10 @@ fn replace_with_verified_preimage(
         // Settling from the real layout verifies that the target is untouched
         // and cleans the staged candidate, while the real reason the replace
         // was refused stays in the reported error.
-        Err(preparation_error) => settle_replace(
-            target,
-            candidate,
-            backup,
-            journal,
-            record,
-            None,
-            fault,
-        )
-        .map_err(|settled| format!("{preparation_error}; {settled}")),
+        Err(preparation_error) => {
+            settle_replace(target, candidate, backup, journal, record, None, fault)
+                .map_err(|settled| format!("{preparation_error}; {settled}"))
+        }
     }
 }
 
@@ -1400,7 +1670,8 @@ fn prepare_write(input: &Value, root: &Path) -> Result<PreparedToolAction, Strin
     enforce_content_size(&content)?;
     let target = resolve_write_target(root, &path)?;
     let old = read_optional_text_versioned(&target)?;
-    let expected_version = write_precondition(input, old.as_ref().map(|(_, version)| version.as_str()))?;
+    let expected_version =
+        write_precondition(input, old.as_ref().map(|(_, version)| version.as_str()))?;
     // 13.38 B5-1: a Windows batch file is written CRLF in the ANSI code page.
     let batch_code_page = crate::script_encoding::batch_code_page_for(&target);
     let content = match batch_code_page {
@@ -1458,7 +1729,10 @@ fn prepare_edit(input: &Value, root: &Path) -> Result<PreparedToolAction, String
     // text is compared the same way; the write turns it into CRLF again.
     let batch_code_page = crate::script_encoding::batch_code_page_for(&target);
     let (old_text, new_text) = match batch_code_page {
-        Some(_) => (old_text.replace("\r\n", "\n"), new_text.replace("\r\n", "\n")),
+        Some(_) => (
+            old_text.replace("\r\n", "\n"),
+            new_text.replace("\r\n", "\n"),
+        ),
         None => (old_text, new_text),
     };
     if old_text.is_empty() {
@@ -1472,8 +1746,9 @@ fn prepare_edit(input: &Value, root: &Path) -> Result<PreparedToolAction, String
     }
     let occurrences = current.matches(&old_text).count();
     if occurrences == 0 {
-        return Err(ToolErrorCode::InvalidInput
-            .error("oldText was not found in the target file; read the file again and use an exact match"));
+        return Err(ToolErrorCode::InvalidInput.error(
+            "oldText was not found in the target file; read the file again and use an exact match",
+        ));
     }
     if occurrences > 1 && !replace_all {
         return Err(ToolErrorCode::InvalidInput.error(format!(
@@ -1522,8 +1797,7 @@ fn prepare_command(input: &Value, root: &Path) -> Result<PreparedToolAction, Str
     // call, not something to ignore.
     if let Some(cwd) = input.get("cwd") {
         if !cwd.is_null() && cwd.as_str().is_none() {
-            return Err(ToolErrorCode::InvalidInput
-                .error("tool input must contain a string cwd"));
+            return Err(ToolErrorCode::InvalidInput.error("tool input must contain a string cwd"));
         }
     }
     let cwd = input
@@ -1558,7 +1832,9 @@ fn prepare_command(input: &Value, root: &Path) -> Result<PreparedToolAction, Str
     })
 }
 
-fn check_cancellation(cancellation: Option<&crate::kernel::CancellationToken>) -> Result<(), String> {
+fn check_cancellation(
+    cancellation: Option<&crate::kernel::CancellationToken>,
+) -> Result<(), String> {
     cancellation.map_or(Ok(()), |token| {
         token
             .check()
@@ -1598,7 +1874,9 @@ impl CommandContainment {
         #[cfg(not(windows))]
         {
             // `run_contained` spawns the child as the leader of its own group.
-            Ok(Self { group: Some(child.id()) })
+            Ok(Self {
+                group: Some(child.id()),
+            })
         }
     }
 
@@ -1634,10 +1912,7 @@ impl CommandContainment {
 #[cfg(windows)]
 const TREE_CONFIRM_WAIT: Duration = Duration::from_secs(5);
 
-pub(crate) fn command_spawn_spec(
-    command: &str,
-    cwd: &Path,
-) -> crate::process_jobs::SpawnSpec {
+pub(crate) fn command_spawn_spec(command: &str, cwd: &Path) -> crate::process_jobs::SpawnSpec {
     #[cfg(windows)]
     let (program, args) = (
         "cmd.exe".to_owned(),
@@ -1687,7 +1962,10 @@ fn run_contained(
     crate::process_jobs::apply_spawn_arguments(&mut process, &spawn_spec);
     // Windows: hidden console, started suspended for the Job Object.
     #[cfg(windows)]
-    fox_agent_backend::console::HideConsole::hide_console_with(&mut process, crate::process_jobs::CREATE_SUSPENDED_FLAG);
+    fox_agent_backend::console::HideConsole::hide_console_with(
+        &mut process,
+        crate::process_jobs::CREATE_SUSPENDED_FLAG,
+    );
     // Unix: own process group so cancel, timeout and post-exit cleanup reach
     // descendants, the same scope the Windows Job Object gives.
     #[cfg(unix)]
@@ -1696,9 +1974,7 @@ fn run_contained(
         process.process_group(0);
     }
     match &spawn_spec.env {
-        crate::process_jobs::EnvMode::Inherit => {
-            command_environment::apply_inherited(&mut process)
-        }
+        crate::process_jobs::EnvMode::Inherit => command_environment::apply_inherited(&mut process),
         crate::process_jobs::EnvMode::InheritWith(entries) => {
             command_environment::apply_inherited(&mut process);
             process.envs(entries.iter().map(|(key, value)| (key, value)));
@@ -1734,9 +2010,9 @@ fn run_contained(
             for _ in 0..READERS_PER_COMMAND {
                 release_reader_slot();
             }
-            return Err(ToolErrorCode::StartFailed.error(format!(
-                "failed to start command: {error}"
-            )));
+            return Err(
+                ToolErrorCode::StartFailed.error(format!("failed to start command: {error}"))
+            );
         }
     };
     let mut containment = match CommandContainment::attach(&child) {
@@ -1783,9 +2059,9 @@ fn run_contained(
                 // loop, which skipped the drain and abandoned both reader slots
                 // and threads. Record it, tear the tree down and fall through to
                 // the common collection below instead.
-                wait_failure = Some(ToolErrorCode::Unknown.error(format!(
-                    "failed to wait for command: {error}"
-                )));
+                wait_failure = Some(
+                    ToolErrorCode::Unknown.error(format!("failed to wait for command: {error}")),
+                );
                 containment.terminate(&mut child);
                 break CommandOutcome::WaitFailed;
             }
@@ -1812,7 +2088,13 @@ fn run_contained(
     // surviving descendant keeps a pipe open past the grace window, and that
     // case is reported instead of being presented as an empty result.
     let (stdout, stderr) = collect_streams(stdout.take(), stderr.take(), STREAM_DRAIN_GRACE);
-    Ok(ContainedRun { outcome, wait_failure, stdout, stderr, started })
+    Ok(ContainedRun {
+        outcome,
+        wait_failure,
+        stdout,
+        stderr,
+        started,
+    })
 }
 
 /// Output of a program the Host runs for a capability tool.
@@ -1845,8 +2127,13 @@ pub(crate) fn run_contained_program(
         cwd: cwd.to_string_lossy().into_owned(),
         env: crate::process_jobs::EnvMode::Inherit,
     };
-    let ContainedRun { outcome, wait_failure, stdout, stderr, started } =
-        run_contained(spec, timeout, extra_env, check)?;
+    let ContainedRun {
+        outcome,
+        wait_failure,
+        stdout,
+        stderr,
+        started,
+    } = run_contained(spec, timeout, extra_env, check)?;
     if let Some(message) = wait_failure {
         return Err(message);
     }
@@ -1856,7 +2143,9 @@ pub(crate) fn run_contained_program(
             "command timed out after {} seconds",
             timeout.as_secs()
         )),
-        CommandOutcome::WaitFailed => Err("failed to wait for command; whether it is still running is unknown".to_owned()),
+        CommandOutcome::WaitFailed => {
+            Err("failed to wait for command; whether it is still running is unknown".to_owned())
+        }
         CommandOutcome::Exited(exit_code) => Ok(ContainedProcessOutput {
             exit_code,
             truncated: stdout.undrained
@@ -1870,13 +2159,24 @@ pub(crate) fn run_contained_program(
     }
 }
 
-fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: Option<&crate::kernel::CancellationToken>) -> Result<Value, String> {
+fn execute_command(
+    command: &str,
+    cwd: &Path,
+    timeout: Duration,
+    cancellation: Option<&crate::kernel::CancellationToken>,
+) -> Result<Value, String> {
     execute_command_with_env(command, cwd, timeout, cancellation, &[])
 }
 
 /// `run_command` with entries added on top of the allowlisted environment
 /// (13.38 B5-2: the system proxy in 自动 / 完全访问).
-fn execute_command_with_env(command: &str, cwd: &Path, timeout: Duration, cancellation: Option<&crate::kernel::CancellationToken>, extra_env: &[(String, String)]) -> Result<Value, String> {
+fn execute_command_with_env(
+    command: &str,
+    cwd: &Path,
+    timeout: Duration,
+    cancellation: Option<&crate::kernel::CancellationToken>,
+    extra_env: &[(String, String)],
+) -> Result<Value, String> {
     let mut spec = command_spawn_spec(command, cwd);
     if !extra_env.is_empty() {
         spec.env = crate::process_jobs::EnvMode::InheritWith(extra_env.to_vec());
@@ -1896,12 +2196,13 @@ fn execute_spawn_spec(
     // already holds it - the ceiling tests - simply nests).
     #[cfg(test)]
     let _budget = tests::lock_reader_budget();
-    let ContainedRun { outcome, wait_failure, stdout, stderr, started } = run_contained(
-        spec,
-        timeout,
-        &[],
-        &|| check_cancellation(cancellation),
-    )?;
+    let ContainedRun {
+        outcome,
+        wait_failure,
+        stdout,
+        stderr,
+        started,
+    } = run_contained(spec, timeout, &[], &|| check_cancellation(cancellation))?;
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let undrained = stdout.undrained || stderr.undrained;
     let mut text = if stderr.text.trim().is_empty() {
@@ -1956,7 +2257,9 @@ fn execute_spawn_spec(
         format!("{outcome_text}{text}").trim_end().to_owned()
     };
     if undrained {
-        text.push_str("\n\n[fox: 子进程仍有输出流未被读完，上面的输出不完整；退出码与该流的剩余部分不可确定]");
+        text.push_str(
+            "\n\n[fox: 子进程仍有输出流未被读完，上面的输出不完整；退出码与该流的剩余部分不可确定]",
+        );
     }
     let encoding = if stdout.encoding == stderr.encoding {
         stdout.encoding.to_owned()
@@ -1994,7 +2297,10 @@ fn execute_spawn_spec(
         if let Some(object) = details.as_object_mut() {
             object.insert("errorCode".to_owned(), json!(error_code.as_str()));
         }
-        if encoding.contains("lossy") || encoding.contains("undecodable") || encoding.contains("truncated") {
+        if encoding.contains("lossy")
+            || encoding.contains("undecodable")
+            || encoding.contains("truncated")
+        {
             if let Some(object) = details.as_object_mut() {
                 object.insert(
                     "outputEncodingNote".to_owned(),
@@ -2015,9 +2321,9 @@ fn execute_spawn_spec(
         // Cancellation is not a business result: it must keep failing the Run
         // terminal path. The retained output still travels with it.
         let retained = text.chars().take(4_000).collect::<String>();
-        return Err(ToolErrorCode::Cancelled.error(format!(
-            "{error}; 取消前已产生的输出：\n{retained}"
-        )));
+        return Err(
+            ToolErrorCode::Cancelled.error(format!("{error}; 取消前已产生的输出：\n{retained}"))
+        );
     }
     let result = failure_text_result(text, details, error_code.is_some());
     Ok(result)
@@ -2116,12 +2422,22 @@ fn live_output_attached() -> bool {
 
 fn stream_snapshot(stream: Option<&OutputStream>) -> (Vec<u8>, u64) {
     stream
-        .and_then(|stream| stream.progress.lock().ok().map(|progress| (progress.kept.clone(), progress.total_bytes)))
+        .and_then(|stream| {
+            stream
+                .progress
+                .lock()
+                .ok()
+                .map(|progress| (progress.kept.clone(), progress.total_bytes))
+        })
         .unwrap_or_default()
 }
 
 /// 已产生输出的文本快照（与最终结果同一套解码），交给接收器。
-fn publish_live_output(stdout: Option<&OutputStream>, stderr: Option<&OutputStream>, last_total: &mut u64) {
+fn publish_live_output(
+    stdout: Option<&OutputStream>,
+    stderr: Option<&OutputStream>,
+    last_total: &mut u64,
+) {
     let (out, out_total) = stream_snapshot(stdout);
     let (err, err_total) = stream_snapshot(stderr);
     let total = out_total.saturating_add(err_total);
@@ -2241,7 +2557,9 @@ pub(crate) fn live_reader_slots() -> usize {
 /// read again.
 #[cfg(test)]
 pub(crate) fn parked_retained_bytes() -> usize {
-    let Ok(readers) = ABANDONED_READERS.lock() else { return usize::MAX };
+    let Ok(readers) = ABANDONED_READERS.lock() else {
+        return usize::MAX;
+    };
     readers
         .iter()
         .map(|parked| {
@@ -2258,7 +2576,9 @@ pub(crate) fn parked_retained_bytes() -> usize {
 /// before each command so reaping happens on a path that is actually used, and
 /// every join gives its slot back.
 pub(crate) fn reap_finished_readers() {
-    let Ok(mut handles) = ABANDONED_READERS.lock() else { return };
+    let Ok(mut handles) = ABANDONED_READERS.lock() else {
+        return;
+    };
     if handles.is_empty() {
         return;
     }
@@ -2277,10 +2597,7 @@ pub(crate) fn reap_finished_readers() {
     *handles = still_running;
 }
 
-fn retire_reader(
-    handle: thread::JoinHandle<()>,
-    progress: std::sync::Arc<Mutex<StreamProgress>>,
-) {
+fn retire_reader(handle: thread::JoinHandle<()>, progress: std::sync::Arc<Mutex<StreamProgress>>) {
     if handle.is_finished() {
         let _ = handle.join();
         release_reader_slot();
@@ -2372,7 +2689,11 @@ fn collect_streams(
 /// Take the snapshot first and only then retire the reader: a stream that never
 /// reached EOF still contributes everything it had already produced.
 fn collect_stream(stream: Option<OutputStream>, undrained_expected: bool) -> CapturedStream {
-    let Some(OutputStream { progress, mut reader }) = stream else {
+    let Some(OutputStream {
+        progress,
+        mut reader,
+    }) = stream
+    else {
         return CapturedStream {
             encoding: "none".to_owned(),
             ..Default::default()
@@ -2515,8 +2836,7 @@ fn required_string(input: &Value, key: &str) -> Result<String, String> {
         .map(str::to_owned)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| {
-            ToolErrorCode::InvalidInput
-                .error(format!("tool input must contain a non-empty {key}"))
+            ToolErrorCode::InvalidInput.error(format!("tool input must contain a non-empty {key}"))
         })
 }
 
@@ -2526,13 +2846,15 @@ fn required_string(input: &Value, key: &str) -> Result<String, String> {
 /// still be present and be a string, and the size limit is enforced separately.
 fn content_field(input: &Value, key: &str) -> Result<String, String> {
     match input.get(key) {
-        None => Err(ToolErrorCode::InvalidInput.error(format!(
-            "tool input must contain a string {key}"
-        ))),
+        None => {
+            Err(ToolErrorCode::InvalidInput
+                .error(format!("tool input must contain a string {key}")))
+        }
         Some(Value::String(value)) => Ok(value.clone()),
-        Some(_) => Err(ToolErrorCode::InvalidInput.error(format!(
-            "tool input must contain a string {key}"
-        ))),
+        Some(_) => {
+            Err(ToolErrorCode::InvalidInput
+                .error(format!("tool input must contain a string {key}")))
+        }
     }
 }
 
@@ -2647,6 +2969,16 @@ pub(crate) fn canonical_project_root(root: &Path) -> Result<PathBuf, String> {
     canonical_directory(root, "project folder")
 }
 
+pub(crate) fn prepare_project_output(root: &str, directory: &str) -> Result<(), String> {
+    let root = canonical_project_root(Path::new(root))?;
+    let target = root.join(directory);
+    if !target.exists() {
+        std::fs::create_dir(&target).map_err(|error| format!("无法创建交付目录 {directory}: {error}"))?;
+    }
+    let canonical = canonical_directory(&target, "output folder")?;
+    ensure_inside(&root, &canonical)
+}
+
 /// Resolve a path the model wants to declare as a deliverable.
 ///
 /// The checks are the ones that already govern every other file tool: the text
@@ -2676,9 +3008,7 @@ pub(crate) fn resolve_present_target(
         )));
     }
     let metadata = std::fs::metadata(&target).map_err(|_| {
-        PresentTargetError::NotFound(format!(
-            "Cannot present {value}: the file cannot be read."
-        ))
+        PresentTargetError::NotFound(format!("Cannot present {value}: the file cannot be read."))
     })?;
     if !metadata.is_file() {
         return Err(PresentTargetError::NotAFile(format!(
@@ -2742,8 +3072,9 @@ fn validate_path_text(value: &str) -> Result<(), String> {
         .components()
         .any(|component| matches!(component, Component::ParentDir))
     {
-        return Err(ToolErrorCode::PermissionDenied
-            .error("tool path cannot contain parent traversal"));
+        return Err(
+            ToolErrorCode::PermissionDenied.error("tool path cannot contain parent traversal")
+        );
     }
     Ok(())
 }
@@ -2789,13 +3120,12 @@ fn ensure_inside(root: &Path, target: &Path) -> Result<(), String> {
 }
 
 fn read_text(path: &Path) -> Result<String, String> {
-    let metadata = fs::metadata(path)
-        .map_err(|error| ToolErrorCode::InvalidInput.error(format!("failed to inspect file: {error}")))?;
+    let metadata = fs::metadata(path).map_err(|error| {
+        ToolErrorCode::InvalidInput.error(format!("failed to inspect file: {error}"))
+    })?;
     if metadata.len() > MAX_FILE_BYTES {
-        return Err(ToolErrorCode::InvalidInput.error(format!(
-            "file exceeds the {} byte limit",
-            MAX_FILE_BYTES
-        )));
+        return Err(ToolErrorCode::InvalidInput
+            .error(format!("file exceeds the {} byte limit", MAX_FILE_BYTES)));
     }
     match fs::read_to_string(path) {
         Ok(text) => Ok(text),
@@ -2803,7 +3133,8 @@ fn read_text(path: &Path) -> Result<String, String> {
             // 只改错误说明，不转码、不按原编码回写。能无损解成 GB18030/GBK 时点名编码。
             if error.kind() == std::io::ErrorKind::InvalidData {
                 if let Ok(bytes) = fs::read(path) {
-                    let (_decoded, encoding, lossy) = crate::resource_gateway::decode_text_bytes(&bytes);
+                    let (_decoded, encoding, lossy) =
+                        crate::resource_gateway::decode_text_bytes(&bytes);
                     if encoding == "gb18030" && !lossy {
                         return Err(ToolErrorCode::InvalidInput.error(
                             "file is not UTF-8 (it decodes as GB18030/GBK); edit_file and write_file only modify UTF-8 text — ask the user before converting it",
@@ -2811,9 +3142,7 @@ fn read_text(path: &Path) -> Result<String, String> {
                     }
                 }
             }
-            Err(ToolErrorCode::InvalidInput.error(format!(
-                "file is not valid UTF-8 text: {error}"
-            )))
+            Err(ToolErrorCode::InvalidInput.error(format!("file is not valid UTF-8 text: {error}")))
         }
     }
 }
@@ -2832,13 +3161,16 @@ fn read_optional_text(path: &Path) -> Result<Option<String>, String> {
 /// still taken from the raw bytes, the same value the read tool reports.
 fn read_text_versioned(path: &Path) -> Result<(String, String), String> {
     if let Some(code_page) = crate::script_encoding::batch_code_page_for(path) {
-        let metadata = fs::metadata(path)
-            .map_err(|error| ToolErrorCode::InvalidInput.error(format!("failed to inspect file: {error}")))?;
+        let metadata = fs::metadata(path).map_err(|error| {
+            ToolErrorCode::InvalidInput.error(format!("failed to inspect file: {error}"))
+        })?;
         if metadata.len() > MAX_FILE_BYTES {
-            return Err(ToolErrorCode::InvalidInput.error(format!("file exceeds the {} byte limit", MAX_FILE_BYTES)));
+            return Err(ToolErrorCode::InvalidInput
+                .error(format!("file exceeds the {} byte limit", MAX_FILE_BYTES)));
         }
-        let bytes = fs::read(path)
-            .map_err(|error| ToolErrorCode::InvalidInput.error(format!("failed to read file: {error}")))?;
+        let bytes = fs::read(path).map_err(|error| {
+            ToolErrorCode::InvalidInput.error(format!("failed to read file: {error}"))
+        })?;
         let (text, _, _) = crate::script_encoding::decode_batch(&bytes, code_page);
         return Ok((text, file_version(&bytes)));
     }
@@ -2928,12 +3260,20 @@ fn command_details_preview(text: &str) -> (String, bool) {
         return (text.to_owned(), false);
     }
     let mut head_end = COMMAND_DETAILS_PREVIEW_BYTES;
-    while !text.is_char_boundary(head_end) { head_end -= 1; }
+    while !text.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
     let mut tail_start = text.len() - COMMAND_DETAILS_PREVIEW_BYTES;
-    while !text.is_char_boundary(tail_start) { tail_start += 1; }
+    while !text.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
     let omitted = tail_start - head_end;
     (
-        format!("{}\n…[fox: 预览省略中间 {omitted} 字节，完整输出见结果正文]…\n{}", &text[..head_end], &text[tail_start..]),
+        format!(
+            "{}\n…[fox: 预览省略中间 {omitted} 字节，完整输出见结果正文]…\n{}",
+            &text[..head_end],
+            &text[tail_start..]
+        ),
         true,
     )
 }
@@ -2997,7 +3337,14 @@ mod tests {
             assert!(is_network_or_device_path(path), "{path}");
             assert!(validate_path_text(path).is_err(), "{path}");
         }
-        for path in [r"\\?\C:\proj\a.txt", r"\\?\c:", "src/main.rs", r"C:\proj\a", "/home/u/p", r"a\b"] {
+        for path in [
+            r"\\?\C:\proj\a.txt",
+            r"\\?\c:",
+            "src/main.rs",
+            r"C:\proj\a",
+            "/home/u/p",
+            r"a\b",
+        ] {
             assert!(!is_network_or_device_path(path), "{path}");
         }
     }
@@ -3017,7 +3364,10 @@ mod tests {
             &|| Ok(()),
         )
         .expect("parent exits normally");
-        assert!(started.elapsed() < Duration::from_secs(10), "descendant held the call open");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "descendant held the call open"
+        );
         assert_eq!(output.exit_code, Some(0));
         assert!(output.stdout.contains("started"));
     }
@@ -3094,9 +3444,16 @@ mod tests {
         let registry = crate::kernel::CancellationRegistry::default();
         registry.register_run("r").unwrap();
         let token = registry.tool_token("r", "write").unwrap();
-        let action = prepare("write_file", &json!({"path":"cancelled/note.txt","content":"must not be written"}), root.to_str().unwrap()).unwrap();
+        let action = prepare(
+            "write_file",
+            &json!({"path":"cancelled/note.txt","content":"must not be written"}),
+            root.to_str().unwrap(),
+        )
+        .unwrap();
         registry.request_tool_cancel("r", "write");
-        assert!(execute_with_cancellation(action, Some(&token)).unwrap_err().contains("tool.cancelled"));
+        assert!(execute_with_cancellation(action, Some(&token))
+            .unwrap_err()
+            .contains("tool.cancelled"));
         assert!(!root.join("cancelled").exists());
     }
 
@@ -3116,7 +3473,12 @@ mod tests {
         let worker = thread::spawn(move || {
             let _budget = lock_reader_budget();
             admitted.send(Instant::now()).unwrap();
-            execute_command(command, &command_root, Duration::from_secs(60), Some(&token))
+            execute_command(
+                command,
+                &command_root,
+                Duration::from_secs(60),
+                Some(&token),
+            )
         });
         let deadline = admission.recv().unwrap() + Duration::from_secs(5);
         while !root.join("started.txt").exists() && Instant::now() < deadline {
@@ -3126,7 +3488,10 @@ mod tests {
         let cancelled_at = Instant::now();
         registry.request_tool_cancel("r", "command");
         let result = worker.join().unwrap();
-        assert!(started, "test command must actually start before cancellation");
+        assert!(
+            started,
+            "test command must actually start before cancellation"
+        );
         assert!(result.unwrap_err().contains("tool.cancelled"));
         assert!(cancelled_at.elapsed() < Duration::from_secs(5));
     }
@@ -3189,9 +3554,19 @@ mod tests {
         let result = execute_command(command, &root, Duration::from_secs(60), None).unwrap();
         let text = command_text(&result);
         let expected = ("abcdefgh".repeat(2000) + "\n").repeat(70).len();
-        assert_eq!(result["details"]["stdoutBytes"].as_u64().unwrap() as usize, expected);
-        assert!(text.len() + 1 >= expected, "every byte is retained in the result body: {} < {expected}", text.len());
-        assert!(result["details"]["stdout"].as_str().unwrap().len() < expected, "details only carries a preview");
+        assert_eq!(
+            result["details"]["stdoutBytes"].as_u64().unwrap() as usize,
+            expected
+        );
+        assert!(
+            text.len() + 1 >= expected,
+            "every byte is retained in the result body: {} < {expected}",
+            text.len()
+        );
+        assert!(
+            result["details"]["stdout"].as_str().unwrap().len() < expected,
+            "details only carries a preview"
+        );
         assert_eq!(result["details"]["outputDroppedBytes"], 0);
         let _ = fs::remove_dir_all(root);
     }
@@ -3208,16 +3583,26 @@ mod tests {
         let result = execute_command("node emit.js", &root, Duration::from_secs(60), None).unwrap();
         let text = command_text(&result);
         assert!(text.contains("HEAD-MARK") && text.contains("TAIL-MARK"));
-        assert!(text.len() >= 300_018, "the body keeps the full retained output");
+        assert!(
+            text.len() >= 300_018,
+            "the body keeps the full retained output"
+        );
         let preview = result["details"]["stdout"].as_str().unwrap();
-        assert!(preview.len() <= COMMAND_DETAILS_PREVIEW_BYTES * 2 + 200, "details preview is bounded: {}", preview.len());
+        assert!(
+            preview.len() <= COMMAND_DETAILS_PREVIEW_BYTES * 2 + 200,
+            "details preview is bounded: {}",
+            preview.len()
+        );
         assert!(preview.starts_with("HEAD-MARK") && preview.ends_with("TAIL-MARK"));
         assert_eq!(result["details"]["stdoutPreviewTruncated"], true);
         assert_eq!(result["details"]["stdoutBytes"], 300_018);
         assert_eq!(result["details"]["stderr"], "small-stderr");
         assert_eq!(result["details"]["stderrPreviewTruncated"], false);
         let serialized = crate::canonical_json::to_string(&result).unwrap();
-        assert!(serialized.len() < 300_018 + COMMAND_DETAILS_PREVIEW_BYTES * 3, "the output is not stored twice");
+        assert!(
+            serialized.len() < 300_018 + COMMAND_DETAILS_PREVIEW_BYTES * 3,
+            "the output is not stored twice"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3227,7 +3612,10 @@ mod tests {
         let (preview, truncated) = command_details_preview(&text);
         assert!(truncated);
         assert!(preview.starts_with('汉') && preview.ends_with('汉'));
-        assert_eq!(command_details_preview("short"), ("short".to_owned(), false));
+        assert_eq!(
+            command_details_preview("short"),
+            ("short".to_owned(), false)
+        );
     }
 
     #[test]
@@ -3236,9 +3624,15 @@ mod tests {
         let attached = attach_reserved(Some(std::io::Cursor::new(data)), MAX_COMMAND_OUTPUT_BYTES);
         let (captured, _) = collect_streams(attached, None, Duration::from_secs(5));
         assert_eq!(captured.text.len(), MAX_COMMAND_OUTPUT_BYTES);
-        assert_eq!(captured.total_bytes, (MAX_COMMAND_OUTPUT_BYTES + 10_000) as u64);
+        assert_eq!(
+            captured.total_bytes,
+            (MAX_COMMAND_OUTPUT_BYTES + 10_000) as u64
+        );
         assert_eq!(captured.dropped_bytes, 10_000);
-        assert!(!captured.undrained, "a finished stream must not claim truncation");
+        assert!(
+            !captured.undrained,
+            "a finished stream must not claim truncation"
+        );
         let (empty, _) = collect_streams(None, None, Duration::from_millis(1));
         assert_eq!(empty.total_bytes, 0);
         assert_eq!(empty.encoding, "none");
@@ -3247,11 +3641,23 @@ mod tests {
     #[test]
     fn a1_synchronous_host_commands_run_directly_in_a_fox_job() {
         let root = project();
-        let action = prepare("run_command", &json!({"command":"echo ran> ran.txt"}), root.to_str().unwrap()).unwrap();
+        let action = prepare(
+            "run_command",
+            &json!({"command":"echo ran> ran.txt"}),
+            root.to_str().unwrap(),
+        )
+        .unwrap();
         let result = execute(action).expect("the command runs without a sandbox backend");
         assert!(root.join("ran.txt").exists());
         assert_eq!(result["details"]["execution"], "fox_job");
-        assert_eq!(result["details"]["shell"], if cfg!(windows) { "cmd.exe /D /S /C" } else { "sh -lc" });
+        assert_eq!(
+            result["details"]["shell"],
+            if cfg!(windows) {
+                "cmd.exe /D /S /C"
+            } else {
+                "sh -lc"
+            }
+        );
         assert!(result["details"].get("sandboxMechanism").is_none());
         fs::remove_dir_all(root).unwrap();
     }
@@ -3263,9 +3669,15 @@ mod tests {
         let root = project();
         let chinese = root.join("毕业设计");
         fs::create_dir_all(&chinese).unwrap();
-        let action = prepare("run_command", &json!({"command":"echo 100%> 说明.txt", "cwd":"毕业设计"}), root.to_str().unwrap()).unwrap();
+        let action = prepare(
+            "run_command",
+            &json!({"command":"echo 100%> 说明.txt", "cwd":"毕业设计"}),
+            root.to_str().unwrap(),
+        )
+        .unwrap();
         execute(action).expect("command in a Chinese directory");
-        let written = fs::read_to_string(chinese.join("说明.txt")).expect("file written in the Chinese cwd");
+        let written =
+            fs::read_to_string(chinese.join("说明.txt")).expect("file written in the Chinese cwd");
         assert_eq!(written.trim(), "100%");
         fs::remove_dir_all(root).unwrap();
     }
@@ -3274,24 +3686,48 @@ mod tests {
     fn a1_host_command_timeout_and_cancellation_clean_up_the_whole_tree() {
         use crate::kernel::CancellationPort;
         let root = project();
-        let sleeper = if cfg!(windows) { "ping -n 30 127.0.0.1 > NUL" } else { "sleep 30" };
-        let action = prepare("run_command", &json!({"command": sleeper, "timeoutSeconds": 1}), root.to_str().unwrap()).unwrap();
+        let sleeper = if cfg!(windows) {
+            "ping -n 30 127.0.0.1 > NUL"
+        } else {
+            "sleep 30"
+        };
+        let action = prepare(
+            "run_command",
+            &json!({"command": sleeper, "timeoutSeconds": 1}),
+            root.to_str().unwrap(),
+        )
+        .unwrap();
         let started = Instant::now();
         let result = execute(action).expect("a timeout is a result");
-        assert!(started.elapsed() < Duration::from_secs(20), "the Fox Job must be bounded");
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the Fox Job must be bounded"
+        );
         assert_eq!(result["details"]["timedOut"], true);
 
         let registry = crate::kernel::CancellationRegistry::default();
         registry.register_run("r").unwrap();
         let token = registry.tool_token("r", "a1-cancel").unwrap();
-        let command = if cfg!(windows) { "echo started>started.txt & ping -n 30 127.0.0.1 > NUL" } else { "echo started>started.txt; sleep 30" };
-        let action = prepare("run_command", &json!({"command": command, "timeoutSeconds": 60}), root.to_str().unwrap()).unwrap();
+        let command = if cfg!(windows) {
+            "echo started>started.txt & ping -n 30 127.0.0.1 > NUL"
+        } else {
+            "echo started>started.txt; sleep 30"
+        };
+        let action = prepare(
+            "run_command",
+            &json!({"command": command, "timeoutSeconds": 60}),
+            root.to_str().unwrap(),
+        )
+        .unwrap();
         let worker = thread::spawn(move || execute_with_cancellation(action, Some(&token)));
         let deadline = Instant::now() + Duration::from_secs(10);
         while !root.join("started.txt").exists() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(20));
         }
-        assert!(root.join("started.txt").exists(), "the command must start before cancellation");
+        assert!(
+            root.join("started.txt").exists(),
+            "the command must start before cancellation"
+        );
         registry.request_tool_cancel("r", "a1-cancel");
         let error = worker.join().unwrap().unwrap_err();
         assert!(error.contains("tool.cancelled"), "{error}");
@@ -3326,7 +3762,15 @@ mod tests {
             root.to_str().unwrap(),
         )
         .unwrap();
-        let PreparedToolAction::RunCommand { command, cwd, timeout, .. } = action else { panic!("expected command"); };
+        let PreparedToolAction::RunCommand {
+            command,
+            cwd,
+            timeout,
+            ..
+        } = action
+        else {
+            panic!("expected command");
+        };
         let result = execute_command(&command, &cwd, timeout, None).unwrap();
         assert!(result["content"][0]["text"]
             .as_str()
@@ -3376,10 +3820,19 @@ mod tests {
         let text = command_text(&result);
         assert!(text.contains("built-stdout-marker"), "{text}");
         assert!(text.contains("broken-stderr-marker"), "{text}");
-        assert!(text.contains("[stderr]"), "streams must stay distinguishable: {text}");
-        assert!(text.contains("退出码 9"), "the outcome line explains the classification: {text}");
+        assert!(
+            text.contains("[stderr]"),
+            "streams must stay distinguishable: {text}"
+        );
+        assert!(
+            text.contains("退出码 9"),
+            "the outcome line explains the classification: {text}"
+        );
         assert!(result["details"]["stdoutBytes"].as_u64().unwrap() >= 19);
-        assert!(result["details"]["stderr"].as_str().unwrap().contains("broken-stderr-marker"));
+        assert!(result["details"]["stderr"]
+            .as_str()
+            .unwrap()
+            .contains("broken-stderr-marker"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3403,7 +3856,10 @@ mod tests {
             result["details"].get("exitCode").unwrap().is_null(),
             "a killed child has no exit code; it must not be reported as 0"
         );
-        assert!(command_text(&result).contains("partial-before-timeout"), "{result}");
+        assert!(
+            command_text(&result).contains("partial-before-timeout"),
+            "{result}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3415,12 +3871,18 @@ mod tests {
         registry.register_run("r").unwrap();
         let token = registry.tool_token("r", "cancel-me").unwrap();
         #[cfg(windows)]
-        let command = "echo marker-before-cancel & echo started>started.txt & ping -n 30 127.0.0.1 > NUL";
+        let command =
+            "echo marker-before-cancel & echo started>started.txt & ping -n 30 127.0.0.1 > NUL";
         #[cfg(not(windows))]
         let command = "echo marker-before-cancel; echo started > started.txt; sleep 30";
         let command_root = root.clone();
         let worker = thread::spawn(move || {
-            execute_command(command, &command_root, Duration::from_secs(60), Some(&token))
+            execute_command(
+                command,
+                &command_root,
+                Duration::from_secs(60),
+                Some(&token),
+            )
         });
         // Wait until the child really ran instead of sleeping a fixed time: the
         // reader budget is process-wide, so this call may legitimately queue
@@ -3437,7 +3899,10 @@ mod tests {
         // Cancellation is a Run-level outcome, not a business result: it still
         // travels through the error channel so the Run terminal state governs.
         assert!(error.contains("tool.cancelled"), "{error}");
-        assert!(error.contains("marker-before-cancel"), "retained output must not be lost: {error}");
+        assert!(
+            error.contains("marker-before-cancel"),
+            "retained output must not be lost: {error}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3537,7 +4002,8 @@ mod tests {
             held += 1;
         }
         assert_eq!(
-            held, MAX_LIVE_OUTPUT_READERS,
+            held,
+            MAX_LIVE_OUTPUT_READERS,
             "the ceiling was not reached within the deadline; live slots were {}",
             live_reader_slots()
         );
@@ -3572,7 +4038,10 @@ mod tests {
         assert!(error.starts_with("[tool.start_failed]"), "{error}");
         assert!(error.contains("未启动"), "{error}");
         assert!(error.contains("重定向到文件"), "{error}");
-        assert!(!marker.exists(), "a refused command must not have run: {error}");
+        assert!(
+            !marker.exists(),
+            "a refused command must not have run: {error}"
+        );
 
         // The pressure is transient: once the wedged pipes close, the parked
         // readers are joined, their slots come back and the same command runs.
@@ -3662,12 +4131,21 @@ mod tests {
         let result = execute_command(command, &root, Duration::from_millis(400), None).unwrap();
         assert_eq!(result["details"]["errorCode"], "tool.timed_out");
         assert!(
-            result["content"][0]["text"].as_str().unwrap().contains("before-detach"),
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("before-detach"),
             "{result}"
         );
         let _ = fs::remove_dir_all(root);
         // Whatever this call parked, a following call reaps it.
-        execute_command("echo next", &std::env::temp_dir(), Duration::from_secs(20), None).ok();
+        execute_command(
+            "echo next",
+            &std::env::temp_dir(),
+            Duration::from_secs(20),
+            None,
+        )
+        .ok();
         for _ in 0..50 {
             reap_finished_readers();
             if abandoned_reader_count() <= baseline {
@@ -3729,7 +4207,10 @@ mod tests {
         )
         .unwrap();
         execute(blank).unwrap();
-        assert_eq!(fs::read_to_string(root.join("indent.txt")).unwrap(), "   \n\t  \n");
+        assert_eq!(
+            fs::read_to_string(root.join("indent.txt")).unwrap(),
+            "   \n\t  \n"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3743,7 +4224,10 @@ mod tests {
         )
         .unwrap();
         execute(action).unwrap();
-        assert_eq!(fs::read_to_string(root.join("src/note.txt")).unwrap(), "hello\n");
+        assert_eq!(
+            fs::read_to_string(root.join("src/note.txt")).unwrap(),
+            "hello\n"
+        );
 
         let blanked = prepare(
             "edit_file",
@@ -3789,15 +4273,33 @@ mod tests {
         let root = project();
         for (tool, input) in [
             ("write_file", json!({ "path": "a.txt" })),
-            ("write_file", json!({ "path": "a.txt", "content": Value::Null })),
+            (
+                "write_file",
+                json!({ "path": "a.txt", "content": Value::Null }),
+            ),
             ("write_file", json!({ "path": "a.txt", "content": 7 })),
             ("write_file", json!({ "content": "" })),
             ("write_file", json!({ "path": "  ", "content": "" })),
-            ("write_file", json!({ "path": "../escape.txt", "content": "" })),
-            ("edit_file", json!({ "path": "src/note.txt", "oldText": "hello" })),
-            ("edit_file", json!({ "path": "src/note.txt", "oldText": "hello", "newText": 1 })),
-            ("edit_file", json!({ "path": "src/note.txt", "oldText": "", "newText": "x" })),
-            ("edit_file", json!({ "path": "src/note.txt", "oldText": "absent", "newText": "" })),
+            (
+                "write_file",
+                json!({ "path": "../escape.txt", "content": "" }),
+            ),
+            (
+                "edit_file",
+                json!({ "path": "src/note.txt", "oldText": "hello" }),
+            ),
+            (
+                "edit_file",
+                json!({ "path": "src/note.txt", "oldText": "hello", "newText": 1 }),
+            ),
+            (
+                "edit_file",
+                json!({ "path": "src/note.txt", "oldText": "", "newText": "x" }),
+            ),
+            (
+                "edit_file",
+                json!({ "path": "src/note.txt", "oldText": "absent", "newText": "" }),
+            ),
             ("run_command", json!({ "command": "" })),
             ("run_command", json!({ "command": "echo x", "cwd": 5 })),
         ] {
@@ -3820,8 +4322,12 @@ mod tests {
         let huge = "x".repeat(MAX_FILE_BYTES as usize + 1);
         assert_eq!(
             ToolErrorCode::classify(
-                &prepare("write_file", &json!({ "path": "big.txt", "content": huge }), root.to_str().unwrap())
-                    .unwrap_err()
+                &prepare(
+                    "write_file",
+                    &json!({ "path": "big.txt", "content": huge }),
+                    root.to_str().unwrap()
+                )
+                .unwrap_err()
             ),
             Some(ToolErrorCode::InvalidInput)
         );
@@ -3839,9 +4345,21 @@ mod tests {
             root.to_str().unwrap(),
         )
         .unwrap();
-        let PreparedToolAction::RunCommand { command, cwd, timeout, .. } = action else { panic!("expected command"); };
+        let PreparedToolAction::RunCommand {
+            command,
+            cwd,
+            timeout,
+            ..
+        } = action
+        else {
+            panic!("expected command");
+        };
         let result = execute_command(&command, &cwd, timeout, None).unwrap();
-        let expected_shell = if cfg!(windows) { "cmd.exe /D /S /C" } else { "sh -lc" };
+        let expected_shell = if cfg!(windows) {
+            "cmd.exe /D /S /C"
+        } else {
+            "sh -lc"
+        };
         let expected_platform = if cfg!(windows) { "windows" } else { "posix" };
         assert_eq!(result["details"]["shell"], expected_shell);
         assert_eq!(result["details"]["platform"], expected_platform);
@@ -3866,10 +4384,24 @@ mod tests {
             &root_text,
         )
         .unwrap();
-        let PreparedToolAction::RunCommand { command, cwd, timeout, .. } = action else { panic!("expected command"); };
-        assert_eq!(execute_command(&command, &cwd, timeout, None).unwrap()["details"]["exitCode"], 0);
+        let PreparedToolAction::RunCommand {
+            command,
+            cwd,
+            timeout,
+            ..
+        } = action
+        else {
+            panic!("expected command");
+        };
+        assert_eq!(
+            execute_command(&command, &cwd, timeout, None).unwrap()["details"]["exitCode"],
+            0
+        );
         let marker = nested.join("env-marker.txt");
-        assert!(marker.exists(), "the cwd must resolve through a non-ASCII path");
+        assert!(
+            marker.exists(),
+            "the cwd must resolve through a non-ASCII path"
+        );
         assert!(fs::read_to_string(&marker).unwrap().contains("ran-here"));
 
         #[cfg(windows)]
@@ -3877,7 +4409,15 @@ mod tests {
         #[cfg(not(windows))]
         let failing = "test -n \"$HOME\" && echo env-seen || exit 5";
         let action = prepare("run_command", &json!({ "command": failing }), &root_text).unwrap();
-        let PreparedToolAction::RunCommand { command, cwd, timeout, .. } = action else { panic!("expected command"); };
+        let PreparedToolAction::RunCommand {
+            command,
+            cwd,
+            timeout,
+            ..
+        } = action
+        else {
+            panic!("expected command");
+        };
         let result = execute_command(&command, &cwd, timeout, None).unwrap();
         // A success keeps the baseline result shape unchanged: no `isError` key
         // is invented for it, so existing consumers of the payload cannot
@@ -3892,7 +4432,15 @@ mod tests {
 
         let nonzero = "exit 7";
         let action = prepare("run_command", &json!({ "command": nonzero }), &root_text).unwrap();
-        let PreparedToolAction::RunCommand { command, cwd, timeout, .. } = action else { panic!("expected command"); };
+        let PreparedToolAction::RunCommand {
+            command,
+            cwd,
+            timeout,
+            ..
+        } = action
+        else {
+            panic!("expected command");
+        };
         let result = execute_command(&command, &cwd, timeout, None).unwrap();
         assert_eq!(result["details"]["exitCode"], 7);
         assert_eq!(result["details"]["errorCode"], "tool.nonzero_exit");
@@ -3956,22 +4504,44 @@ mod revision_regression_tests {
         fs::create_dir_all(&root).unwrap();
         let path = root.join("file.txt");
         fs::write(&path, "old").unwrap();
-        assert!(prepare("write_file", &json!({"path":"file.txt","content":"bad"}),root.to_str().unwrap()).unwrap_err().contains("tool.file_conflict"));
+        assert!(prepare(
+            "write_file",
+            &json!({"path":"file.txt","content":"bad"}),
+            root.to_str().unwrap()
+        )
+        .unwrap_err()
+        .contains("tool.file_conflict"));
         for tool in ["write_file", "edit_file"] {
             fs::write(&path, "old").unwrap();
-            let input=json!({"path":"file.txt","content":"replacement","oldText":"old","newText":"replacement","expectedVersion":file_version(b"old")});
-            let action=prepare(tool,&input,root.to_str().unwrap()).unwrap();
-            fs::write(&path,"other writer").unwrap();
+            let input = json!({"path":"file.txt","content":"replacement","oldText":"old","newText":"replacement","expectedVersion":file_version(b"old")});
+            let action = prepare(tool, &input, root.to_str().unwrap()).unwrap();
+            fs::write(&path, "other writer").unwrap();
             assert!(execute(action).unwrap_err().contains("tool.file_conflict"));
-            assert_eq!(fs::read_to_string(&path).unwrap(),"other writer");
-            assert!(prepare(tool,&input,root.to_str().unwrap()).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), "other writer");
+            assert!(prepare(tool, &input, root.to_str().unwrap()).is_err());
         }
-        let first=prepare("write_file",&json!({"path":"new.txt","content":"first"}),root.to_str().unwrap()).unwrap();
-        let second=prepare("write_file",&json!({"path":"new.txt","content":"second"}),root.to_str().unwrap()).unwrap();
+        let first = prepare(
+            "write_file",
+            &json!({"path":"new.txt","content":"first"}),
+            root.to_str().unwrap(),
+        )
+        .unwrap();
+        let second = prepare(
+            "write_file",
+            &json!({"path":"new.txt","content":"second"}),
+            root.to_str().unwrap(),
+        )
+        .unwrap();
         execute(first).unwrap();
         assert!(execute(second).unwrap_err().contains("tool.file_conflict"));
-        assert_eq!(fs::read_to_string(root.join("new.txt")).unwrap(),"first");
-        assert!(!fs::read_dir(&root).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with(".fox-write-")), "uncommitted candidates are cleaned; journal history is retained");
+        assert_eq!(fs::read_to_string(root.join("new.txt")).unwrap(), "first");
+        assert!(
+            !fs::read_dir(&root)
+                .unwrap()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with(".fox-write-")),
+            "uncommitted candidates are cleaned; journal history is retained"
+        );
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -3981,30 +4551,48 @@ mod revision_regression_tests {
         let root = std::env::temp_dir().join(format!("fox-a3-edit-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("file.txt"), "winner").unwrap();
-        let stale=json!({"path":"file.txt","oldText":"before","newText":"loser","expectedVersion":file_version(b"before")});
-        let error=prepare("edit_file",&stale,root.to_str().unwrap()).unwrap_err();
+        let stale = json!({"path":"file.txt","oldText":"before","newText":"loser","expectedVersion":file_version(b"before")});
+        let error = prepare("edit_file", &stale, root.to_str().unwrap()).unwrap_err();
         assert!(error.contains("tool.file_conflict"), "{error}");
-        let current=json!({"path":"file.txt","oldText":"before","newText":"x","expectedVersion":file_version(b"winner")});
-        let error=prepare("edit_file",&current,root.to_str().unwrap()).unwrap_err();
-        assert!(error.contains("tool.invalid_input"), "a current read with a wrong oldText is still invalid input: {error}");
-        assert_eq!(fs::read_to_string(root.join("file.txt")).unwrap(),"winner");
+        let current = json!({"path":"file.txt","oldText":"before","newText":"x","expectedVersion":file_version(b"winner")});
+        let error = prepare("edit_file", &current, root.to_str().unwrap()).unwrap_err();
+        assert!(
+            error.contains("tool.invalid_input"),
+            "a current read with a wrong oldText is still invalid input: {error}"
+        );
+        assert_eq!(fs::read_to_string(root.join("file.txt")).unwrap(), "winner");
         fs::remove_dir_all(root).unwrap();
     }
     #[cfg(windows)]
     #[test]
     fn r4_failed_atomic_replace_preserves_original_and_cleans_staging() {
         use std::os::windows::fs::OpenOptionsExt;
-        let root=std::env::temp_dir().join(format!("fox-r4-locked-{}",uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("fox-r4-locked-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
-        let path=root.join("file.txt"); fs::write(&path,"original").unwrap();
-        let action=prepare("write_file",&json!({"path":"file.txt","content":"new","expectedVersion":file_version(b"original")}),root.to_str().unwrap()).unwrap();
-        let guard=fs::OpenOptions::new().read(true).share_mode(1).open(&path).unwrap();
+        let path = root.join("file.txt");
+        fs::write(&path, "original").unwrap();
+        let action = prepare(
+            "write_file",
+            &json!({"path":"file.txt","content":"new","expectedVersion":file_version(b"original")}),
+            root.to_str().unwrap(),
+        )
+        .unwrap();
+        let guard = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
         assert!(execute(action).is_err());
-        assert_eq!(fs::read_to_string(&path).unwrap(),"original");
-        let settled = fs::read_dir(&root).unwrap().flatten().find(|e| e.file_name().to_string_lossy().ends_with(".settled.json")).expect("durable refusal settlement");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+        let settled = fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().ends_with(".settled.json"))
+            .expect("durable refusal settlement");
         let record: Value = serde_json::from_slice(&fs::read(settled.path()).unwrap()).unwrap();
         assert_eq!(record["status"], "not_applied");
-        drop(guard); fs::remove_dir_all(root).unwrap();
+        drop(guard);
+        fs::remove_dir_all(root).unwrap();
     }
 }
 
@@ -4185,7 +4773,10 @@ mod a0_replace_recovery_tests {
         let dir = fresh_dir();
         let (base, new) = versions();
         assert!(matches!(probe_version(&dir), Probe::Unknown(_)));
-        assert!(matches!(probe_version(&dir.join("nope.txt")), Probe::Absent));
+        assert!(matches!(
+            probe_version(&dir.join("nope.txt")),
+            Probe::Absent
+        ));
         let unknown_target = probe_version(&dir);
         let layout = ReplaceLayout {
             target: unknown_target,
@@ -4220,10 +4811,19 @@ mod a0_replace_recovery_tests {
         let mut record = make_record(&target, &candidate, &backup, &base, &new);
         store_applying(&journal, &record).unwrap();
         let error = settle_replace(
-            &target, &candidate, &backup, &journal, &mut record, Some(1177), JournalFault::NONE,
+            &target,
+            &candidate,
+            &backup,
+            &journal,
+            &mut record,
+            Some(1177),
+            JournalFault::NONE,
         )
         .unwrap_err();
-        assert!(error.contains("1177"), "the failure text must keep the OS error: {error}");
+        assert!(
+            error.contains("1177"),
+            "the failure text must keep the OS error: {error}"
+        );
         assert!(
             !error.contains("no effect"),
             "a moved original must not be reported as a no-effect failure: {error}"
@@ -4231,7 +4831,10 @@ mod a0_replace_recovery_tests {
         assert!(candidate.exists(), "the candidate must not be deleted");
         assert!(backup.exists(), "the backup must not be deleted");
         assert!(journal.exists(), "the applying record must be retained");
-        assert!(settled_record_path(&journal).exists(), "the settlement record is written");
+        assert!(
+            settled_record_path(&journal).exists(),
+            "the settlement record is written"
+        );
         assert_eq!(fs::read_to_string(&backup).unwrap(), "original");
         assert_eq!(fs::read_to_string(&candidate).unwrap(), "new content");
         let _ = fs::remove_dir_all(root);
@@ -4253,13 +4856,28 @@ mod a0_replace_recovery_tests {
         let mut record = make_record(&target, &candidate, &backup, &base, &new);
         store_applying(&journal, &record).unwrap();
         let error = settle_replace(
-            &target, &candidate, &backup, &journal, &mut record, Some(32), JournalFault::NONE,
+            &target,
+            &candidate,
+            &backup,
+            &journal,
+            &mut record,
+            Some(32),
+            JournalFault::NONE,
         )
         .unwrap_err();
-        assert!(error.contains("no effect"), "a no-effect failure must say so: {error}");
-        assert!(error.contains("OS error 32"), "the OS error code must survive: {error}");
+        assert!(
+            error.contains("no effect"),
+            "a no-effect failure must say so: {error}"
+        );
+        assert!(
+            error.contains("OS error 32"),
+            "the OS error code must survive: {error}"
+        );
         assert_eq!(fs::read_to_string(&target).unwrap(), "original");
-        assert!(!candidate.exists(), "a verified no-effect candidate is settled cleanup");
+        assert!(
+            !candidate.exists(),
+            "a verified no-effect candidate is settled cleanup"
+        );
         assert!(journal.exists(), "not-applied preserves applying history");
         let _ = fs::remove_dir_all(root);
     }
@@ -4283,7 +4901,13 @@ mod a0_replace_recovery_tests {
         let mut record = make_record(&target, &candidate, &backup, &base, &new);
         store_applying(&journal, &record).unwrap();
         settle_replace(
-            &target, &candidate, &backup, &journal, &mut record, None, JournalFault::NONE,
+            &target,
+            &candidate,
+            &backup,
+            &journal,
+            &mut record,
+            None,
+            JournalFault::NONE,
         )
         .unwrap();
         assert_eq!(fs::read_to_string(&target).unwrap(), "new content");
@@ -4292,7 +4916,10 @@ mod a0_replace_recovery_tests {
         assert!(backup.exists(), "the verified backup is retained");
         assert_eq!(fs::read_to_string(&backup).unwrap(), "original");
         assert!(journal.exists(), "the applying record is retained");
-        assert!(settled.exists(), "the settlement record is written beside it");
+        assert!(
+            settled.exists(),
+            "the settlement record is written beside it"
+        );
         let body = fs::read_to_string(&settled).unwrap();
         assert!(
             serde_json::from_str::<serde_json::Value>(&body).unwrap()["status"] == "committed",
@@ -4320,11 +4947,19 @@ mod a0_replace_recovery_tests {
         let mut record = make_record(&target, &candidate, &backup, &base, &new);
         store_applying(&journal, &record).unwrap();
         replace_with_verified_preimage(
-            &target, &candidate, &backup, &journal, &mut record, JournalFault::NONE,
+            &target,
+            &candidate,
+            &backup,
+            &journal,
+            &mut record,
+            JournalFault::NONE,
         )
         .unwrap();
         assert_eq!(fs::read_to_string(&target).unwrap(), "new content");
-        assert!(!candidate.exists(), "the candidate was consumed into the target");
+        assert!(
+            !candidate.exists(),
+            "the candidate was consumed into the target"
+        );
         // The verified pre-image is what makes this a commit, not just a
         // rename: it is kept, and it still holds the original bytes.
         assert!(backup.exists(), "the verified pre-image is kept");
@@ -4349,7 +4984,9 @@ mod a0_replace_recovery_tests {
         let candidate = root.join(".fox-write-candidate.tmp");
         // The backup would live in a directory that does not exist, so the
         // pre-image cannot be staged at all.
-        let backup = root.join("no-such-dir").join(".fox-replace-backup-injected");
+        let backup = root
+            .join("no-such-dir")
+            .join(".fox-replace-backup-injected");
         let journal = root.join(".fox-replace-journal-injected.json");
         fs::write(&target, "original").unwrap();
         fs::write(&candidate, "new content").unwrap();
@@ -4358,18 +4995,32 @@ mod a0_replace_recovery_tests {
         let mut record = make_record(&target, &candidate, &backup, &base, &new);
         store_applying(&journal, &record).unwrap();
         let error = replace_with_verified_preimage(
-            &target, &candidate, &backup, &journal, &mut record, JournalFault::NONE,
+            &target,
+            &candidate,
+            &backup,
+            &journal,
+            &mut record,
+            JournalFault::NONE,
         )
         .unwrap_err();
         assert!(
             error.contains("cannot stage the pre-image backup"),
             "the refusal must name the missing storage condition: {error}"
         );
-        assert!(error.contains("no effect"), "the refusal must be verified as no-effect: {error}");
+        assert!(
+            error.contains("no effect"),
+            "the refusal must be verified as no-effect: {error}"
+        );
         assert_eq!(fs::read_to_string(&target).unwrap(), "original");
-        assert!(!candidate.exists(), "a refused replace cleans its staged candidate");
+        assert!(
+            !candidate.exists(),
+            "a refused replace cleans its staged candidate"
+        );
         assert!(journal.exists(), "refusal preserves applying history");
-        assert!(!backup.exists(), "no backup is published for a refused replace");
+        assert!(
+            !backup.exists(),
+            "no backup is published for a refused replace"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -4393,7 +5044,12 @@ mod a0_replace_recovery_tests {
         // The target changed after the precondition was checked.
         fs::write(&target, "someone else wrote this").unwrap();
         let error = replace_with_verified_preimage(
-            &target, &candidate, &backup, &journal, &mut record, JournalFault::NONE,
+            &target,
+            &candidate,
+            &backup,
+            &journal,
+            &mut record,
+            JournalFault::NONE,
         )
         .unwrap_err();
         assert!(
@@ -4402,13 +5058,19 @@ mod a0_replace_recovery_tests {
         );
         // No rename happened: the candidate is still staged and the target was
         // not touched by this replace.
-        assert!(candidate.exists(), "no rename may happen on a refused replace");
+        assert!(
+            candidate.exists(),
+            "no rename may happen on a refused replace"
+        );
         assert_eq!(
             fs::read_to_string(&target).unwrap(),
             "someone else wrote this",
             "the target is left as the concurrent writer left it"
         );
-        assert!(!backup.exists(), "no backup is published for a refused replace");
+        assert!(
+            !backup.exists(),
+            "no backup is published for a refused replace"
+        );
         // The conflict is recovery-required, not a forced commit and not a
         // silent cleanup.
         assert!(
@@ -4461,12 +5123,20 @@ mod a0_replace_recovery_tests {
                 panic!("unexpected Host artifact left behind: {name}");
             }
         }
-        assert_eq!(backups.len(), 2, "verified pre-image and replacement backup: {backups:?}");
+        assert_eq!(
+            backups.len(),
+            2,
+            "verified pre-image and replacement backup: {backups:?}"
+        );
         assert_eq!(
             fs::read_to_string(root.join(&backups[0])).unwrap(),
             "original"
         );
-        assert_eq!(journals.len(), 2, "the applying and settlement records: {journals:?}");
+        assert_eq!(
+            journals.len(),
+            2,
+            "the applying and settlement records: {journals:?}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -4498,7 +5168,13 @@ mod a0_replace_recovery_tests {
             // settlement write then fails at the injected point.
             fs::rename(&target, &backup).unwrap();
             let error = settle_replace(
-                &target, &candidate, &backup, &journal, &mut record, Some(1177), fault,
+                &target,
+                &candidate,
+                &backup,
+                &journal,
+                &mut record,
+                Some(1177),
+                fault,
             )
             .unwrap_err();
             assert!(
@@ -4511,11 +5187,17 @@ mod a0_replace_recovery_tests {
                 "a failed settlement write must be reported, not swallowed: {error}"
             );
             // The original applying record is still there, complete and intact.
-            assert!(journal.exists(), "the applying record must survive a failed settlement");
+            assert!(
+                journal.exists(),
+                "the applying record must survive a failed settlement"
+            );
             let applying = fs::read_to_string(&journal).unwrap();
             let parsed = serde_json::from_str::<serde_json::Value>(&applying)
                 .expect("the applying record must still be complete, valid JSON");
-            assert_eq!(parsed["status"], "applying", "the applying record is unchanged");
+            assert_eq!(
+                parsed["status"], "applying",
+                "the applying record is unchanged"
+            );
             // The recovery materials are all retained, untouched.
             assert_eq!(fs::read_to_string(&candidate).unwrap(), "new content");
             assert_eq!(fs::read_to_string(&backup).unwrap(), "original");
@@ -4549,8 +5231,14 @@ mod a0_replace_recovery_tests {
         );
         // The API was never called: the target path was never reached, and the
         // candidate was cleaned up as pre-applying material.
-        assert!(!target.exists(), "a refused replace never reaches the target");
-        assert!(!candidate.exists(), "a refused replace cleans its pre-applying candidate");
+        assert!(
+            !target.exists(),
+            "a refused replace never reaches the target"
+        );
+        assert!(
+            !candidate.exists(),
+            "a refused replace cleans its pre-applying candidate"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -4588,7 +5276,11 @@ mod a0_replace_recovery_tests {
                 panic!("unexpected Host artifact left behind: {name}");
             }
         }
-        assert_eq!(backups.len(), 2, "verified pre-image and API backup: {backups:?}");
+        assert_eq!(
+            backups.len(),
+            2,
+            "verified pre-image and API backup: {backups:?}"
+        );
         let backup_path = root.join(&backups[0]);
         assert_eq!(fs::read_to_string(&backup_path).unwrap(), "hello\nworld\n");
         assert_eq!(
@@ -4596,7 +5288,11 @@ mod a0_replace_recovery_tests {
             base,
             "the backup must hash to the pre-replace version"
         );
-        assert_eq!(journals.len(), 2, "the applying and settlement records: {journals:?}");
+        assert_eq!(
+            journals.len(),
+            2,
+            "the applying and settlement records: {journals:?}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -4633,7 +5329,12 @@ mod a0_replace_recovery_tests {
             .open(&candidate)
             .unwrap();
         let error = replace_with_backup(
-            &target, &candidate, &backup, &journal, &mut record, JournalFault::NONE,
+            &target,
+            &candidate,
+            &backup,
+            &journal,
+            &mut record,
+            JournalFault::NONE,
         )
         .unwrap_err();
         assert!(
@@ -4654,7 +5355,10 @@ mod a0_replace_recovery_tests {
                 candidate.exists(),
                 "a moved original must not take the candidate with it"
             );
-            assert!(journal.exists(), "the applying record must be pinned for reconciliation");
+            assert!(
+                journal.exists(),
+                "the applying record must be pinned for reconciliation"
+            );
             assert!(
                 !error.contains("no effect"),
                 "a partial replace must not be reported as a no-effect failure: {error}"
@@ -4695,11 +5399,20 @@ mod a0_replace_recovery_tests {
             error.contains("no effect"),
             "a refusal before any rename must be reported as a verified no-effect failure: {error}"
         );
-        assert!(error.contains("OS error"), "the real OS error code must be preserved: {error}");
+        assert!(
+            error.contains("OS error"),
+            "the real OS error code must be preserved: {error}"
+        );
         assert_eq!(fs::read_to_string(&target).unwrap(), "original");
         let materials = leftovers(&root);
-        assert!(materials.iter().any(|p| p.ends_with(".settled.json")), "refusal history must survive");
-        assert!(!materials.iter().any(|p| p.starts_with(".fox-write-")), "candidate must be cleaned");
+        assert!(
+            materials.iter().any(|p| p.ends_with(".settled.json")),
+            "refusal history must survive"
+        );
+        assert!(
+            !materials.iter().any(|p| p.starts_with(".fox-write-")),
+            "candidate must be cleaned"
+        );
         drop(held);
         let _ = fs::remove_dir_all(root);
     }
@@ -4728,7 +5441,12 @@ mod a0_replace_recovery_tests {
             .open(&candidate)
             .unwrap();
         let result = replace_with_backup(
-            &target, &candidate, &backup, &journal, &mut record, JournalFault::NONE,
+            &target,
+            &candidate,
+            &backup,
+            &journal,
+            &mut record,
+            JournalFault::NONE,
         );
         let layout = inspect_layout(&target, &candidate, &backup);
         eprintln!(
@@ -4737,9 +5455,8 @@ mod a0_replace_recovery_tests {
             os_error = record.os_error,
             status = record.status
         );
-        let original_recoverable =
-            fs::read(&target).ok().as_deref() == Some(b"original")
-                || fs::read(&backup).ok().as_deref() == Some(b"original");
+        let original_recoverable = fs::read(&target).ok().as_deref() == Some(b"original")
+            || fs::read(&backup).ok().as_deref() == Some(b"original");
         assert!(original_recoverable, "the original must stay recoverable");
         if fs::read(&backup).ok().as_deref() == Some(b"original") {
             assert_eq!(fs::read(&candidate).unwrap(), b"new content");
@@ -4753,36 +5470,75 @@ mod a0_replace_recovery_tests {
 mod admitted_file_tests {
     use super::*;
     struct Hooks {
-        baseline: String, validations: usize, reject_at: Option<usize>,
-        fail_registration: bool, committed: bool, captured: bool,
+        baseline: String,
+        validations: usize,
+        reject_at: Option<usize>,
+        fail_registration: bool,
+        committed: bool,
+        captured: bool,
     }
     impl FileCommitContext for Hooks {
-        fn baseline(&self) -> &str { &self.baseline }
-        fn dispatch_id(&self) -> &str { "tool-dispatch:1:r:write" }
+        fn baseline(&self) -> &str {
+            &self.baseline
+        }
+        fn dispatch_id(&self) -> &str {
+            "tool-dispatch:1:r:write"
+        }
         fn validate(&mut self, _: &Path) -> Result<(), String> {
             self.validations += 1;
-            if self.reject_at == Some(self.validations) { Err("credential_mismatch".into()) } else { Ok(()) }
+            if self.reject_at == Some(self.validations) {
+                Err("credential_mismatch".into())
+            } else {
+                Ok(())
+            }
         }
-        fn capture_before(&mut self, _: &Path) -> Result<(), String> { self.captured = true; Ok(()) }
-        fn mark_committed(&mut self) { self.committed = true; }
+        fn capture_before(&mut self, _: &Path) -> Result<(), String> {
+            self.captured = true;
+            Ok(())
+        }
+        fn mark_committed(&mut self) {
+            self.committed = true;
+        }
         fn record_committed(&mut self, target: &Path) -> Result<(), String> {
             assert!(self.captured);
             assert!(self.committed);
-            assert!(FILE_WRITE_LOCK.try_lock().is_err(), "registration must remain inside file lock");
+            assert!(
+                FILE_WRITE_LOCK.try_lock().is_err(),
+                "registration must remain inside file lock"
+            );
             assert_eq!(fs::read(target).unwrap(), b"new");
-            if self.fail_registration { Err("injected registry failure".into()) } else { Ok(()) }
+            if self.fail_registration {
+                Err("injected registry failure".into())
+            } else {
+                Ok(())
+            }
         }
     }
     fn fixture() -> (PathBuf, Hooks) {
         let root = std::env::temp_dir().join(format!("fox-admission-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("a.txt"), b"old").unwrap();
-        (root, Hooks { baseline: file_version(b"old"), validations: 0, reject_at: None,
-            fail_registration: false, committed: false, captured: false })
+        (
+            root,
+            Hooks {
+                baseline: file_version(b"old"),
+                validations: 0,
+                reject_at: None,
+                fail_registration: false,
+                committed: false,
+                captured: false,
+            },
+        )
     }
     fn action(root: &Path, hooks: &Hooks) -> PreparedToolAction {
-        prepare_admitted_file("write_file", &json!({"path":"a.txt", "content":"new",
-            "expectedVersion":"model-forged-version"}), root.to_str().unwrap(), &hooks.baseline).unwrap()
+        prepare_admitted_file(
+            "write_file",
+            &json!({"path":"a.txt", "content":"new",
+            "expectedVersion":"model-forged-version"}),
+            root.to_str().unwrap(),
+            &hooks.baseline,
+        )
+        .unwrap()
     }
     #[test]
     fn final_gate_refuses_after_verified_preimage_before_any_replace() {
@@ -4792,8 +5548,11 @@ mod admitted_file_tests {
         assert!(result.unwrap_err().contains("credential_mismatch"));
         assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"old");
         assert!(!hooks.committed);
-        let preimages: Vec<_> = fs::read_dir(&root).unwrap().flatten()
-            .filter(|entry| entry.path().extension().is_some_and(|x| x == "verified")).collect();
+        let preimages: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|x| x == "verified"))
+            .collect();
         assert_eq!(preimages.len(), 1);
         assert_eq!(fs::read(preimages[0].path()).unwrap(), b"old");
         fs::remove_dir_all(root).unwrap();
@@ -4806,8 +5565,10 @@ mod admitted_file_tests {
         assert!(error.contains("file committed but version registration failed"));
         assert!(hooks.committed);
         assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"new");
-        assert!(fs::read_dir(&root).unwrap().flatten().any(|entry|
-            entry.file_name().to_string_lossy().ends_with(".verified")));
+        assert!(fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(".verified")));
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -4889,6 +5650,17 @@ mod write_gate_tests {
     }
 
     #[test]
+    fn list_results_in_named_csv_keeps_source_read_only() {
+        let root = fresh_dir();
+        let task = "读取当前项目的 `input/sales.csv`，按地区汇总金额并在 `output/analysis.csv` 中列出分项和总计。";
+        let project = root.to_str().unwrap();
+        ensure_writable_target(Some(task), project, &root.join("output/analysis.csv")).unwrap();
+        let error = ensure_writable_target(Some(task), project, &root.join("input/sales.csv")).unwrap_err();
+        assert!(error.contains("tool.read_only_input"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn task_inputs_are_read_only_while_outputs_and_unmentioned_paths_stay_writable() {
         let root = fresh_dir();
         fs::create_dir_all(root.join("in")).unwrap();
@@ -4920,7 +5692,10 @@ mod write_gate_tests {
     fn punctuation_inside_a_prohibition_still_refuses_the_real_write() {
         for (task, targets) in [
             ("禁止：生成 out/a.md。", vec!["out/a.md"]),
-            ("不要生成 out/a.md、out/b.md。", vec!["out/a.md", "out/b.md"]),
+            (
+                "不要生成 out/a.md、out/b.md。",
+                vec!["out/a.md", "out/b.md"],
+            ),
             ("不得在本轮执行中，生成 out/a.md。", vec!["out/a.md"]),
         ] {
             let root = fresh_dir();
@@ -4936,7 +5711,11 @@ mod write_gate_tests {
                 let error = ensure_writable_target(Some(task), root.to_str().unwrap(), &path)
                     .expect_err("the write entry must refuse a prohibited target");
                 assert!(error.contains("tool.read_only_input"), "{target}: {error}");
-                assert_eq!(fs::read(&path).unwrap(), before, "{target} must be unchanged");
+                assert_eq!(
+                    fs::read(&path).unwrap(),
+                    before,
+                    "{target} must be unchanged"
+                );
             }
             fs::remove_dir_all(root).unwrap();
         }
@@ -4966,7 +5745,11 @@ mod write_gate_tests {
         let error = ensure_writable_target(Some(task), root.to_str().unwrap(), &target)
             .expect_err("the write entry must refuse a prohibited target");
         assert!(error.contains("tool.read_only_input"), "{error}");
-        assert_eq!(fs::read(&target).unwrap(), before, "the file must be unchanged");
+        assert_eq!(
+            fs::read(&target).unwrap(),
+            before,
+            "the file must be unchanged"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -4982,8 +5765,12 @@ mod write_gate_tests {
     #[test]
     fn a_task_without_file_mentions_leaves_every_path_writable() {
         let root = fresh_dir();
-        ensure_writable_target(Some("你好，帮我想个名字。"), root.to_str().unwrap(), &root.join("a.txt"))
-            .expect("no mentions means no read-only set");
+        ensure_writable_target(
+            Some("你好，帮我想个名字。"),
+            root.to_str().unwrap(),
+            &root.join("a.txt"),
+        )
+        .expect("no mentions means no read-only set");
         ensure_writable_target(None, root.to_str().unwrap(), &root.join("a.txt"))
             .expect("no task text means no restriction");
         fs::remove_dir_all(root).unwrap();
@@ -5036,13 +5823,15 @@ mod tx6_publish_tests {
         let settled = fs::read_dir(&root)
             .unwrap()
             .flatten()
-            .find(|entry| entry.file_name().to_string_lossy().ends_with(".settled.json"))
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".settled.json")
+            })
             .expect("settled journal");
         let body = fs::read_to_string(settled.path()).unwrap();
-        assert!(
-            body.contains("published_by=move_no_replace"),
-            "{body}"
-        );
+        assert!(body.contains("published_by=move_no_replace"), "{body}");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -5073,12 +5862,24 @@ mod tx5_recovery_material_tests {
     }
 
     impl FileCommitContext for Registration {
-        fn baseline(&self) -> &str { &self.baseline }
-        fn dispatch_id(&self) -> &str { "tx5-dispatch" }
-        fn validate(&mut self, _: &Path) -> Result<(), String> { Ok(()) }
-        fn capture_before(&mut self, _: &Path) -> Result<(), String> { Ok(()) }
+        fn baseline(&self) -> &str {
+            &self.baseline
+        }
+        fn dispatch_id(&self) -> &str {
+            "tx5-dispatch"
+        }
+        fn validate(&mut self, _: &Path) -> Result<(), String> {
+            Ok(())
+        }
+        fn capture_before(&mut self, _: &Path) -> Result<(), String> {
+            Ok(())
+        }
         fn record_committed(&mut self, _: &Path) -> Result<(), String> {
-            if self.fail { Err("injected registry failure".into()) } else { Ok(()) }
+            if self.fail {
+                Err("injected registry failure".into())
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -5103,8 +5904,12 @@ mod tx5_recovery_material_tests {
         let path = root.join("note.txt");
         fs::write(&path, b"old").unwrap();
         let baseline = file_version(b"old");
-        let mut context = Registration { baseline: baseline.clone(), fail: false };
-        atomic_write_with_context(&root, &path, b"new", &baseline, None, Some(&mut context)).unwrap();
+        let mut context = Registration {
+            baseline: baseline.clone(),
+            fail: false,
+        };
+        atomic_write_with_context(&root, &path, b"new", &baseline, None, Some(&mut context))
+            .unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"new");
         assert_eq!(names(&root), vec!["note.txt".to_owned()]);
         fs::remove_dir_all(root).unwrap();
@@ -5116,24 +5921,37 @@ mod tx5_recovery_material_tests {
         let path = root.join("note.txt");
         fs::write(&path, b"old").unwrap();
         let baseline = file_version(b"old");
-        let mut context = Registration { baseline: baseline.clone(), fail: true };
-        let error = atomic_write_with_context(&root, &path, b"new", &baseline, None, Some(&mut context))
-            .expect_err("registration failure");
+        let mut context = Registration {
+            baseline: baseline.clone(),
+            fail: true,
+        };
+        let error =
+            atomic_write_with_context(&root, &path, b"new", &baseline, None, Some(&mut context))
+                .expect_err("registration failure");
         assert!(error.contains("version registration failed"), "{error}");
         assert_eq!(fs::read(&path).unwrap(), b"new");
         let left = names(&root);
         assert!(
-            left.iter().any(|name| name.starts_with(".fox-replace-backup-")
-                && !name.ends_with(".verified")
-                && !name.ends_with(".staging")),
+            left.iter()
+                .any(|name| name.starts_with(".fox-replace-backup-")
+                    && !name.ends_with(".verified")
+                    && !name.ends_with(".staging")),
             "backup missing: {left:?}"
         );
-        assert!(left.iter().any(|name| name.ends_with(".verified")), "preimage missing: {left:?}");
         assert!(
-            left.iter().any(|name| name.starts_with(".fox-replace-journal-") && !name.ends_with(".settled.json")),
+            left.iter().any(|name| name.ends_with(".verified")),
+            "preimage missing: {left:?}"
+        );
+        assert!(
+            left.iter()
+                .any(|name| name.starts_with(".fox-replace-journal-")
+                    && !name.ends_with(".settled.json")),
             "applying journal missing: {left:?}"
         );
-        assert!(left.iter().any(|name| name.ends_with(".settled.json")), "settled journal missing: {left:?}");
+        assert!(
+            left.iter().any(|name| name.ends_with(".settled.json")),
+            "settled journal missing: {left:?}"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -5141,8 +5959,12 @@ mod tx5_recovery_material_tests {
     fn tx5_a_registered_create_leaves_only_the_target() {
         let root = fresh_dir();
         let path = root.join("created.txt");
-        let mut context = Registration { baseline: "missing".into(), fail: false };
-        atomic_write_with_context(&root, &path, b"body", "missing", None, Some(&mut context)).unwrap();
+        let mut context = Registration {
+            baseline: "missing".into(),
+            fail: false,
+        };
+        atomic_write_with_context(&root, &path, b"body", "missing", None, Some(&mut context))
+            .unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"body");
         assert_eq!(names(&root), vec!["created.txt".to_owned()]);
         fs::remove_dir_all(root).unwrap();
@@ -5161,7 +5983,10 @@ mod b5_1338_tests {
     }
 
     fn text(result: &Value) -> String {
-        result["content"][0]["text"].as_str().unwrap_or_default().to_owned()
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
     }
 
     /// 实测 B5-1：Fox 写出「测试.bat」，再执行「测试.bat 参数一」。
@@ -5170,15 +5995,33 @@ mod b5_1338_tests {
     fn b5_1_chinese_batch_is_written_crlf_in_the_ansi_code_page_and_runs_with_its_parameter() {
         let root = project();
         let script = "@echo off\necho 参数是 %1\n";
-        let action = prepare("write_file", &json!({ "path": "测试.bat", "content": script }), root.to_str().unwrap()).unwrap();
+        let action = prepare(
+            "write_file",
+            &json!({ "path": "测试.bat", "content": script }),
+            root.to_str().unwrap(),
+        )
+        .unwrap();
         let written = execute(action).unwrap();
         let bytes = fs::read(root.join("测试.bat")).unwrap();
         let code_page = crate::script_encoding::batch_code_page().expect("Windows 有 ANSI 代码页");
-        assert_eq!(bytes, crate::script_encoding::encode_batch(script, code_page).bytes);
-        assert!(!bytes.windows(2).any(|pair| pair[0] != b'\r' && pair[1] == b'\n'), "全部是 CRLF");
+        assert_eq!(
+            bytes,
+            crate::script_encoding::encode_batch(script, code_page).bytes
+        );
+        assert!(
+            !bytes
+                .windows(2)
+                .any(|pair| pair[0] != b'\r' && pair[1] == b'\n'),
+            "全部是 CRLF"
+        );
         assert!(!bytes.starts_with(&[0xEF, 0xBB, 0xBF]), "不带 BOM");
-        assert_eq!(written["details"]["readVersion"], json!(file_version(&bytes)), "版本按磁盘字节");
-        let result = execute_command("测试.bat 参数一", &root, Duration::from_secs(30), None).unwrap();
+        assert_eq!(
+            written["details"]["readVersion"],
+            json!(file_version(&bytes)),
+            "版本按磁盘字节"
+        );
+        let result =
+            execute_command("测试.bat 参数一", &root, Duration::from_secs(30), None).unwrap();
         assert_eq!(result["details"]["exitCode"], 0, "{result}");
         assert!(text(&result).contains("参数是 参数一"), "{}", text(&result));
         let _ = fs::remove_dir_all(root);
@@ -5190,7 +6033,8 @@ mod b5_1338_tests {
     fn b5_1_editing_a_batch_file_keeps_its_encoding() {
         let root = project();
         let code_page = crate::script_encoding::batch_code_page().unwrap();
-        let original = crate::script_encoding::encode_batch("@echo off\necho 参数是 %1\n", code_page).bytes;
+        let original =
+            crate::script_encoding::encode_batch("@echo off\necho 参数是 %1\n", code_page).bytes;
         fs::write(root.join("run.cmd"), &original).unwrap();
         let action = prepare(
             "edit_file",
@@ -5200,8 +6044,12 @@ mod b5_1338_tests {
         .unwrap();
         execute(action).unwrap();
         let bytes = fs::read(root.join("run.cmd")).unwrap();
-        assert_eq!(bytes, crate::script_encoding::encode_batch("@echo off\necho 收到 %1\n", code_page).bytes);
-        let result = execute_command("run.cmd 参数一", &root, Duration::from_secs(30), None).unwrap();
+        assert_eq!(
+            bytes,
+            crate::script_encoding::encode_batch("@echo off\necho 收到 %1\n", code_page).bytes
+        );
+        let result =
+            execute_command("run.cmd 参数一", &root, Duration::from_secs(30), None).unwrap();
         assert!(text(&result).contains("收到 参数一"), "{}", text(&result));
         let _ = fs::remove_dir_all(root);
     }
@@ -5212,7 +6060,15 @@ mod b5_1338_tests {
     fn b5_1_batch_files_are_unchanged_elsewhere() {
         let root = project();
         let script = "@echo off\necho 参数是 %1\n";
-        execute(prepare("write_file", &json!({ "path": "测试.bat", "content": script }), root.to_str().unwrap()).unwrap()).unwrap();
+        execute(
+            prepare(
+                "write_file",
+                &json!({ "path": "测试.bat", "content": script }),
+                root.to_str().unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         assert_eq!(fs::read(root.join("测试.bat")).unwrap(), script.as_bytes());
         let _ = fs::remove_dir_all(root);
     }
@@ -5232,9 +6088,18 @@ mod b5_1338_tests {
         let command = "echo [%HTTPS_PROXY%] [%https_proxy%] [%NO_PROXY%] [%no_proxy%]";
         #[cfg(not(windows))]
         let command = "echo \"[$HTTPS_PROXY] [$https_proxy] [$NO_PROXY] [$no_proxy]\"";
-        let result = execute_command_with_env(command, &root, Duration::from_secs(30), None, &settings.command_environment()).unwrap();
+        let result = execute_command_with_env(
+            command,
+            &root,
+            Duration::from_secs(30),
+            None,
+            &settings.command_environment(),
+        )
+        .unwrap();
         assert!(
-            text(&result).contains("[http://127.0.0.1:7890] [http://127.0.0.1:7890] [localhost] [localhost]"),
+            text(&result).contains(
+                "[http://127.0.0.1:7890] [http://127.0.0.1:7890] [localhost] [localhost]"
+            ),
             "{}",
             text(&result)
         );
@@ -5245,8 +6110,13 @@ mod b5_1338_tests {
     #[test]
     fn b5_2_only_auto_and_full_access_get_the_system_proxy() {
         use crate::runtime_host::approval_policy::AccessMode;
-        assert!(crate::runtime_host::command_proxy_environment_for_mode(AccessMode::ReadOnly).is_empty());
-        assert!(crate::runtime_host::command_proxy_environment_for_mode(AccessMode::Ask).is_empty());
+        assert!(
+            crate::runtime_host::command_proxy_environment_for_mode(AccessMode::ReadOnly)
+                .is_empty()
+        );
+        assert!(
+            crate::runtime_host::command_proxy_environment_for_mode(AccessMode::Ask).is_empty()
+        );
         assert_eq!(
             crate::runtime_host::command_proxy_environment_for_mode(AccessMode::Auto),
             crate::system_proxy::detect().command_environment()
@@ -5255,8 +6125,20 @@ mod b5_1338_tests {
             crate::runtime_host::command_proxy_environment_for_mode(AccessMode::FullAccess),
             crate::system_proxy::detect().command_environment()
         );
-        let action = prepare("run_command", &json!({ "command": "echo hi" }), std::env::temp_dir().to_str().unwrap()).unwrap();
-        let PreparedToolAction::RunCommand { extra_env, .. } = action.with_command_environment(vec![("HTTP_PROXY".into(), "http://p:1".into())]) else { panic!() };
-        assert_eq!(extra_env, vec![("HTTP_PROXY".to_owned(), "http://p:1".to_owned())]);
+        let action = prepare(
+            "run_command",
+            &json!({ "command": "echo hi" }),
+            std::env::temp_dir().to_str().unwrap(),
+        )
+        .unwrap();
+        let PreparedToolAction::RunCommand { extra_env, .. } =
+            action.with_command_environment(vec![("HTTP_PROXY".into(), "http://p:1".into())])
+        else {
+            panic!()
+        };
+        assert_eq!(
+            extra_env,
+            vec![("HTTP_PROXY".to_owned(), "http://p:1".to_owned())]
+        );
     }
 }

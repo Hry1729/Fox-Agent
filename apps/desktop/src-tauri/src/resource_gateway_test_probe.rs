@@ -54,23 +54,45 @@ pub(crate) struct Probe {
 }
 
 impl Probe {
-    pub fn install(targets: &[PathBuf], first_wave: usize, gate_timeout: Duration) -> Result<Self, String> {
-        if first_wave == 0 || first_wave > 4 || first_wave > targets.len() || gate_timeout.is_zero() {
+    pub fn install(
+        targets: &[PathBuf],
+        first_wave: usize,
+        gate_timeout: Duration,
+    ) -> Result<Self, String> {
+        if first_wave == 0 || first_wave > 4 || first_wave > targets.len() || gate_timeout.is_zero()
+        {
             return Err("read probe requires a finite first wave of at most four targets".into());
         }
-        let canonical = targets.iter().map(|target| {
-            let path = target.canonicalize().map_err(|error| error.to_string())?;
-            if !path.is_file() { return Err("read probe target is not an existing file".into()); }
-            Ok(path)
-        }).collect::<Result<HashSet<_>, String>>()?;
-        if canonical.len() != targets.len() { return Err("read probe targets must be distinct canonical files".into()); }
+        let canonical = targets
+            .iter()
+            .map(|target| {
+                let path = target.canonicalize().map_err(|error| error.to_string())?;
+                if !path.is_file() {
+                    return Err("read probe target is not an existing file".into());
+                }
+                Ok(path)
+            })
+            .collect::<Result<HashSet<_>, String>>()?;
+        if canonical.len() != targets.len() {
+            return Err("read probe targets must be distinct canonical files".into());
+        }
         let inner = Arc::new(Inner {
-            targets: canonical, first_wave, gate_timeout, origin: Instant::now(),
-            state: Mutex::new(State::default()), changed: Condvar::new(),
+            targets: canonical,
+            first_wave,
+            gate_timeout,
+            origin: Instant::now(),
+            state: Mutex::new(State::default()),
+            changed: Condvar::new(),
         });
-        let mut active = registry().lock().map_err(|_| "read probe registry is poisoned")?;
+        let mut active = registry()
+            .lock()
+            .map_err(|_| "read probe registry is poisoned")?;
         active.retain(|entry| entry.strong_count() > 0);
-        if active.iter().filter_map(Weak::upgrade).any(|other| !other.targets.is_disjoint(&inner.targets)) {
+        if active
+            .iter()
+            .filter_map(Weak::upgrade)
+            .any(|other| !other.targets.is_disjoint(&inner.targets))
+        {
             return Err("another read probe already owns one of these canonical targets".into());
         }
         active.push(Arc::downgrade(&inner));
@@ -78,10 +100,16 @@ impl Probe {
     }
 
     pub fn snapshot(&self) -> Result<Snapshot, String> {
-        let state = self.inner.state.lock().map_err(|_| "read probe state is poisoned")?;
+        let state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| "read probe state is poisoned")?;
         Ok(Snapshot {
-            first_wave: self.inner.first_wave, opened_targets: state.opened.len(),
-            gate_released_ns: state.gate_released_ns, gate_failed: state.gate_failed,
+            first_wave: self.inner.first_wave,
+            opened_targets: state.opened.len(),
+            gate_released_ns: state.gate_released_ns,
+            gate_failed: state.gate_failed,
             intervals: state.intervals.clone(),
         })
     }
@@ -90,7 +118,11 @@ impl Probe {
 impl Drop for Probe {
     fn drop(&mut self) {
         if let Ok(mut active) = registry().lock() {
-            active.retain(|entry| entry.upgrade().is_some_and(|other| !Arc::ptr_eq(&other, &self.inner)));
+            active.retain(|entry| {
+                entry
+                    .upgrade()
+                    .is_some_and(|other| !Arc::ptr_eq(&other, &self.inner))
+            });
         }
     }
 }
@@ -113,35 +145,58 @@ impl ReadSpan {
     }
 
     fn record_end(&mut self) {
-        if self.recorded { return; }
+        if self.recorded {
+            return;
+        }
         self.interval.exited_ns = self.inner.origin.elapsed().as_nanos() as u64;
         self.recorded = true;
-        if let Ok(mut state) = self.inner.state.lock() { state.intervals.push(self.interval.clone()); }
+        if let Ok(mut state) = self.inner.state.lock() {
+            state.intervals.push(self.interval.clone());
+        }
     }
 }
 
 impl Drop for ReadSpan {
-    fn drop(&mut self) { self.record_end(); }
+    fn drop(&mut self) {
+        self.record_end();
+    }
 }
 
 // Only registered canonical files opt in; all other readers bypass the gate.
 pub(super) fn begin_read(target: &Path) -> Result<Option<ReadSpan>, String> {
     let inner = {
-        let mut active = registry().lock().map_err(|_| "read probe registry is poisoned")?;
+        let mut active = registry()
+            .lock()
+            .map_err(|_| "read probe registry is poisoned")?;
         active.retain(|entry| entry.strong_count() > 0);
-        active.iter().filter_map(Weak::upgrade).find(|probe| probe.targets.contains(target))
+        active
+            .iter()
+            .filter_map(Weak::upgrade)
+            .find(|probe| probe.targets.contains(target))
     };
-    let Some(inner) = inner else { return Ok(None); };
+    let Some(inner) = inner else {
+        return Ok(None);
+    };
     let opened_ns = inner.origin.elapsed().as_nanos() as u64;
     {
-        let mut state = inner.state.lock().map_err(|_| "read probe state is poisoned")?;
-        if !state.opened.insert(target.to_path_buf()) { return Err("read probe observed a repeated target execution".into()); }
-        let deadline = *state.gate_deadline.get_or_insert_with(|| Instant::now() + inner.gate_timeout);
+        let mut state = inner
+            .state
+            .lock()
+            .map_err(|_| "read probe state is poisoned")?;
+        if !state.opened.insert(target.to_path_buf()) {
+            return Err("read probe observed a repeated target execution".into());
+        }
+        let deadline = *state
+            .gate_deadline
+            .get_or_insert_with(|| Instant::now() + inner.gate_timeout);
         if state.gate_released_ns.is_none() && Instant::now() >= deadline {
             state.gate_failed = true;
             inner.changed.notify_all();
         }
-        if !state.gate_failed && state.gate_released_ns.is_none() && state.opened.len() >= inner.first_wave {
+        if !state.gate_failed
+            && state.gate_released_ns.is_none()
+            && state.opened.len() >= inner.first_wave
+        {
             state.gate_released_ns = Some(inner.origin.elapsed().as_nanos() as u64);
             inner.changed.notify_all();
         }
@@ -152,18 +207,31 @@ pub(super) fn begin_read(target: &Path) -> Result<Option<ReadSpan>, String> {
                 inner.changed.notify_all();
                 break;
             }
-            let (next, _) = inner.changed.wait_timeout(state, remaining).map_err(|_| "read probe gate is poisoned")?;
+            let (next, _) = inner
+                .changed
+                .wait_timeout(state, remaining)
+                .map_err(|_| "read probe gate is poisoned")?;
             state = next;
         }
         if state.gate_failed {
-            return Err(format!("read probe first wave timed out: opened {}, expected {}", state.opened.len(), inner.first_wave));
+            return Err(format!(
+                "read probe first wave timed out: opened {}, expected {}",
+                state.opened.len(),
+                inner.first_wave
+            ));
         }
     }
     let mut span = ReadSpan {
         inner,
         interval: ReadInterval {
-            target: target.to_path_buf(), thread: format!("{:?}", std::thread::current().id()),
-            opened_ns, entered_ns: 0, exited_ns: 0, bytes: 0, read_calls: 0, completed: false,
+            target: target.to_path_buf(),
+            thread: format!("{:?}", std::thread::current().id()),
+            opened_ns,
+            entered_ns: 0,
+            exited_ns: 0,
+            bytes: 0,
+            read_calls: 0,
+            completed: false,
         },
         recorded: false,
     };

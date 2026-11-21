@@ -7,19 +7,21 @@
 <style>
 :root{
   --bg:#070a12; --card:rgba(20,27,42,.62); --card-solid:#141b2a;
-  --line:rgba(120,150,210,.14); --line-hi:rgba(120,160,255,.4);
+  --line:rgba(120,150,210,.14); --line-hi:rgba(120,160,255,.42);
   --txt:#eaf0fa; --sub:#9aa9c2; --dim:#5f6d85;
   --a1:#5b9dff; --a2:#8b7bff; --a3:#3fd6a8;
   --grad:linear-gradient(135deg,#5b9dff 0%,#8b7bff 55%,#c86bff 100%);
+  --nav-h:62px;
 }
 *{box-sizing:border-box;margin:0;padding:0}
-html{scroll-behavior:smooth}
+html{scroll-behavior:smooth;scroll-padding-top:calc(var(--nav-h) + 16px)}
 body{
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
   background:var(--bg); color:var(--txt); line-height:1.65; overflow-x:hidden;
   -webkit-font-smoothing:antialiased;
 }
-/* animated bg */
+::selection{background:rgba(91,157,255,.35);color:#fff}
+/* bg */
 .bg{position:fixed;inset:0;z-index:-2;overflow:hidden;background:
   radial-gradient(1000px 600px at 15% -10%,rgba(91,157,255,.14),transparent 60%),
   radial-gradient(900px 600px at 90% 5%,rgba(139,123,255,.14),transparent 60%),
@@ -37,37 +39,59 @@ body{
 .blob.b3{width:300px;height:300px;background:#2f9e86;bottom:-100px;left:30%;animation-delay:-12s}
 @keyframes float{0%,100%{transform:translate(0,0) scale(1)}33%{transform:translate(30px,-30px) scale(1.08)}66%{transform:translate(-25px,25px) scale(.95)}}
 
+/* scroll progress */
+.progress{position:fixed;top:0;left:0;height:3px;width:0;background:var(--grad);z-index:100;transition:width .1s linear;box-shadow:0 0 12px rgba(91,157,255,.6)}
+
+/* NAV */
+nav{position:fixed;top:0;left:0;right:0;height:var(--nav-h);z-index:90;
+  background:rgba(7,10,18,.72);backdrop-filter:blur(18px);border-bottom:1px solid var(--line);
+  display:flex;align-items:center;transition:.3s}
+nav.scrolled{background:rgba(7,10,18,.9);box-shadow:0 8px 30px rgba(0,0,0,.35)}
+.nav-inner{max-width:1100px;margin:0 auto;padding:0 26px;width:100%;display:flex;align-items:center;gap:26px}
+.nav-brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:16px;text-decoration:none;color:var(--txt)}
+.nav-brand svg{width:26px;height:26px;fill:url(#navgrad)}
+.nav-links{display:flex;gap:4px;margin-left:auto}
+.nav-links a{color:var(--sub);text-decoration:none;font-size:13.5px;font-weight:600;padding:7px 13px;border-radius:9px;transition:.2s}
+.nav-links a:hover{color:var(--txt);background:rgba(255,255,255,.05)}
+.nav-links a.active{color:var(--a1);background:rgba(91,157,255,.1)}
+@media(max-width:820px){.nav-links{display:none}}
+
 .wrap{max-width:1100px;margin:0 auto;padding:0 26px;position:relative;z-index:1}
 
 /* HERO */
-.hero{padding:110px 0 80px;text-align:center}
+.hero{padding:calc(var(--nav-h) + 80px) 0 80px;text-align:center}
 .logo{
-  width:86px;height:86px;border-radius:24px;margin:0 auto 30px;position:relative;
+  width:90px;height:90px;border-radius:26px;margin:0 auto 30px;position:relative;
   background:var(--grad);display:flex;align-items:center;justify-content:center;
   box-shadow:0 16px 50px rgba(91,157,255,.4),0 0 0 1px rgba(255,255,255,.08) inset;
   animation:glow 4s ease-in-out infinite;
 }
 @keyframes glow{0%,100%{box-shadow:0 16px 50px rgba(91,157,255,.4)}50%{box-shadow:0 16px 60px rgba(139,123,255,.6)}}
-.logo svg{width:44px;height:44px;fill:#fff}
+.logo svg{width:46px;height:46px;fill:#fff}
 .eyebrow{display:inline-block;font-size:12px;letter-spacing:3px;text-transform:uppercase;
   color:var(--a1);font-weight:700;margin-bottom:16px;
   padding:6px 14px;border:1px solid var(--line-hi);border-radius:99px;background:rgba(91,157,255,.07)}
-h1{font-size:60px;font-weight:850;letter-spacing:-2px;margin-bottom:18px;line-height:1.05}
+h1{font-size:62px;font-weight:850;letter-spacing:-2px;margin-bottom:18px;line-height:1.05}
 h1 .g{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
-.tag{font-size:19px;color:var(--sub);max-width:660px;margin:0 auto}
+.tag{font-size:19px;color:var(--sub);max-width:680px;margin:0 auto}
 .tag b{color:var(--txt);font-weight:650}
 .pills{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:28px}
 .pill{padding:8px 16px;border-radius:99px;font-size:13px;font-weight:600;
   background:rgba(255,255,255,.04);border:1px solid var(--line);color:var(--sub);backdrop-filter:blur(8px)}
+.hero-cta{display:flex;gap:14px;justify-content:center;margin-top:34px;flex-wrap:wrap}
+.btn{padding:13px 26px;border-radius:13px;font-size:15px;font-weight:700;text-decoration:none;transition:.25s;display:inline-flex;align-items:center;gap:8px}
+.btn-p{background:var(--grad);color:#fff;box-shadow:0 10px 30px rgba(91,157,255,.35)}
+.btn-p:hover{transform:translateY(-3px);box-shadow:0 16px 40px rgba(91,157,255,.5)}
+.btn-s{background:rgba(255,255,255,.04);color:var(--txt);border:1px solid var(--line)}
+.btn-s:hover{border-color:var(--line-hi);transform:translateY(-3px);background:rgba(255,255,255,.07)}
 
 /* SECTION */
-section{padding:70px 0;position:relative}
+section{padding:76px 0;position:relative}
 .sec-head{margin-bottom:44px}
 .sec-eyebrow{font-size:12px;letter-spacing:2.5px;text-transform:uppercase;color:var(--a2);font-weight:700;margin-bottom:10px}
 .sec-title{font-size:32px;font-weight:800;letter-spacing:-.5px}
 .sec-sub{color:var(--sub);margin-top:8px;font-size:16px}
 
-/* reveal animation */
 .reveal{opacity:0;transform:translateY(24px);transition:opacity .7s cubic-bezier(.2,.7,.3,1),transform .7s cubic-bezier(.2,.7,.3,1)}
 .reveal.in{opacity:1;transform:none}
 
@@ -81,16 +105,35 @@ section{padding:70px 0;position:relative}
 .step::before{content:"";position:absolute;inset:0;background:var(--grad);opacity:0;transition:.25s;z-index:0}
 .step:hover::before{opacity:.16}
 .step:hover{border-color:var(--line-hi);transform:translateY(-3px)}
-.step span{position:relative;z-index:1}
-.step .em{font-size:19px}
+.step span{position:relative;z-index:1}.step .em{font-size:19px}
 .arrow{color:var(--a1);font-size:22px;font-weight:700;opacity:.7}
 .roles{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:16px;margin-top:30px}
 .role{background:rgba(255,255,255,.03);border:1px solid var(--line);border-radius:16px;padding:24px 18px;text-align:center;transition:.25s}
 .role:hover{border-color:var(--line-hi);transform:translateY(-3px);background:rgba(255,255,255,.05)}
 .role .ric{width:48px;height:48px;border-radius:13px;margin:0 auto 12px;display:flex;align-items:center;justify-content:center;background:rgba(91,157,255,.1)}
 .role .ric svg{width:24px;height:24px;stroke:var(--a1);fill:none;stroke-width:2}
-.role b{display:block;margin-bottom:5px;font-size:16px}
-.role span{color:var(--sub);font-size:13px}
+.role b{display:block;margin-bottom:5px;font-size:16px}.role span{color:var(--sub);font-size:13px}
+
+/* ARCH (visual layers) */
+.arch-card{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:34px;backdrop-filter:blur(16px);box-shadow:0 20px 60px rgba(0,0,0,.3)}
+.layer{display:flex;align-items:stretch;gap:16px;margin-bottom:14px}
+.layer:last-child{margin-bottom:0}
+.layer-tag{flex:0 0 120px;display:flex;align-items:center;justify-content:center;
+  border-radius:14px;font-weight:800;font-size:14px;text-align:center;padding:10px;line-height:1.3}
+.layer-box{flex:1;background:rgba(255,255,255,.03);border:1px solid var(--line);border-radius:14px;padding:16px 18px;
+  display:flex;flex-wrap:wrap;gap:9px;align-items:center;transition:.25s}
+.layer-box:hover{border-color:var(--line-hi)}
+.node{padding:8px 14px;border-radius:10px;font-size:13px;font-weight:600;background:rgba(255,255,255,.05);border:1px solid var(--line);transition:.2s}
+.node:hover{transform:translateY(-2px);border-color:var(--line-hi)}
+.node.hi{background:linear-gradient(135deg,rgba(91,157,255,.2),rgba(139,123,255,.15));border-color:var(--line-hi);color:#fff}
+.node.hi2{background:linear-gradient(135deg,rgba(139,123,255,.2),rgba(200,107,255,.12));border-color:var(--line-hi);color:#fff}
+.node.hi3{background:linear-gradient(135deg,rgba(63,214,168,.18),rgba(63,214,143,.1));border-color:rgba(63,214,168,.35);color:#fff}
+.connector{text-align:center;color:var(--dim);font-size:18px;margin:-6px 0 8px;padding-left:136px}
+.connector span{display:inline-block;animation:bob 1.6s ease-in-out infinite}
+@keyframes bob{0%,100%{transform:translateY(0);opacity:.5}50%{transform:translateY(4px);opacity:1}}
+.lt1{background:linear-gradient(135deg,#5b9dff,#3b6fd4);color:#fff}
+.lt2{background:linear-gradient(135deg,#8b7bff,#5b3fd4);color:#fff}
+.lt3{background:linear-gradient(135deg,#3fd6a8,#2a9e86);color:#04120e}
 
 /* CARDS */
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(255px,1fr));gap:20px}
@@ -103,8 +146,7 @@ section{padding:70px 0;position:relative}
 .card .cic{width:50px;height:50px;border-radius:14px;margin-bottom:18px;display:flex;align-items:center;justify-content:center;
   background:linear-gradient(135deg,rgba(91,157,255,.16),rgba(139,123,255,.12));border:1px solid var(--line)}
 .card .cic svg{width:25px;height:25px;stroke:var(--a1);fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-.card h3{font-size:18px;margin-bottom:9px;font-weight:700}
-.card p{color:var(--sub);font-size:14px}
+.card h3{font-size:18px;margin-bottom:9px;font-weight:700}.card p{color:var(--sub);font-size:14px}
 
 /* STACK */
 .stack{display:flex;flex-wrap:wrap;gap:12px}
@@ -112,14 +154,6 @@ section{padding:70px 0;position:relative}
   display:flex;align-items:center;gap:10px;backdrop-filter:blur(10px);transition:.2s;font-weight:550}
 .chip:hover{border-color:var(--line-hi);transform:translateY(-2px)}
 .chip .dot{width:9px;height:9px;border-radius:50%;background:var(--grad);box-shadow:0 0 10px var(--a1)}
-
-/* ARCH */
-.arch-card{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:34px;backdrop-filter:blur(16px);
-  box-shadow:0 20px 60px rgba(0,0,0,.3)}
-.arch{font-family:"SF Mono","JetBrains Mono",Consolas,monospace;font-size:13.5px;color:var(--sub);
-  white-space:pre;overflow-x:auto;line-height:2}
-.arch .hl{color:var(--a1);font-weight:700} .arch .hl2{color:var(--a2);font-weight:700} .arch .hl3{color:var(--a3);font-weight:700}
-.arch .d{color:var(--dim)}
 
 /* AGENTS */
 .agents{display:grid;gap:14px}
@@ -141,28 +175,48 @@ section{padding:70px 0;position:relative}
   position:relative;overflow:hidden;transition:.25s;backdrop-filter:blur(12px)}
 .tier::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;background:var(--tc,var(--a1))}
 .tier:hover{transform:translateY(-4px);border-color:var(--line-hi)}
-.tier:nth-child(1){--tc:var(--a3)} .tier:nth-child(2){--tc:#7bd88f}
-.tier:nth-child(3){--tc:var(--a1)} .tier:nth-child(4){--tc:#c86bff}
+.tier:nth-child(1){--tc:var(--a3)}.tier:nth-child(2){--tc:#7bd88f}
+.tier:nth-child(3){--tc:var(--a1)}.tier:nth-child(4){--tc:#c86bff}
 .tier .tn{width:40px;height:40px;border-radius:12px;margin:0 auto 14px;display:flex;align-items:center;justify-content:center;
   background:rgba(255,255,255,.05);border:1px solid var(--line);font-weight:800;font-size:18px;color:var(--tc)}
-.tier b{display:block;font-size:16px;margin-bottom:6px}
-.tier span{color:var(--sub);font-size:12.5px}
+.tier b{display:block;font-size:16px;margin-bottom:6px}.tier span{color:var(--sub);font-size:12.5px}
 
 /* STATS */
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:20px}
 .stat{text-align:center;background:var(--card);border:1px solid var(--line);border-radius:18px;padding:30px 18px;
   backdrop-filter:blur(12px);transition:.25s}
 .stat:hover{border-color:var(--line-hi);transform:translateY(-4px)}
-.stat b{font-size:40px;font-weight:850;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent;display:block;line-height:1}
+.stat b{font-size:42px;font-weight:850;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent;display:block;line-height:1}
 .stat span{display:block;color:var(--sub);font-size:13px;margin-top:10px;font-weight:550}
 
+/* ROADMAP */
+.timeline{position:relative;padding-left:34px}
+.timeline::before{content:"";position:absolute;left:12px;top:6px;bottom:6px;width:2px;background:linear-gradient(180deg,var(--a1),var(--a2),var(--a3))}
+.tl-item{position:relative;margin-bottom:26px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px 22px;backdrop-filter:blur(12px);transition:.25s}
+.tl-item:hover{border-color:var(--line-hi);transform:translateX(4px)}
+.tl-item:last-child{margin-bottom:0}
+.tl-item::before{content:"";position:absolute;left:-30px;top:24px;width:14px;height:14px;border-radius:50%;background:var(--grad);box-shadow:0 0 0 4px var(--bg),0 0 14px rgba(91,157,255,.6)}
+.tl-item h4{font-size:16px;margin-bottom:6px;font-weight:750}
+.tl-item p{color:var(--sub);font-size:14px}
+.tl-tag{display:inline-block;font-size:11px;font-weight:700;padding:3px 10px;border-radius:99px;margin-bottom:8px;background:rgba(91,157,255,.12);color:var(--a1);border:1px solid rgba(91,157,255,.25)}
+.tl-tag.done{background:rgba(63,214,168,.12);color:var(--a3);border-color:rgba(63,214,168,.28)}
+
+/* LIMITS */
+.limits{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:30px;backdrop-filter:blur(16px)}
+.limits ul{list-style:none;display:grid;gap:14px}
+.limits li{display:flex;gap:12px;color:var(--sub);font-size:14.5px;padding-bottom:14px;border-bottom:1px dashed var(--line)}
+.limits li:last-child{border-bottom:none;padding-bottom:0}
+.limits li svg{flex-shrink:0;width:18px;height:18px;stroke:#ffb454;fill:none;stroke-width:2;margin-top:3px}
+
 /* CTA */
-.cta{text-align:center;padding:30px;background:var(--card);border:1px solid var(--line);border-radius:22px;
+.cta{text-align:center;padding:40px 30px;background:var(--card);border:1px solid var(--line);border-radius:22px;
   backdrop-filter:blur(16px);position:relative;overflow:hidden}
-.cta::before{content:"";position:absolute;inset:0;background:var(--grad);opacity:.07}
-.cta h3{font-size:24px;font-weight:800;margin-bottom:10px;position:relative}
+.cta::before{content:"";position:absolute;inset:0;background:var(--grad);opacity:.08}
+.cta h3{font-size:26px;font-weight:800;margin-bottom:14px;position:relative}
 .cta p{color:var(--sub);position:relative}
-.cta code{background:rgba(0,0,0,.35);padding:3px 9px;border-radius:6px;font-size:14px;color:var(--a3);position:relative}
+.cta .cmds{display:flex;gap:12px;justify-content:center;margin:20px 0;flex-wrap:wrap;position:relative}
+.cta code{background:rgba(0,0,0,.4);padding:10px 18px;border-radius:10px;font-size:14.5px;color:var(--a3);border:1px solid var(--line)}
+.cta .note{font-size:13.5px;margin-top:6px}
 
 footer{padding:50px 0 60px;text-align:center;color:var(--dim);font-size:13px}
 footer .fl{margin-bottom:14px}
@@ -170,20 +224,35 @@ footer .fl svg{width:28px;height:28px;fill:var(--dim);opacity:.6}
 footer a{color:var(--a1);text-decoration:none;font-weight:600}
 
 @media(max-width:640px){
-  h1{font-size:40px}.hero{padding:70px 0 55px}
-  .sec-title{font-size:26px}.flow-wrap,.arch-card{padding:22px}
+  h1{font-size:42px}.hero{padding-top:calc(var(--nav-h) + 55px)}
+  .sec-title{font-size:26px}.flow-wrap,.arch-card,.limits,.cta{padding:22px}
   .agent{flex-wrap:wrap;gap:12px}.agent .name{min-width:auto}
+  .layer{flex-direction:column;gap:10px}.layer-tag{flex-basis:auto;padding:8px}
+  .connector{padding-left:0}
 }
 </style>
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute"><defs>
+<linearGradient id="navgrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#5b9dff"/><stop offset="100%" stop-color="#c86bff"/></linearGradient>
+</defs></svg>
+
+<div class="progress" id="prog"></div>
 <div class="bg"><div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div></div>
 
-<div class="hero">
-  <div class="wrap">
-    <div class="logo">
-      <svg viewBox="0 0 24 24"><path d="M12 2C6.5 2 2 6 2 11c0 2.5 1.2 4.7 3 6.3V21a1 1 0 001 1h1.5a1 1 0 001-1v-1h7v1a1 1 0 001 1H18a1 1 0 001-1v-3.7c1.8-1.6 3-3.8 3-6.3 0-5-4.5-9-10-9zM8.5 13a1.8 1.8 0 110-3.6 1.8 1.8 0 010 3.6zm7 0a1.8 1.8 0 110-3.6 1.8 1.8 0 010 3.6z"/></svg>
+<nav id="nav">
+  <div class="nav-inner">
+    <a href="#top" class="nav-brand"><svg viewBox="0 0 24 24"><path d="M12 2C6.5 2 2 6 2 11c0 2.5 1.2 4.7 3 6.3V21a1 1 0 001 1h1.5a1 1 0 001-1v-1h7v1a1 1 0 001 1H18a1 1 0 001-1v-3.7c1.8-1.6 3-3.8 3-6.3 0-5-4.5-9-10-9zM8.5 13a1.8 1.8 0 110-3.6 1.8 1.8 0 010 3.6zm7 0a1.8 1.8 0 110-3.6 1.8 1.8 0 010 3.6z"/></svg>Fox</a>
+    <div class="nav-links" id="navlinks">
+      <a href="#flow">闭环</a><a href="#agents">Agent</a><a href="#caps">能力</a>
+      <a href="#arch">架构</a><a href="#security">安全</a><a href="#roadmap">路线图</a>
     </div>
+  </div>
+</nav>
+
+<div class="hero" id="top">
+  <div class="wrap">
+    <div class="logo"><svg viewBox="0 0 24 24"><path d="M12 2C6.5 2 2 6 2 11c0 2.5 1.2 4.7 3 6.3V21a1 1 0 001 1h1.5a1 1 0 001-1v-1h7v1a1 1 0 001 1H18a1 1 0 001-1v-3.7c1.8-1.6 3-3.8 3-6.3 0-5-4.5-9-10-9zM8.5 13a1.8 1.8 0 110-3.6 1.8 1.8 0 010 3.6zm7 0a1.8 1.8 0 110-3.6 1.8 1.8 0 010 3.6z"/></svg></div>
     <div class="eyebrow">Desktop Agent Workbench</div>
     <h1>Fox <span class="g">Agent</span></h1>
     <p class="tag">面向个人与小团队的<strong>桌面智能体工作台</strong>。把本地项目、模型、知识库、工具与可恢复工作流,放进统一的 <b>Host 权限边界</b>。</p>
@@ -191,10 +260,14 @@ footer a{color:var(--a1);text-decoration:none;font-weight:600}
       <div class="pill">React</div><div class="pill">Tauri / Rust</div><div class="pill">SQLite</div>
       <div class="pill">Node Agent Runtime</div><div class="pill">ACP</div>
     </div>
+    <div class="hero-cta">
+      <a href="#flow" class="btn btn-p">了解工作闭环 →</a>
+      <a href="#arch" class="btn btn-s">查看架构</a>
+    </div>
   </div>
 </div>
 
-<section>
+<section id="flow">
   <div class="wrap">
     <div class="sec-head reveal">
       <div class="sec-eyebrow">Philosophy</div>
@@ -221,7 +294,7 @@ footer a{color:var(--a1);text-decoration:none;font-weight:600}
   </div>
 </section>
 
-<section>
+<section id="agents">
   <div class="wrap">
     <div class="sec-head reveal">
       <div class="sec-eyebrow">Agents</div>
@@ -229,35 +302,15 @@ footer a{color:var(--a1);text-decoration:none;font-weight:600}
       <div class="sec-sub">默认只有 Fox,外部 Agent 需用户在设置中启用</div>
     </div>
     <div class="agents">
-      <div class="agent reveal">
-        <div class="avatar">F</div>
-        <div class="name">Fox (PiNative)</div>
-        <div class="badge">默认启用</div>
-        <div class="desc">内置主线,Authoritative 模式,失败直接报错、不回退</div>
-      </div>
-      <div class="agent reveal">
-        <div class="avatar ext">P</div>
-        <div class="name">Pi</div>
-        <div class="badge off">可选接入</div>
-        <div class="desc">经 ACP 接入,工具调用交 Fox 审批引擎,共用四档</div>
-      </div>
-      <div class="agent reveal">
-        <div class="avatar ext">C</div>
-        <div class="name">Codex</div>
-        <div class="badge off">可选接入</div>
-        <div class="desc">经 ACP 接入,用 Codex 自己的沙箱与权限模式</div>
-      </div>
-      <div class="agent reveal">
-        <div class="avatar ext">D</div>
-        <div class="name">DeepSeek Harness</div>
-        <div class="badge off">可选接入</div>
-        <div class="desc">经 ACP 接入,审批请求在 Fox 显示为审批卡</div>
-      </div>
+      <div class="agent reveal"><div class="avatar">F</div><div class="name">Fox (PiNative)</div><div class="badge">默认启用</div><div class="desc">内置主线,Authoritative 模式,失败直接报错、不回退</div></div>
+      <div class="agent reveal"><div class="avatar ext">P</div><div class="name">Pi</div><div class="badge off">可选接入</div><div class="desc">经 ACP 接入,工具调用交 Fox 审批引擎,共用四档</div></div>
+      <div class="agent reveal"><div class="avatar ext">C</div><div class="name">Codex</div><div class="badge off">可选接入</div><div class="desc">经 ACP 接入,用 Codex 自己的沙箱与权限模式</div></div>
+      <div class="agent reveal"><div class="avatar ext">D</div><div class="name">DeepSeek Harness</div><div class="badge off">可选接入</div><div class="desc">经 ACP 接入,审批请求在 Fox 显示为审批卡</div></div>
     </div>
   </div>
 </section>
 
-<section>
+<section id="caps">
   <div class="wrap">
     <div class="sec-head reveal">
       <div class="sec-eyebrow">Capabilities</div>
@@ -275,22 +328,46 @@ footer a{color:var(--a1);text-decoration:none;font-weight:600}
   </div>
 </section>
 
-<section>
+<section id="arch">
   <div class="wrap">
     <div class="sec-head reveal">
       <div class="sec-eyebrow">Architecture</div>
       <div class="sec-title">系统结构</div>
-      <div class="sec-sub">从 React 工作台到模型供应商的完整链路</div>
+      <div class="sec-sub">从 React 工作台到模型供应商的四层链路</div>
     </div>
     <div class="arch-card reveal">
-      <div class="arch"><span class="hl">React 工作台</span>
-<span class="d">    ↓ Tauri Command / Event</span>
-<span class="hl2">Rust Host</span> <span class="d">──</span> SQLite 产品事实
-<span class="d">    ├─ Fox 会话:</span> PiNative <span class="d">→</span> JSONL 协议 <span class="d">→</span> <span class="hl3">Node Agent Runtime</span> <span class="d">──</span> 模型供应商
-<span class="d">    │                                ↓ Host Tool 请求 →</span> 审批引擎(四档)
-<span class="d">    │            Rust Host ──</span> 项目文件 / 命令 / 知识库 / MCP / OpenAPI / Keyring
-<span class="d">    └─ 外部 Agent 会话:</span> 通用 ACP 后端 <span class="d">→</span> Pi / Codex / dsh
-<span class="d">                                ↑ Fox 工具经 MCP 桥接</span></div>
+      <div class="layer">
+        <div class="layer-tag lt1">前端<br>工作台</div>
+        <div class="layer-box">
+          <div class="node hi">React + TypeScript</div><div class="node">会话 / 工作台</div>
+          <div class="node">设置中心</div><div class="node">知识库 UI</div><div class="node">专家 / 团队</div>
+        </div>
+      </div>
+      <div class="connector"><span>↓ Tauri Command / Event</span></div>
+      <div class="layer">
+        <div class="layer-tag lt2">Rust Host<br>权限核心</div>
+        <div class="layer-box">
+          <div class="node hi2">审批引擎(四档)</div><div class="node">SQLite 事实库</div>
+          <div class="node">项目文件 / 命令 Job</div><div class="node">MCP / OpenAPI</div>
+          <div class="node">Keyring 凭据</div><div class="node">进程树管理</div>
+        </div>
+      </div>
+      <div class="connector"><span>↓ JSONL Runtime 协议</span></div>
+      <div class="layer">
+        <div class="layer-tag lt3">Agent<br>Runtime</div>
+        <div class="layer-box">
+          <div class="node hi3">Node Runtime</div><div class="node">模型循环</div><div class="node">Prompt Registry</div>
+          <div class="node">Typed Context</div><div class="node">Execution Profile</div><div class="node">离线 Eval</div>
+        </div>
+      </div>
+      <div class="connector"><span>↓ ACP 协议</span></div>
+      <div class="layer">
+        <div class="layer-tag lt1">外部<br>Agent</div>
+        <div class="layer-box">
+          <div class="node hi">通用 ACP 后端</div><div class="node">Pi</div><div class="node">Codex</div>
+          <div class="node">DeepSeek Harness</div><div class="node">Fox 工具 MCP 桥</div>
+        </div>
+      </div>
     </div>
   </div>
 </section>
@@ -315,7 +392,7 @@ footer a{color:var(--a1);text-decoration:none;font-weight:600}
   </div>
 </section>
 
-<section>
+<section id="security">
   <div class="wrap">
     <div class="sec-head reveal">
       <div class="sec-eyebrow">Security</div>
@@ -337,6 +414,24 @@ footer a{color:var(--a1);text-decoration:none;font-weight:600}
   </div>
 </section>
 
+<section id="roadmap">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="sec-eyebrow">Roadmap</div>
+      <div class="sec-title">演进时间线</div>
+      <div class="sec-sub">从最小闭环到完整工作台</div>
+    </div>
+    <div class="timeline">
+      <div class="tl-item reveal"><span class="tl-tag done">已交付</span><h4>A0 · 最小工作闭环</h4><p>Goal → Task → Evidence 状态机、乐观锁、阻塞、重试与中断恢复。</p></div>
+      <div class="tl-item reveal"><span class="tl-tag done">已交付</span><h4>A1 · 完整工作图</h4><p>Plan Revision、Reviewer、Finding、Acceptance 与审批 Gate。</p></div>
+      <div class="tl-item reveal"><span class="tl-tag done">已交付</span><h4>A2–A6 · 治理与扩展</h4><p>受治理长期记忆、会话归档/Fork、Span Tree 离线评测、Child Run、MCP/OpenAPI/Lifecycle Hook。</p></div>
+      <div class="tl-item reveal"><span class="tl-tag done">已交付</span><h4>E1–E4 · 专家能力</h4><p>版本化能力包、持久工作流、Supervisor 团队、数字同事首版。</p></div>
+      <div class="tl-item reveal"><span class="tl-tag">进行中</span><h4>团队协作深化</h4><p>mailbox、成员并行领取任务、自动共享写 worktree。</p></div>
+      <div class="tl-item reveal"><span class="tl-tag">规划中</span><h4>扩展治理完善</h4><p>MCP 完整 OAuth、证书固定、操作级限流;跨平台验收与 CSP。</p></div>
+    </div>
+  </div>
+</section>
+
 <section>
   <div class="wrap">
     <div class="sec-head reveal">
@@ -344,11 +439,29 @@ footer a{color:var(--a1);text-decoration:none;font-weight:600}
       <div class="sec-title">代码体量</div>
     </div>
     <div class="stats">
-      <div class="stat reveal"><b>202</b><span>Tauri Commands</span></div>
-      <div class="stat reveal"><b>488</b><span>前端 TS/TSX 文件</span></div>
-      <div class="stat reveal"><b>2073</b><span>Rust 测试函数</span></div>
-      <div class="stat reveal"><b>v113</b><span>数据库 Schema</span></div>
-      <div class="stat reveal"><b>618</b><span>Rust 依赖 crate</span></div>
+      <div class="stat reveal"><b data-count="202">0</b><span>Tauri Commands</span></div>
+      <div class="stat reveal"><b data-count="488">0</b><span>前端 TS/TSX 文件</span></div>
+      <div class="stat reveal"><b data-count="2073">0</b><span>Rust 测试函数</span></div>
+      <div class="stat reveal"><b data-suffix="v" data-count="113">0</b><span>数据库 Schema</span></div>
+      <div class="stat reveal"><b data-count="618">0</b><span>Rust 依赖 crate</span></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div class="sec-eyebrow">Limitations</div>
+      <div class="sec-title">已知边界</div>
+      <div class="sec-sub">明确的能力边界,诚实告知</div>
+    </div>
+    <div class="limits reveal">
+      <ul>
+        <li><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>团队首版为串行 Supervisor,暂不提供 mailbox、成员并行领取任务或自动共享写 worktree。</li>
+        <li><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>Child Run 限制深度、并发与每父 Run 总数;远程知识库 Agent 尚不参与本地 Memory 与 Child Run 池。</li>
+        <li><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>MCP/OpenAPI 暂不支持完整 OAuth、证书固定、外部 $ref 与操作级限流。</li>
+        <li><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>命令不在沙箱内执行(已接受的取舍,靠四档审批 + block 规则 + 审计追溯)。</li>
+      </ul>
     </div>
   </div>
 </section>
@@ -357,8 +470,8 @@ footer a{color:var(--a1);text-decoration:none;font-weight:600}
   <div class="wrap">
     <div class="cta reveal">
       <h3>开始使用</h3>
-      <p><code>pnpm install</code> &nbsp;→&nbsp; <code>pnpm dev</code></p>
-      <p style="margin-top:12px;font-size:14px">本地运行一律使用 Authoritative + PiNative</p>
+      <div class="cmds"><code>pnpm install</code><code>pnpm dev</code></div>
+      <p class="note">本地运行一律使用 Authoritative + PiNative</p>
     </div>
   </div>
 </section>
@@ -372,8 +485,45 @@ footer a{color:var(--a1);text-decoration:none;font-weight:600}
 </footer>
 
 <script>
+// reveal on scroll
 const io=new IntersectionObserver((es)=>{es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}})},{threshold:.12});
 document.querySelectorAll('.reveal').forEach((el,i)=>{el.style.transitionDelay=(i%4)*70+'ms';io.observe(el)});
+
+// scroll progress + nav shadow
+const prog=document.getElementById('prog'),nav=document.getElementById('nav');
+const onScroll=()=>{
+  const h=document.documentElement.scrollHeight-window.innerHeight;
+  prog.style.width=(window.scrollY/h*100)+'%';
+  nav.classList.toggle('scrolled',window.scrollY>20);
+};
+window.addEventListener('scroll',onScroll,{passive:true});onScroll();
+
+// active nav link
+const secs=[...document.querySelectorAll('section[id]')];
+const links=[...document.querySelectorAll('.nav-links a')];
+const io2=new IntersectionObserver((es)=>{
+  es.forEach(e=>{if(e.isIntersecting){
+    links.forEach(l=>l.classList.toggle('active',l.getAttribute('href')==='#'+e.target.id));
+  }});
+},{rootMargin:'-40% 0px -55% 0px'});
+secs.forEach(s=>io2.observe(s));
+
+// number count-up
+const fmt=(n)=>n.toLocaleString('en-US');
+const io3=new IntersectionObserver((es)=>{
+  es.forEach(e=>{
+    if(!e.isIntersecting)return;
+    const el=e.target,target=+el.dataset.count,suf=el.dataset.suffix||'';
+    const dur=1400,start=performance.now();
+    const tick=(now)=>{
+      const p=Math.min((now-start)/dur,1),ease=1-Math.pow(1-p,3);
+      el.textContent=(suf==='v'?'v':'')+fmt(Math.round(target*ease));
+      if(p<1)requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);io3.unobserve(el);
+  });
+},{threshold:.5});
+document.querySelectorAll('[data-count]').forEach(el=>io3.observe(el));
 </script>
 </body>
 </html>

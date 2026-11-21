@@ -73,10 +73,10 @@ use serde_json::Value;
 
 use super::super::attachment_compute::DeliveryReadFailure;
 use super::super::delivery_checks_v2::{
-    CandidateBinding, CheckObservation, CheckOutcome, CheckState, LimitKind, RecordLocator,
-    reason_code,
+    reason_code, CandidateBinding, CheckObservation, CheckOutcome, CheckState, LimitKind,
+    RecordLocator,
 };
-use super::content_requirements::{DecodedSpec, decode_spec};
+use super::content_requirements::{decode_spec, DecodedSpec};
 
 /// One project-authorization refusal, spelled once. The root-lookup adapter and
 /// the artifact-read adapter both funnel through [`authorization_refused`], so
@@ -245,7 +245,11 @@ pub(crate) struct DecisionFact {
 
 impl DecisionFact {
     /// A refusal: a security/trust decision. Never repairable, never acceptable.
-    pub(crate) fn refused(origin: FactOrigin, reason_code: &str, detail: impl Into<String>) -> Self {
+    pub(crate) fn refused(
+        origin: FactOrigin,
+        reason_code: &str,
+        detail: impl Into<String>,
+    ) -> Self {
         Self {
             class: FactClass::Refused,
             origin,
@@ -455,12 +459,9 @@ pub(crate) fn classify_read_failure(
         ),
         // An OS/database error proves only that this read did not happen. It is
         // never upgraded to an authorization conclusion and never a pass.
-        DeliveryReadFailure::Io(detail) => DecisionFact::unconfirmed(
-            origin,
-            None,
-            format!("交付读取失败：{detail}"),
-            None,
-        ),
+        DeliveryReadFailure::Io(detail) => {
+            DecisionFact::unconfirmed(origin, None, format!("交付读取失败：{detail}"), None)
+        }
     }
 }
 
@@ -488,12 +489,7 @@ pub(crate) fn classify_read_result(
 
 /// Classify one identity drift. The role decides both the reason code and which
 /// identity the fact belongs to.
-pub(crate) fn drift_fact(
-    role: HashRole,
-    expected: &str,
-    actual: &str,
-    path: &str,
-) -> DecisionFact {
+pub(crate) fn drift_fact(role: HashRole, expected: &str, actual: &str, path: &str) -> DecisionFact {
     let origin = match role {
         HashRole::CandidateReceipt => FactOrigin::candidate(path, actual),
         HashRole::SourceIdentity => FactOrigin::source(path, actual),
@@ -517,11 +513,9 @@ pub(crate) fn classify_root_failure(failure: &DeliveryReadFailure) -> DecisionFa
         DeliveryReadFailure::AuthorizationRefused { detail } => {
             authorization_refused(FactOrigin::ProjectBinding, detail)
         }
-        DeliveryReadFailure::TrustRefusal { reason, detail } => DecisionFact::refused(
-            FactOrigin::ProjectBinding,
-            reason,
-            detail.clone(),
-        ),
+        DeliveryReadFailure::TrustRefusal { reason, detail } => {
+            DecisionFact::refused(FactOrigin::ProjectBinding, reason, detail.clone())
+        }
         DeliveryReadFailure::EvidenceUnavailable { detail } => DecisionFact::unconfirmed(
             FactOrigin::ProjectBinding,
             Some(reason_code::EVIDENCE_UNAVAILABLE),
@@ -656,7 +650,8 @@ fn sole_candidate(outcome: &CheckOutcome) -> Option<&CandidateBinding> {
         let binding = observation.candidate.as_ref()?;
         match found {
             None => found = Some(binding),
-            Some(previous) if previous.path == binding.path && previous.sha256 == binding.sha256 => {}
+            Some(previous)
+                if previous.path == binding.path && previous.sha256 == binding.sha256 => {}
             // Two different candidates: the set proves nothing about which one a
             // veto belongs to.
             Some(_) => return None,
@@ -713,13 +708,24 @@ fn classify_outcome(outcome: &CheckOutcome, context: Option<&FactContext>) -> Ve
 
     for observation in &outcome.observations {
         let origin = observation_origin(observation);
-        let structured = (observation.expected.as_deref(), observation.actual.as_deref());
+        let structured = (
+            observation.expected.as_deref(),
+            observation.actual.as_deref(),
+        );
         match observation.state {
             CheckState::Passed => {
                 let mut fact = DecisionFact::passed(origin);
                 fact = fact
-                    .with_check_identity(Some(&observation.rule_id), &observation.check, observation.checker_version)
-                    .with_structured(structured.0, structured.1, observation.equivalence.as_deref());
+                    .with_check_identity(
+                        Some(&observation.rule_id),
+                        &observation.check,
+                        observation.checker_version,
+                    )
+                    .with_structured(
+                        structured.0,
+                        structured.1,
+                        observation.equivalence.as_deref(),
+                    );
                 fact.locator = observation.locator.clone();
                 facts.push(fact);
             }
@@ -744,8 +750,16 @@ fn classify_outcome(outcome: &CheckOutcome, context: Option<&FactContext>) -> Ve
                 // the leaf refuses to repair, must not become a repair round.
                 fact.needs_repair = outcome.needs_repair() && observation.blocking;
                 fact = fact
-                    .with_check_identity(Some(&observation.rule_id), &observation.check, observation.checker_version)
-                    .with_structured(structured.0, structured.1, observation.equivalence.as_deref());
+                    .with_check_identity(
+                        Some(&observation.rule_id),
+                        &observation.check,
+                        observation.checker_version,
+                    )
+                    .with_structured(
+                        structured.0,
+                        structured.1,
+                        observation.equivalence.as_deref(),
+                    );
                 facts.push(fact);
             }
             CheckState::Unverified => {
@@ -763,8 +777,16 @@ fn classify_outcome(outcome: &CheckOutcome, context: Option<&FactContext>) -> Ve
                 );
                 fact.limit_kind = observation.limit;
                 fact = fact
-                    .with_check_identity(Some(&observation.rule_id), &observation.check, observation.checker_version)
-                    .with_structured(structured.0, structured.1, observation.equivalence.as_deref());
+                    .with_check_identity(
+                        Some(&observation.rule_id),
+                        &observation.check,
+                        observation.checker_version,
+                    )
+                    .with_structured(
+                        structured.0,
+                        structured.1,
+                        observation.equivalence.as_deref(),
+                    );
                 fact.locator = observation.locator.clone();
                 facts.push(fact);
             }
@@ -772,8 +794,7 @@ fn classify_outcome(outcome: &CheckOutcome, context: Option<&FactContext>) -> Ve
     }
 
     debug_assert!(
-        !outcome.is_fully_verified()
-            || facts.iter().all(|fact| fact.class == FactClass::Passed),
+        !outcome.is_fully_verified() || facts.iter().all(|fact| fact.class == FactClass::Passed),
         "a fully verified leaf outcome must classify as passes only"
     );
     // Cross-check against the leaf's own failure predicate: classifying must not

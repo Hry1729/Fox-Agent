@@ -1,85 +1,91 @@
-mod capability_tools;
-#[cfg(test)]
-mod companion_child_lifecycle_tests;
 pub(crate) mod artifact_store;
 pub(crate) mod attachment_compute;
 pub(crate) mod background_jobs;
+mod capability_tools;
+mod companion_chief;
+mod companion_coordination;
+#[cfg(test)]
+mod companion_coordination_tests;
 pub(crate) mod command_jobs;
+#[cfg(test)]
+mod companion_child_lifecycle_tests;
 mod continuation;
-pub(crate) mod managed_files;
-mod tool_result_read;
-mod skill_load;
 pub(crate) mod delivery;
 pub(crate) mod delivery_checks_v2;
-pub(crate) mod process_job;
-mod kernel_run_lock;
 mod kernel_host;
+mod kernel_run_lock;
+pub(crate) mod managed_files;
 pub(crate) mod office_grants;
+pub(crate) mod process_job;
 mod session_lifecycle;
 mod sidecar_sessions;
+mod skill_load;
+mod tool_result_read;
 
 /// The reset availability rule, shared with the UI fact and the command's own
 /// refusal.
 pub(crate) use session_lifecycle::ResetAvailability;
-mod kernel_authority;
-mod native_tool_batch;
-mod native_recovery;
-mod native_model_budget;
-mod native_approval_scope;
-#[cfg(test)]
-mod native_host_integration_tests;
-#[cfg(test)]
-mod e2e_full_turn_tests;
-#[cfg(test)]
-mod native_performance_tests;
-#[cfg(test)]
-mod native_crash_integration_tests;
-#[cfg(test)]
-mod native_business_integration_tests;
-#[cfg(test)]
-mod native_isolation_tests;
 #[cfg(test)]
 mod companion_prompt_tests;
 #[cfg(test)]
-mod search_knowledge_agent_tests;
+mod companion_team_tests;
 #[cfg(test)]
 mod cx2_shutdown_tests;
 #[cfg(test)]
-mod released_terminal_tests;
+mod e2e_full_turn_tests;
+mod kernel_authority;
+mod native_approval_scope;
+#[cfg(test)]
+mod native_business_integration_tests;
+#[cfg(test)]
+mod native_crash_integration_tests;
+#[cfg(test)]
+mod native_host_integration_tests;
+#[cfg(test)]
+mod native_isolation_tests;
+mod native_model_budget;
+mod native_mcp_recovery;
+#[cfg(test)]
+mod native_performance_tests;
+mod native_recovery;
+mod native_tool_batch;
 pub(crate) mod process_identity;
-pub(crate) use process_identity::process_start_marker;
+#[cfg(test)]
+mod released_terminal_tests;
+#[cfg(test)]
+mod search_knowledge_agent_tests;
 pub(crate) use process_identity::owner_is_gone as job_owner_is_gone;
-mod mcp_catalog;
+pub(crate) use process_identity::process_start_marker;
 mod connector_provenance;
+mod mcp_catalog;
 
 pub(super) fn host_runtime_capabilities(manifest_hash: &str, profile_id: &str) -> Value {
-    let mut facts=crate::process_jobs::runtime_capabilities(manifest_hash,profile_id);
-    facts["tools"]["attachment_compute"]=json!({"availability":"available","projectPaths":true,"reportPdf":crate::report_pdf::availability()});
+    let mut facts = crate::process_jobs::runtime_capabilities(manifest_hash, profile_id);
+    facts["tools"]["attachment_compute"] = json!({"availability":"available","projectPaths":true,"reportPdf":crate::report_pdf::availability()});
     facts
 }
-mod protocol;
 pub(crate) mod approval_policy;
-mod work_tools;
 /// Explicit final-file declaration. Distinct from `work_tools` (durable task
 /// state) and from `delivery` (content verification), because handing a file to
 /// the user is neither of those.
 pub(crate) mod present_files;
+mod protocol;
+mod work_tools;
 
 #[cfg(test)]
 pub(crate) use work_tools::WORK_TOOLS;
 
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use crate::yuxi::{get_access_token, YuxiClient};
 use crate::kernel::CancellationPort;
+use crate::yuxi::{get_access_token, YuxiClient};
 use crate::{
     app_state::AppState,
     database::{
-        AgentRecord, ApprovalDecision, ApprovalRecord, ApprovalRefusal,
-        AttachmentRecord, ChildRunBudget,
-        ChildRunRecord, Database, EvaluationRunSummary, HostToolCallDisposition,
-        KnowledgeReference, MemoryProposalInput, PreparedDigitalColleagueTrigger, resolved_device_timezone,
-        SkillActivationRecord, StartRunResult, ToolCallRecord,
+        resolved_device_timezone, AgentRecord, ApprovalDecision, ApprovalRecord, ApprovalRefusal,
+        AttachmentRecord, ChildRunBudget, ChildRunRecord, Database, EvaluationRunSummary,
+        HostToolCallDisposition, KnowledgeReference, MemoryProposalInput,
+        PreparedDigitalColleagueTrigger, SkillActivationRecord, StartRunResult, ToolCallRecord,
         MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS,
     },
     local_knowledge::LocalKnowledgeStore,
@@ -229,8 +235,15 @@ fn create_fresh_host_tool_call(
     requires_approval: bool,
 ) -> Result<HostToolCallExecution, String> {
     if let Some(record) = native_tool_batch::recovering_host_tool_call(
-        database, run_id, runtime_tool_call_id, tool_name, input, status == "running",
-    )? { return Ok(HostToolCallExecution::Execute(record)); }
+        database,
+        run_id,
+        runtime_tool_call_id,
+        tool_name,
+        input,
+        status == "running",
+    )? {
+        return Ok(HostToolCallExecution::Execute(record));
+    }
     let (record, disposition) = database.create_host_tool_call_once(
         run_id,
         runtime_tool_call_id,
@@ -258,7 +271,16 @@ fn inspect_existing_host_tool_call(
     tool_name: &str,
     input: &Value,
 ) -> Result<Option<Value>, String> {
-    if native_tool_batch::recovering_host_tool_call(database, run_id, runtime_tool_call_id, tool_name, input, false)?.is_some() {
+    if native_tool_batch::recovering_host_tool_call(
+        database,
+        run_id,
+        runtime_tool_call_id,
+        tool_name,
+        input,
+        false,
+    )?
+    .is_some()
+    {
         return Ok(None);
     }
     let Some((record, disposition)) =
@@ -287,17 +309,19 @@ fn replayed_host_tool_call(
     record: ToolCallRecord,
 ) -> Result<HostToolCallExecution, String> {
     if record.status == "completed" {
-        return Ok(HostToolCallExecution::Replay(settled_host_tool_call_envelope(
-            database,
-            &record.run_id,
-            &record.runtime_tool_call_id,
-            &record.conversation_id,
-            record.result.clone().unwrap_or(Value::Null),
-            None,
-            // Replays never re-run hooks, so their annotation set is empty.
-            Vec::new(),
-            true,
-        )));
+        return Ok(HostToolCallExecution::Replay(
+            settled_host_tool_call_envelope(
+                database,
+                &record.run_id,
+                &record.runtime_tool_call_id,
+                &record.conversation_id,
+                record.result.clone().unwrap_or(Value::Null),
+                None,
+                // Replays never re-run hooks, so their annotation set is empty.
+                Vec::new(),
+                true,
+            ),
+        ));
     }
     if record.status == "failed" {
         // A replayed failure must hand back the same facts the original attempt
@@ -316,16 +340,18 @@ fn replayed_host_tool_call(
                 "error": error,
             })));
         };
-        return Ok(HostToolCallExecution::Replay(settled_host_tool_call_envelope(
-            database,
-            &record.run_id,
-            &record.runtime_tool_call_id,
-            &record.conversation_id,
-            result,
-            Some(error),
-            Vec::new(),
-            true,
-        )));
+        return Ok(HostToolCallExecution::Replay(
+            settled_host_tool_call_envelope(
+                database,
+                &record.run_id,
+                &record.runtime_tool_call_id,
+                &record.conversation_id,
+                result,
+                Some(error),
+                Vec::new(),
+                true,
+            ),
+        ));
     }
     Err(format!(
         "[tool_call.replayed_terminal] ToolCall '{}' already ended as '{}': {}",
@@ -363,15 +389,24 @@ fn structured_runtime_error(message: &str) -> (&str, &str) {
     (code, detail.trim_start())
 }
 
-
 /// 13.38（R1-3 / B4-2）：Pi 没有写下终态就释放了 Run 时写什么。这一轮出现过模型重试或
 /// 模型服务失败：`provider.request_failed`（失败，可重试）；否则仍是「释放时没有终态」（中断）。
 /// 返回 `(code, message, 写成 failed 而不是 interrupted)`。
-pub(crate) fn released_without_terminal_outcome(had_provider_trouble: bool) -> (&'static str, &'static str, bool) {
+pub(crate) fn released_without_terminal_outcome(
+    had_provider_trouble: bool,
+) -> (&'static str, &'static str, bool) {
     if had_provider_trouble {
-        ("provider.request_failed", "模型服务连接中断，可重试。", true)
+        (
+            "provider.request_failed",
+            "模型服务连接中断，可重试。",
+            true,
+        )
     } else {
-        ("runtime.released_without_terminal", "Pi released its Run before a terminal result was recorded.", false)
+        (
+            "runtime.released_without_terminal",
+            "Pi released its Run before a terminal result was recorded.",
+            false,
+        )
     }
 }
 
@@ -382,8 +417,15 @@ pub(crate) fn rejected_terminal_outcome(payload: &Value) -> Option<(String, Stri
     if !matches!(event_type, "run.failed" | "run.interrupted") {
         return None;
     }
-    let code = payload.get("code").and_then(Value::as_str).filter(|code| !code.trim().is_empty())?;
-    let message = payload.get("message").and_then(Value::as_str).filter(|message| !message.trim().is_empty()).unwrap_or(code);
+    let code = payload
+        .get("code")
+        .and_then(Value::as_str)
+        .filter(|code| !code.trim().is_empty())?;
+    let message = payload
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|message| !message.trim().is_empty())
+        .unwrap_or(code);
     Some((code.to_owned(), message.to_owned()))
 }
 
@@ -920,7 +962,10 @@ pub(crate) const VISUAL_EXPRESSION_GUIDANCE: &str = "视觉表达：当图表能
 
 /// Host-owned prompts (`pi`) get the guidance appended; a remote engine (Yuxi) keeps its own
 /// instructions, and repeated calls do not append twice.
-pub(crate) fn append_visual_expression_guidance(system_prompt: String, runtime_type: &str) -> String {
+pub(crate) fn append_visual_expression_guidance(
+    system_prompt: String,
+    runtime_type: &str,
+) -> String {
     if runtime_type != "pi" || system_prompt.contains(VISUAL_EXPRESSION_GUIDANCE) {
         return system_prompt;
     }
@@ -933,17 +978,28 @@ mod visual_expression_guidance_tests {
 
     #[test]
     fn appends_only_for_host_owned_prompts() {
-        let appended = append_visual_expression_guidance("你是自定义助手，请始终用中文回答。".into(), "pi");
-        assert!(appended.starts_with("你是自定义助手，请始终用中文回答。"), "an assistant prompt is preserved verbatim");
+        let appended =
+            append_visual_expression_guidance("你是自定义助手，请始终用中文回答。".into(), "pi");
+        assert!(
+            appended.starts_with("你是自定义助手，请始终用中文回答。"),
+            "an assistant prompt is preserved verbatim"
+        );
         assert!(appended.ends_with(VISUAL_EXPRESSION_GUIDANCE));
         // A remote engine owns its instructions, so nothing is appended.
-        assert_eq!(append_visual_expression_guidance("remote prompt".into(), "yuxi"), "remote prompt");
+        assert_eq!(
+            append_visual_expression_guidance("remote prompt".into(), "yuxi"),
+            "remote prompt"
+        );
     }
 
     #[test]
     fn is_idempotent_and_advertises_only_real_abilities() {
         let once = append_visual_expression_guidance("base".into(), "pi");
-        assert_eq!(append_visual_expression_guidance(once.clone(), "pi"), once, "never appended twice");
+        assert_eq!(
+            append_visual_expression_guidance(once.clone(), "pi"),
+            once,
+            "never appended twice"
+        );
         assert!(VISUAL_EXPRESSION_GUIDANCE.contains("```mermaid"));
         // The wording has to match what the client does: other families are attempted by the
         // compatible renderer (pie/gantt do render), and only a failure or an over-budget
@@ -971,8 +1027,7 @@ pub(crate) fn conversation_prompt_context(
     overrides: PromptScopeOverrides<'_>,
 ) -> Result<AgentPromptContext, String> {
     {
-        let assistant = database
-            .conversation_runtime_assistant(conversation_id)?;
+        let assistant = database.conversation_runtime_assistant(conversation_id)?;
         let system_prompt = if assistant.runtime_type == "pi" {
             assistant.system_prompt.clone()
         } else {
@@ -981,7 +1036,8 @@ pub(crate) fn conversation_prompt_context(
         // Single source of truth: every entry point (the app, the Kernel payload constructor
         // and non-UI callers) builds its prompt here, so the diagram guidance is attached
         // exactly once — and only when Fox owns the prompt.
-        let system_prompt = append_visual_expression_guidance(system_prompt, &assistant.runtime_type);
+        let system_prompt =
+            append_visual_expression_guidance(system_prompt, &assistant.runtime_type);
         let run_role = match (run_kind, assistant.agent_kind.as_str()) {
             ("child", "expert") => "expert_consultation",
             ("child", _) => "child_worker",
@@ -993,10 +1049,11 @@ pub(crate) fn conversation_prompt_context(
             "runRole": run_role,
             "isUserFacingLead": run_role == "user_facing_lead",
         });
-        let expert_binding = database
-            .runtime_conversation_expert_binding(conversation_id)?;
+        let expert_binding = database.runtime_conversation_expert_binding(conversation_id)?;
         let private_expert = expert_binding.is_some()
-            && database.conversation_companion_scope(conversation_id)?.is_some();
+            && database
+                .conversation_companion_scope(conversation_id)?
+                .is_some();
         let assistant_skills = if private_expert {
             Vec::new()
         } else {
@@ -1006,7 +1063,10 @@ pub(crate) fn conversation_prompt_context(
             .as_ref()
             .map(|binding| {
                 if binding.package_snapshot.get("enabledSkills").is_some() {
-                    Ok(package_string_list(&binding.package_snapshot, "enabledSkills"))
+                    Ok(package_string_list(
+                        &binding.package_snapshot,
+                        "enabledSkills",
+                    ))
                 } else if private_expert {
                     Ok(Vec::new())
                 } else if let Some(expert_id) = binding.expert_id.as_deref() {
@@ -1018,8 +1078,12 @@ pub(crate) fn conversation_prompt_context(
             .transpose()?
             .unwrap_or_default();
         if private_expert && !configured_expert_skills.is_empty() {
-            let installed: HashSet<_> = crate::skills::scan_skills(skills_dir, &configured_expert_skills)?
-                .into_iter().filter(|skill| skill.record.valid).map(|skill| skill.record.id).collect();
+            let installed: HashSet<_> =
+                crate::skills::scan_skills(skills_dir, &configured_expert_skills)?
+                    .into_iter()
+                    .filter(|skill| skill.record.valid)
+                    .map(|skill| skill.record.id)
+                    .collect();
             configured_expert_skills.retain(|id| installed.contains(id));
         }
         let enabled_mcps = database
@@ -1092,15 +1156,32 @@ pub(crate) fn conversation_prompt_context(
                 "activatedAt": binding.activated_at,
             })
         });
-        let skill_activations = skill_plan.included.iter().map(|included| SkillActivationRecord {
-            skill_id: included.id.clone(), version: included.version.clone(),
-            content_sha256: included.content_sha256.clone(), source: "initial_prompt".into(),
-            required_tools: included.required_tools.clone(), missing_tools: Vec::new(),
-            tools_available: true, char_count: included.chars as i64, byte_count: included.bytes as i64,
-            created_at: crate::database::now_ms(),
-        }).collect();
-        Ok(AgentPromptContext { system_prompt, assistant_package, expert_package,
-            expert_binding_payload, run_role, run_context, skill_prompt: skill_plan.prompt, skill_activations })
+        let skill_activations = skill_plan
+            .included
+            .iter()
+            .map(|included| SkillActivationRecord {
+                skill_id: included.id.clone(),
+                version: included.version.clone(),
+                content_sha256: included.content_sha256.clone(),
+                source: "initial_prompt".into(),
+                required_tools: included.required_tools.clone(),
+                missing_tools: Vec::new(),
+                tools_available: true,
+                char_count: included.chars as i64,
+                byte_count: included.bytes as i64,
+                created_at: crate::database::now_ms(),
+            })
+            .collect();
+        Ok(AgentPromptContext {
+            system_prompt,
+            assistant_package,
+            expert_package,
+            expert_binding_payload,
+            run_role,
+            run_context,
+            skill_prompt: skill_plan.prompt,
+            skill_activations,
+        })
     }
 }
 
@@ -1163,45 +1244,134 @@ impl session_lifecycle::SessionRuntimeLink for HostSessionLink<'_> {
 
 impl RuntimeHost {
     pub(crate) fn companion_transition(&self) -> Result<std::sync::MutexGuard<'_, ()>, String> {
-        self.run_transition.lock().map_err(|_| "运行时状态锁已损坏".to_owned())
+        self.run_transition
+            .lock()
+            .map_err(|_| "运行时状态锁已损坏".to_owned())
     }
 
-    pub(crate) fn execute_job_operation(&self, conversation: &str, run_id: &str, tool: &str, input: &Value) -> Result<Value,String> {
-        run_bound_conversation(&self.database,run_id,Some(conversation))?;
-        let binding=self.database.run_control_binding(run_id)?.ok_or("job operation needs a frozen Run")?;
+    pub(crate) fn stop_running_command(&self, run_id: &str, call_id: &str) -> Result<(), String> {
+        let state = self.state.lock().map_err(|_| "runtime state lock poisoned")?;
+        state.cancellation.run_token(run_id)?;
+        state.cancellation.request_tool_cancel(run_id, call_id);
+        Ok(())
+    }
+
+    pub(crate) fn execute_job_operation(
+        &self,
+        conversation: &str,
+        run_id: &str,
+        tool: &str,
+        input: &Value,
+    ) -> Result<Value, String> {
+        run_bound_conversation(&self.database, run_id, Some(conversation))?;
+        let binding = self
+            .database
+            .run_control_binding(run_id)?
+            .ok_or("job operation needs a frozen Run")?;
         if kernel_authority::is_retired_kernel(Some(&binding)) {
             return Err(kernel_authority::retired_route_error());
         }
-        self.ensure_runtime_tool_allowed(run_id,tool,RuntimeToolIngress::Execute, Some(input)).map_err(|(_,e)|e)?;
-        let elapsed=if binding.executor_route.is_some() { native_model_budget::elapsed_ms(&self.database, run_id)? } else { 0 };
-        let token=self.state.lock().map_err(|_| "runtime state poisoned")?.cancellation.run_token(run_id).ok();
-        let budget=std::time::Duration::from_millis(binding.budgets.limit_operation_ms(binding.budgets.tool_execution_ms, elapsed).max(0) as u64);
+        self.ensure_runtime_tool_allowed(run_id, tool, RuntimeToolIngress::Execute, Some(input))
+            .map_err(|(_, e)| e)?;
+        let elapsed = if binding.executor_route.is_some() {
+            native_model_budget::elapsed_ms(&self.database, run_id)?
+        } else {
+            0
+        };
+        let token = self
+            .state
+            .lock()
+            .map_err(|_| "runtime state poisoned")?
+            .cancellation
+            .run_token(run_id)
+            .ok();
+        let budget = std::time::Duration::from_millis(
+            binding
+                .budgets
+                .limit_operation_ms(binding.budgets.tool_execution_ms, elapsed)
+                .max(0) as u64,
+        );
         let wait = if tool == "compute_job_status" && input["waitMs"].as_u64().unwrap_or(0) > 0 {
-            Some(SidecarExecutionWait::begin(&self.database, &self.state, run_id)?)
-        } else { None };
-        let result = background_jobs::execute(&self.database,&self.attachments_dir,&self.sessions_dir,run_id,tool,input,token,budget,None);
-        if let Some(wait) = wait { wait.resume()?; }
+            Some(SidecarExecutionWait::begin(
+                &self.database,
+                &self.state,
+                run_id,
+            )?)
+        } else {
+            None
+        };
+        let result = background_jobs::execute(
+            &self.database,
+            &self.attachments_dir,
+            &self.sessions_dir,
+            run_id,
+            tool,
+            input,
+            token,
+            budget,
+            None,
+        );
+        if let Some(wait) = wait {
+            wait.resume()?;
+        }
         result
     }
     fn handle_job_tool_request(&self, stdin: &Arc<Mutex<ChildStdin>>, envelope: RuntimeEnvelope) {
-        let outcome=(|| -> Result<Value,String> {
-            let run=envelope.run_id.as_deref().ok_or("missing runId")?;
-            let conversation=run_bound_conversation(&self.database,run,envelope.conversation_id.as_deref())?;
-            let p=envelope.payload.as_ref().ok_or("missing payload")?;
-            let tool=p["tool"].as_str().ok_or("missing tool")?;
-            let call=p["toolCallId"].as_str().ok_or("missing toolCallId")?;
-            let input=&p["input"];
-            if let Some(response)=inspect_existing_host_tool_call(&self.database,run,call,tool,input)? {return Ok(response);}
-            let hooks=crate::lifecycle_hooks::before_tool(&self.database,run,call,tool,input)?;
-            if hooks.blocked.is_some()||hooks.requires_approval {return Err("job operation requires explicit approval through Kernel".into());}
-            match create_fresh_host_tool_call(&self.database,run,call,tool,input,"running",false)? {
-                HostToolCallExecution::Replay(response)=>Ok(response),
-                HostToolCallExecution::Execute(_)=>finalize_host_tool_execution(&self.database,run,call,tool,input,hooks.annotations,self.execute_job_operation(&conversation,run,tool,input))
+        let outcome = (|| -> Result<Value, String> {
+            let run = envelope.run_id.as_deref().ok_or("missing runId")?;
+            let conversation =
+                run_bound_conversation(&self.database, run, envelope.conversation_id.as_deref())?;
+            let p = envelope.payload.as_ref().ok_or("missing payload")?;
+            let tool = p["tool"].as_str().ok_or("missing tool")?;
+            let call = p["toolCallId"].as_str().ok_or("missing toolCallId")?;
+            let input = &p["input"];
+            if let Some(response) =
+                inspect_existing_host_tool_call(&self.database, run, call, tool, input)?
+            {
+                return Ok(response);
+            }
+            let hooks =
+                crate::lifecycle_hooks::before_tool(&self.database, run, call, tool, input)?;
+            if hooks.blocked.is_some() || hooks.requires_approval {
+                return Err("job operation requires explicit approval through Kernel".into());
+            }
+            match create_fresh_host_tool_call(
+                &self.database,
+                run,
+                call,
+                tool,
+                input,
+                "running",
+                false,
+            )? {
+                HostToolCallExecution::Replay(response) => Ok(response),
+                HostToolCallExecution::Execute(_) => finalize_host_tool_execution(
+                    &self.database,
+                    run,
+                    call,
+                    tool,
+                    input,
+                    hooks.annotations,
+                    self.execute_job_operation(&conversation, run, tool, input),
+                ),
             }
         })();
-        let response=outcome.unwrap_or_else(|error| json!({"isError":true,"error":error}));
-        let kind=if response["isError"]==true {"tool.execute_failed"}else{"tool.execute_completed"};
-        if let Err(error)=write_tool_protocol_response(&self.database,&self.state,stdin,&envelope,kind,response) {eprintln!("fox job response: {error}");}
+        let response = outcome.unwrap_or_else(|error| json!({"isError":true,"error":error}));
+        let kind = if response["isError"] == true {
+            "tool.execute_failed"
+        } else {
+            "tool.execute_completed"
+        };
+        if let Err(error) = write_tool_protocol_response(
+            &self.database,
+            &self.state,
+            stdin,
+            &envelope,
+            kind,
+            response,
+        ) {
+            eprintln!("fox job response: {error}");
+        }
     }
 
     fn try_acquire_tool_handler(&self) -> Option<ToolHandlerPermit> {
@@ -1234,7 +1404,8 @@ impl RuntimeHost {
             .stdin
             .take()
             .ok_or_else(|| "offline evaluator stdin was unavailable".to_owned())?;
-        crate::canonical_json::to_writer(&mut stdin, &request).map_err(|error| error.to_string())?;
+        crate::canonical_json::to_writer(&mut stdin, &request)
+            .map_err(|error| error.to_string())?;
         stdin
             .write_all(b"\n")
             .and_then(|_| stdin.flush())
@@ -1413,14 +1584,18 @@ impl RuntimeHost {
                 runtime_version: state.runtime_version.clone(),
                 capabilities: self.effective_capabilities(&state.capabilities),
                 available: self.runtime_available(),
-                current_conversation_id: state
-                    .worker
-                    .as_ref()
-                    .and_then(|worker| worker.sessions.single_active().map(|session| session.conversation_id.clone())),
-                active_run_id: state
-                    .worker
-                    .as_ref()
-                    .and_then(|worker| worker.sessions.single_active().and_then(|session| session.run_id.clone())),
+                current_conversation_id: state.worker.as_ref().and_then(|worker| {
+                    worker
+                        .sessions
+                        .single_active()
+                        .map(|session| session.conversation_id.clone())
+                }),
+                active_run_id: state.worker.as_ref().and_then(|worker| {
+                    worker
+                        .sessions
+                        .single_active()
+                        .and_then(|session| session.run_id.clone())
+                }),
                 last_error: state.last_error.clone(),
             },
             Err(_) => RuntimeStatus {
@@ -1457,14 +1632,18 @@ impl RuntimeHost {
                 runtime_version: state.runtime_version.clone(),
                 capabilities: state.capabilities.clone(),
                 available,
-                current_conversation_id: state
-                    .worker
-                    .as_ref()
-                    .and_then(|worker| worker.sessions.single_active().map(|session| session.conversation_id.clone())),
-                active_run_id: state
-                    .worker
-                    .as_ref()
-                    .and_then(|worker| worker.sessions.single_active().and_then(|session| session.run_id.clone())),
+                current_conversation_id: state.worker.as_ref().and_then(|worker| {
+                    worker
+                        .sessions
+                        .single_active()
+                        .map(|session| session.conversation_id.clone())
+                }),
+                active_run_id: state.worker.as_ref().and_then(|worker| {
+                    worker
+                        .sessions
+                        .single_active()
+                        .and_then(|session| session.run_id.clone())
+                }),
                 last_error: state.last_error.as_deref().map(redact_diagnostic_line),
                 stderr_tail: state
                     .stderr
@@ -1505,9 +1684,15 @@ impl RuntimeHost {
     /// report 「不能在 Agent 正在运行时修改」).
     pub fn ensure_configuration_reloadable(&self) -> Result<(), String> {
         let active = {
-            let state = self.state.lock().map_err(|_| "runtime state lock is poisoned")?;
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "runtime state lock is poisoned")?;
             !state.dispatching_runs.is_empty()
-                || state.worker.as_ref().is_some_and(|w| !w.sessions.is_empty())
+                || state
+                    .worker
+                    .as_ref()
+                    .is_some_and(|w| !w.sessions.is_empty())
         };
         let active_children = self
             .child_hosts
@@ -1581,7 +1766,8 @@ impl RuntimeHost {
         let result = self.start_run_inner(started, text, attachments);
         if let Err(error) = &result {
             if error == CANCELLED_BEFORE_SUBMISSION
-                || error == kernel_run_lock::KERNEL_RUN_ALREADY_OWNED {
+                || error == kernel_run_lock::KERNEL_RUN_ALREADY_OWNED
+            {
                 return result;
             }
             if let Ok(mut state) = self.state.lock() {
@@ -1591,7 +1777,11 @@ impl RuntimeHost {
                     worker.sessions.finish(&started.run.id);
                 }
                 if state.state == "busy"
-                    && state.worker.as_ref().is_none_or(|worker| worker.sessions.is_empty()) {
+                    && state
+                        .worker
+                        .as_ref()
+                        .is_none_or(|worker| worker.sessions.is_empty())
+                {
                     state.state = "ready".to_owned();
                 }
                 state.last_error = Some(error.clone());
@@ -1637,14 +1827,20 @@ impl RuntimeHost {
                 return;
             }
             Ok(_) => {}
-            Err(error) => { self.record_start_failure(&started, error); return; }
+            Err(error) => {
+                self.record_start_failure(&started, error);
+                return;
+            }
         }
         // K2: resolve the contact position from the persisted ownership chain
         // before queueing. A contact task whose chain is broken stops here; it
         // is never queued as an unrestricted ordinary Run.
         let companion = match self.database.run_companion_slot(&run_id) {
             Ok(slot) => slot,
-            Err(error) => { self.record_start_failure(&started, error); return; }
+            Err(error) => {
+                self.record_start_failure(&started, error);
+                return;
+            }
         };
         let mut queued_at = None;
         if let Ok(mut state) = self.state.lock() {
@@ -1657,16 +1853,22 @@ impl RuntimeHost {
             queued_at = Some(crate::database::now_ms());
         }
         if let Some(at) = queued_at {
-            let _ = self.database.record_host_stage_point(&run_id, &run_id, "queued", at);
+            let _ = self
+                .database
+                .record_host_stage_point(&run_id, &run_id, "queued", at);
         }
         self.ensure_queue_dispatcher();
     }
 
     fn ensure_queue_dispatcher(&self) {
         let signal = {
-            let Ok(mut state) = self.state.lock() else { return; };
+            let Ok(mut state) = self.state.lock() else {
+                return;
+            };
             state.queue_changed.1.notify_all();
-            if state.queue_dispatcher || state.shutting_down { return; }
+            if state.queue_dispatcher || state.shutting_down {
+                return;
+            }
             state.queue_dispatcher = true;
             state.queue_changed.clone()
         };
@@ -1674,84 +1876,126 @@ impl RuntimeHost {
         thread::spawn(move || loop {
             host.dispatch_next_queued_run();
             {
-                let Ok(mut state) = host.state.lock() else { return; };
+                let Ok(mut state) = host.state.lock() else {
+                    return;
+                };
                 if state.shutting_down || state.queued_runs.is_empty() {
                     state.queue_dispatcher = false;
                     return;
                 }
             }
-            let Ok(guard) = signal.0.lock() else { return; };
+            let Ok(guard) = signal.0.lock() else {
+                return;
+            };
             let _ = signal.1.wait_timeout(guard, Duration::from_millis(500));
         });
     }
 
     fn dispatch_next_queued_run(&self) {
         loop {
-        let queued = {
-            let Ok(mut state) = self.state.lock() else {
-                return;
-            };
-            if state.shutting_down {
-                return;
-            }
-            let starting = state.dispatching_runs.keys().filter(|run|
-                state.worker.as_ref().is_none_or(|w| w.sessions.by_run(run).is_none())).count();
-            let occupied = state.worker.as_ref().map(|w| w.sessions.occupied()).unwrap_or(0);
-            let Some(index) = state.queued_runs.iter().position(|item| {
-                let conversation = &item.started.run.conversation_id;
-                let companion = item.companion.as_ref().map(|(id, _)| id.as_str());
-                occupied + starting < sidecar_sessions::ACTIVE_RUN_LIMIT
-                    && !state.dispatching_runs.values().any(|reservation| reservation.conversation_id == *conversation)
-                    && companion.is_none_or(|id| {
-                        !state.dispatching_runs.values().any(|reservation| reservation.companion_id.as_deref() == Some(id))
-                            && !state.stopping_companions.contains(id)
-                    })
-                    && state.worker.as_ref().is_none_or(|w| w.sessions.can_admit(conversation, companion))
-                    && !matches!(state.state.as_str(), "starting" | "stopping")
-            }) else { return; };
-            let Some(queued) = state.queued_runs.remove(index) else { return; };
-            state.dispatching_runs.insert(queued.started.run.id.clone(), DispatchReservation {
-                conversation_id: queued.started.run.conversation_id.clone(),
-                companion_id: queued.companion.as_ref().map(|(id, _)| id.clone()),
-            });
-            (queued, crate::database::now_ms())
-        };
-        let (queued, granted_at) = queued;
-        let _ = self.database.record_host_stage_point(
-            &queued.started.run.id, &queued.started.run.id, "dispatch_granted", granted_at,
-        );
-        let runtime_host = self.child_hosts.lock().ok().and_then(|hosts| hosts.get(&queued.started.run.id).cloned())
-            .unwrap_or_else(|| self.clone());
-        std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
-            let run_id = queued.started.run.id.clone();
-            let cancelled = runtime_host
-                .state
+            let queued =
+                {
+                    let Ok(mut state) = self.state.lock() else {
+                        return;
+                    };
+                    if state.shutting_down {
+                        return;
+                    }
+                    let starting = state
+                        .dispatching_runs
+                        .keys()
+                        .filter(|run| {
+                            state
+                                .worker
+                                .as_ref()
+                                .is_none_or(|w| w.sessions.by_run(run).is_none())
+                        })
+                        .count();
+                    let occupied = state
+                        .worker
+                        .as_ref()
+                        .map(|w| w.sessions.occupied())
+                        .unwrap_or(0);
+                    let Some(index) = state.queued_runs.iter().position(|item| {
+                        let conversation = &item.started.run.conversation_id;
+                        let companion = item.companion.as_ref().map(|(id, _)| id.as_str());
+                        occupied + starting < sidecar_sessions::ACTIVE_RUN_LIMIT
+                            && !state
+                                .dispatching_runs
+                                .values()
+                                .any(|reservation| reservation.conversation_id == *conversation)
+                            && companion.is_none_or(|id| {
+                                !state.dispatching_runs.values().any(|reservation| {
+                                    reservation.companion_id.as_deref() == Some(id)
+                                }) && !state.stopping_companions.contains(id)
+                            })
+                            && state
+                                .worker
+                                .as_ref()
+                                .is_none_or(|w| w.sessions.can_admit(conversation, companion))
+                            && !matches!(state.state.as_str(), "starting" | "stopping")
+                    }) else {
+                        return;
+                    };
+                    let Some(queued) = state.queued_runs.remove(index) else {
+                        return;
+                    };
+                    state.dispatching_runs.insert(
+                        queued.started.run.id.clone(),
+                        DispatchReservation {
+                            conversation_id: queued.started.run.conversation_id.clone(),
+                            companion_id: queued.companion.as_ref().map(|(id, _)| id.clone()),
+                        },
+                    );
+                    (queued, crate::database::now_ms())
+                };
+            let (queued, granted_at) = queued;
+            let _ = self.database.record_host_stage_point(
+                &queued.started.run.id,
+                &queued.started.run.id,
+                "dispatch_granted",
+                granted_at,
+            );
+            let runtime_host = self
+                .child_hosts
                 .lock()
                 .ok()
-                .is_some_and(|mut state| state.cancelled_dispatches.remove(&run_id));
-            if !cancelled {
-                let result =
-                    runtime_host.start_run(&queued.started, &queued.text, &queued.attachments);
-                if let Err(error) = result {
-                    if error == CANCELLED_BEFORE_SUBMISSION {
-                        if let Ok(mut state) = runtime_host.state.lock() {
-                            if state.state == "busy"
-                                && state.worker.as_ref().is_none_or(|worker| worker.sessions.is_empty()) {
-                                state.state = "ready".to_owned();
+                .and_then(|hosts| hosts.get(&queued.started.run.id).cloned())
+                .unwrap_or_else(|| self.clone());
+            std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
+                let run_id = queued.started.run.id.clone();
+                let cancelled = runtime_host
+                    .state
+                    .lock()
+                    .ok()
+                    .is_some_and(|mut state| state.cancelled_dispatches.remove(&run_id));
+                if !cancelled {
+                    let result =
+                        runtime_host.start_run(&queued.started, &queued.text, &queued.attachments);
+                    if let Err(error) = result {
+                        if error == CANCELLED_BEFORE_SUBMISSION {
+                            if let Ok(mut state) = runtime_host.state.lock() {
+                                if state.state == "busy"
+                                    && state
+                                        .worker
+                                        .as_ref()
+                                        .is_none_or(|worker| worker.sessions.is_empty())
+                                {
+                                    state.state = "ready".to_owned();
+                                }
                             }
+                        } else if error != kernel_run_lock::KERNEL_RUN_ALREADY_OWNED {
+                            runtime_host.record_start_failure(&queued.started, error);
                         }
-                    } else if error != kernel_run_lock::KERNEL_RUN_ALREADY_OWNED {
-                        runtime_host.record_start_failure(&queued.started, error);
                     }
                 }
-            }
-            if let Ok(mut state) = runtime_host.state.lock() {
-                state.dispatching_runs.remove(&run_id);
-                state.queue_changed.1.notify_all();
-            }
-            runtime_host.dispatch_next_queued_run();
-        }));
-        // Dispatch reservations prevent two starts from taking the same conversation or capacity slot.
+                if let Ok(mut state) = runtime_host.state.lock() {
+                    state.dispatching_runs.remove(&run_id);
+                    state.queue_changed.1.notify_all();
+                }
+                runtime_host.dispatch_next_queued_run();
+            }));
+            // Dispatch reservations prevent two starts from taking the same conversation or capacity slot.
         }
     }
 
@@ -1768,7 +2012,10 @@ impl RuntimeHost {
                     .is_none_or(|worker| worker.sessions.by_run(run_id).is_none())
             {
                 state.cancelled_dispatches.insert(run_id.to_owned());
-                state.dispatching_runs.get(run_id).map(|reservation| reservation.conversation_id.clone())
+                state
+                    .dispatching_runs
+                    .get(run_id)
+                    .map(|reservation| reservation.conversation_id.clone())
             } else {
                 let Some(index) = state
                     .queued_runs
@@ -1809,8 +2056,13 @@ impl RuntimeHost {
     }
 
     fn record_start_failure(&self, started: &StartRunResult, message: String) {
-        if self.database.run_control_binding(&started.run.id).ok().flatten()
-            .is_some_and(|binding| kernel_authority::is_retired_kernel(Some(&binding))) {
+        if self
+            .database
+            .run_control_binding(&started.run.id)
+            .ok()
+            .flatten()
+            .is_some_and(|binding| kernel_authority::is_retired_kernel(Some(&binding)))
+        {
             // B1: a historical Kernel Run refuses every legacy writer; it is
             // settled exactly like the startup retirement instead.
             if let Err(error) = self.database.retire_kernel_run(&started.run.id) {
@@ -1889,7 +2141,12 @@ impl RuntimeHost {
     /// Delegates to [`conversation_prompt_context`], the non-UI production
     /// construction, so the application and any non-UI entry point build the
     /// same prompt from the same Host facts.
-    fn agent_prompt_context(&self, conversation_id: &str, text: &str, run_kind: &str) -> Result<AgentPromptContext, String> {
+    fn agent_prompt_context(
+        &self,
+        conversation_id: &str,
+        text: &str,
+        run_kind: &str,
+    ) -> Result<AgentPromptContext, String> {
         conversation_prompt_context(
             &self.database,
             &self.skills_dir,
@@ -1910,7 +2167,9 @@ impl RuntimeHost {
         attachments: &[AttachmentRecord],
     ) -> Result<(), String> {
         if let Ok(mut state) = self.state.lock() {
-            if state.shutting_down { return Err("Runtime Host is shutting down".into()); }
+            if state.shutting_down {
+                return Err("Runtime Host is shutting down".into());
+            }
             state.recovery_attempts = 0;
         }
         self.cancel_stale_pending_approvals_for_conversation(
@@ -1932,8 +2191,14 @@ impl RuntimeHost {
         let companion_slot = self.database.run_companion_slot(&started.run.id)?;
         let companion_scope = self.database.run_companion_scope(&started.run.id)?;
         let frozen_binding = self.database.run_control_binding(&started.run.id)?;
-        if matches!(kernel_authority::resolve_run_route(frozen_binding.as_ref()), kernel_authority::RunRoute::Reject) {
-            return Err(format!("{}: unsupported frozen executor", crate::database::EXECUTOR_ROUTE_UNKNOWN));
+        if matches!(
+            kernel_authority::resolve_run_route(frozen_binding.as_ref()),
+            kernel_authority::RunRoute::Reject
+        ) {
+            return Err(format!(
+                "{}: unsupported frozen executor",
+                crate::database::EXECUTOR_ROUTE_UNKNOWN
+            ));
         }
         // B1: the Kernel execution loop is gone. A frozen historical Kernel Run
         // (Authoritative, no route) that is started again is refused, never
@@ -1941,9 +2206,8 @@ impl RuntimeHost {
         if kernel_authority::is_retired_kernel(frozen_binding.as_ref()) {
             return Err(kernel_authority::retired_route_error());
         }
-        let authority = kernel_authority::select(
-            frozen_binding.as_ref().map(|binding| binding.authority),
-        )?;
+        let authority =
+            kernel_authority::select(frozen_binding.as_ref().map(|binding| binding.authority))?;
         let executor_route = match &frozen_binding {
             Some(binding) => binding.executor_route,
             None => Database::new_run_executor_route(authority),
@@ -1952,20 +2216,32 @@ impl RuntimeHost {
         if authority == fox_engine_protocol::ExecutionAuthority::Authoritative && !native {
             return Err(kernel_authority::retired_route_error());
         }
-        let native_ownership = if native { Some(kernel_host::acquire(&self.sessions_dir, &started.run.id)?) } else { None };
-        crate::lifecycle_hooks::run_event(&self.database,"before_run",&started.run.id,run_kind,
-            &json!({"conversationId":started.run.conversation_id,"runKind":run_kind,
-                "depth":if run_kind=="child" {1} else {0}}))?;
-        let execution_profile = if authority == fox_engine_protocol::ExecutionAuthority::Authoritative {
-            if let Some(binding) = &frozen_binding {
-                continuation::ExecutionProfileSelection::resolve(&binding.execution_profile_id)?
-            } else if let Some(profile) = self.execution_profile_override {
-                continuation::ExecutionProfileSelection::resolve(profile)?
-            } else { continuation::ExecutionProfileSelection::load(&self.database)? }
+        let native_ownership = if native {
+            Some(kernel_host::acquire(&self.sessions_dir, &started.run.id)?)
         } else {
-            self.ensure_worker(&started.run.conversation_id)?;
-            self.current_execution_profile()?
+            None
         };
+        crate::lifecycle_hooks::run_event(
+            &self.database,
+            "before_run",
+            &started.run.id,
+            run_kind,
+            &json!({"conversationId":started.run.conversation_id,"runKind":run_kind,
+                "depth":if run_kind=="child" {1} else {0}}),
+        )?;
+        let execution_profile =
+            if authority == fox_engine_protocol::ExecutionAuthority::Authoritative {
+                if let Some(binding) = &frozen_binding {
+                    continuation::ExecutionProfileSelection::resolve(&binding.execution_profile_id)?
+                } else if let Some(profile) = self.execution_profile_override {
+                    continuation::ExecutionProfileSelection::resolve(profile)?
+                } else {
+                    continuation::ExecutionProfileSelection::load(&self.database)?
+                }
+            } else {
+                self.ensure_worker(&started.run.conversation_id)?;
+                self.current_execution_profile()?
+            };
         self.database
             .freeze_run_execution_profile(&started.run.id, execution_profile.id())
             .map_err(|error| error.to_string())?;
@@ -1980,12 +2256,22 @@ impl RuntimeHost {
                 let resolved = self
                     .database
                     .resolve_effective_model(&started.run.conversation_id)?
-                    .ok_or_else(|| format!("[model.connection_required] {}", crate::commands::FOX_MODEL_SERVICE_MISSING))?;
-                self.database.freeze_run_model_snapshot(&started.run.id, &resolved)?;
+                    .ok_or_else(|| {
+                        format!(
+                            "[model.connection_required] {}",
+                            crate::commands::FOX_MODEL_SERVICE_MISSING
+                        )
+                    })?;
+                self.database
+                    .freeze_run_model_snapshot(&started.run.id, &resolved)?;
                 resolved
             }
         };
-        let images = self.runtime_images(&started.run.conversation_id, attachments, model_service.supports_image_input)?;
+        let images = self.runtime_images(
+            &started.run.conversation_id,
+            attachments,
+            model_service.supports_image_input,
+        )?;
         let count_budget_override = self
             .run_budget_override
             .as_ref()
@@ -2016,11 +2302,22 @@ impl RuntimeHost {
             240,
             context_chars,
         )?;
-        let AgentPromptContext { system_prompt, assistant_package, expert_package,
-            expert_binding_payload, run_role, run_context, skill_prompt, skill_activations } =
-            self.agent_prompt_context(&started.run.conversation_id, text, run_kind)?;
+        let AgentPromptContext {
+            system_prompt,
+            assistant_package,
+            expert_package,
+            expert_binding_payload,
+            run_role,
+            run_context,
+            skill_prompt,
+            skill_activations,
+        } = self.agent_prompt_context(&started.run.conversation_id, text, run_kind)?;
         for record in &skill_activations {
-            self.database.record_skill_activation(&started.run.id, Some(&started.run.conversation_id), record)?;
+            self.database.record_skill_activation(
+                &started.run.id,
+                Some(&started.run.conversation_id),
+                record,
+            )?;
         }
         let control_binding = match frozen_binding {
             Some(binding) => binding,
@@ -2028,46 +2325,78 @@ impl RuntimeHost {
                 let mut budgets = fox_engine_protocol::TimeBudgets::continuous();
                 // Only an explicit caller budget limits the whole task. Existing
                 // frozen bindings above remain unchanged on restart.
-                if let Some((tier, custom_ms)) = self.database.kernel_run_budget_selection(&started.run.id)? {
+                if let Some((tier, custom_ms)) =
+                    self.database.kernel_run_budget_selection(&started.run.id)?
+                {
                     budgets = crate::database::run_budget_for_tier(budgets, tier, custom_ms)?;
                 }
                 if let Some(budget) = &self.run_budget_override {
                     budgets.restrict_execution_ms(budget.max_duration_ms as i64);
                 }
-                self.database.freeze_default_run_control_for_engine(&started.run.id, execution_profile.id(), budgets, &crate::kernel_model_config::configured_engine()?)?
+                self.database.freeze_default_run_control_for_engine(
+                    &started.run.id,
+                    execution_profile.id(),
+                    budgets,
+                    &crate::kernel_model_config::configured_engine()?,
+                )?
             }
             None => {
                 let executor = match std::env::var("FOX_RESOURCE_GATEWAY_READS") {
                     // New runs need Host observations for guarded file writes. Existing frozen runs retain their executor.
-                    Err(std::env::VarError::NotPresent) => fox_engine_protocol::ResourceExecutor::Rust,
-                    Ok(value) if value == "runtime" => fox_engine_protocol::ResourceExecutor::Runtime,
+                    Err(std::env::VarError::NotPresent) => {
+                        fox_engine_protocol::ResourceExecutor::Rust
+                    }
+                    Ok(value) if value == "runtime" => {
+                        fox_engine_protocol::ResourceExecutor::Runtime
+                    }
                     Ok(value) if value == "rust" => fox_engine_protocol::ResourceExecutor::Rust,
                     _ => return Err("FOX_RESOURCE_GATEWAY_READS must be runtime or rust".into()),
                 };
-                self.database.freeze_legacy_run_control_with_executor(&started.run.id, execution_profile.id(), executor)?
+                self.database.freeze_legacy_run_control_with_executor(
+                    &started.run.id,
+                    execution_profile.id(),
+                    executor,
+                )?
             }
         };
         if control_binding.authority != authority
-            || authority == fox_engine_protocol::ExecutionAuthority::Legacy && control_binding.engine_id != "pi"
+            || authority == fox_engine_protocol::ExecutionAuthority::Legacy
+                && control_binding.engine_id != "pi"
             || control_binding.conversation_id != started.run.conversation_id
-            || control_binding.execution_profile_id != execution_profile.id() {
-            return Err("Startup cannot replace the frozen Run engine/authority/profile/conversation".into());
+            || control_binding.execution_profile_id != execution_profile.id()
+        {
+            return Err(
+                "Startup cannot replace the frozen Run engine/authority/profile/conversation"
+                    .into(),
+            );
         }
         self.ensure_worker(&started.run.conversation_id)?;
-        let runtime_session_id =
-            self.open_runtime_session(&started.run.conversation_id, Some(&started.run.id))?.0;
+        let runtime_session_id = self
+            .open_runtime_session(&started.run.conversation_id, Some(&started.run.id))?
+            .0;
         let mut project_context = project_context_for(
-            &self.database,&self.sessions_dir,&started.run.conversation_id,&control_binding.permission,
+            &self.database,
+            &self.sessions_dir,
+            &started.run.conversation_id,
+            &control_binding.permission,
         );
-        // Placement reference only: where a user-facing file should go. It is
-        // advice for the model and claims nothing about verification. A new
-        // task never seeds a delivery checklist; content verification, repair
-        // rounds and delivery review are retired.
-        project_context["deliveryTargets"] =
-            delivery::task_delivery_reference(text, &project_context);
+        let delivery_targets = delivery::task_delivery_reference(text, &project_context);
+        if delivery_targets["targets"].as_array().is_some_and(|targets|
+            targets.iter().any(|target| target["directory"] == delivery::DEFAULT_PROJECT_OUTPUT))
+            && control_binding.permission.mode != fox_engine_protocol::PermissionMode::ReadOnly
+        {
+            if let Some(root) = control_binding.permission.project_root.as_deref() {
+                crate::tool_host::prepare_project_output(root, delivery::DEFAULT_PROJECT_OUTPUT)?;
+            }
+        }
+        project_context["deliveryTargets"] = delivery_targets;
         // 13.37（B1-5）：后台任务属于启动它的那一轮，那一轮结束（例如点停止）时会被一并取消，
         // 但模型上下文里最后一次工具结果仍是「运行中」。把最近几轮后台任务的真实状态交给这一轮。
-        let previous_run_jobs = previous_run_background_jobs(&self.database, &started.run.conversation_id, &started.run.id);
+        let previous_run_jobs = previous_run_background_jobs(
+            &self.database,
+            &started.run.conversation_id,
+            &started.run.id,
+        );
         // Host-decided placement for user-facing files. The folder is decided
         // once per (conversation, project) and persisted, so a continuation,
         // a retry on a later day and an application restart all land in the
@@ -2083,36 +2412,75 @@ impl RuntimeHost {
             6_000,
         )?;
 
-        let mut companion_context = self.database.companion_runtime_notes(&started.run.conversation_id, text)?;
-        let can_update_profile = self.database.run_companion_profile_update_scope(&started.run.id)?
+        let coordination_context = companion_coordination::context(&self.database,
+            &started.run.id, &started.run.conversation_id, text)?;
+        let mut companion_context = self
+            .database
+            .companion_runtime_notes(&started.run.conversation_id, text)?;
+        let can_update_profile = self
+            .database
+            .run_companion_profile_update_scope(&started.run.id)?
             .is_some_and(|scope| scope.conversation_id == started.run.conversation_id);
-        if let Some(context) = companion_context.as_mut().filter(|ctx| ctx["role"] == "owner") {
+        if let Some(context) = companion_context
+            .as_mut()
+            .filter(|ctx| ctx["role"] == "owner")
+        {
             context["canUpdateProfile"] = json!(can_update_profile);
             context["canWriteNotes"] = json!(can_update_profile);
+            let companion_id = context["companionId"].as_str().ok_or("缺少伙伴标识")?;
+            let is_default = self.database.companion_profile(companion_id)
+                .map_err(|error| error.response().1.to_owned())?.profile.is_default;
+            let can_manage_team = is_default && can_update_profile;
+            context["isDefault"] = json!(is_default);
             // K4: freeze this run's capability snapshot (write-once) and show
             // the model exactly that set. A grant added mid-run only appears
             // in the next run; a revocation still stops execution via the
             // claim-time re-check.
-            let snapshot = match self.database.run_companion_tools_snapshot(&started.run.id)? {
+            let snapshot = match self
+                .database
+                .run_companion_tools_snapshot(&started.run.id)?
+            {
                 Some(ids) => ids,
                 None => {
-                    let mut ids = match self.database.conversation_companion_id(&started.run.conversation_id)? {
+                    let mut ids = match self
+                        .database
+                        .conversation_companion_id(&started.run.conversation_id)?
+                    {
                         Some(companion) => self.database.companion_capability_ids(&companion)?,
                         None => Vec::new(),
                     };
                     let mcp_scope = intersect_optional_scopes(
                         package_string_scope(&assistant_package["packageManifest"], "mcpServers"),
-                        expert_package.as_ref().and_then(|package| package_string_scope(&package["packageManifest"], "mcpServers")),
+                        expert_package.as_ref().and_then(|package| {
+                            package_string_scope(&package["packageManifest"], "mcpServers")
+                        }),
                     );
-                    ids.retain(|id| id.strip_prefix("mcp:").and_then(|rest| rest.split_once(':'))
-                        .is_none_or(|(server, _)| mcp_scope.as_ref().is_none_or(|scope| scope.contains(server))));
+                    ids.retain(|id| {
+                        id.strip_prefix("mcp:")
+                            .and_then(|rest| rest.split_once(':'))
+                            .is_none_or(|(server, _)| {
+                                mcp_scope
+                                    .as_ref()
+                                    .is_none_or(|scope| scope.contains(server))
+                            })
+                    });
                     ids
                 }
             };
-            let mut allowed: Vec<&str> = fox_engine_protocol::TOOL_CONTRACTS.iter()
+            let mut allowed: Vec<&str> = fox_engine_protocol::TOOL_CONTRACTS
+                .iter()
                 .map(|contract| contract.0)
                 .filter(|name| crate::companion_workspace::allows_tool(name))
-                .filter(|name| (!matches!(*name, "companion_profile_update" | "memory_write" | "note_organize") && !name.starts_with("companion_task_")) || can_update_profile)
+                .filter(|name| !crate::companion_workspace::is_companion_team_tool(name)
+                    || crate::companion_workspace::is_companion_peer_tool(name) && can_update_profile
+                    || can_manage_team)
+                .filter(|name| {
+                    (!matches!(
+                        *name,
+                        "companion_profile_update" | "memory_write" | "note_organize"
+                    ) && !name.starts_with("companion_task_"))
+                        || can_update_profile
+                })
                 .collect();
             for tool in crate::database::WEB_TOOLS {
                 if snapshot.iter().any(|id| id == tool) {
@@ -2123,18 +2491,55 @@ impl RuntimeHost {
                 allowed.push("list_mcp_tools");
                 allowed.push("call_mcp_tool");
             }
-            let package_scope = intersect_optional_scopes(runtime_package_tool_scope(&assistant_package),
-                expert_package.as_ref().and_then(runtime_package_tool_scope));
-            allowed.retain(|name| matches!(*name, "companion_profile_update" | "memory_write" | "note_organize" | "note_read" | "note_search")
-                || name.starts_with("companion_task_")
-                || package_scope.as_ref().is_none_or(|scope| scope.contains(*name)));
-            allowed.retain(|name| self.tool_allowlist_override.as_ref().is_none_or(|scope| scope.contains(*name)));
+            if coordination_context["incoming"]["consult"] == true {
+                allowed.retain(|name| crate::companion_workspace::is_consultation_tool(name));
+            }
+            let package_scope = intersect_optional_scopes(
+                runtime_package_tool_scope(&assistant_package),
+                expert_package.as_ref().and_then(runtime_package_tool_scope),
+            );
+            allowed.retain(|name| {
+                matches!(
+                    *name,
+                    "companion_profile_update"
+                        | "memory_write"
+                        | "note_organize"
+                        | "note_read"
+                        | "note_search"
+                ) || name.starts_with("companion_task_")
+                    || crate::companion_workspace::is_companion_team_tool(name)
+                    || package_scope
+                        .as_ref()
+                        .is_none_or(|scope| scope.contains(*name))
+            });
+            allowed.retain(|name| {
+                self.tool_allowlist_override
+                    .as_ref()
+                    .is_none_or(|scope| scope.contains(*name))
+            });
             if let Some(frozen) = self.database.run_companion_tool_catalog(&started.run.id)? {
                 allowed.retain(|name| frozen.iter().any(|tool| tool == name));
             }
-            self.database.freeze_run_companion_catalog(&started.run.id, &snapshot,
-                &allowed.iter().map(|tool| (*tool).to_owned()).collect::<Vec<_>>())?;
+            self.database.freeze_run_companion_catalog(
+                &started.run.id,
+                &snapshot,
+                &allowed
+                    .iter()
+                    .map(|tool| (*tool).to_owned())
+                    .collect::<Vec<_>>(),
+            )?;
             context["allowedTools"] = json!(allowed);
+            if can_manage_team {
+                let companion_id = context["companionId"].as_str().ok_or("缺少伙伴标识")?;
+                context["teamActions"] = crate::companion_team::runtime_actions(
+                    &self.database, companion_id, &started.run.conversation_id,
+                ).map_err(|error| error.response().1.to_owned())?;
+            }
+            if allowed.contains(&"companion_list") {
+                let companion_id = context["companionId"].as_str().ok_or("缺少伙伴标识")?;
+                context["teamRoster"] = crate::companion_team::roster(&self.database, companion_id)
+                    .map_err(|error| error.response().1.to_owned())?;
+            }
         }
 
         // Assembled once and borrowed by both prompt branches below, so the
@@ -2172,32 +2577,50 @@ impl RuntimeHost {
                 self.database.ensure_companion_executable(companion)?;
             }
             if let Some(child) = self.database.child_run(&started.run.id)? {
-                let parent_status: String = self.database.with_connection(|connection| connection.query_row(
-                    "SELECT status FROM runs WHERE id=?1", [&child.parent_run_id], |row| row.get(0),
-                ))?;
-                if parent_status != "running" || state.finishing_runs.contains(&child.parent_run_id) {
+                let parent_status: String = self.database.with_connection(|connection| {
+                    connection.query_row(
+                        "SELECT status FROM runs WHERE id=?1",
+                        [&child.parent_run_id],
+                        |row| row.get(0),
+                    )
+                })?;
+                if parent_status != "running" || state.finishing_runs.contains(&child.parent_run_id)
+                {
                     return Err("child_run.parent_not_running: 父任务已停止接收子任务".into());
                 }
             }
             state.cancellation.register_run(&started.run.id)?;
             if let Some(worker) = state.worker.as_mut() {
-                let generation = self.database.get_runtime_session(&started.run.conversation_id)?
-                    .ok_or("runtime session mapping is missing")?.context_generation;
+                let generation = self
+                    .database
+                    .get_runtime_session(&started.run.conversation_id)?
+                    .ok_or("runtime session mapping is missing")?
+                    .context_generation;
                 worker.sessions.start(
                     &started.run.conversation_id,
                     &runtime_session_id,
                     generation,
                     &started.run.id,
-                    companion_slot.as_ref().map(|(id, background)| (id.as_str(), *background)),
+                    companion_slot
+                        .as_ref()
+                        .map(|(id, background)| (id.as_str(), *background)),
                 )?;
             }
-            if let Some(lease) = native_ownership { state.native_run_leases.insert(started.run.id.clone(), lease); }
+            if let Some(lease) = native_ownership {
+                state
+                    .native_run_leases
+                    .insert(started.run.id.clone(), lease);
+            }
             state.state = "busy".to_owned();
         }
         if native {
-            native_model_budget::freeze(&self.database, &control_binding, effective_max_output_tokens as i64,
+            native_model_budget::freeze(
+                &self.database,
+                &control_binding,
+                effective_max_output_tokens as i64,
                 count_budget_override.map(|b| b.max_total_tokens as i64),
-                count_budget_override.map(|b| b.max_output_tokens as i64))?;
+                count_budget_override.map(|b| b.max_output_tokens as i64),
+            )?;
         }
 
         let prompt_request = RuntimeRequest::new("prompt")
@@ -2226,10 +2649,12 @@ impl RuntimeHost {
                 "runContext": context.run_context,
                 "projectContext": project_context,
                 "controlBinding": control_binding,
+                "currentRunSteering": authority == fox_engine_protocol::ExecutionAuthority::Authoritative,
                 "hostRuntimeCapabilities": host_runtime_capabilities(&runtime_shadow_hash(&format!("manifest|pi|v2|{}",self.capabilities_manifest_json().unwrap_or_default())), &control_binding.execution_profile_id),
                 "workSnapshot": work_snapshot,
                 "memoryContext": memory_context,
                 "companionContext": companion_context,
+                "companionCoordination": coordination_context,
                 "previousRunBackgroundJobs": previous_run_jobs,
                 "promptBudget": { "maxPromptTokens": input_tokens },
                 "runBudget": self.run_budget_override.as_ref().map(|budget| {
@@ -2335,19 +2760,37 @@ impl RuntimeHost {
     /// Pi-native session whose exact file the Host must open. All of the
     /// decisions live in `session_lifecycle`, which knows that a failed native
     /// restore must never become a fresh context.
-    fn open_runtime_session(&self, conversation_id: &str, run_id: Option<&str>) -> Result<(String, PathBuf), String> {
+    fn open_runtime_session(
+        &self,
+        conversation_id: &str,
+        run_id: Option<&str>,
+    ) -> Result<(String, PathBuf), String> {
         // The live worker is the only source of "this allocated session is
         // still in memory": after a reset Pi has not written the JSONL yet, and
         // refusing to reuse it would make the new generation unusable.
         let live_runtime_session_id = self.live_runtime_session_id(conversation_id);
-        if let (Some(live), Some(mapping)) = (&live_runtime_session_id, self.database.get_runtime_session(conversation_id)?) {
-            if live == &mapping.runtime_session_id && matches!(mapping.status.as_str(), "ready" | "allocated") {
-                if let Some(run) = run_id { self.database.associate_run_runtime_session(run, conversation_id, live)?; }
-                let path = mapping.native_session_path.or(mapping.session_path).ok_or("live session path is missing")?;
+        if let (Some(live), Some(mapping)) = (
+            &live_runtime_session_id,
+            self.database.get_runtime_session(conversation_id)?,
+        ) {
+            if live == &mapping.runtime_session_id
+                && matches!(mapping.status.as_str(), "ready" | "allocated")
+            {
+                if let Some(run) = run_id {
+                    self.database
+                        .associate_run_runtime_session(run, conversation_id, live)?;
+                }
+                let path = mapping
+                    .native_session_path
+                    .or(mapping.session_path)
+                    .ok_or("live session path is missing")?;
                 return Ok((live.clone(), PathBuf::from(path)));
             }
         }
-        let lease = kernel_run_lock::KernelRunLock::acquire(&self.sessions_dir, &format!("native-session:{conversation_id}"))?;
+        let lease = kernel_run_lock::KernelRunLock::acquire(
+            &self.sessions_dir,
+            &format!("native-session:{conversation_id}"),
+        )?;
         let mut link = HostSessionLink { host: self, run_id };
         let lifecycle = self.session_lifecycle();
         let opened = match run_id {
@@ -2364,13 +2807,26 @@ impl RuntimeHost {
             ),
         };
         let opened = opened.map_err(|error| error.user_message())?;
-        let mapping = self.database.get_runtime_session(conversation_id)?.ok_or("opened session mapping is missing")?;
-        self.state.lock().map_err(|_| "runtime state lock is poisoned")?
-            .worker.as_mut().ok_or("runtime worker is not running")?
-            .sessions.remember(conversation_id, &opened.0, mapping.context_generation)?;
-        self.state.lock().map_err(|_| "runtime state lock is poisoned")?
-            .worker.as_mut().ok_or("runtime worker is not running")?
-            .session_leases.insert(conversation_id.to_owned(), lease);
+        let mapping = self
+            .database
+            .get_runtime_session(conversation_id)?
+            .ok_or("opened session mapping is missing")?;
+        self.state
+            .lock()
+            .map_err(|_| "runtime state lock is poisoned")?
+            .worker
+            .as_mut()
+            .ok_or("runtime worker is not running")?
+            .sessions
+            .remember(conversation_id, &opened.0, mapping.context_generation)?;
+        self.state
+            .lock()
+            .map_err(|_| "runtime state lock is poisoned")?
+            .worker
+            .as_mut()
+            .ok_or("runtime worker is not running")?
+            .session_leases
+            .insert(conversation_id.to_owned(), lease);
         Ok(opened)
     }
 
@@ -2378,15 +2834,34 @@ impl RuntimeHost {
     ///
     /// Worker-scoped on purpose: a restarted worker (or another conversation's
     /// worker) proves nothing about this conversation's session.
-    fn close_conversation_session(&self, conversation_id: &str) -> Result<(), String> {
-        let session = self.state.lock().map_err(|_| "runtime state lock is poisoned")?
-            .worker.as_ref().and_then(|w| w.sessions.by_conversation(conversation_id).cloned());
+    pub(crate) fn close_conversation_session(&self, conversation_id: &str) -> Result<(), String> {
+        let session = self
+            .state
+            .lock()
+            .map_err(|_| "runtime state lock is poisoned")?
+            .worker
+            .as_ref()
+            .and_then(|w| w.sessions.by_conversation(conversation_id).cloned());
         if let Some(session) = session {
-            if session.run_id.is_some() { return Err("cannot close a conversation with an active Run".into()); }
-            let response = self.send_request(RuntimeRequest::new("session.close")
-                .with_conversation(conversation_id).with_runtime_session(&session.runtime_session_id), RESPONSE_TIMEOUT)?;
-            if response.r#type != "session_closed" { return Err(response_error(&response, "session close failed")); }
-            if let Some(worker) = self.state.lock().map_err(|_| "runtime state lock is poisoned")?.worker.as_mut() {
+            if session.run_id.is_some() {
+                return Err("cannot close a conversation with an active Run".into());
+            }
+            let response = self.send_request(
+                RuntimeRequest::new("session.close")
+                    .with_conversation(conversation_id)
+                    .with_runtime_session(&session.runtime_session_id),
+                RESPONSE_TIMEOUT,
+            )?;
+            if response.r#type != "session_closed" {
+                return Err(response_error(&response, "session close failed"));
+            }
+            if let Some(worker) = self
+                .state
+                .lock()
+                .map_err(|_| "runtime state lock is poisoned")?
+                .worker
+                .as_mut()
+            {
                 worker.sessions.remove(conversation_id)?;
                 worker.session_leases.remove(conversation_id);
             }
@@ -2401,24 +2876,34 @@ impl RuntimeHost {
     pub(crate) fn archive_companion(
         &self,
         companion_id: &str,
-    ) -> Result<crate::database::companions::CompanionView, crate::database::companions::CompanionError> {
+    ) -> Result<
+        crate::database::companions::CompanionView,
+        crate::database::companions::CompanionError,
+    > {
         use crate::database::companions::CompanionError;
-        self.begin_companion_stop(companion_id).map_err(CompanionError::Storage)?;
+        self.begin_companion_stop(companion_id)
+            .map_err(CompanionError::Storage)?;
         let outcome = self
             .drain_companion_runs(companion_id)
             .map_err(CompanionError::Storage)
             .and_then(|()| {
-                let _transition = self.run_transition.lock()
+                let _transition = self
+                    .run_transition
+                    .lock()
                     .map_err(|_| CompanionError::Storage("运行时状态锁已损坏".into()))?;
                 let record = self.database.companion_profile(companion_id)?;
                 if record.active_run_status.is_some() {
                     return Err(CompanionError::RunActive);
                 }
-                self.close_conversation_session(&record.conversation_id).map_err(CompanionError::Storage)?;
-                for conversation in self.database.companion_background_conversations(companion_id)
+                self.close_conversation_session(&record.conversation_id)
+                    .map_err(CompanionError::Storage)?;
+                for conversation in self
+                    .database
+                    .companion_background_conversations(companion_id)
                     .map_err(CompanionError::Storage)?
                 {
-                    self.close_conversation_session(&conversation).map_err(CompanionError::Storage)?;
+                    self.close_conversation_session(&conversation)
+                        .map_err(CompanionError::Storage)?;
                 }
                 self.database.archive_companion(companion_id)
             });
@@ -2430,7 +2915,10 @@ impl RuntimeHost {
     /// Always paired with [`Self::end_companion_stop`]. Cancelling a Run takes the
     /// transition lock, so the caller must not hold it across the sweep.
     pub(crate) fn begin_companion_stop(&self, companion_id: &str) -> Result<(), String> {
-        let mut state = self.state.lock().map_err(|_| "runtime state lock is poisoned")?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "runtime state lock is poisoned")?;
         state.stopping_companions.insert(companion_id.to_owned());
         state.queue_changed.1.notify_all();
         Ok(())
@@ -2483,26 +2971,41 @@ impl RuntimeHost {
     /// `session.run_id`, not `occupied()`/`holds_companion()`: a background
     /// approval can release the execution position yet keep the session owner.
     fn companion_session_owner_present(&self, companion_id: &str) -> Result<bool, String> {
-        let conversations = self.database.companion_session_conversations(companion_id)?;
+        let conversations = self
+            .database
+            .companion_session_conversations(companion_id)?;
         if conversations.is_empty() {
             return Ok(false);
         }
-        let state = self.state.lock().map_err(|_| "runtime state lock is poisoned".to_owned())?;
-        let Some(worker) = state.worker.as_ref() else { return Ok(false); };
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "runtime state lock is poisoned".to_owned())?;
+        let Some(worker) = state.worker.as_ref() else {
+            return Ok(false);
+        };
         Ok(conversations.iter().any(|conversation| {
-            worker.sessions.by_conversation(conversation).is_some_and(|session| session.run_id.is_some())
+            worker
+                .sessions
+                .by_conversation(conversation)
+                .is_some_and(|session| session.run_id.is_some())
         }))
     }
 
     fn settle_unowned_companion_run(&self, run_id: &str) -> Result<(), String> {
         use rusqlite::OptionalExtension;
-        let goal: Option<String> = self.database.with_connection(|connection| {
-            connection.query_row(
-                "SELECT goal_id FROM pending_work_mode_dispatches WHERE run_id = ?1",
-                [run_id],
-                |row| row.get::<_, Option<String>>(0),
-            ).optional()
-        })?.flatten();
+        let goal: Option<String> = self
+            .database
+            .with_connection(|connection| {
+                connection
+                    .query_row(
+                        "SELECT goal_id FROM pending_work_mode_dispatches WHERE run_id = ?1",
+                        [run_id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()
+            })?
+            .flatten();
         if let Some(goal) = goal {
             self.database.reject_pending_work_mode_dispatch(&goal)?;
             return Ok(());
@@ -2524,7 +3027,10 @@ impl RuntimeHost {
     fn live_runtime_session_id(&self, conversation_id: &str) -> Option<String> {
         let state = self.state.lock().ok()?;
         let worker = state.worker.as_ref()?;
-        worker.sessions.by_conversation(conversation_id).map(|session| session.runtime_session_id.clone())
+        worker
+            .sessions
+            .by_conversation(conversation_id)
+            .map(|session| session.runtime_session_id.clone())
     }
 
     /// Explicit context reset: keep the conversation (history, expert, memory,
@@ -2554,25 +3060,40 @@ impl RuntimeHost {
         repair: bool,
     ) -> Result<session_lifecycle::ResetOutcome, session_lifecycle::ResetRefusal> {
         use session_lifecycle::ResetRefusal;
-        let _transition = self.run_transition.lock()
+        let _transition = self
+            .run_transition
+            .lock()
             .map_err(|_| ResetRefusal::failed("运行时状态锁已损坏"))?;
-        if self.database.conversation_has_active_run(conversation_id).map_err(ResetRefusal::failed)? {
+        if self
+            .database
+            .conversation_has_active_run(conversation_id)
+            .map_err(ResetRefusal::failed)?
+        {
             return Err(ResetRefusal::run_active());
         }
         let available = if repair {
             self.companion_repair_availability(conversation_id)
         } else {
             self.context_reset_availability(conversation_id)
-        }.map_err(ResetRefusal::failed)?;
+        }
+        .map_err(ResetRefusal::failed)?;
         if let Some(refusal) = available.refusal() {
             return Err(refusal);
         }
-        self.ensure_worker(conversation_id).map_err(ResetRefusal::failed)?;
-        self.close_conversation_session(conversation_id).map_err(session_lifecycle::ResetRefusal::failed)?;
-        let lease = kernel_run_lock::KernelRunLock::acquire(&self.sessions_dir, &format!("native-session:{conversation_id}"))
+        self.ensure_worker(conversation_id)
+            .map_err(ResetRefusal::failed)?;
+        self.close_conversation_session(conversation_id)
             .map_err(session_lifecycle::ResetRefusal::failed)?;
+        let lease = kernel_run_lock::KernelRunLock::acquire(
+            &self.sessions_dir,
+            &format!("native-session:{conversation_id}"),
+        )
+        .map_err(session_lifecycle::ResetRefusal::failed)?;
         let outcome = {
-            let mut link = HostSessionLink { host: self, run_id: None };
+            let mut link = HostSessionLink {
+                host: self,
+                run_id: None,
+            };
             self.session_lifecycle().reset(conversation_id, &mut link)?
         };
         // The runtime now holds the new session. Recording it here is what lets
@@ -2580,9 +3101,17 @@ impl RuntimeHost {
         // yet (and it never points at the old session).
         if let Ok(mut state) = self.state.lock() {
             if let Some(worker) = state.worker.as_mut() {
-                worker.sessions.remember(conversation_id, &outcome.runtime_session_id,
-                    outcome.context_generation).map_err(session_lifecycle::ResetRefusal::failed)?;
-                worker.session_leases.insert(conversation_id.to_owned(), lease);
+                worker
+                    .sessions
+                    .remember(
+                        conversation_id,
+                        &outcome.runtime_session_id,
+                        outcome.context_generation,
+                    )
+                    .map_err(session_lifecycle::ResetRefusal::failed)?;
+                worker
+                    .session_leases
+                    .insert(conversation_id.to_owned(), lease);
             }
         }
         Ok(outcome)
@@ -2597,11 +3126,19 @@ impl RuntimeHost {
         &self,
         conversation_id: &str,
     ) -> Result<Vec<PathBuf>, session_lifecycle::SessionFileRefusal> {
-        self.close_conversation_session(conversation_id).map_err(|message| session_lifecycle::SessionFileRefusal {
-            code: session_lifecycle::SESSION_FILE_DELETE_FAILED.to_owned(), message,
+        self.close_conversation_session(conversation_id)
+            .map_err(|message| session_lifecycle::SessionFileRefusal {
+                code: session_lifecycle::SESSION_FILE_DELETE_FAILED.to_owned(),
+                message,
+            })?;
+        let _lease = kernel_run_lock::KernelRunLock::acquire(
+            &self.sessions_dir,
+            &format!("native-session:{conversation_id}"),
+        )
+        .map_err(|message| session_lifecycle::SessionFileRefusal {
+            code: session_lifecycle::SESSION_FILE_DELETE_FAILED.to_owned(),
+            message,
         })?;
-        let _lease = kernel_run_lock::KernelRunLock::acquire(&self.sessions_dir, &format!("native-session:{conversation_id}"))
-            .map_err(|message| session_lifecycle::SessionFileRefusal { code: session_lifecycle::SESSION_FILE_DELETE_FAILED.to_owned(), message })?;
         session_lifecycle::purge_owned_session_files(
             &self.database,
             &self.sessions_dir,
@@ -2619,7 +3156,10 @@ impl RuntimeHost {
     ) -> Result<session_lifecycle::ResetAvailability, String> {
         if let Some(state) = self.database.companion_chat_state(conversation_id)? {
             if state != crate::database::CompanionChatState::Active {
-                return Ok(ResetAvailability::unsupported("companion.inactive", "请先恢复联系人，再重置私聊上下文。"));
+                return Ok(ResetAvailability::unsupported(
+                    "companion.inactive",
+                    "请先恢复联系人，再重置私聊上下文。",
+                ));
             }
             let available = self.companion_workspace_availability(conversation_id)?;
             if !available.supported {
@@ -2634,32 +3174,54 @@ impl RuntimeHost {
         ))
     }
 
-    pub(crate) fn companion_repair_availability(&self, chat: &str) -> Result<ResetAvailability, String> {
+    pub(crate) fn companion_repair_availability(
+        &self,
+        chat: &str,
+    ) -> Result<ResetAvailability, String> {
         let state = self.database.companion_chat_state(chat)?;
         if state != Some(crate::database::CompanionChatState::Active) {
-            return Ok(ResetAvailability::unsupported("companion.repair_not_needed", "仅可修复使用中的联系人私聊。"));
+            return Ok(ResetAvailability::unsupported(
+                "companion.repair_not_needed",
+                "仅可修复使用中的联系人私聊。",
+            ));
         }
         if self.companion_context_issue(chat)?.is_none() {
-            return Ok(ResetAvailability::unsupported("companion.repair_not_needed", "当前私聊无需修复。"));
+            return Ok(ResetAvailability::unsupported(
+                "companion.repair_not_needed",
+                "当前私聊无需修复。",
+            ));
         }
         if self.database.conversation_has_active_run(chat)? {
-            return Ok(ResetAvailability::unsupported("session.reset_run_active", "请先停止当前生成。"));
+            return Ok(ResetAvailability::unsupported(
+                "session.reset_run_active",
+                "请先停止当前生成。",
+            ));
         }
         self.companion_workspace_availability(chat)
     }
 
     fn companion_workspace_availability(&self, chat: &str) -> Result<ResetAvailability, String> {
         let root = self.sessions_dir.parent().ok_or("无法定位 Fox 数据目录")?;
-        if let Err(error) = crate::companion_workspace::require_for_chat(&self.database, root, chat) {
-            return Ok(ResetAvailability::unsupported("companion.workspace_unavailable", error));
+        if let Err(error) = crate::companion_workspace::require_for_chat(&self.database, root, chat)
+        {
+            return Ok(ResetAvailability::unsupported(
+                "companion.workspace_unavailable",
+                error,
+            ));
         }
         Ok(ResetAvailability::supported())
     }
 
-    pub(crate) fn companion_context_issue(&self, chat: &str) -> Result<Option<(&'static str, &'static str)>, String> {
+    pub(crate) fn companion_context_issue(
+        &self,
+        chat: &str,
+    ) -> Result<Option<(&'static str, &'static str)>, String> {
         let record = self.database.get_runtime_session(chat)?;
         let live = self.live_runtime_session_id(chat);
-        Ok(session_lifecycle::context_recovery_issue(record.as_ref(), live.as_deref()))
+        Ok(session_lifecycle::context_recovery_issue(
+            record.as_ref(),
+            live.as_deref(),
+        ))
     }
 
     fn session_lifecycle(&self) -> session_lifecycle::SessionLifecycle<'_> {
@@ -2716,7 +3278,8 @@ impl RuntimeHost {
     ) -> Result<(), String> {
         let child_run_id = child_run.child_run_id.clone();
         if self.database.run_companion_scope(&child_run_id)?.is_some() {
-            self.database.freeze_child_companion_tools(&child_run_id, &child_run.parent_run_id)?;
+            self.database
+                .freeze_child_companion_tools(&child_run_id, &child_run.parent_run_id)?;
         }
         let enforce_count_budget_override = graph_review_request_id.is_some()
             || self
@@ -2726,11 +3289,27 @@ impl RuntimeHost {
         // A0: every child Run is frozen PiNative, whatever route its parent was
         // frozen with. A child inherits its parent's permission and budgets,
         // never its executor, so no child can ever land on the frozen Kernel loop.
-        let parent_control = self.database.run_control_binding(&child_run.parent_run_id)?;
-        let parent_native = parent_control.as_ref().is_some_and(|binding| binding.executor_route == Some(fox_engine_protocol::ExecutorRoute::PiNative));
-        if let Some(parent) = parent_control.filter(|binding| binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative) {
-            if !parent_native && (self.database.pending_kernel_host_commands(&parent.run_id)?.iter().any(|command| command.kind=="cancel")
-                || self.database.kernel_host_run_state(&parent.run_id)?.as_deref()!=Some("running")) {
+        let parent_control = self
+            .database
+            .run_control_binding(&child_run.parent_run_id)?;
+        let parent_native = parent_control.as_ref().is_some_and(|binding| {
+            binding.executor_route == Some(fox_engine_protocol::ExecutorRoute::PiNative)
+        });
+        if let Some(parent) = parent_control.filter(|binding| {
+            binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative
+        }) {
+            if !parent_native
+                && (self
+                    .database
+                    .pending_kernel_host_commands(&parent.run_id)?
+                    .iter()
+                    .any(|command| command.kind == "cancel")
+                    || self
+                        .database
+                        .kernel_host_run_state(&parent.run_id)?
+                        .as_deref()
+                        != Some("running"))
+            {
                 return Err("Kernel parent is no longer admitting child execution".into());
             }
             let inherited = kernel_authority::child_run_binding(
@@ -2738,7 +3317,9 @@ impl RuntimeHost {
                 &child_run_id,
                 &child_run.child_conversation_id,
                 enforce_count_budget_override,
-                graph_review_request_id.is_some().then_some(GRAPH_REVIEWER_EXECUTION_PROFILE),
+                graph_review_request_id
+                    .is_some()
+                    .then_some(GRAPH_REVIEWER_EXECUTION_PROFILE),
                 child_run.budget.max_duration_ms,
             )?;
             self.database.freeze_run_control(&inherited)?;
@@ -2754,7 +3335,10 @@ impl RuntimeHost {
                 .state
                 .lock()
                 .map_err(|_| "runtime state lock is poisoned".to_owned())?;
-            (current.pending_approvals.clone(), current.active_file_writes.clone())
+            (
+                current.pending_approvals.clone(),
+                current.active_file_writes.clone(),
+            )
         };
         {
             let mut child_state = child_host
@@ -2775,8 +3359,11 @@ impl RuntimeHost {
                 Some(HashSet::new()),
             )
         } else {
-            let (mut tool_scope, mcp_scope) =
-                effective_child_delegation_scope(&self.database, &child_run.parent_run_id, &parent_conversation_id)?;
+            let (mut tool_scope, mcp_scope) = effective_child_delegation_scope(
+                &self.database,
+                &child_run.parent_run_id,
+                &parent_conversation_id,
+            )?;
             tool_scope = intersect_optional_scopes(
                 tool_scope,
                 child_run
@@ -2816,8 +3403,9 @@ impl RuntimeHost {
                 // The native model budget is the child's execution clock; time
                 // waiting for the user's approval does not count, because
                 // approvals have no deadline of their own.
-                let duration_exceeded = native_model_budget::elapsed_ms(&coordinator.database, &child_run_id)
-                    .is_ok_and(|elapsed| elapsed >= child_run.budget.max_duration_ms);
+                let duration_exceeded =
+                    native_model_budget::elapsed_ms(&coordinator.database, &child_run_id)
+                        .is_ok_and(|elapsed| elapsed >= child_run.budget.max_duration_ms);
                 if duration_exceeded {
                     let _ = child_host.cancel_run(&child_run_id);
                     let _ = coordinator.database.mark_run_failed(
@@ -2888,16 +3476,23 @@ impl RuntimeHost {
         )?;
         let frozen = self.database.run_control_binding(&run_id)?;
         let authority = kernel_authority::select(frozen.as_ref().map(|binding| binding.authority))?;
-        let route = match frozen { Some(binding) => binding.executor_route, None => Database::new_run_executor_route(authority) };
+        let route = match frozen {
+            Some(binding) => binding.executor_route,
+            None => Database::new_run_executor_route(authority),
+        };
         let shared_native = route == Some(fox_engine_protocol::ExecutorRoute::PiNative);
-        let mut managed_host = if shared_native { self.clone_for_detached_dispatch() } else { RuntimeHost::new(
-            self.app.clone(),
-            self.database.clone(),
-            self.sessions_dir.clone(),
-            self.attachments_dir.clone(),
-            self.skills_dir.clone(),
-            self.yuxi_client.clone(),
-        ) };
+        let mut managed_host = if shared_native {
+            self.clone_for_detached_dispatch()
+        } else {
+            RuntimeHost::new(
+                self.app.clone(),
+                self.database.clone(),
+                self.sessions_dir.clone(),
+                self.attachments_dir.clone(),
+                self.skills_dir.clone(),
+                self.yuxi_client.clone(),
+            )
+        };
         managed_host.run_budget_override = Some(ChildRunBudget {
             max_duration_ms: prepared.colleague.max_duration_ms,
             max_total_tokens: prepared.remaining_tokens.min(200_000),
@@ -2909,7 +3504,10 @@ impl RuntimeHost {
                 .state
                 .lock()
                 .map_err(|_| "runtime state lock is poisoned".to_owned())?;
-            (current.pending_approvals.clone(), current.active_file_writes.clone())
+            (
+                current.pending_approvals.clone(),
+                current.active_file_writes.clone(),
+            )
         };
         {
             let mut managed_state = managed_host
@@ -2920,7 +3518,7 @@ impl RuntimeHost {
             managed_state.active_file_writes = shared_file_writes;
         }
         let (tool_scope, mcp_scope) =
-            effective_conversation_delegation_scope(&self.database, &conversation_id)?;
+            effective_background_delegation_scope(&self.database, &run_id, &conversation_id)?;
         managed_host.tool_allowlist_override = tool_scope;
         managed_host.mcp_server_scope_override = mcp_scope;
         {
@@ -2939,7 +3537,9 @@ impl RuntimeHost {
             let start = if shared_native {
                 managed_host.start_run_detached(prepared.started.clone(), prompt, Vec::new());
                 Ok(())
-            } else { managed_host.start_run(&prepared.started, &prompt, &[]) };
+            } else {
+                managed_host.start_run(&prepared.started, &prompt, &[])
+            };
             if let Err(error) = start {
                 let (code, detail) = structured_runtime_error(&error);
                 let _ = coordinator.database.mark_run_failed(
@@ -2969,10 +3569,14 @@ impl RuntimeHost {
                     let duration_exceeded = if shared_native {
                         native_model_budget::elapsed_ms(&coordinator.database, &run_id)
                             .is_ok_and(|elapsed| elapsed >= prepared.colleague.max_duration_ms)
-                    } else { Instant::now() >= deadline + Duration::from_millis(approval_wait) };
+                    } else {
+                        Instant::now() >= deadline + Duration::from_millis(approval_wait)
+                    };
                     if token_budget_exceeded || duration_exceeded {
                         let _ = managed_host.cancel_run(&run_id);
-                        if !shared_native { let _ = managed_host.stop_worker(); }
+                        if !shared_native {
+                            let _ = managed_host.stop_worker();
+                        }
                         let (code, message) = if token_budget_exceeded {
                             (
                                 "digital_colleague.token_budget_exceeded",
@@ -2998,7 +3602,9 @@ impl RuntimeHost {
                     thread::sleep(Duration::from_millis(100));
                 }
             }
-            if !shared_native { let _ = managed_host.stop_worker(); }
+            if !shared_native {
+                let _ = managed_host.stop_worker();
+            }
             if let Ok(mut hosts) = coordinator.child_hosts.lock() {
                 hosts.remove(&run_id);
             }
@@ -3014,6 +3620,16 @@ impl RuntimeHost {
         let coordinator = self.clone();
         thread::spawn(move || {
             while !coordinator.digital_scheduler_stop.load(Ordering::SeqCst) {
+                let chief_notice = coordinator.database.sync_app_notifications()
+                    .and_then(|_| coordinator.database.prepare_companion_failure_notice());
+                match chief_notice {
+                    Ok(Some(started)) => {
+                        let text = started.user_message.content.clone();
+                        coordinator.start_run_detached(started, text, Vec::new());
+                    }
+                    Err(error) => eprintln!("小狐失败通知处理失败：{error}"),
+                    _ => {}
+                }
                 if let Ok(prepared) = coordinator
                     .database
                     .claim_due_digital_colleague_triggers(crate::database::now_ms())
@@ -3030,9 +3646,14 @@ impl RuntimeHost {
                         }
                     }
                 }
-                for _ in 0..100 {
+                for tick in 0..100 {
                     if coordinator.digital_scheduler_stop.load(Ordering::SeqCst) {
                         break;
+                    }
+                    if tick % 10 == 0 {
+                        if let Err(error) = coordinator.tick_companion_coordination() {
+                            eprintln!("伙伴协作调度失败：{error}");
+                        }
                     }
                     thread::sleep(Duration::from_millis(100));
                 }
@@ -3070,18 +3691,29 @@ impl RuntimeHost {
     fn reject_owned_task_budget(&self, run_id: &str, message: &str) {
         if !message.contains("digital_colleague.budget_exceeded")
             && !message.contains("digital_colleague.tool_budget_exceeded")
-            && !message.contains("digital_colleague.output_budget_exceeded") { return; }
+            && !message.contains("digital_colleague.output_budget_exceeded")
+        {
+            return;
+        }
         let root = self.database.with_connection(|connection| {
             use rusqlite::OptionalExtension;
-            connection.query_row(
-                "SELECT t.run_id FROM runs r JOIN digital_colleague_triggers t
-                 ON t.run_id = CASE WHEN r.run_kind = 'child' THEN r.root_run_id ELSE r.id END
-                 WHERE r.id = ?1", [run_id], |row| row.get::<_, String>(0),
-            ).optional()
+            connection
+                .query_row(
+                    "SELECT t.run_id FROM run_usage_roots u JOIN digital_colleague_triggers t
+                     ON t.run_id=u.usage_root_id WHERE u.run_id=?1",
+                    [run_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
         });
         match root {
-            Ok(Some(root)) => self.reject_runtime_run_event(&root, "digital_colleague.budget_exceeded", message),
-            Ok(None) => {},
+            Ok(Some(root)) => {
+                if root != run_id {
+                    self.reject_runtime_run_event(run_id, "digital_colleague.budget_exceeded", message);
+                }
+                self.reject_runtime_run_event(&root, "digital_colleague.budget_exceeded", message)
+            }
+            Ok(None) => {}
             Err(error) => eprintln!("[digital_colleague.budget_lookup_failed] {run_id}: {error}"),
         }
     }
@@ -3114,7 +3746,12 @@ impl RuntimeHost {
                 "runtime.identity.session_missing",
                 "runtime envelope omitted runtimeSessionId".to_owned(),
             ))?;
-        let (expected_conversation_id, expected_run_id, expected_runtime_session_id, expected_generation) = {
+        let (
+            expected_conversation_id,
+            expected_run_id,
+            expected_runtime_session_id,
+            expected_generation,
+        ) = {
             let state = self.state.lock().map_err(|_| {
                 (
                     "runtime.state_unavailable",
@@ -3126,20 +3763,40 @@ impl RuntimeHost {
                 "runtime envelope arrived without an active worker".to_owned(),
             ))?;
             let session = worker.sessions.by_run(run_id).ok_or((
-                "runtime.identity.run_not_active", "runtime envelope names no active sidecar Run".to_owned(),
+                "runtime.identity.run_not_active",
+                "runtime envelope names no active sidecar Run".to_owned(),
             ))?;
-            (Some(session.conversation_id.clone()), session.run_id.clone(), Some(session.runtime_session_id.clone()), session.generation)
+            (
+                Some(session.conversation_id.clone()),
+                session.run_id.clone(),
+                Some(session.runtime_session_id.clone()),
+                session.generation,
+            )
         };
-        let mapping = self.database.get_runtime_session(conversation_id)
+        let mapping = self
+            .database
+            .get_runtime_session(conversation_id)
             .map_err(|error| ("runtime.identity.mapping_invalid", error))?;
         if let Some(mapping) = mapping {
-            if mapping.runtime_session_id != runtime_session_id || mapping.context_generation != expected_generation {
-                return Err(("runtime.identity.session_retired", "runtime event belongs to a retired session".into()));
+            if mapping.runtime_session_id != runtime_session_id
+                || mapping.context_generation != expected_generation
+            {
+                return Err((
+                    "runtime.identity.session_retired",
+                    "runtime event belongs to a retired session".into(),
+                ));
             }
         }
-        if let Some(generation) = envelope.payload.as_ref().and_then(|payload| payload.get("contextGeneration")) {
+        if let Some(generation) = envelope
+            .payload
+            .as_ref()
+            .and_then(|payload| payload.get("contextGeneration"))
+        {
             if generation.as_i64() != Some(expected_generation) {
-                return Err(("runtime.identity.generation_mismatch", "runtime envelope belongs to a different context generation".into()));
+                return Err((
+                    "runtime.identity.generation_mismatch",
+                    "runtime envelope belongs to a different context generation".into(),
+                ));
             }
         }
         let authoritative_conversation_id = self
@@ -3157,10 +3814,15 @@ impl RuntimeHost {
         )
     }
 
-    fn execution_profile_for_run(&self, run: Option<&str>) -> Result<continuation::ExecutionProfileSelection, String> {
+    fn execution_profile_for_run(
+        &self,
+        run: Option<&str>,
+    ) -> Result<continuation::ExecutionProfileSelection, String> {
         if let Some(run) = run {
             if let Some(binding) = self.database.run_control_binding(run)? {
-                return continuation::ExecutionProfileSelection::resolve(&binding.execution_profile_id);
+                return continuation::ExecutionProfileSelection::resolve(
+                    &binding.execution_profile_id,
+                );
             }
         }
         self.current_execution_profile()
@@ -3203,10 +3865,23 @@ impl RuntimeHost {
         ingress: RuntimeToolIngress,
         input: Option<&Value>,
     ) -> Result<(), (&'static str, String)> {
-        let data_dir = self.sessions_dir.parent().ok_or(("companion.workspace_unavailable", "缺少数据目录".into()))?;
-        crate::companion_workspace::check_run_tool(&self.database, data_dir, run_id, tool, input, Some(&|id, path| {
-            let _ = self.app.emit("fox://companion-import-suggested", json!({"companionId": id, "path": path}));
-        }))?;
+        let data_dir = self
+            .sessions_dir
+            .parent()
+            .ok_or(("companion.workspace_unavailable", "缺少数据目录".into()))?;
+        crate::companion_workspace::check_run_tool(
+            &self.database,
+            data_dir,
+            run_id,
+            tool,
+            input,
+            Some(&|id, path| {
+                let _ = self.app.emit(
+                    "fox://companion-import-suggested",
+                    json!({"companionId": id, "path": path}),
+                );
+            }),
+        )?;
         let (active_profile_id, capabilities) = {
             let state = self.state.lock().map_err(|_| {
                 (
@@ -3219,10 +3894,13 @@ impl RuntimeHost {
                 state.capabilities.clone(),
             )
         };
-        let active_profile_id = self.database.run_control_binding(run_id)
+        let active_profile_id = self
+            .database
+            .run_control_binding(run_id)
             .map_err(|error| ("runtime.binding_invalid", error))?
             .filter(|binding| binding.executor_route.is_some())
-            .map(|binding| binding.execution_profile_id).unwrap_or(active_profile_id);
+            .map(|binding| binding.execution_profile_id)
+            .unwrap_or(active_profile_id);
         let active_profile = continuation::ExecutionProfileSelection::resolve(&active_profile_id)
             .map_err(|error| ("runtime.execution_profile.invalid", error))?;
         let manifest =
@@ -3283,7 +3961,9 @@ impl RuntimeHost {
     }
 
     fn cancel_child_runtime(&self, child_run_id: &str) -> Result<bool, String> {
-        if kernel_authority::is_retired_kernel(self.database.run_control_binding(child_run_id)?.as_ref()) {
+        if kernel_authority::is_retired_kernel(
+            self.database.run_control_binding(child_run_id)?.as_ref(),
+        ) {
             return self.database.retire_kernel_run(child_run_id);
         }
         if self
@@ -3330,7 +4010,14 @@ impl RuntimeHost {
         child_run_id: &str,
         allow_redelivery: bool,
     ) -> Result<bool, String> {
-        if self.database.run_control_binding(child_run_id)?.is_some_and(|binding| binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative && binding.executor_route.is_none()) {
+        if self
+            .database
+            .run_control_binding(child_run_id)?
+            .is_some_and(|binding| {
+                binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative
+                    && binding.executor_route.is_none()
+            })
+        {
             return self.cancel_child_runtime(child_run_id);
         }
         let child_host = self
@@ -3513,7 +4200,8 @@ impl RuntimeHost {
     /// approval Run is settled as `runtime.user_cancelled`. The archive stop
     /// sweep passes false and settles orphans itself with `companion.stopping`.
     fn cancel_run_inner(&self, run_id: &str, settle_unowned: bool) -> Result<bool, String> {
-        if kernel_authority::is_retired_kernel(self.database.run_control_binding(run_id)?.as_ref()) {
+        if kernel_authority::is_retired_kernel(self.database.run_control_binding(run_id)?.as_ref())
+        {
             // B1: no Kernel loop owns this Run any more. Settle it like the
             // startup retirement; there is nothing left to signal.
             return self.database.retire_kernel_run(run_id);
@@ -3538,9 +4226,15 @@ impl RuntimeHost {
                 .state
                 .lock()
                 .map_err(|_| "runtime state lock is poisoned".to_owned())?;
-            let session = state.worker.as_ref().and_then(|worker| worker.sessions.by_run(run_id));
+            let session = state
+                .worker
+                .as_ref()
+                .and_then(|worker| worker.sessions.by_run(run_id));
             match session {
-                Some(session) => (Some(session.conversation_id.clone()), Some(session.runtime_session_id.clone())),
+                Some(session) => (
+                    Some(session.conversation_id.clone()),
+                    Some(session.runtime_session_id.clone()),
+                ),
                 None => {
                     // D1-5: no worker session owns this Run. A PiNative approval
                     // Run left unowned (e.g. after a restart) is settled through
@@ -3554,8 +4248,11 @@ impl RuntimeHost {
             }
         };
 
-        self.state.lock().map_err(|_| "runtime state lock is poisoned")?
-            .cancellation.request_run_cancel(run_id);
+        self.state
+            .lock()
+            .map_err(|_| "runtime state lock is poisoned")?
+            .cancellation
+            .request_run_cancel(run_id);
         let mut request = RuntimeRequest::new("cancel").with_run(run_id);
         if let Some(conversation_id) = conversation_id.as_deref() {
             request = request.with_conversation(conversation_id);
@@ -3582,24 +4279,43 @@ impl RuntimeHost {
             Some(binding) => binding,
             None => return Ok(false),
         };
-        if !matches!(kernel_authority::resolve_run_route(Some(&binding)), kernel_authority::RunRoute::PiNative) {
+        if !matches!(
+            kernel_authority::resolve_run_route(Some(&binding)),
+            kernel_authority::RunRoute::PiNative
+        ) {
             return Ok(false);
         }
         {
-            let state = self.state.lock().map_err(|_| "runtime state lock is poisoned".to_owned())?;
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "runtime state lock is poisoned".to_owned())?;
             if state.native_run_leases.contains_key(run_id) {
                 return Ok(false);
             }
-            if state.pending_approvals.lock().map_err(|_| "approval map is poisoned".to_owned())?
-                .values().any(|pending| pending.run_id == run_id)
+            if state
+                .pending_approvals
+                .lock()
+                .map_err(|_| "approval map is poisoned".to_owned())?
+                .values()
+                .any(|pending| pending.run_id == run_id)
             {
                 return Ok(false);
             }
-            if state.worker.as_ref().is_some_and(|worker| worker.sessions.by_run(run_id).is_some()) {
+            if state
+                .worker
+                .as_ref()
+                .is_some_and(|worker| worker.sessions.by_run(run_id).is_some())
+            {
                 return Ok(false);
             }
         }
-        if self.child_hosts.lock().map_err(|_| "managed runtime map is poisoned".to_owned())?.contains_key(run_id) {
+        if self
+            .child_hosts
+            .lock()
+            .map_err(|_| "managed runtime map is poisoned".to_owned())?
+            .contains_key(run_id)
+        {
             return Ok(false);
         }
         let recovering = self.native_batches.recovering_approval_ids()?;
@@ -3625,31 +4341,61 @@ impl RuntimeHost {
     /// command prefix, then approves this one call. The prefix must cover every
     /// segment of the exact command on the card; a rule that would not even
     /// cover the call it was created from is refused rather than saved.
-    pub fn allow_approval_with_project_rules(&self, approval_id: &str, pattern: &str) -> Result<bool, String> {
+    pub fn allow_approval_with_project_rules(
+        &self,
+        approval_id: &str,
+        pattern: &str,
+    ) -> Result<bool, String> {
         let approval = self.database.approval_record(approval_id)?;
         if approval.status != "pending" {
             return Ok(false);
         }
         let tool = approval.tool_name.as_str();
-        let offered = approval.request.get("availableDecisions").and_then(Value::as_array)
-            .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("allow_project_rule")));
+        let offered = approval
+            .request
+            .get("availableDecisions")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item.as_str() == Some("allow_project_rule"))
+            });
         if !offered || !approval_policy::is_command_tool(tool) {
             return Err("permission.rule_not_offered: 这次审批不能保存为项目规则".into());
         }
-        let access = self.database.conversation_access(&approval.conversation_id)?;
-        let project_id = access.project_id.clone().ok_or("permission.rule_not_offered: 这个会话没有项目，不能保存项目规则")?;
-        let command = approval.request.get("command").and_then(Value::as_str)
+        let access = self
+            .database
+            .conversation_access(&approval.conversation_id)?;
+        let project_id = access
+            .project_id
+            .clone()
+            .ok_or("permission.rule_not_offered: 这个会话没有项目，不能保存项目规则")?;
+        let command = approval
+            .request
+            .get("command")
+            .and_then(Value::as_str)
             .ok_or("permission.rule_not_offered: 审批卡上没有命令")?;
-        let cwd = approval.request.get("cwd").and_then(Value::as_str).map(PathBuf::from)
+        let cwd = approval
+            .request
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
             .or_else(|| access.project_root.as_deref().map(PathBuf::from))
             .ok_or("permission.rule_not_offered: 审批卡上没有工作目录")?;
         approval_policy::parse_rule_pattern(pattern)?;
         let root = access.project_root.as_deref().map(PathBuf::from);
         let home = approval_policy::host_home();
-        if !approval_policy::pattern_covers_command(pattern, command, &cwd, root.as_deref(), home.as_deref()) {
+        if !approval_policy::pattern_covers_command(
+            pattern,
+            command,
+            &cwd,
+            root.as_deref(),
+            home.as_deref(),
+        ) {
             return Err(format!("permission.rule_does_not_cover: 前缀「{}」没有覆盖这条命令的每一段（或命令是高风险操作而前缀没有写出它），没有保存规则", pattern.trim()));
         }
-        self.database.add_permission_rule(&project_id, "allow", tool, pattern, "user")?;
+        self.database
+            .add_permission_rule(&project_id, "allow", tool, pattern, "user")?;
         self.resolve_approval(approval_id, ApprovalDecision::AllowOnce)
     }
 
@@ -3666,7 +4412,9 @@ impl RuntimeHost {
             Some(run_id) => self.database.run_control_binding(&run_id)?,
             None => None,
         };
-        let route = binding.as_ref().map(|binding| kernel_authority::resolve_run_route(Some(binding)));
+        let route = binding
+            .as_ref()
+            .map(|binding| kernel_authority::resolve_run_route(Some(binding)));
         if matches!(route.as_ref(), Some(kernel_authority::RunRoute::Reject)) {
             return Err(format!(
                 "{}: approval belongs to a Run this build cannot execute",
@@ -3695,18 +4443,38 @@ impl RuntimeHost {
             .remove(approval_id);
         if let Some(pending) = sender {
             let _ = pending.sender.send(approval.status == "approved");
-        } else if self.database.run_control_binding(&approval.run_id)?
-            .is_some_and(|binding| binding.executor_route == Some(fox_engine_protocol::ExecutorRoute::PiNative)) {
+        } else if self
+            .database
+            .run_control_binding(&approval.run_id)?
+            .is_some_and(|binding| {
+                binding.executor_route == Some(fox_engine_protocol::ExecutorRoute::PiNative)
+            })
+        {
             self.ensure_worker(&approval.conversation_id)?;
-            let stdin = self.state.lock().map_err(|_| "runtime state lock is poisoned")?
-                .worker.as_ref().ok_or("runtime worker is not running")?.stdin.clone();
+            let stdin = self
+                .state
+                .lock()
+                .map_err(|_| "runtime state lock is poisoned")?
+                .worker
+                .as_ref()
+                .ok_or("runtime worker is not running")?
+                .stdin
+                .clone();
             native_tool_batch::recover_native_approval(self, &stdin, approval_id)?;
         }
         // D1-6: recovery above may have consumed/invalidated this approval; emit
         // the re-read durable record so a stale pre-recovery `approved` cannot
         // overwrite the irreversible reason on the client.
-        let latest = self.database.approval_record(approval_id).unwrap_or(approval);
-        let _ = emit_approval_event(&self.app, &self.database, "fox://approval-resolved", &latest);
+        let latest = self
+            .database
+            .approval_record(approval_id)
+            .unwrap_or(approval);
+        let _ = emit_approval_event(
+            &self.app,
+            &self.database,
+            "fox://approval-resolved",
+            &latest,
+        );
         Ok(true)
     }
 
@@ -3719,12 +4487,28 @@ impl RuntimeHost {
     /// refusal, so we never send a denial on its channel.
     pub fn refresh_invalidated_approvals(&self, approval_ids: &[String]) {
         for approval_id in approval_ids {
-            let Ok(Some(run_id)) = self.database.approval_run_id(approval_id) else { continue };
-            let Some(message) = self.database.approval_invalidation_message(approval_id).ok().flatten() else { continue };
+            let Ok(Some(run_id)) = self.database.approval_run_id(approval_id) else {
+                continue;
+            };
+            let Some(message) = self
+                .database
+                .approval_invalidation_message(approval_id)
+                .ok()
+                .flatten()
+            else {
+                continue;
+            };
             let refusal = ApprovalRefusal::new("companion.tool_not_available", message);
-            let _ = self.database.settle_approval_refusal(&run_id, approval_id, &refusal);
+            let _ = self
+                .database
+                .settle_approval_refusal(&run_id, approval_id, &refusal);
             if let Ok(approval) = self.database.approval_record(approval_id) {
-                let _ = emit_approval_event(&self.app, &self.database, "fox://approval-resolved", &approval);
+                let _ = emit_approval_event(
+                    &self.app,
+                    &self.database,
+                    "fox://approval-resolved",
+                    &approval,
+                );
             }
         }
     }
@@ -3792,7 +4576,10 @@ impl RuntimeHost {
 
     pub fn remove_conversation(&self, conversation_id: &str) -> Result<(), String> {
         self.close_conversation_session(conversation_id)?;
-        let _lease = kernel_run_lock::KernelRunLock::acquire(&self.sessions_dir, &format!("native-session:{conversation_id}"))?;
+        let _lease = kernel_run_lock::KernelRunLock::acquire(
+            &self.sessions_dir,
+            &format!("native-session:{conversation_id}"),
+        )?;
         if let Some(session) = self.database.get_runtime_session(conversation_id)? {
             if let Some(path) = session.session_path.map(PathBuf::from) {
                 let sessions_root = self
@@ -3834,21 +4621,47 @@ impl RuntimeHost {
             .drain()
             .collect::<Vec<_>>();
         for (run_id, child_host) in child_hosts {
-            if Arc::ptr_eq(&self.state, &child_host.state) { continue; }
-            note(&format!("child {run_id} stop_worker"), child_host.stop_worker_with_shutdown(false));
-            if self.database.native_run_waiting_approval(&run_id).unwrap_or(false) { continue; }
-            note(&format!("child {run_id} mark_interrupted"), self.database.mark_run_interrupted(
-                &run_id,
-                "runtime.application_exit",
-                "Fox closed before the managed Run reached a terminal state.",
-            ).map(|_| ()));
+            if Arc::ptr_eq(&self.state, &child_host.state) {
+                continue;
+            }
+            note(
+                &format!("child {run_id} stop_worker"),
+                child_host.stop_worker_with_shutdown(false),
+            );
+            if self
+                .database
+                .native_run_waiting_approval(&run_id)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            note(
+                &format!("child {run_id} mark_interrupted"),
+                self.database
+                    .mark_run_interrupted(
+                        &run_id,
+                        "runtime.application_exit",
+                        "Fox closed before the managed Run reached a terminal state.",
+                    )
+                    .map(|_| ()),
+            );
         }
         let (active_run_ids, queued_run_ids) = {
-            let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let active = state
                 .worker
                 .as_ref()
-                .map(|worker| worker.sessions.active().into_iter().filter_map(|session| session.run_id).collect::<Vec<_>>())
+                .map(|worker| {
+                    worker
+                        .sessions
+                        .active()
+                        .into_iter()
+                        .filter_map(|session| session.run_id)
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default();
             let queued = state
                 .queued_runs
@@ -3859,19 +4672,35 @@ impl RuntimeHost {
         };
         note("stop_worker", self.stop_worker_with_shutdown(false));
         for run_id in active_run_ids {
-            if self.database.native_run_waiting_approval(&run_id).unwrap_or(false) { continue; }
-            note(&format!("run {run_id} mark_interrupted"), self.database.mark_run_interrupted(
-                &run_id,
-                "runtime.application_exit",
-                "Fox closed before the run reached a terminal state.",
-            ).map(|_| ()));
+            if self
+                .database
+                .native_run_waiting_approval(&run_id)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            note(
+                &format!("run {run_id} mark_interrupted"),
+                self.database
+                    .mark_run_interrupted(
+                        &run_id,
+                        "runtime.application_exit",
+                        "Fox closed before the run reached a terminal state.",
+                    )
+                    .map(|_| ()),
+            );
         }
         for run_id in queued_run_ids {
-            note(&format!("queued {run_id} mark_interrupted"), self.database.mark_run_interrupted(
-                &run_id,
-                "runtime.application_exit",
-                "Fox closed before the queued run started.",
-            ).map(|_| ()));
+            note(
+                &format!("queued {run_id} mark_interrupted"),
+                self.database
+                    .mark_run_interrupted(
+                        &run_id,
+                        "runtime.application_exit",
+                        "Fox closed before the queued run started.",
+                    )
+                    .map(|_| ()),
+            );
         }
         if errors.is_empty() {
             return Ok(());
@@ -3884,14 +4713,21 @@ impl RuntimeHost {
     fn mark_run_ready(&self, run_id: &str) {
         let descendants = match self.descendant_run_ids(run_id) {
             Ok(ids) => ids,
-            Err(error) => { eprintln!("[child_run.release_blocked] {run_id}: {error}"); return; }
+            Err(error) => {
+                eprintln!("[child_run.release_blocked] {run_id}: {error}");
+                return;
+            }
         };
         if descendants.is_empty() {
             self.finish_run_release(run_id);
             return;
         }
-        let Ok(mut state) = self.state.lock() else { return; };
-        if !state.finishing_runs.insert(run_id.to_owned()) { return; }
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if !state.finishing_runs.insert(run_id.to_owned()) {
+            return;
+        }
         if let Some(worker) = state.worker.as_mut() {
             worker.sessions.preserve_waiting_companion(run_id);
         }
@@ -3902,7 +4738,9 @@ impl RuntimeHost {
         thread::spawn(move || match host.stop_child_runs_before_release(&run_id) {
             Ok(()) => host.finish_run_release(&run_id),
             Err(error) => {
-                if let Ok(mut state) = host.state.lock() { state.finishing_runs.remove(&run_id); }
+                if let Ok(mut state) = host.state.lock() {
+                    state.finishing_runs.remove(&run_id);
+                }
                 eprintln!("[child_run.release_blocked] {run_id}: {error}");
             }
         });
@@ -3926,39 +4764,73 @@ impl RuntimeHost {
         loop {
             let active = self.database.active_child_run_ids(run_id)?;
             for child in &active {
-                if signalled.insert(child.clone()) { self.cancel_child_runtime(child)?; }
+                if signalled.insert(child.clone()) {
+                    self.cancel_child_runtime(child)?;
+                }
             }
             let descendants = self.descendant_run_ids(run_id)?;
             let owner_present = {
-                let state = self.state.lock().map_err(|_| "runtime state lock is poisoned")?;
-                descendants.iter().any(|child| state.dispatching_runs.contains_key(child)
-                    || state.worker.as_ref().is_some_and(|worker| worker.sessions.by_run(child).is_some()))
+                let state = self
+                    .state
+                    .lock()
+                    .map_err(|_| "runtime state lock is poisoned")?;
+                descendants.iter().any(|child| {
+                    state.dispatching_runs.contains_key(child)
+                        || state
+                            .worker
+                            .as_ref()
+                            .is_some_and(|worker| worker.sessions.by_run(child).is_some())
+                })
             };
-            if active.is_empty() && !owner_present { return Ok(()); }
+            if active.is_empty() && !owner_present {
+                return Ok(());
+            }
             thread::sleep(Duration::from_millis(20));
         }
     }
 
     fn finish_run_release(&self, run_id: &str) {
+        if let Err(error) = self.database.cancel_pending_native_steering(run_id) {
+            eprintln!("[fox-host] cannot close pending steering for {run_id}: {error}");
+        }
         let should_dispatch = if let Ok(mut state) = self.state.lock() {
             state.finishing_runs.remove(run_id);
             state.cancellation.retire_run(run_id);
             state.native_run_leases.remove(run_id);
             state.queue_changed.1.notify_all();
-            let removed = state.worker.as_mut().is_some_and(|worker| worker.sessions.finish(run_id));
-            if state.worker.as_ref().is_none_or(|worker| worker.sessions.is_empty()) {
+            let removed = state
+                .worker
+                .as_mut()
+                .is_some_and(|worker| worker.sessions.finish(run_id));
+            if state
+                .worker
+                .as_ref()
+                .is_none_or(|worker| worker.sessions.is_empty())
+            {
                 state.state = "ready".to_owned();
             }
             removed
-        } else { false };
-        if should_dispatch { self.dispatch_next_queued_run(); }
+        } else {
+            false
+        };
+        if should_dispatch {
+            self.dispatch_next_queued_run();
+        }
     }
 
     fn ensure_worker(&self, conversation_id: &str) -> Result<(), String> {
-        let _launch = self.worker_launch.lock().map_err(|_| "runtime worker launch lock is poisoned")?;
+        let _launch = self
+            .worker_launch
+            .lock()
+            .map_err(|_| "runtime worker launch lock is poisoned")?;
         {
-            let state = self.state.lock().map_err(|_| "runtime state lock is poisoned")?;
-            if state.shutting_down { return Err("Runtime Host is shutting down".into()); }
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "runtime state lock is poisoned")?;
+            if state.shutting_down {
+                return Err("Runtime Host is shutting down".into());
+            }
             if state.worker.is_some() && !matches!(state.state.as_str(), "stopping" | "crashed") {
                 return Ok(());
             }
@@ -4161,13 +5033,25 @@ impl RuntimeHost {
         match receiver.recv_timeout(timeout) {
             Ok(response) => Ok(response),
             Err(error) => {
-                if let Ok(mut responses) = pending.lock() { responses.remove(&request_id); }
+                if let Ok(mut responses) = pending.lock() {
+                    responses.remove(&request_id);
+                }
                 match error {
-                    mpsc::RecvTimeoutError::Timeout => Err(format!("runtime request timed out: {}", request.r#type)),
+                    mpsc::RecvTimeoutError::Timeout => {
+                        Err(format!("runtime request timed out: {}", request.r#type))
+                    }
                     mpsc::RecvTimeoutError::Disconnected => {
-                        let cause = self.state.lock().ok().and_then(|state| state.last_error.clone())
+                        let cause = self
+                            .state
+                            .lock()
+                            .ok()
+                            .and_then(|state| state.last_error.clone())
                             .unwrap_or_else(|| "runtime transport closed".into());
-                        Err(format!("runtime request disconnected: {}: {}", request.r#type, redact_diagnostic_line(&cause)))
+                        Err(format!(
+                            "runtime request disconnected: {}: {}",
+                            request.r#type,
+                            redact_diagnostic_line(&cause)
+                        ))
                     }
                 }
             }
@@ -4189,17 +5073,22 @@ impl RuntimeHost {
         let runtime_host = self.clone();
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
-                if !runtime_host.is_current_transport(&stdin) { return; }
+                if !runtime_host.is_current_transport(&stdin) {
+                    return;
+                }
                 let line = match line {
                     Ok(line) => line,
                     Err(error) => {
-                        runtime_host
-                            .handle_worker_transport_crash(&stdin, format!("runtime stdout failed: {error}"));
+                        runtime_host.handle_worker_transport_crash(
+                            &stdin,
+                            format!("runtime stdout failed: {error}"),
+                        );
                         return;
                     }
                 };
                 if line.len() > MAX_PROTOCOL_LINE_BYTES {
-                    runtime_host.handle_worker_transport_crash(&stdin,
+                    runtime_host.handle_worker_transport_crash(
+                        &stdin,
                         "runtime emitted an oversized JSONL message".to_owned(),
                     );
                     return;
@@ -4207,24 +5096,36 @@ impl RuntimeHost {
                 let envelope: RuntimeEnvelope = match serde_json::from_str(&line) {
                     Ok(envelope) => envelope,
                     Err(error) => {
-                        runtime_host.handle_worker_transport_crash(&stdin, format!(
-                            "runtime emitted invalid JSONL: {error}"
-                        ));
+                        runtime_host.handle_worker_transport_crash(
+                            &stdin,
+                            format!("runtime emitted invalid JSONL: {error}"),
+                        );
                         return;
                     }
                 };
                 if envelope.protocol != protocol::PROTOCOL_NAME
                     || envelope.version != protocol::PROTOCOL_VERSION
                 {
-                    runtime_host.handle_worker_transport_crash(&stdin, format!(
-                        "runtime protocol mismatch: {} v{}",
-                        envelope.protocol, envelope.version
-                    ));
+                    runtime_host.handle_worker_transport_crash(
+                        &stdin,
+                        format!(
+                            "runtime protocol mismatch: {} v{}",
+                            envelope.protocol, envelope.version
+                        ),
+                    );
                     return;
                 }
 
-                let runtime_host = envelope.run_id.as_deref().and_then(|run|
-                    runtime_host.child_hosts.lock().ok().and_then(|hosts| hosts.get(run).cloned()))
+                let runtime_host = envelope
+                    .run_id
+                    .as_deref()
+                    .and_then(|run| {
+                        runtime_host
+                            .child_hosts
+                            .lock()
+                            .ok()
+                            .and_then(|hosts| hosts.get(run).cloned())
+                    })
                     .unwrap_or_else(|| runtime_host.clone());
 
                 if envelope.kind == "response" {
@@ -4270,7 +5171,10 @@ impl RuntimeHost {
                         run_id,
                         tool,
                         RuntimeToolIngress::Preflight,
-                        envelope.payload.as_ref().and_then(|payload| payload.get("input")),
+                        envelope
+                            .payload
+                            .as_ref()
+                            .and_then(|payload| payload.get("input")),
                     ) {
                         let response = HostResponse::for_request(
                             &envelope,
@@ -4307,7 +5211,8 @@ impl RuntimeHost {
                         .conversation_id
                         .as_deref()
                         .and_then(|conversation_id| {
-                            database.conversation_permission_mode(conversation_id).ok()
+                            envelope.run_id.as_deref().and_then(|run_id|
+                                companion_run_permission_mode(&database, conversation_id, run_id).ok())
                         })
                         .unwrap_or_else(|| "ask".to_owned());
                     let project_root = project_access.as_ref().map(|(root, _)| root.as_str());
@@ -4323,13 +5228,22 @@ impl RuntimeHost {
                         Ok(_) => match database.run_control_binding(run_id) {
                             Ok(Some(binding)) => {
                                 let (allowed, mut payload) = crate::tool_guard::preflight_payload(
-                                    tool, &input, binding.permission.project_root.as_deref(), binding.permission.mode.as_str(),
+                                    tool,
+                                    &input,
+                                    binding.permission.project_root.as_deref(),
+                                    binding.permission.mode.as_str(),
                                 );
                                 payload["executionRoute"] = json!(binding.read_only_executor);
-                                payload["permissionSnapshotId"] = json!(binding.permission_snapshot_id);
+                                payload["permissionSnapshotId"] =
+                                    json!(binding.permission_snapshot_id);
                                 (allowed, payload)
                             }
-                            Ok(None) => crate::tool_guard::preflight_payload(tool, &input, project_root, &persisted_permission_mode),
+                            Ok(None) => crate::tool_guard::preflight_payload(
+                                tool,
+                                &input,
+                                project_root,
+                                &persisted_permission_mode,
+                            ),
                             Err(error) => (false, json!({"decision":"block","message":error})),
                         },
                         Err(error) => (
@@ -4356,16 +5270,72 @@ impl RuntimeHost {
 
                 if envelope.kind == "request" && native_model_budget::handles(&envelope.r#type) {
                     let admission = if envelope.r#type == native_model_budget::ADMIT {
-                        runtime_host.ensure_active_envelope_identity(&envelope).map_err(|(code,error)| format!("{code}: {error}"))
-                            .and_then(|_| runtime_host.state.lock().map_err(|_| "runtime state poisoned".to_owned())?
-                                .cancellation.run_token(envelope.run_id.as_deref().unwrap_or_default())?.check())
-                    } else { Ok(()) };
+                        runtime_host
+                            .ensure_active_envelope_identity(&envelope)
+                            .map_err(|(code, error)| format!("{code}: {error}"))
+                            .and_then(|_| {
+                                runtime_host
+                                    .state
+                                    .lock()
+                                    .map_err(|_| "runtime state poisoned".to_owned())?
+                                    .cancellation
+                                    .run_token(envelope.run_id.as_deref().unwrap_or_default())?
+                                    .check()
+                            })
+                    } else {
+                        Ok(())
+                    };
                     let payload = match admission {
                         Ok(()) => native_model_budget::response(&database, &envelope),
                         Err(error) => json!({"isError":true,"error":error}),
                     };
-                    let kind = if envelope.r#type == native_model_budget::ADMIT { "model_request.admitted" } else { "model_request.completed" };
-                    if let Err(error) = write_protocol_message(&stdin, &HostResponse::for_request(&envelope, kind, payload)) {
+                    let kind = if envelope.r#type == native_model_budget::ADMIT {
+                        "model_request.admitted"
+                    } else {
+                        "model_request.completed"
+                    };
+                    if let Err(error) = write_protocol_message(
+                        &stdin,
+                        &HostResponse::for_request(&envelope, kind, payload),
+                    ) {
+                        runtime_host.handle_worker_transport_crash(&stdin, error);
+                        return;
+                    }
+                    continue;
+                }
+
+                if envelope.kind == "request" && envelope.r#type == "run.delivery.finalize" {
+                    let outcome = runtime_host.ensure_active_envelope_identity(&envelope)
+                        .map_err(|(code, error)| format!("{code}: {error}"))
+                        .and_then(|_| present_files::finalization_candidates(&database,
+                            envelope.run_id.as_deref().unwrap_or_default()));
+                    let payload = match outcome {
+                        Ok(candidates) => json!({"candidates": candidates}),
+                        Err(error) => json!({"isError": true, "error": error}),
+                    };
+                    if let Err(error) = write_protocol_message(&stdin,
+                        &HostResponse::for_request(&envelope, "run.delivery.finalization", payload)) {
+                        runtime_host.handle_worker_transport_crash(&stdin, error);
+                        return;
+                    }
+                    continue;
+                }
+
+                if envelope.kind == "request" && envelope.r#type == "run.steering.advance" {
+                    let outcome = runtime_host.ensure_active_envelope_identity(&envelope)
+                        .map_err(|(code, error)| format!("{code}: {error}"))
+                        .and_then(|_| database.advance_native_steering(
+                            envelope.run_id.as_deref().unwrap_or_default(),
+                            envelope.payload.as_ref().and_then(|payload| payload["appliedThrough"].as_i64()),
+                        ));
+                    let payload = match outcome {
+                        Ok(messages) => json!({"messages": messages.iter().map(|message| json!({
+                            "seq": message.seq, "content": message.content,
+                        })).collect::<Vec<_>>()}),
+                        Err(error) => json!({"isError": true, "error": error}),
+                    };
+                    if let Err(error) = write_protocol_message(&stdin,
+                        &HostResponse::for_request(&envelope, "run.steering.advanced", payload)) {
                         runtime_host.handle_worker_transport_crash(&stdin, error);
                         return;
                     }
@@ -4377,7 +5347,12 @@ impl RuntimeHost {
                     continue;
                 }
 
-                if envelope.kind == "request" && matches!(envelope.r#type.as_str(), "tool.execute" | "tool.readonly_execute") {
+                if envelope.kind == "request"
+                    && matches!(
+                        envelope.r#type.as_str(),
+                        "tool.execute" | "tool.readonly_execute"
+                    )
+                {
                     if let Err((code, error)) =
                         runtime_host.ensure_active_envelope_identity(&envelope)
                     {
@@ -4407,19 +5382,43 @@ impl RuntimeHost {
                         .unwrap_or_default();
                     let run_id = envelope.run_id.as_deref().unwrap_or_default();
                     let readonly_execution = envelope.r#type == "tool.readonly_execute";
-                    let ingress = if readonly_execution { RuntimeToolIngress::Preflight } else { RuntimeToolIngress::Execute };
-                    let admission = database.run_control_binding(run_id)
+                    let ingress = if readonly_execution {
+                        RuntimeToolIngress::Preflight
+                    } else {
+                        RuntimeToolIngress::Execute
+                    };
+                    let admission = database
+                        .run_control_binding(run_id)
                         .map_err(|error| ("runtime.binding_invalid", error))
                         .and_then(|binding| {
                             if binding.is_some_and(|binding| binding.executor_route.is_some()) {
-                                Err(("runtime.native_proxy_required", "Routed Runs must use the registered native tool proxy".into()))
-                            } else { Ok(()) }
+                                Err((
+                                    "runtime.native_proxy_required",
+                                    "Routed Runs must use the registered native tool proxy".into(),
+                                ))
+                            } else {
+                                Ok(())
+                            }
                         })
-                        .and_then(|_| runtime_host.ensure_runtime_tool_allowed(run_id, tool, ingress, envelope.payload.as_ref().and_then(|payload| payload.get("input"))))
+                        .and_then(|_| {
+                            runtime_host.ensure_runtime_tool_allowed(
+                                run_id,
+                                tool,
+                                ingress,
+                                envelope
+                                    .payload
+                                    .as_ref()
+                                    .and_then(|payload| payload.get("input")),
+                            )
+                        })
                         .and_then(|_| {
                             if readonly_execution {
-                                require_rust_reader_binding(&database, &envelope).map(|_| ()).map_err(|error| ("resource_gateway.binding_rejected", error))
-                            } else { Ok(()) }
+                                require_rust_reader_binding(&database, &envelope)
+                                    .map(|_| ())
+                                    .map_err(|error| ("resource_gateway.binding_rejected", error))
+                            } else {
+                                Ok(())
+                            }
                         });
                     if let Err((code, error)) = admission {
                         let response = HostResponse::for_request(
@@ -4473,8 +5472,15 @@ impl RuntimeHost {
                             .and_then(Value::as_str)
                             .filter(|value| !value.trim().is_empty())
                             .ok_or_else(|| "tool request is missing toolCallId".to_owned())?;
-                        let raw_input = if readonly_execution { payload.get("originalInput").or_else(|| payload.get("input")) } else { payload.get("input") }
-                            .cloned().unwrap_or_else(|| json!({}));
+                        let raw_input = if readonly_execution {
+                            payload
+                                .get("originalInput")
+                                .or_else(|| payload.get("input"))
+                        } else {
+                            payload.get("input")
+                        }
+                        .cloned()
+                        .unwrap_or_else(|| json!({}));
                         let input = if tool == "task_repair_escalate_start" {
                             work_tools::canonicalize_task_repair_override_request(&raw_input)
                                 .map_err(|error| error.to_string())?
@@ -4612,17 +5618,37 @@ impl RuntimeHost {
                 }
 
                 if envelope.kind == "event" && envelope.r#type == "run_released" {
-                    if runtime_host.ensure_active_envelope_identity(&envelope).is_ok() {
+                    if runtime_host
+                        .ensure_active_envelope_identity(&envelope)
+                        .is_ok()
+                    {
                         if let Some(run) = envelope.run_id.as_deref() {
-                            let native = database.run_control_binding(run).ok().flatten().is_some_and(|binding| binding.executor_route.is_some());
+                            let native = database
+                                .run_control_binding(run)
+                                .ok()
+                                .flatten()
+                                .is_some_and(|binding| binding.executor_route.is_some());
                             if native {
-                                let terminal = database.with_connection(|connection| connection.query_row("SELECT status FROM runs WHERE id=?1",[run],|row|row.get::<_,String>(0)))
+                                let terminal = database
+                                    .with_connection(|connection| {
+                                        connection.query_row(
+                                            "SELECT status FROM runs WHERE id=?1",
+                                            [run],
+                                            |row| row.get::<_, String>(0),
+                                        )
+                                    })
                                     .is_ok_and(|status| run_status_is_terminal(&status));
                                 if !terminal {
                                     // 13.38（R1-3 / B4-2）：这一轮出现过模型重试或模型服务失败时，释放前没写下的终态
                                     // 就是模型服务那一次失败：写 provider.request_failed（中文、可重试）。
-                                    let (code, message, failed) = released_without_terminal_outcome(database.run_had_provider_trouble(run).unwrap_or(false));
-                                    let _ = if failed { database.mark_run_failed(run, code, message) } else { database.mark_run_interrupted(run, code, message) };
+                                    let (code, message, failed) = released_without_terminal_outcome(
+                                        database.run_had_provider_trouble(run).unwrap_or(false),
+                                    );
+                                    let _ = if failed {
+                                        database.mark_run_failed(run, code, message)
+                                    } else {
+                                        database.mark_run_interrupted(run, code, message)
+                                    };
                                 }
                                 runtime_host.mark_run_ready(run);
                             }
@@ -4635,7 +5661,9 @@ impl RuntimeHost {
                     if let Err((code, error)) =
                         runtime_host.ensure_active_envelope_identity(&envelope)
                     {
-                        let profile = runtime_host.execution_profile_for_run(envelope.run_id.as_deref()).ok();
+                        let profile = runtime_host
+                            .execution_profile_for_run(envelope.run_id.as_deref())
+                            .ok();
                         let shadow_proposal = profile.as_ref().is_some_and(|profile| {
                             envelope.payload.as_ref().is_some_and(|payload| {
                                 profile.treats_proposal_error_as_observation(payload)
@@ -4688,7 +5716,8 @@ impl RuntimeHost {
                                 payload.get("type").and_then(Value::as_str)
                                     == Some(continuation::CONTINUATION_PROPOSAL_EVENT_TYPE);
                             if is_continuation_proposal {
-                                let profile = runtime_host.execution_profile_for_run(envelope.run_id.as_deref());
+                                let profile = runtime_host
+                                    .execution_profile_for_run(envelope.run_id.as_deref());
                                 let shadow =
                                     profile.as_ref().is_ok_and(|profile| profile.is_shadow());
                                 let persisted = profile.and_then(|profile| {
@@ -4725,7 +5754,9 @@ impl RuntimeHost {
                                             ),
                                         };
                                         if !shadow {
-                                            runtime_host.reject_runtime_run_event(&run_id, error_code, &error);
+                                            runtime_host.reject_runtime_run_event(
+                                                &run_id, error_code, &error,
+                                            );
                                             continue;
                                         }
                                         runtime_host.emit_continuation_diagnostic(
@@ -4791,11 +5822,20 @@ impl RuntimeHost {
                                         .unwrap_or("run.terminal"),
                                     &payload,
                                 );
-                                if database.run_control_binding(&run_id).ok().flatten().is_some_and(|binding| binding.executor_route.is_some()) {
+                                if database
+                                    .run_control_binding(&run_id)
+                                    .ok()
+                                    .flatten()
+                                    .is_some_and(|binding| binding.executor_route.is_some())
+                                {
                                     if payload["type"] != "run.completed" {
-                                        if let Ok(state) = state.lock() { state.cancellation.request_run_cancel(&run_id); }
+                                        if let Ok(state) = state.lock() {
+                                            state.cancellation.request_run_cancel(&run_id);
+                                        }
                                     }
-                                } else { runtime_host.mark_run_ready(&run_id); }
+                                } else {
+                                    runtime_host.mark_run_ready(&run_id);
+                                }
                             }
                         }
                         Err(error) => {
@@ -4830,13 +5870,18 @@ impl RuntimeHost {
                     }
                 }
             }
-            runtime_host.handle_worker_transport_crash(&stdin, "runtime process closed stdout".to_owned());
+            runtime_host
+                .handle_worker_transport_crash(&stdin, "runtime process closed stdout".to_owned());
         });
     }
 
     fn is_current_transport(&self, stdin: &Arc<Mutex<ChildStdin>>) -> bool {
-        self.state.lock().ok().is_some_and(|state|
-            state.worker.as_ref().is_some_and(|worker| Arc::ptr_eq(&worker.stdin, stdin)))
+        self.state.lock().ok().is_some_and(|state| {
+            state
+                .worker
+                .as_ref()
+                .is_some_and(|worker| Arc::ptr_eq(&worker.stdin, stdin))
+        })
     }
 
     fn handle_worker_transport_crash(&self, stdin: &Arc<Mutex<ChildStdin>>, message: String) {
@@ -4844,23 +5889,46 @@ impl RuntimeHost {
     }
 
     fn reject_runtime_run_event(&self, run_id: &str, code: &str, message: &str) {
-        let known = self.state.lock().ok().is_some_and(|state|
-            state.worker.as_ref().is_some_and(|w| w.sessions.by_run(run_id).is_some()));
-        if !known || self.database.with_connection(|connection| connection.query_row(
-            "SELECT status FROM runs WHERE id=?1", [run_id], |row| row.get::<_,String>(0)))
-            .is_ok_and(|status| run_status_is_terminal(&status)) { return; }
+        let known = self.state.lock().ok().is_some_and(|state| {
+            state
+                .worker
+                .as_ref()
+                .is_some_and(|w| w.sessions.by_run(run_id).is_some())
+        });
+        if !known
+            || self
+                .database
+                .with_connection(|connection| {
+                    connection.query_row("SELECT status FROM runs WHERE id=?1", [run_id], |row| {
+                        row.get::<_, String>(0)
+                    })
+                })
+                .is_ok_and(|status| run_status_is_terminal(&status))
+        {
+            return;
+        }
         // 13.38（R1-3 / B4-2）：失败终态在这里同步写下。之前在后台线程里写，和随后内联处理的
         // run_released 竞争：run_released 先写下 released_without_terminal，真正的失败原因就丢了。
         match self.database.mark_run_failed(run_id, code, message) {
             Ok(()) => {
-                let session = self.state.lock().ok().and_then(|state|
-                    state.worker.as_ref().and_then(|worker| worker.sessions.by_run(run_id).cloned()));
+                let session = self.state.lock().ok().and_then(|state| {
+                    state
+                        .worker
+                        .as_ref()
+                        .and_then(|worker| worker.sessions.by_run(run_id).cloned())
+                });
                 if let Some(session) = session {
-                    let _ = self.app.emit("fox://runtime-event", RuntimeEventNotification {
-                        conversation_id: session.conversation_id, runtime_session_id: Some(session.runtime_session_id),
-                        run_id: run_id.to_owned(), seq: self.database.next_run_seq(run_id).unwrap_or(1), timestamp: protocol::timestamp(),
-                        event: json!({"type":"run.failed","code":code,"message":message}),
-                    });
+                    let _ = self.app.emit(
+                        "fox://runtime-event",
+                        RuntimeEventNotification {
+                            conversation_id: session.conversation_id,
+                            runtime_session_id: Some(session.runtime_session_id),
+                            run_id: run_id.to_owned(),
+                            seq: self.database.next_run_seq(run_id).unwrap_or(1),
+                            timestamp: protocol::timestamp(),
+                            event: json!({"type":"run.failed","code":code,"message":message}),
+                        },
+                    );
                 }
             }
             Err(error) => eprintln!("runtime event rejection could not settle {run_id}: {error}"),
@@ -4870,7 +5938,13 @@ impl RuntimeHost {
         let run = run_id.to_owned();
         thread::spawn(move || {
             let _ = host.cancel_run(&run);
-            if !host.database.run_control_binding(&run).ok().flatten().is_some_and(|binding| binding.executor_route.is_some()) {
+            if !host
+                .database
+                .run_control_binding(&run)
+                .ok()
+                .flatten()
+                .is_some_and(|binding| binding.executor_route.is_some())
+            {
                 host.mark_run_ready(&run);
             }
         });
@@ -4878,41 +5952,84 @@ impl RuntimeHost {
 
     fn handle_runtime_crash(&self, stdin: &Arc<Mutex<ChildStdin>>, message: String) {
         let worker = {
-            let Ok(mut state) = self.state.lock() else { return; };
+            let Ok(mut state) = self.state.lock() else {
+                return;
+            };
             if matches!(state.state.as_str(), "stopped" | "stopping")
-                || !state.worker.as_ref().is_some_and(|worker| Arc::ptr_eq(&worker.stdin, stdin)) { return; }
+                || !state
+                    .worker
+                    .as_ref()
+                    .is_some_and(|worker| Arc::ptr_eq(&worker.stdin, stdin))
+            {
+                return;
+            }
             let worker = state.worker.take();
-            if worker.is_none() { return; }
+            if worker.is_none() {
+                return;
+            }
             state.state = "crashed".to_owned();
             state.last_error = Some(message.clone());
             worker
         };
-        let Some(worker) = worker else { return; };
-        if let Ok(mut pending) = worker.pending.lock() { pending.clear(); }
-        if let Ok(mut child) = worker.child.lock() { let _ = child.kill(); let _ = child.wait(); }
+        let Some(worker) = worker else {
+            return;
+        };
+        if let Ok(mut pending) = worker.pending.lock() {
+            pending.clear();
+        }
+        if let Ok(mut child) = worker.child.lock() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         for session in worker.sessions.active() {
-            let Some(run) = session.run_id else { continue; };
-            let native = self.database.run_control_binding(&run).ok().flatten()
-                .is_some_and(|b| b.executor_route == Some(fox_engine_protocol::ExecutorRoute::PiNative));
+            let Some(run) = session.run_id else {
+                continue;
+            };
+            let native = self
+                .database
+                .run_control_binding(&run)
+                .ok()
+                .flatten()
+                .is_some_and(|b| {
+                    b.executor_route == Some(fox_engine_protocol::ExecutorRoute::PiNative)
+                });
             if native {
-                if let Err(error) = native_tool_batch::close_unclaimed_after_transport_loss(&self.database, &run) {
+                if let Err(error) =
+                    native_tool_batch::close_unclaimed_after_transport_loss(&self.database, &run)
+                {
                     eprintln!("native transport cleanup failed for {run}: {error}");
                 }
             }
-            let companion_child = self.database.run_companion_scope(&run)
+            let companion_child = self
+                .database
+                .run_companion_scope(&run)
                 .is_ok_and(|scope| scope.is_some_and(|scope| scope.is_child));
-            if native && !companion_child && self.database.native_run_waiting_approval(&run).unwrap_or(false) {
+            if native
+                && !companion_child
+                && self
+                    .database
+                    .native_run_waiting_approval(&run)
+                    .unwrap_or(false)
+            {
                 // The live Host handler still owns the pending approval and may commit its result after the pipe closes.
                 continue;
             }
-            if let Ok(mut state) = self.state.lock() { state.cancellation.request_run_cancel(&run); }
+            if let Ok(mut state) = self.state.lock() {
+                state.cancellation.request_run_cancel(&run);
+            }
             let result = if native {
-                self.database.mark_run_interrupted(&run, "runtime.process_crashed", &message)
+                self.database
+                    .mark_run_interrupted(&run, "runtime.process_crashed", &message)
             } else {
-                self.database.mark_run_failed(&run, "runtime.process_crashed", &message)
+                self.database
+                    .mark_run_failed(&run, "runtime.process_crashed", &message)
             };
-            if let Err(error) = result { eprintln!("runtime crash persistence failed for {run}: {error}"); }
-            if let Ok(mut state) = self.state.lock() { state.native_run_leases.remove(&run); }
+            if let Err(error) = result {
+                eprintln!("runtime crash persistence failed for {run}: {error}");
+            }
+            if let Ok(mut state) = self.state.lock() {
+                state.native_run_leases.remove(&run);
+            }
             self.cancel_pending_approvals_for_run(&run);
             let _ = self.app.emit("fox://runtime-event", RuntimeEventNotification {
                 conversation_id: session.conversation_id, runtime_session_id: Some(session.runtime_session_id),
@@ -4937,7 +6054,9 @@ impl RuntimeHost {
         });
     }
 
-    fn stop_worker(&self) -> Result<(), String> { self.stop_worker_with_shutdown(true) }
+    fn stop_worker(&self) -> Result<(), String> {
+        self.stop_worker_with_shutdown(true)
+    }
 
     fn stop_worker_with_shutdown(&self, graceful: bool) -> Result<(), String> {
         let should_shutdown = {
@@ -5070,13 +6189,14 @@ impl RuntimeHost {
                     .to_owned(),
             );
         }
-        let node_available = fox_agent_backend::console::HideConsole::hide_console(&mut Command::new("node"))
-            .arg("--version")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success());
+        let node_available =
+            fox_agent_backend::console::HideConsole::hide_console(&mut Command::new("node"))
+                .arg("--version")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success());
         if !node_available {
             return Err("Node.js is required for the development Runtime; production builds use the bundled Runtime executable.".to_owned());
         }
@@ -5167,43 +6287,78 @@ fn write_tool_protocol_response(
     response_type: &str,
     response: Value,
 ) -> Result<(), String> {
-    let response = native_tool_batch::prepare_response(database, envelope, response_type, response)?;
+    let response =
+        native_tool_batch::prepare_response(database, envelope, response_type, response)?;
     match write_protocol_message(stdin, &response) {
-        Err(error) if native_tool_batch::settle_disconnected_native_response(database, envelope)? => {
+        Err(error)
+            if native_tool_batch::settle_disconnected_native_response(database, envelope)? =>
+        {
             eprintln!("native result committed but transport response was lost: {error}");
-            if let Some(run) = envelope.run_id.as_deref() { retire_disconnected_native_run(database, state, run); }
+            if let Some(run) = envelope.run_id.as_deref() {
+                retire_disconnected_native_run(database, state, run);
+            }
             Ok(())
         }
         result => result,
     }
 }
 
-fn retire_disconnected_native_run(database: &Database, state: &Arc<Mutex<RuntimeHostState>>, run: &str) {
-    let terminal = database.with_connection(|connection| connection.query_row("SELECT status FROM runs WHERE id=?1", [run], |row| row.get::<_,String>(0)))
+fn retire_disconnected_native_run(
+    database: &Database,
+    state: &Arc<Mutex<RuntimeHostState>>,
+    run: &str,
+) {
+    let terminal = database
+        .with_connection(|connection| {
+            connection.query_row("SELECT status FROM runs WHERE id=?1", [run], |row| {
+                row.get::<_, String>(0)
+            })
+        })
         .is_ok_and(|status| run_status_is_terminal(&status));
-    if terminal { if let Ok(mut state) = state.lock() {
-        let descendants = database.with_connection(|connection| {
-            let mut query = connection.prepare("WITH RECURSIVE children(id,status) AS (
+    if terminal {
+        if let Ok(mut state) = state.lock() {
+            let descendants = database.with_connection(|connection| {
+                let mut query = connection.prepare(
+                    "WITH RECURSIVE children(id,status) AS (
                 SELECT id,status FROM runs WHERE parent_run_id=?1
                 UNION SELECT r.id,r.status FROM runs r JOIN children c ON r.parent_run_id=c.id
-            ) SELECT id,status FROM children")?;
-            let rows = query.query_map([run], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?)))?.collect::<Result<Vec<_>,_>>();
-            rows
-        });
-        let Ok(descendants) = descendants else { return; };
-        if descendants.iter().any(|(child, status)| !run_status_is_terminal(status)
-            || state.worker.as_ref().is_some_and(|worker| worker.sessions.by_run(child).is_some())) {
-            for (child, _) in descendants { state.cancellation.request_run_cancel(&child); }
-            // Release/transport-crash processing owns the remaining child sessions.
-            // A committed tool receipt alone cannot release their parent's workspace.
-            if let Some(worker) = state.worker.as_mut() { worker.sessions.preserve_waiting_companion(run); }
-            return;
+            ) SELECT id,status FROM children",
+                )?;
+                let rows = query
+                    .query_map([run], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>();
+                rows
+            });
+            let Ok(descendants) = descendants else {
+                return;
+            };
+            if descendants.iter().any(|(child, status)| {
+                !run_status_is_terminal(status)
+                    || state
+                        .worker
+                        .as_ref()
+                        .is_some_and(|worker| worker.sessions.by_run(child).is_some())
+            }) {
+                for (child, _) in descendants {
+                    state.cancellation.request_run_cancel(&child);
+                }
+                // Release/transport-crash processing owns the remaining child sessions.
+                // A committed tool receipt alone cannot release their parent's workspace.
+                if let Some(worker) = state.worker.as_mut() {
+                    worker.sessions.preserve_waiting_companion(run);
+                }
+                return;
+            }
+            state.native_run_leases.remove(run);
+            state.cancellation.retire_run(run);
+            if let Some(worker) = state.worker.as_mut() {
+                worker.sessions.finish(run);
+            }
+            state.queue_changed.1.notify_all();
         }
-        state.native_run_leases.remove(run);
-        state.cancellation.retire_run(run);
-        if let Some(worker) = state.worker.as_mut() { worker.sessions.finish(run); }
-        state.queue_changed.1.notify_all();
-    } }
+    }
 }
 
 fn write_protocol_message<T: Serialize>(
@@ -5230,7 +6385,10 @@ fn write_protocol_message<T: Serialize>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResumePlan {
     /// Pi owns the context: open this exact file (and check this session id).
-    Native { path: PathBuf, session_id: Option<String> },
+    Native {
+        path: PathBuf,
+        session_id: Option<String>,
+    },
     /// The legacy Fox JSON snapshot.
     Legacy { path: PathBuf },
 }
@@ -5317,12 +6475,19 @@ mod stage_two_session_tests {
     #[test]
     fn an_old_row_stays_on_the_legacy_snapshot() {
         let plan = resume_plan(&record(1), PathBuf::from("C:/fallback.json"));
-        assert_eq!(plan, ResumePlan::Legacy { path: PathBuf::from("C:/fox/runtime-1.json") });
+        assert_eq!(
+            plan,
+            ResumePlan::Legacy {
+                path: PathBuf::from("C:/fox/runtime-1.json")
+            }
+        );
         let mut unknown = record(0);
         unknown.session_path = None;
         assert_eq!(
             resume_plan(&unknown, PathBuf::from("C:/fallback.json")),
-            ResumePlan::Legacy { path: PathBuf::from("C:/fallback.json") }
+            ResumePlan::Legacy {
+                path: PathBuf::from("C:/fallback.json")
+            }
         );
     }
 
@@ -5519,13 +6684,9 @@ fn execute_tool_result_read_request(
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
     let conversation_id =
         run_bound_conversation(database, run_id, envelope.conversation_id.as_deref())?;
-    if let Some(response) = inspect_existing_host_tool_call(
-        database,
-        run_id,
-        tool_call_id,
-        "read_tool_result",
-        &input,
-    )? {
+    if let Some(response) =
+        inspect_existing_host_tool_call(database, run_id, tool_call_id, "read_tool_result", &input)?
+    {
         return Ok(response);
     }
     let hook_decision = crate::lifecycle_hooks::before_tool(
@@ -5582,7 +6743,9 @@ fn handle_tool_result_read_request(
     } else {
         "tool.execute_completed"
     };
-    if let Err(error) = write_tool_protocol_response(database, state, stdin, &envelope, response_type, response) {
+    if let Err(error) =
+        write_tool_protocol_response(database, state, stdin, &envelope, response_type, response)
+    {
         eprintln!("fox: failed to answer read_tool_result: {error}");
     }
 }
@@ -5596,11 +6759,12 @@ pub(super) fn conversation_enabled_skill_ids(
     skills_dir: &std::path::Path,
     conversation_id: &str,
 ) -> Result<Vec<String>, String> {
-    let assistant = database
-        .conversation_runtime_assistant(conversation_id)?;
+    let assistant = database.conversation_runtime_assistant(conversation_id)?;
     let expert_binding = database.runtime_conversation_expert_binding(conversation_id)?;
     let private_expert = expert_binding.is_some()
-        && database.conversation_companion_scope(conversation_id)?.is_some();
+        && database
+            .conversation_companion_scope(conversation_id)?
+            .is_some();
     let assistant_skills = if private_expert {
         Vec::new()
     } else {
@@ -5612,9 +6776,13 @@ pub(super) fn conversation_enabled_skill_ids(
         .filter(|server| server.enabled)
         .map(|server| server.id)
         .collect::<Vec<_>>();
-        let bound_knowledge = database.conversation_knowledge_references(conversation_id)?;
-    let assistant_package =
-        runtime_agent_package(&assistant, &assistant_skills, &enabled_mcps, &bound_knowledge)?;
+    let bound_knowledge = database.conversation_knowledge_references(conversation_id)?;
+    let assistant_package = runtime_agent_package(
+        &assistant,
+        &assistant_skills,
+        &enabled_mcps,
+        &bound_knowledge,
+    )?;
     let effective_expert_skills = expert_binding
         .as_ref()
         .map(|binding| {
@@ -5674,13 +6842,9 @@ fn execute_skill_load_request(
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
     let conversation_id =
         run_bound_conversation(database, run_id, envelope.conversation_id.as_deref())?;
-    if let Some(response) = inspect_existing_host_tool_call(
-        database,
-        run_id,
-        tool_call_id,
-        "skill_load",
-        &input,
-    )? {
+    if let Some(response) =
+        inspect_existing_host_tool_call(database, run_id, tool_call_id, "skill_load", &input)?
+    {
         return Ok(response);
     }
     let hook_decision =
@@ -5746,7 +6910,9 @@ fn handle_skill_load_request(
     } else {
         "tool.execute_completed"
     };
-    if let Err(error) = write_tool_protocol_response(database, state, stdin, &envelope, response_type, response) {
+    if let Err(error) =
+        write_tool_protocol_response(database, state, stdin, &envelope, response_type, response)
+    {
         eprintln!("fox: failed to answer skill_load: {error}");
     }
 }
@@ -5769,7 +6935,9 @@ fn handle_host_tool_request(
     } else {
         "tool.execute_completed"
     };
-    if let Err(error) = write_tool_protocol_response(database, state, stdin, &envelope, response_type, response) {
+    if let Err(error) =
+        write_tool_protocol_response(database, state, stdin, &envelope, response_type, response)
+    {
         record_runtime_crash(app, database, state, stdin, error);
     }
 }
@@ -5783,10 +6951,14 @@ fn handle_capability_tool_request(
 ) {
     // 13.38 B5-3: a tagged refusal (`[tool.permission_denied] …`, e.g. web_read's
     // network protection) carries its code, so the UI shows its own sentence.
-    let response = execute_capability_tool_request(app, database, state, &envelope)
-        .unwrap_or_else(|error| match crate::tool_host::ToolErrorCode::classify(&error) {
-            Some(code) => json!({ "isError": true, "error": error, "errorCode": code.as_str() }),
-            None => json!({ "isError": true, "error": error }),
+    let response =
+        execute_capability_tool_request(app, database, state, &envelope).unwrap_or_else(|error| {
+            match crate::tool_host::ToolErrorCode::classify(&error) {
+                Some(code) => {
+                    json!({ "isError": true, "error": error, "errorCode": code.as_str() })
+                }
+                None => json!({ "isError": true, "error": error }),
+            }
         });
     let response_type = if response
         .get("isError")
@@ -5797,7 +6969,9 @@ fn handle_capability_tool_request(
     } else {
         "tool.execute_completed"
     };
-    if let Err(error) = write_tool_protocol_response(database, state, stdin, &envelope, response_type, response) {
+    if let Err(error) =
+        write_tool_protocol_response(database, state, stdin, &envelope, response_type, response)
+    {
         record_runtime_crash(app, database, state, stdin, error);
     }
 }
@@ -5830,7 +7004,9 @@ fn handle_work_tool_request(
     } else {
         "tool.execute_completed"
     };
-    if let Err(error) = write_tool_protocol_response(database, state, stdin, &envelope, response_type, response) {
+    if let Err(error) =
+        write_tool_protocol_response(database, state, stdin, &envelope, response_type, response)
+    {
         record_runtime_crash(app, database, state, stdin, error);
     }
 }
@@ -5993,7 +7169,9 @@ fn handle_child_run_tool_request(
     } else {
         "tool.execute_completed"
     };
-    if let Err(error) = write_tool_protocol_response(database, state, stdin, &envelope, response_type, response) {
+    if let Err(error) =
+        write_tool_protocol_response(database, state, stdin, &envelope, response_type, response)
+    {
         record_runtime_crash(app, database, state, stdin, error);
     }
 }
@@ -6253,6 +7431,8 @@ fn execute_child_run_tool_request(
                                 if available.is_empty() { "无" } else { &available }
                             ));
                         }
+                        let mut budget = input["budget"].as_object().cloned().unwrap_or_default();
+                        budget.entry("maxTotalTokens").or_insert(json!(96_000));
                         start_isolated_child_run(
                             runtime_host,
                             database,
@@ -6262,7 +7442,7 @@ fn execute_child_run_tool_request(
                             agent_id,
                             objective,
                             context,
-                            input.get("budget"),
+                            Some(&Value::Object(budget)),
                             "child_run.start_rejected",
                         )
                     }
@@ -6391,9 +7571,13 @@ fn wait_for_child_runs(
             .filter(|record| requested.contains(&record.child_run_id))
             .collect::<Vec<_>>();
         if records.len() != requested.len() {
-            return Err("one or more Child Runs do not belong to the current parent Run".to_owned());
+            return Err(
+                "one or more Child Runs do not belong to the current parent Run".to_owned(),
+            );
         }
-        if records.iter().all(|record| run_status_is_terminal(&record.status))
+        if records
+            .iter()
+            .all(|record| run_status_is_terminal(&record.status))
             || wait_ms == 0
             || Instant::now() >= deadline
         {
@@ -6505,9 +7689,16 @@ fn start_isolated_child_run(
         .ok_or_else(|| "model service is not configured".to_owned())?
         .max_output_tokens;
     let budget = normalized_child_budget(budget_input, model_max_output)?;
-    let (tool_scope, _) = effective_child_delegation_scope(database, parent_run_id, parent_conversation_id)?;
-    let allowed_tools = intersect_optional_scopes(tool_scope, runtime_host.tool_allowlist_override.clone())
-        .map(|tools| { let mut tools: Vec<_> = tools.into_iter().collect(); tools.sort(); tools });
+    let (tool_scope, _) =
+        effective_child_delegation_scope(database, parent_run_id, parent_conversation_id)?;
+    let allowed_tools =
+        intersect_optional_scopes(tool_scope, runtime_host.tool_allowlist_override.clone()).map(
+            |tools| {
+                let mut tools: Vec<_> = tools.into_iter().collect();
+                tools.sort();
+                tools
+            },
+        );
     let (started, child_run, created) = database
         .create_child_run(crate::database::CreateChildRunInput {
             parent_run_id,
@@ -6540,7 +7731,24 @@ fn run_status_is_terminal(status: &str) -> bool {
 }
 
 fn is_memory_tool(tool: &str) -> bool {
-    matches!(tool, "memory_search" | "memory_propose" | "memory_write" | "companion_profile_update" | "companion_task_create" | "companion_task_update" | "companion_task_list" | "companion_task_history" | "companion_task_pause" | "companion_task_resume" | "companion_task_run_now" | "companion_task_delete" | "note_organize" | "note_search" | "note_read")
+    crate::companion_workspace::is_companion_team_tool(tool) || matches!(
+        tool,
+        "memory_search"
+            | "memory_propose"
+            | "memory_write"
+            | "companion_profile_update"
+            | "companion_task_create"
+            | "companion_task_update"
+            | "companion_task_list"
+            | "companion_task_history"
+            | "companion_task_pause"
+            | "companion_task_resume"
+            | "companion_task_run_now"
+            | "companion_task_delete"
+            | "note_organize"
+            | "note_search"
+            | "note_read"
+    )
 }
 
 fn is_child_run_tool(tool: &str) -> bool {
@@ -6575,7 +7783,9 @@ fn handle_memory_tool_request(
     } else {
         "tool.execute_completed"
     };
-    if let Err(error) = write_tool_protocol_response(database, state, stdin, &envelope, response_type, response) {
+    if let Err(error) =
+        write_tool_protocol_response(database, state, stdin, &envelope, response_type, response)
+    {
         record_runtime_crash(app, database, state, stdin, error);
     }
 }
@@ -6650,12 +7860,30 @@ fn execute_memory_tool_request(
         }
         if tool == "companion_task_run_now" {
             execute_companion_task_run_now(app, database, conversation_id, run_id, &input)
+        } else if crate::companion_workspace::is_companion_peer_tool(tool) {
+            companion_coordination::execute(app, database, conversation_id, run_id, tool, input.clone())
+        } else if matches!(tool, "companion_list_unread_notifications" | "companion_mark_notifications_read" | "companion_retry_failed_task") {
+            companion_chief::execute(app, database, run_id, tool, &input)
+        } else if crate::companion_workspace::is_companion_team_tool(tool) {
+            let owner = companion_task_owner_scope(database, conversation_id, run_id)?;
+            let result = crate::companion_team::execute(database, &app.state::<AppState>().data_dir,
+                &owner, conversation_id, run_id, tool, input.clone()).map_err(|error| { let (code, message) = error.response(); format!("[{code}] {message}") })?;
+            if tool != "companion_list" {
+                let _ = app.emit("companion-team-actions-changed", json!({"companionId": owner}));
+            }
+            Ok(result)
         } else {
-            execute_memory_operation(database,conversation_id,run_id,tool,&input)
+            execute_memory_operation(database, conversation_id, run_id, tool, &input)
         }
     })();
     finalize_host_tool_execution(
-        database,run_id,tool_call_id,tool,&input,hook_decision.annotations,outcome,
+        database,
+        run_id,
+        tool_call_id,
+        tool,
+        &input,
+        hook_decision.annotations,
+        outcome,
     )
 }
 
@@ -6666,25 +7894,40 @@ fn companion_task_owner_scope(
     conversation_id: &str,
     run_id: &str,
 ) -> Result<String, String> {
-    database.run_companion_profile_update_scope(run_id)?
+    database
+        .run_companion_profile_update_scope(run_id)?
         .filter(|scope| scope.conversation_id == conversation_id)
         .map(|scope| scope.companion_id)
-        .ok_or_else(|| "[companion.tool_not_available] 只有该联系人的根运行可以管理任务。".to_owned())
+        .ok_or_else(|| {
+            "[companion.tool_not_available] 只有该联系人的根运行可以管理任务。".to_owned()
+        })
 }
 
 fn companion_task_id(input: &Value) -> Result<&str, String> {
-    input.get("taskId").and_then(Value::as_str)
+    input
+        .get("taskId")
+        .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "companion.task_id_required".to_owned())
 }
 
-fn companion_task_spec(input: &Value, timezone: Option<&str>) -> Result<crate::database::DigitalColleagueScheduleSpec, String> {
+fn companion_task_spec(
+    input: &Value,
+    timezone: Option<&str>,
+) -> Result<crate::database::DigitalColleagueScheduleSpec, String> {
     let mut value = input.clone();
-    let fields = value.as_object_mut().ok_or_else(|| "companion.schedule_invalid".to_owned())?;
+    let fields = value
+        .as_object_mut()
+        .ok_or_else(|| "companion.schedule_invalid".to_owned())?;
     if !fields.contains_key("timezone") {
-        fields.insert("timezone".to_owned(), json!(timezone.ok_or_else(|| "companion.schedule_timezone_required".to_owned())?));
+        fields.insert(
+            "timezone".to_owned(),
+            json!(timezone.ok_or_else(|| "companion.schedule_timezone_required".to_owned())?),
+        );
     }
-    serde_json::from_value(value).map_err(|_| "companion.schedule_invalid: 仅支持明确的单次、间隔、每日或每周时间".to_owned())
+    serde_json::from_value(value).map_err(|_| {
+        "companion.schedule_invalid: 仅支持明确的单次、间隔、每日或每周时间".to_owned()
+    })
 }
 
 fn execute_companion_task_run_now(
@@ -6696,199 +7939,340 @@ fn execute_companion_task_run_now(
 ) -> Result<Value, String> {
     let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
     let task_id = companion_task_id(input)?;
-    let before = database.owned_companion_task(&scope, task_id)?
+    let before = database
+        .owned_companion_task(&scope, task_id)?
         .ok_or_else(|| "digital_colleague.not_found".to_owned())?;
     let acceptance = database.accept_digital_colleague_trigger(
-        task_id, "manual", None, &format!("companion-task:{}", Uuid::new_v4()),
+        task_id,
+        "manual",
+        None,
+        &format!("companion-task:{}", Uuid::new_v4()),
         &json!({"objective": before.task.objective, "source": "companion_task_run_now"}),
-        None, "user",
+        None,
+        "user",
     )?;
     let trigger = acceptance.trigger.clone();
     if let Some(prepared) = acceptance.prepared {
-        app.state::<AppState>().runtime_host.dispatch_digital_colleague_trigger(prepared)?;
+        app.state::<AppState>()
+            .runtime_host
+            .dispatch_digital_colleague_trigger(prepared)?;
     }
-    let after = database.owned_companion_task(&scope, task_id)?
+    let after = database
+        .owned_companion_task(&scope, task_id)?
         .ok_or_else(|| "digital_colleague.not_found".to_owned())?;
     Ok(json!({"task": after, "trigger": trigger, "runId": trigger.run_id}))
 }
 
-fn execute_memory_operation(database: &Database, conversation_id: &str, run_id: &str,
-    tool: &str, input: &Value) -> Result<Value,String> {
-        match tool {
-            "memory_write" | "note_organize" if database.run_companion_profile_update_scope(run_id)?.is_none() => {
-                Err("[companion.tool_not_available] 子运行不能写入联系人配置或笔记。".into())
+fn execute_memory_operation(
+    database: &Database,
+    conversation_id: &str,
+    run_id: &str,
+    tool: &str,
+    input: &Value,
+) -> Result<Value, String> {
+    match tool {
+        "memory_write" | "note_organize"
+            if database
+                .run_companion_profile_update_scope(run_id)?
+                .is_none() =>
+        {
+            Err("[companion.tool_not_available] 子运行不能写入联系人配置或笔记。".into())
+        }
+        "companion_task_create" => {
+            let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
+            let allowed: HashSet<&str> = [
+                "name",
+                "objective",
+                "schedule",
+                "enabled",
+                "knowledgeReferences",
+            ]
+            .into_iter()
+            .collect();
+            if input
+                .as_object()
+                .is_none_or(|fields| fields.keys().any(|key| !allowed.contains(key.as_str())))
+            {
+                return Err("companion.task_invalid_fields".into());
             }
-            "companion_task_create" => {
-                let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
-                let allowed: HashSet<&str> = ["name", "objective", "schedule", "enabled", "knowledgeReferences"].into_iter().collect();
-                if input.as_object().is_none_or(|fields| fields.keys().any(|key| !allowed.contains(key.as_str()))) {
-                    return Err("companion.task_invalid_fields".into());
-                }
-                let required = |name: &str| input.get(name).and_then(Value::as_str)
-                    .filter(|value| !value.trim().is_empty()).map(str::to_owned)
-                    .ok_or_else(|| format!("companion.task_{name}_required"));
-                let schedule_input = input.get("schedule").ok_or_else(|| "companion.schedule_required".to_owned())?;
-                let timezone = schedule_input.get("timezone").and_then(Value::as_str)
-                    .map(crate::database::canonical_timezone)
-                    .transpose()?
-                    .map_or_else(resolved_device_timezone, Ok)?;
-                let spec = companion_task_spec(schedule_input, Some(&timezone))?;
-                let enabled = input.get("enabled").and_then(Value::as_bool).unwrap_or(true);
-                let input = crate::database::CreateDigitalColleagueInput {
-                    name: required("name")?, objective: required("objective")?, expert_id: String::new(),
-                    project_id: None, project_root: None,
-                    knowledge_references: serde_json::from_value(input.get("knowledgeReferences").cloned().unwrap_or_else(|| json!([])))
-                        .map_err(|_| "companion.task_knowledge_invalid".to_owned())?,
-                    max_runs_per_day: 8, max_tokens_per_day: 128_000, max_duration_ms: 300_000,
-                    max_output_tokens: 4_096, max_tool_calls: 16,
-                    companion_id: Some(scope),
-                };
-                serde_json::to_value(database.create_owned_companion_task(&input, spec, enabled)?)
-                    .map_err(|error| error.to_string())
+            let required = |name: &str| {
+                input
+                    .get(name)
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("companion.task_{name}_required"))
+            };
+            let schedule_input = input
+                .get("schedule")
+                .ok_or_else(|| "companion.schedule_required".to_owned())?;
+            let timezone = schedule_input
+                .get("timezone")
+                .and_then(Value::as_str)
+                .map(crate::database::canonical_timezone)
+                .transpose()?
+                .map_or_else(resolved_device_timezone, Ok)?;
+            let spec = companion_task_spec(schedule_input, Some(&timezone))?;
+            let enabled = input
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let input = crate::database::CreateDigitalColleagueInput {
+                name: required("name")?,
+                objective: required("objective")?,
+                expert_id: String::new(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: serde_json::from_value(
+                    input
+                        .get("knowledgeReferences")
+                        .cloned()
+                        .unwrap_or_else(|| json!([])),
+                )
+                .map_err(|_| "companion.task_knowledge_invalid".to_owned())?,
+                max_runs_per_day: 8,
+                max_tokens_per_day: 128_000,
+                max_duration_ms: 300_000,
+                max_output_tokens: 4_096,
+                max_tool_calls: 16,
+                companion_id: Some(scope),
+            };
+            serde_json::to_value(database.create_owned_companion_task(&input, spec, enabled)?)
+                .map_err(|error| error.to_string())
+        }
+        "companion_task_update" => {
+            let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
+            let allowed: HashSet<&str> = [
+                "taskId",
+                "name",
+                "objective",
+                "schedule",
+                "enabled",
+                "knowledgeReferences",
+            ]
+            .into_iter()
+            .collect();
+            if input
+                .as_object()
+                .is_none_or(|fields| fields.keys().any(|key| !allowed.contains(key.as_str())))
+            {
+                return Err("companion.task_invalid_fields".into());
             }
-            "companion_task_update" => {
-                let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
-                let allowed: HashSet<&str> = ["taskId", "name", "objective", "schedule", "enabled", "knowledgeReferences"].into_iter().collect();
-                if input.as_object().is_none_or(|fields| fields.keys().any(|key| !allowed.contains(key.as_str()))) {
-                    return Err("companion.task_invalid_fields".into());
-                }
-                let task_id = companion_task_id(input)?;
-                let existing = database.owned_companion_task(&scope, task_id)?
-                    .ok_or_else(|| "digital_colleague.not_found".to_owned())?;
-                let schedule = input.get("schedule").map(|value| {
+            let task_id = companion_task_id(input)?;
+            let existing = database
+                .owned_companion_task(&scope, task_id)?
+                .ok_or_else(|| "digital_colleague.not_found".to_owned())?;
+            let schedule = input
+                .get("schedule")
+                .map(|value| {
                     if let Some(zone) = value.get("timezone").and_then(Value::as_str) {
-                        if crate::database::canonical_timezone(zone)? != existing.schedule.timezone {
-                            return Err("companion.schedule_timezone_immutable: 现有计划必须保留原时区".to_owned());
+                        if crate::database::canonical_timezone(zone)? != existing.schedule.timezone
+                        {
+                            return Err(
+                                "companion.schedule_timezone_immutable: 现有计划必须保留原时区"
+                                    .to_owned(),
+                            );
                         }
                     }
                     companion_task_spec(value, Some(&existing.schedule.timezone))
-                }).transpose()?;
-                let update = crate::database::OwnedCompanionTaskUpdate {
-                    name: input.get("name").and_then(Value::as_str).map(str::to_owned),
-                    objective: input.get("objective").and_then(Value::as_str).map(str::to_owned),
-                    knowledge_references: input.get("knowledgeReferences").map(|value| serde_json::from_value(value.clone())
-                        .map_err(|_| "companion.task_knowledge_invalid".to_owned())).transpose()?,
-                    schedule, enabled: input.get("enabled").and_then(Value::as_bool),
-                };
-                serde_json::to_value(database.update_owned_companion_task(&scope, task_id, update)?)
-                    .map_err(|error| error.to_string())
-            }
-            "companion_task_list" => {
-                let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
-                serde_json::to_value(database.list_owned_companion_tasks(&scope)?)
-                    .map_err(|error| error.to_string())
-            }
-            "companion_task_history" => {
-                let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
-                let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(20).clamp(1, 100) as usize;
-                serde_json::to_value(database.list_owned_companion_task_history(&scope, companion_task_id(input)?, limit)?)
-                    .map_err(|error| error.to_string())
-            }
-            "companion_task_pause" | "companion_task_resume" => {
-                let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
-                let enabled = tool == "companion_task_resume";
-                let update = crate::database::OwnedCompanionTaskUpdate { enabled: Some(enabled), ..Default::default() };
-                serde_json::to_value(database.update_owned_companion_task(&scope, companion_task_id(input)?, update)?)
-                    .map_err(|error| error.to_string())
-            }
-            "companion_task_delete" => {
-                let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
-                let task_id = companion_task_id(input)?;
-                database.owned_companion_task(&scope, task_id)?
-                    .ok_or_else(|| "digital_colleague.not_found".to_owned())?;
-                serde_json::to_value(database.revoke_digital_colleague(task_id, "companion_task_delete")?)
-                    .map_err(|error| error.to_string())
-            }
-            "companion_profile_update" => {
-                let scope = database.run_companion_profile_update_scope(run_id)?
-                    .filter(|scope| scope.conversation_id == conversation_id)
-                    .ok_or_else(|| "[companion.tool_not_available] 只有该联系人的根运行可以修改配置。".to_owned())?;
-                let allowed: std::collections::HashSet<&str> = [
-                    "name", "display_name", "duty", "persona_override", "preferenceOperation",
-                ].into_iter().collect();
-                if input.as_object().is_none_or(|fields| fields.keys().any(|key| !allowed.contains(key.as_str()))) {
-                    return Err("companion.profile_invalid_fields: 只允许修改名称、职责和沟通偏好".into());
-                }
-                if allowed.iter().any(|field| input.get(*field).is_some_and(|value| !value.is_string())) {
-                    return Err("companion.profile_invalid_field_types: 名称、职责和沟通偏好必须是字符串".into());
-                }
-                let name = input.get("name").and_then(Value::as_str);
-                let display_name = input.get("display_name").and_then(Value::as_str);
-                if name.is_some() && display_name.is_some() {
-                    return Err("companion.profile_name_ambiguous: name 和 display_name 只能提供一个".into());
-                }
-                let operation = input.get("preferenceOperation").and_then(Value::as_str).unwrap_or("add");
-                let preference = input.get("persona_override").and_then(Value::as_str);
-                if operation == "clear" && preference.is_some() || operation != "clear" && preference.is_none() && input.get("preferenceOperation").is_some() {
-                    return Err("companion.profile_preference_operation_invalid".into());
-                }
-                let preference = match (operation, preference) {
-                    (_, Some(value)) if operation == "add" => crate::database::companions::CompanionPreferenceEdit::Add(value.to_owned()),
-                    (_, Some(value)) if operation == "replace" => crate::database::companions::CompanionPreferenceEdit::Replace(value.to_owned()),
-                    ("clear", None) => crate::database::companions::CompanionPreferenceEdit::Clear,
-                    _ if preference.is_none() => crate::database::companions::CompanionPreferenceEdit::Preserve,
-                    _ => return Err("companion.profile_preference_operation_invalid".into()),
-                };
-                let display_name = name.or(display_name).map(str::to_owned);
-                let duty = input.get("duty").and_then(Value::as_str).map(str::to_owned);
-                if display_name.is_none() && duty.is_none() && matches!(preference, crate::database::companions::CompanionPreferenceEdit::Preserve) {
-                    return Err("companion.profile_empty_update".into());
-                }
-                let saved = database.save_companion_profile(&scope.companion_id, crate::database::companions::CompanionProfileSaveInput {
-                    display_name,
-                    avatar_ref: None,
-                    duty,
-                    preference,
-                }).map_err(|error| error.response().1.to_owned())?;
-                serde_json::to_value(saved).map_err(|error| error.to_string())
-            }
-            "memory_write" | "note_organize" | "note_search" | "note_read" =>
-                database.companion_notes_tool(conversation_id, run_id, tool, input),
-            "memory_search" => {
-                let query = input.get("query").and_then(Value::as_str).unwrap_or("");
-                let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
-                database
-                    .recall_memories(conversation_id, Some(run_id), query, limit, 8_000)
-                    .and_then(|value| {
-                        serde_json::to_value(value).map_err(|error| error.to_string())
+                })
+                .transpose()?;
+            let update = crate::database::OwnedCompanionTaskUpdate {
+                name: input.get("name").and_then(Value::as_str).map(str::to_owned),
+                objective: input
+                    .get("objective")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                knowledge_references: input
+                    .get("knowledgeReferences")
+                    .map(|value| {
+                        serde_json::from_value(value.clone())
+                            .map_err(|_| "companion.task_knowledge_invalid".to_owned())
                     })
-            }
-            "memory_propose" => {
-                let required = |name: &str| {
-                    input
-                        .get(name)
-                        .and_then(Value::as_str)
-                        .filter(|value| !value.trim().is_empty())
-                        .map(str::to_owned)
-                        .ok_or_else(|| format!("memory.{name}_required"))
-                };
-                let proposal = MemoryProposalInput {
-                    scope: input
-                        .get("scope")
-                        .and_then(Value::as_str)
-                        .unwrap_or("agent")
-                        .to_owned(),
-                    kind: required("kind")?,
-                    canonical_key: required("canonicalKey")?,
-                    content: required("content")?,
-                    evidence_excerpt: required("evidenceExcerpt")?,
-                    source_message_id: input
-                        .get("sourceMessageId")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    confidence: input
-                        .get("confidence")
-                        .and_then(Value::as_f64)
-                        .unwrap_or(0.7),
-                };
-                database
-                    .propose_memory_for_run(conversation_id, run_id, &proposal)
-                    .and_then(|value| {
-                        serde_json::to_value(value).map_err(|error| error.to_string())
-                    })
-            }
-            _ => Err(format!("unsupported memory tool: {tool}")),
+                    .transpose()?,
+                schedule,
+                enabled: input.get("enabled").and_then(Value::as_bool),
+            };
+            serde_json::to_value(database.update_owned_companion_task(&scope, task_id, update)?)
+                .map_err(|error| error.to_string())
         }
+        "companion_task_list" => {
+            let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
+            serde_json::to_value(database.list_owned_companion_tasks(&scope)?)
+                .map_err(|error| error.to_string())
+        }
+        "companion_task_history" => {
+            let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
+            let limit = input
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(20)
+                .clamp(1, 100) as usize;
+            serde_json::to_value(database.list_owned_companion_task_history(
+                &scope,
+                companion_task_id(input)?,
+                limit,
+            )?)
+            .map_err(|error| error.to_string())
+        }
+        "companion_task_pause" | "companion_task_resume" => {
+            let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
+            let enabled = tool == "companion_task_resume";
+            let update = crate::database::OwnedCompanionTaskUpdate {
+                enabled: Some(enabled),
+                ..Default::default()
+            };
+            serde_json::to_value(database.update_owned_companion_task(
+                &scope,
+                companion_task_id(input)?,
+                update,
+            )?)
+            .map_err(|error| error.to_string())
+        }
+        "companion_task_delete" => {
+            let scope = companion_task_owner_scope(database, conversation_id, run_id)?;
+            let task_id = companion_task_id(input)?;
+            database
+                .owned_companion_task(&scope, task_id)?
+                .ok_or_else(|| "digital_colleague.not_found".to_owned())?;
+            serde_json::to_value(
+                database.revoke_digital_colleague(task_id, "companion_task_delete")?,
+            )
+            .map_err(|error| error.to_string())
+        }
+        "companion_profile_update" => {
+            let scope = database
+                .run_companion_profile_update_scope(run_id)?
+                .filter(|scope| scope.conversation_id == conversation_id)
+                .ok_or_else(|| {
+                    "[companion.tool_not_available] 只有该联系人的根运行可以修改配置。".to_owned()
+                })?;
+            let allowed: std::collections::HashSet<&str> = [
+                "name",
+                "display_name",
+                "duty",
+                "persona_override",
+                "preferenceOperation",
+            ]
+            .into_iter()
+            .collect();
+            if input
+                .as_object()
+                .is_none_or(|fields| fields.keys().any(|key| !allowed.contains(key.as_str())))
+            {
+                return Err(
+                    "companion.profile_invalid_fields: 只允许修改名称、职责和沟通偏好".into(),
+                );
+            }
+            if allowed
+                .iter()
+                .any(|field| input.get(*field).is_some_and(|value| !value.is_string()))
+            {
+                return Err(
+                    "companion.profile_invalid_field_types: 名称、职责和沟通偏好必须是字符串"
+                        .into(),
+                );
+            }
+            let name = input.get("name").and_then(Value::as_str);
+            let display_name = input.get("display_name").and_then(Value::as_str);
+            if name.is_some() && display_name.is_some() {
+                return Err(
+                    "companion.profile_name_ambiguous: name 和 display_name 只能提供一个".into(),
+                );
+            }
+            let operation = input
+                .get("preferenceOperation")
+                .and_then(Value::as_str)
+                .unwrap_or("add");
+            let preference = input.get("persona_override").and_then(Value::as_str);
+            if operation == "clear" && preference.is_some()
+                || operation != "clear"
+                    && preference.is_none()
+                    && input.get("preferenceOperation").is_some()
+            {
+                return Err("companion.profile_preference_operation_invalid".into());
+            }
+            let preference = match (operation, preference) {
+                (_, Some(value)) if operation == "add" => {
+                    crate::database::companions::CompanionPreferenceEdit::Add(value.to_owned())
+                }
+                (_, Some(value)) if operation == "replace" => {
+                    crate::database::companions::CompanionPreferenceEdit::Replace(value.to_owned())
+                }
+                ("clear", None) => crate::database::companions::CompanionPreferenceEdit::Clear,
+                _ if preference.is_none() => {
+                    crate::database::companions::CompanionPreferenceEdit::Preserve
+                }
+                _ => return Err("companion.profile_preference_operation_invalid".into()),
+            };
+            let display_name = name.or(display_name).map(str::to_owned);
+            let duty = input.get("duty").and_then(Value::as_str).map(str::to_owned);
+            if display_name.is_none()
+                && duty.is_none()
+                && matches!(
+                    preference,
+                    crate::database::companions::CompanionPreferenceEdit::Preserve
+                )
+            {
+                return Err("companion.profile_empty_update".into());
+            }
+            let saved = database
+                .save_companion_profile(
+                    &scope.companion_id,
+                    crate::database::companions::CompanionProfileSaveInput {
+                        display_name,
+                        avatar_ref: None,
+                        duty,
+                        preference,
+                    },
+                )
+                .map_err(|error| error.response().1.to_owned())?;
+            serde_json::to_value(saved).map_err(|error| error.to_string())
+        }
+        "memory_write" | "note_organize" | "note_search" | "note_read" => {
+            database.companion_notes_tool(conversation_id, run_id, tool, input)
+        }
+        "memory_search" => {
+            let query = input.get("query").and_then(Value::as_str).unwrap_or("");
+            let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
+            database
+                .recall_memories(conversation_id, Some(run_id), query, limit, 8_000)
+                .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
+        }
+        "memory_propose" => {
+            let required = |name: &str| {
+                input
+                    .get(name)
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("memory.{name}_required"))
+            };
+            let proposal = MemoryProposalInput {
+                scope: input
+                    .get("scope")
+                    .and_then(Value::as_str)
+                    .unwrap_or("agent")
+                    .to_owned(),
+                kind: required("kind")?,
+                canonical_key: required("canonicalKey")?,
+                content: required("content")?,
+                evidence_excerpt: required("evidenceExcerpt")?,
+                source_message_id: input
+                    .get("sourceMessageId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                confidence: input
+                    .get("confidence")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.7),
+            };
+            database
+                .propose_memory_for_run(conversation_id, run_id, &proposal)
+                .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
+        }
+        _ => Err(format!("unsupported memory tool: {tool}")),
+    }
 }
 
 fn execute_work_tool_request(
@@ -7269,8 +8653,7 @@ fn effective_conversation_delegation_scope(
     database: &Database,
     conversation_id: &str,
 ) -> Result<(Option<HashSet<String>>, Option<HashSet<String>>), String> {
-    let assistant = database
-        .conversation_runtime_assistant(conversation_id)?;
+    let assistant = database.conversation_runtime_assistant(conversation_id)?;
     let mut tool_scope = package_string_scope(&assistant.package_manifest, "allowedTools");
     let mut mcp_scope = agent_mcp_server_scope(&assistant);
     if let Some(binding) = database.runtime_conversation_expert_binding(conversation_id)? {
@@ -7294,15 +8677,61 @@ fn effective_child_delegation_scope(
     if database.run_companion_scope(parent_run_id)?.is_none() {
         return effective_conversation_delegation_scope(database, conversation_id);
     }
-    let snapshot = database.run_companion_tools_snapshot(parent_run_id)?
+    let snapshot = database
+        .run_companion_tools_snapshot(parent_run_id)?
         .ok_or("companion.parent_snapshot_missing: 父任务缺少冻结的能力集合")?;
-    let allowed = database.run_companion_tool_catalog(parent_run_id)?
+    let allowed = database
+        .run_companion_tool_catalog(parent_run_id)?
         .ok_or("companion.parent_snapshot_missing: 父任务缺少冻结的工具目录，请重新发起任务")?
         .into_iter()
-        .filter(|tool| !matches!(tool.as_str(), "memory_write" | "note_organize" | "companion_profile_update") && !tool.starts_with("companion_task_"))
+        .filter(|tool| {
+            !matches!(
+                tool.as_str(),
+                "memory_write" | "note_organize" | "companion_profile_update"
+            ) && !tool.starts_with("companion_task_")
+                && !crate::companion_workspace::is_companion_team_tool(tool)
+        })
         .collect();
-    let servers = snapshot.iter().filter_map(|id| id.strip_prefix("mcp:")?.split_once(':').map(|(server, _)| server.to_owned())).collect();
+    let servers = snapshot
+        .iter()
+        .filter_map(|id| {
+            id.strip_prefix("mcp:")?
+                .split_once(':')
+                .map(|(server, _)| server.to_owned())
+        })
+        .collect();
     Ok((Some(allowed), Some(servers)))
+}
+
+fn effective_background_delegation_scope(
+    database: &Database,
+    run_id: &str,
+    conversation_id: &str,
+) -> Result<(Option<HashSet<String>>, Option<HashSet<String>>), String> {
+    let (mut tools, servers) = effective_conversation_delegation_scope(database, conversation_id)?;
+    let owner = database.run_companion_profile_update_scope(run_id)?;
+    if let Some(owner) = owner.filter(|owner| owner.background && owner.conversation_id == conversation_id) {
+        let profile = database.companion_profile(&owner.companion_id)
+            .map_err(|error| error.response().1.to_owned())?;
+        if let Some(tools) = &mut tools {
+            tools.extend(fox_engine_protocol::TOOL_CONTRACTS.iter().map(|contract| contract.0)
+                .filter(|tool| crate::companion_workspace::is_companion_peer_tool(tool)
+                    || profile.profile.is_default && crate::companion_workspace::is_companion_team_tool(tool))
+                .map(str::to_owned));
+        }
+    }
+    Ok((tools, servers))
+}
+
+fn companion_run_permission_mode(database: &Database, conversation_id: &str, run_id: &str) -> Result<String, String> {
+    let current = database.conversation_permission_mode(conversation_id)?;
+    let delegated = database.with_connection(|connection|
+        crate::database::companion_coordination::permission_mode_on(connection, run_id))?;
+    Ok(match (current.as_str(), delegated.as_deref()) {
+        ("read_only", _) | (_, Some("read_only")) => "read_only".into(),
+        ("ask", _) | (_, Some("ask")) => "ask".into(),
+        _ => current,
+    })
 }
 
 fn ensure_expert_tool_allowed(
@@ -7310,18 +8739,21 @@ fn ensure_expert_tool_allowed(
     conversation_id: &str,
     tool: &str,
 ) -> Result<(), String> {
-    if tool == "companion_profile_update" || tool.starts_with("companion_task_") {
+    if tool == "companion_profile_update" || tool.starts_with("companion_task_")
+        || crate::companion_workspace::is_companion_team_tool(tool) {
         return Ok(());
     }
-    if matches!(tool, "memory_write" | "note_organize" | "note_search" | "note_read") {
+    if matches!(
+        tool,
+        "memory_write" | "note_organize" | "note_search" | "note_read"
+    ) {
         let access = database.companion_note_access(conversation_id)?;
         if access.is_some_and(|(_, owner)| owner || matches!(tool, "note_read" | "note_search")) {
             return Ok(());
         }
         return Err("[companion.tool_not_available] 当前会话没有使用此笔记工具的权限。".into());
     }
-    let assistant = database
-        .conversation_runtime_assistant(conversation_id)?;
+    let assistant = database.conversation_runtime_assistant(conversation_id)?;
     ensure_agent_tool_allowed(&assistant, "assistant", tool)?;
     if let Some(binding) = database.runtime_conversation_expert_binding(conversation_id)? {
         validate_expert_package_snapshot(&binding.package_snapshot, &binding.package_hash)?;
@@ -7348,13 +8780,20 @@ struct ToolApprovalPolicy {
 /// (HTTP_PROXY / HTTPS_PROXY / NO_PROXY / ALL_PROXY from Fox's own
 /// environment, the Windows user environment, or the WinINET system proxy).
 /// 只读 and 询问 keep the plain allowlisted environment.
-pub(crate) fn command_proxy_environment_for_mode(mode: approval_policy::AccessMode) -> Vec<(String, String)> {
+pub(crate) fn command_proxy_environment_for_mode(
+    mode: approval_policy::AccessMode,
+) -> Vec<(String, String)> {
     crate::system_proxy::command_environment_for_mode(mode, crate::system_proxy::detect)
 }
 
 /// The same, for a command that only knows its Run (background jobs).
-pub(crate) fn command_proxy_environment(database: &Database, run_id: &str) -> Vec<(String, String)> {
-    let Ok(Some(conversation_id)) = database.run_conversation(run_id) else { return Vec::new() };
+pub(crate) fn command_proxy_environment(
+    database: &Database,
+    run_id: &str,
+) -> Vec<(String, String)> {
+    let Ok(Some(conversation_id)) = database.run_conversation(run_id) else {
+        return Vec::new();
+    };
     match database.conversation_access(&conversation_id) {
         Ok(access) => command_proxy_environment_for_mode(access.mode),
         Err(_) => Vec::new(),
@@ -7378,12 +8817,26 @@ fn decide_tool_approval(
         root.canonicalize().unwrap_or(root)
     });
     let cwd = preview.cwd.as_deref().map(PathBuf::from);
-    let subject = approval_policy::subject_for(tool, input, preview.command.as_deref(), cwd.as_deref(), write_target);
+    let subject = approval_policy::subject_for(
+        tool,
+        input,
+        preview.command.as_deref(),
+        cwd.as_deref(),
+        write_target,
+    );
     let home = approval_policy::host_home();
     let decision = approval_policy::decide(&approval_policy::PolicyRequest {
-        tool, subject: &subject, mode: access.mode, project_root: root.as_deref(), home: home.as_deref(), rules: &rules,
+        tool,
+        subject: &subject,
+        mode: access.mode,
+        project_root: root.as_deref(),
+        home: home.as_deref(),
+        rules: &rules,
     });
-    Ok(ToolApprovalPolicy { decision, has_project: access.project_id.is_some() })
+    Ok(ToolApprovalPolicy {
+        decision,
+        has_project: access.project_id.is_some(),
+    })
 }
 
 impl ToolApprovalPolicy {
@@ -7405,7 +8858,9 @@ impl ToolApprovalPolicy {
     /// The approval card's decisions and its `policy`, `hostExecution` and
     /// `projectRule` fields. Command tools never take a conversation grant.
     fn decorate_request(&self, request: &mut Value, tool: &str) {
-        let Some(object) = request.as_object_mut() else { return };
+        let Some(object) = request.as_object_mut() else {
+            return;
+        };
         let mut decisions = vec!["allow_once"];
         if self.rule_offer(tool) {
             decisions.push("allow_project_rule");
@@ -7413,20 +8868,44 @@ impl ToolApprovalPolicy {
         decisions.push("deny");
         object.insert("availableDecisions".into(), json!(decisions));
         object.insert("policy".into(), self.decision.card_json());
-        object.insert("hostExecution".into(), if approval_policy::is_command_tool(tool) { approval_policy::host_execution_json() } else { Value::Null });
+        object.insert(
+            "hostExecution".into(),
+            if approval_policy::is_command_tool(tool) {
+                approval_policy::host_execution_json()
+            } else {
+                Value::Null
+            },
+        );
         let mut project_rule = self.decision.project_rule_json(tool);
         project_rule["eligible"] = json!(self.rule_offer(tool));
         object.insert("projectRule".into(), project_rule);
     }
 
     /// Every automatic allow of a non-read call leaves one audit row.
-    fn audit_auto_allow(&self, database: &Database, conversation_id: &str, run_id: &str, tool_call_id: &str,
-        tool: &str, preview: &crate::tool_host::ToolPreview) -> Result<(), String> {
+    fn audit_auto_allow(
+        &self,
+        database: &Database,
+        conversation_id: &str,
+        run_id: &str,
+        tool_call_id: &str,
+        tool: &str,
+        preview: &crate::tool_host::ToolPreview,
+    ) -> Result<(), String> {
         if !self.decision.is_allow() || self.decision.class == approval_policy::ToolClass::Read {
             return Ok(());
         }
-        let summary = preview.command.clone().unwrap_or_else(|| preview.summary.clone());
-        database.record_permission_audit(conversation_id, Some(run_id), Some(tool_call_id), tool, &self.decision, &summary)
+        let summary = preview
+            .command
+            .clone()
+            .unwrap_or_else(|| preview.summary.clone());
+        database.record_permission_audit(
+            conversation_id,
+            Some(run_id),
+            Some(tool_call_id),
+            tool,
+            &self.decision,
+            &summary,
+        )
     }
 }
 
@@ -7437,7 +8916,11 @@ mod project_rule_decision_order_tests {
     fn command_decision(command: &str) -> approval_policy::PolicyDecision {
         let root = PathBuf::from("D:/fox-test/测试项目");
         let home = PathBuf::from("C:/Users/fox");
-        let subject = approval_policy::ToolSubject::Command { command: command.into(), cwd: root.clone(), model_risk: None };
+        let subject = approval_policy::ToolSubject::Command {
+            command: command.into(),
+            cwd: root.clone(),
+            model_risk: None,
+        };
         approval_policy::decide(&approval_policy::PolicyRequest {
             tool: "run_command",
             subject: &subject,
@@ -7454,19 +8937,40 @@ mod project_rule_decision_order_tests {
         let eligible = command_decision("dir");
         assert!(eligible.rule_eligible);
         let mut request = json!({});
-        ToolApprovalPolicy { decision: eligible, has_project: true }.decorate_request(&mut request, "run_command");
-        assert_eq!(request["availableDecisions"], json!(["allow_once", "allow_project_rule", "deny"]));
+        ToolApprovalPolicy {
+            decision: eligible,
+            has_project: true,
+        }
+        .decorate_request(&mut request, "run_command");
+        assert_eq!(
+            request["availableDecisions"],
+            json!(["allow_once", "allow_project_rule", "deny"])
+        );
         assert_eq!(request["availableDecisions"][0], "allow_once");
 
         let mut without_project = json!({});
-        ToolApprovalPolicy { decision: command_decision("dir"), has_project: false }.decorate_request(&mut without_project, "run_command");
-        assert_eq!(without_project["availableDecisions"], json!(["allow_once", "deny"]));
+        ToolApprovalPolicy {
+            decision: command_decision("dir"),
+            has_project: false,
+        }
+        .decorate_request(&mut without_project, "run_command");
+        assert_eq!(
+            without_project["availableDecisions"],
+            json!(["allow_once", "deny"])
+        );
 
         let outside = command_decision(r"type D:\other\x.txt");
         assert!(!outside.rule_eligible);
         let mut boundary = json!({});
-        ToolApprovalPolicy { decision: outside, has_project: true }.decorate_request(&mut boundary, "run_command");
-        assert_eq!(boundary["availableDecisions"], json!(["allow_once", "deny"]));
+        ToolApprovalPolicy {
+            decision: outside,
+            has_project: true,
+        }
+        .decorate_request(&mut boundary, "run_command");
+        assert_eq!(
+            boundary["availableDecisions"],
+            json!(["allow_once", "deny"])
+        );
     }
 }
 
@@ -7476,15 +8980,25 @@ mod project_rule_decision_order_tests {
 /// may ever cover it. An approval-time grant is registered against exactly the
 /// key a later admission compares. (Moved here from the removed Kernel shadow
 /// reconciler in B1; the behaviour is unchanged.)
-pub(crate) fn tool_operation_scope(tool: &str, input: &Value, project_root: Option<&str>) -> Option<String> {
+pub(crate) fn tool_operation_scope(
+    tool: &str,
+    input: &Value,
+    project_root: Option<&str>,
+) -> Option<String> {
     if matches!(tool, "write_file" | "edit_file") {
         let root = project_root?;
         // A grant names a target, not a read version or an edit match. Those
         // independent preconditions are checked against Host observations at
         // admission and again at commit.
         let target = crate::tool_host::canonical_file_identity(
-            std::path::Path::new(root), input.get("path")?.as_str()?).ok()?;
-        Some(permission_scope_hash("host-target", format!("{tool}\0{target}").as_bytes()))
+            std::path::Path::new(root),
+            input.get("path")?.as_str()?,
+        )
+        .ok()?;
+        Some(permission_scope_hash(
+            "host-target",
+            format!("{tool}\0{target}").as_bytes(),
+        ))
     } else if tool == "run_command" {
         None
     } else if tool == "call_mcp_tool" {
@@ -7510,7 +9024,10 @@ fn mcp_permission_scope(tool: &str, input: &Value) -> Option<String> {
     if server_id == crate::office::SERVER_ID {
         // Office grants are bound to the exact request (files and operations),
         // never to the entire connector's read/write command surface.
-        return Some(permission_scope_hash("office-request", input.canonical_string().as_bytes()));
+        return Some(permission_scope_hash(
+            "office-request",
+            input.canonical_string().as_bytes(),
+        ));
     }
     if server_id.is_empty() || remote_tool.is_empty() {
         return None;
@@ -7566,7 +9083,10 @@ impl SidecarExecutionWait {
         state: &Arc<Mutex<RuntimeHostState>>,
         run_id: &str,
     ) -> Result<Self, String> {
-        let children = if database.run_companion_slot(run_id)?.is_some_and(|(_, background)| background) {
+        let children = if database
+            .run_companion_slot(run_id)?
+            .is_some_and(|(_, background)| background)
+        {
             database.child_runs_for_parent(run_id)?
         } else {
             Vec::new()
@@ -7575,9 +9095,10 @@ impl SidecarExecutionWait {
         let preserve_companion = children.iter().any(|child| {
             !run_status_is_terminal(&child.status)
                 || locked.dispatching_runs.contains_key(&child.child_run_id)
-                || locked.worker.as_ref().is_some_and(|worker| {
-                    worker.sessions.by_run(&child.child_run_id).is_some()
-                })
+                || locked
+                    .worker
+                    .as_ref()
+                    .is_some_and(|worker| worker.sessions.by_run(&child.child_run_id).is_some())
         });
         if let Some(worker) = locked.worker.as_mut() {
             if preserve_companion {
@@ -7586,16 +9107,26 @@ impl SidecarExecutionWait {
             worker.sessions.set_waiting(run_id, true)?;
         }
         locked.queue_changed.1.notify_all();
-        Ok(Self { state: state.clone(), run_id: run_id.to_owned() })
+        Ok(Self {
+            state: state.clone(),
+            run_id: run_id.to_owned(),
+        })
     }
 
     fn resume(self) -> Result<(), String> {
         loop {
             let signal = {
-                let mut guard = self.state.lock().map_err(|_| "runtime state lock is poisoned")?;
+                let mut guard = self
+                    .state
+                    .lock()
+                    .map_err(|_| "runtime state lock is poisoned")?;
                 let state = &mut *guard;
-                if state.shutting_down { return Err("runtime is shutting down".into()); }
-                if let Ok(token) = state.cancellation.run_token(&self.run_id) { token.check()?; }
+                if state.shutting_down {
+                    return Err("runtime is shutting down".into());
+                }
+                if let Ok(token) = state.cancellation.run_token(&self.run_id) {
+                    token.check()?;
+                }
                 // P2: the resume admission shares the dispatcher's reservation
                 // view under the same state lock, so an answered approval can
                 // never take a slot already granted to a starting Run.
@@ -7604,12 +9135,28 @@ impl SidecarExecutionWait {
                     .iter()
                     .map(|(id, reservation)| (id.as_str(), reservation.companion_id.as_deref()))
                     .collect();
-                let Some(worker) = state.worker.as_mut() else { return Ok(()); };
-                if worker.sessions.set_waiting_with_dispatch(&self.run_id, false, &dispatching).is_ok() { return Ok(()); }
+                let Some(worker) = state.worker.as_mut() else {
+                    return Ok(());
+                };
+                if worker
+                    .sessions
+                    .set_waiting_with_dispatch(&self.run_id, false, &dispatching)
+                    .is_ok()
+                {
+                    return Ok(());
+                }
                 state.queue_changed.clone()
             };
-            let guard = signal.0.lock().map_err(|_| "runtime capacity lock is poisoned")?;
-            drop(signal.1.wait_timeout(guard, Duration::from_millis(50)).map_err(|_| "runtime capacity wait is poisoned")?);
+            let guard = signal
+                .0
+                .lock()
+                .map_err(|_| "runtime capacity lock is poisoned")?;
+            drop(
+                signal
+                    .1
+                    .wait_timeout(guard, Duration::from_millis(50))
+                    .map_err(|_| "runtime capacity wait is poisoned")?,
+            );
         }
     }
 }
@@ -7625,14 +9172,18 @@ pub(crate) fn emit_approval_event(
     event: &str,
     approval: &ApprovalRecord,
 ) -> Result<(), String> {
-    app.emit(event, approval).map_err(|error| error.to_string())?;
+    app.emit(event, approval)
+        .map_err(|error| error.to_string())?;
     if let Some(mirrored) = report_chat_approval_mirror(database, approval) {
         let _ = app.emit(event, &mirrored);
     }
     Ok(())
 }
 
-fn report_chat_approval_mirror(database: &Database, approval: &ApprovalRecord) -> Option<ApprovalRecord> {
+fn report_chat_approval_mirror(
+    database: &Database,
+    approval: &ApprovalRecord,
+) -> Option<ApprovalRecord> {
     let scope = database.run_companion_scope(&approval.run_id).ok()??;
     let report = scope.report_conversation_id?;
     if report == approval.conversation_id {
@@ -7643,8 +9194,13 @@ fn report_chat_approval_mirror(database: &Database, approval: &ApprovalRecord) -
     Some(mirrored)
 }
 
-fn receive_sidecar_run_approval(database: &Database, state: &Arc<Mutex<RuntimeHostState>>,
-    run_id: &str, approval_id: &str, receiver: &mpsc::Receiver<bool>) -> Result<bool, String> {
+fn receive_sidecar_run_approval(
+    database: &Database,
+    state: &Arc<Mutex<RuntimeHostState>>,
+    run_id: &str,
+    approval_id: &str,
+    receiver: &mpsc::Receiver<bool>,
+) -> Result<bool, String> {
     let wait = SidecarExecutionWait::begin(database, state, run_id)?;
     let result = receive_run_approval(database, run_id, approval_id, receiver);
     wait.resume()?;
@@ -7658,7 +9214,9 @@ fn receive_run_approval(
     receiver: &mpsc::Receiver<bool>,
 ) -> Result<bool, String> {
     database.run_approval_requested_at(run_id, approval_id)?;
-    if let Some(approved) = native_tool_batch::recovering_approval_decision(database, run_id, approval_id)? {
+    if let Some(approved) =
+        native_tool_batch::recovering_approval_decision(database, run_id, approval_id)?
+    {
         return Ok(approved);
     }
     // D1-2: a revocation registered while this waiter was parked is an execution
@@ -7672,10 +9230,15 @@ fn receive_run_approval(
     loop {
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(approved) => return Ok(approved),
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Err("Approval request was interrupted".into()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("Approval request was interrupted".into())
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if native_tool_batch::cancelled_native_approval(database, run_id, approval_id)? { return Ok(false); }
-                if let Some(message) = invalidated_approval_message(database, run_id, approval_id)? {
+                if native_tool_batch::cancelled_native_approval(database, run_id, approval_id)? {
+                    return Ok(false);
+                }
+                if let Some(message) = invalidated_approval_message(database, run_id, approval_id)?
+                {
                     return Err(message);
                 }
             }
@@ -7697,7 +9260,11 @@ pub(super) fn invalidated_approval_message(
     };
     let refusal = ApprovalRefusal::new("companion.tool_not_available", message.clone());
     let _ = database.settle_approval_refusal(run_id, approval_id, &refusal);
-    Ok(Some(database.approval_invalidation_message(approval_id)?.unwrap_or(message)))
+    Ok(Some(
+        database
+            .approval_invalidation_message(approval_id)?
+            .unwrap_or(message),
+    ))
 }
 
 #[cfg(test)]
@@ -7746,10 +9313,8 @@ mod deliverable_placement_tests {
 
     impl Fixture {
         fn new(tag: &str) -> Fixture {
-            let root = std::env::temp_dir().join(format!(
-                "fox-placement-{tag}-{}",
-                uuid::Uuid::new_v4()
-            ));
+            let root =
+                std::env::temp_dir().join(format!("fox-placement-{tag}-{}", uuid::Uuid::new_v4()));
             let sessions = root.join("runtime-sessions");
             std::fs::create_dir_all(&sessions).unwrap();
             let other_project = root.join("other-project");
@@ -7850,7 +9415,10 @@ mod deliverable_placement_tests {
 
         // Two more days later it is still the same folder.
         clock.set(3);
-        assert_eq!(Fixture::folder_of(&fixture.context_for(&fixture.root.clone())), folder);
+        assert_eq!(
+            Fixture::folder_of(&fixture.context_for(&fixture.root.clone())),
+            folder
+        );
     }
 
     /// Ownership is per (conversation, project): another conversation never
@@ -7894,7 +9462,10 @@ mod deliverable_placement_tests {
             "pre-existing-folder-for-the-other-project"
         );
         // Coming back to the first project reads the first project's own record.
-        assert_eq!(Fixture::folder_of(&fixture.context_for(&fixture.root.clone())), mine);
+        assert_eq!(
+            Fixture::folder_of(&fixture.context_for(&fixture.root.clone())),
+            mine
+        );
     }
 
     /// A stored name that is no longer a single safe path component is replaced
@@ -7946,7 +9517,9 @@ mod deliverable_placement_tests {
                 .unwrap(),
             None
         );
-        assert!(is_valid_deliverable_folder_name(&Fixture::folder_of(&context)));
+        assert!(is_valid_deliverable_folder_name(&Fixture::folder_of(
+            &context
+        )));
         assert!(!fixture.root.join("fox").exists());
     }
 
@@ -7991,29 +9564,59 @@ mod frozen_approval_tests {
     use super::*;
 
     fn pending_approval(db: &Database, run_id: &str) -> String {
-        db.apply_runtime_event(run_id, 1, &json!({"type":"run.started"})).unwrap();
-        let tool = db.create_host_tool_call(run_id, "budget-tool", "write_file", &json!({"path":"test.txt"}), "pending", true).unwrap();
-        db.create_approval(&tool.id, "write", &json!({})).unwrap().id
+        db.apply_runtime_event(run_id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        let tool = db
+            .create_host_tool_call(
+                run_id,
+                "budget-tool",
+                "write_file",
+                &json!({"path":"test.txt"}),
+                "pending",
+                true,
+            )
+            .unwrap();
+        db.create_approval(&tool.id, "write", &json!({}))
+            .unwrap()
+            .id
     }
 
     #[test]
     fn frozen_approval_has_no_deadline_and_corruption_cannot_fall_back() {
-        let path = std::env::temp_dir().join(format!("fox-approval-budget-{}.db", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("fox-approval-budget-{}.db", uuid::Uuid::new_v4()));
         let db = Database::open(path.clone()).unwrap();
-        let conversation = db.create_conversation("fox-general", Some("budget test"), None, None).unwrap();
+        let conversation = db
+            .create_conversation("fox-general", Some("budget test"), None, None)
+            .unwrap();
         let seed = db.create_run(&conversation.id, "seed", None).unwrap();
-        let mut binding = db.freeze_legacy_run_control(&seed.run.id, "test-profile").unwrap();
-        let short_conversation = db.create_conversation("fox-general", Some("short budget"), None, None).unwrap();
-        let run = db.create_run(&short_conversation.id, "short budget", None).unwrap();
+        let mut binding = db
+            .freeze_legacy_run_control(&seed.run.id, "test-profile")
+            .unwrap();
+        let short_conversation = db
+            .create_conversation("fox-general", Some("short budget"), None, None)
+            .unwrap();
+        let run = db
+            .create_run(&short_conversation.id, "short budget", None)
+            .unwrap();
         binding.run_id = run.run.id.clone();
         binding.conversation_id = short_conversation.id;
         binding.budgets.approval_wait_ms = 1;
         db.freeze_run_control(&binding).unwrap();
         let approval_id = pending_approval(&db, &run.run.id);
-        rusqlite::Connection::open(&path).unwrap().execute("UPDATE approvals SET requested_at=1 WHERE id=?1", [&approval_id]).unwrap();
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute(
+                "UPDATE approvals SET requested_at=1 WHERE id=?1",
+                [&approval_id],
+            )
+            .unwrap();
         drop(db);
         let db = Database::open(path.clone()).unwrap();
-        assert_eq!(db.run_time_budgets(&run.run.id).unwrap().approval_wait_ms, 1);
+        assert_eq!(
+            db.run_time_budgets(&run.run.id).unwrap().approval_wait_ms,
+            1
+        );
         // Long past the frozen nominal window: the user's answer still counts.
         let (sender, receiver) = mpsc::channel();
         let answer = std::thread::spawn(move || {
@@ -8023,21 +9626,35 @@ mod frozen_approval_tests {
         });
         assert!(receive_run_approval(&db, &run.run.id, &approval_id, &receiver).unwrap());
         let sender = answer.join().unwrap();
-        rusqlite::Connection::open(path).unwrap().execute(
-            "UPDATE run_control_bindings SET binding_hash='corrupt' WHERE run_id=?1", [&run.run.id],
-        ).unwrap();
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .execute(
+                "UPDATE run_control_bindings SET binding_hash='corrupt' WHERE run_id=?1",
+                [&run.run.id],
+            )
+            .unwrap();
         sender.send(true).unwrap();
-        assert!(receive_run_approval(&db, &run.run.id, &approval_id, &receiver).unwrap_err().contains("hash mismatch"));
+        assert!(
+            receive_run_approval(&db, &run.run.id, &approval_id, &receiver)
+                .unwrap_err()
+                .contains("hash mismatch")
+        );
         assert!(receive_run_approval(&db, "unknown-run", &approval_id, &receiver).is_err());
     }
 
     #[test]
     fn legacy_approval_keeps_default_and_disconnection_is_not_approval() {
-        let path = std::env::temp_dir().join(format!("fox-approval-legacy-{}.db", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("fox-approval-legacy-{}.db", uuid::Uuid::new_v4()));
         let db = Database::open(path).unwrap();
-        let conversation = db.create_conversation("fox-general", Some("legacy budget"), None, None).unwrap();
+        let conversation = db
+            .create_conversation("fox-general", Some("legacy budget"), None, None)
+            .unwrap();
         let run = db.create_run(&conversation.id, "legacy", None).unwrap();
-        assert_eq!(db.run_time_budgets(&run.run.id).unwrap().approval_wait_ms, 300_000);
+        assert_eq!(
+            db.run_time_budgets(&run.run.id).unwrap().approval_wait_ms,
+            300_000
+        );
         let approval_id = pending_approval(&db, &run.run.id);
         let (sender, receiver) = mpsc::channel();
         sender.send(true).unwrap();
@@ -8045,7 +9662,10 @@ mod frozen_approval_tests {
         sender.send(false).unwrap();
         assert!(!receive_run_approval(&db, &run.run.id, &approval_id, &receiver).unwrap());
         drop(sender);
-        assert_eq!(receive_run_approval(&db, &run.run.id, &approval_id, &receiver).unwrap_err(), "Approval request was interrupted");
+        assert_eq!(
+            receive_run_approval(&db, &run.run.id, &approval_id, &receiver).unwrap_err(),
+            "Approval request was interrupted"
+        );
     }
 }
 
@@ -8076,7 +9696,9 @@ fn request_declarative_hook_approval(
         }),
     )?;
     if approval.status != "pending"
-        && native_tool_batch::recovering_approval_decision(database, run_id, &approval.id)?.is_none() {
+        && native_tool_batch::recovering_approval_decision(database, run_id, &approval.id)?
+            .is_none()
+    {
         return Err(format!(
             "approval '{}' is already terminal and cannot be reopened",
             approval.id
@@ -8107,7 +9729,8 @@ fn request_declarative_hook_approval(
     drop(pending);
     let approval_id = approval.id.clone();
     let _ = emit_approval_event(app, database, "fox://approval-requested", &approval);
-    let approval_result = receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
+    let approval_result =
+        receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
     if let Ok(runtime_state) = state.lock() {
         if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
             pending.remove(&approval_id);
@@ -8162,7 +9785,9 @@ fn request_task_repair_override_approval(
         }),
     )?;
     if approval.status != "pending"
-        && native_tool_batch::recovering_approval_decision(database, run_id, &approval.id)?.is_none() {
+        && native_tool_batch::recovering_approval_decision(database, run_id, &approval.id)?
+            .is_none()
+    {
         return Err(format!(
             "repair override approval '{}' is already terminal or claimed and cannot be replayed",
             approval.id
@@ -8193,7 +9818,8 @@ fn request_task_repair_override_approval(
     drop(pending);
     let approval_id = approval.id.clone();
     let _ = emit_approval_event(app, database, "fox://approval-requested", &approval);
-    let approval_result = receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
+    let approval_result =
+        receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
     if let Ok(runtime_state) = state.lock() {
         if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
             pending.remove(&approval_id);
@@ -8326,11 +9952,21 @@ fn finalize_host_tool_execution(
             // message carries the outcome, the result carries the reason.
             let reported_failure = result.get("isError").and_then(Value::as_bool) == Some(true);
             let error_message = reported_failure.then(|| execution_failure_message(&result));
-            if let Err(persist_error) =
-                database.complete_host_tool_call(run_id, tool_call_id, Some(&result), error_message.as_deref())
-            {
+            if let Err(persist_error) = database.complete_host_tool_call(
+                run_id,
+                tool_call_id,
+                Some(&result),
+                error_message.as_deref(),
+            ) {
                 if let Some(retained) = native_tool_batch::retain_late_native_result(
-                    database, run_id, tool_call_id, tool, input, &result, &persist_error)? {
+                    database,
+                    run_id,
+                    tool_call_id,
+                    tool,
+                    input,
+                    &result,
+                    &persist_error,
+                )? {
                     return Ok(retained);
                 }
                 if let Some(authoritative) =
@@ -8343,12 +9979,22 @@ fn finalize_host_tool_execution(
                 ));
             }
             #[cfg(test)]
-            native_crash_integration_tests::checkpoint("host_result_committed", run_id, tool_call_id);
-            let after_annotations =
-                crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, !reported_failure)
-                    .unwrap_or_default();
-            let tool_result_storage =
-                database.tool_result_storage(run_id, tool_call_id).unwrap_or_default();
+            native_crash_integration_tests::checkpoint(
+                "host_result_committed",
+                run_id,
+                tool_call_id,
+            );
+            let after_annotations = crate::lifecycle_hooks::after_tool(
+                database,
+                run_id,
+                tool_call_id,
+                tool,
+                !reported_failure,
+            )
+            .unwrap_or_default();
+            let tool_result_storage = database
+                .tool_result_storage(run_id, tool_call_id)
+                .unwrap_or_default();
             if reported_failure {
                 // Bounded transport: the wire carries exactly what the Host
                 // persisted - which `complete_host_tool_call` already compacts
@@ -8374,9 +10020,10 @@ fn finalize_host_tool_execution(
                     tool_call_id,
                     &conversation,
                     stored,
-                    Some(error_message.unwrap_or_else(|| {
-                        "the tool reported a failed execution".to_owned()
-                    })),
+                    Some(
+                        error_message
+                            .unwrap_or_else(|| "the tool reported a failed execution".to_owned()),
+                    ),
                     merge_hook_annotations(before_annotations, after_annotations),
                     false,
                 ));
@@ -8622,7 +10269,9 @@ fn handle_mcp_tool_request(
     } else {
         "tool.execute_completed"
     };
-    if let Err(error) = write_tool_protocol_response(database, state, stdin, &envelope, response_type, response) {
+    if let Err(error) =
+        write_tool_protocol_response(database, state, stdin, &envelope, response_type, response)
+    {
         record_runtime_crash(app, database, state, stdin, error);
     }
 }
@@ -8641,8 +10290,7 @@ fn execute_mcp_tool_request(
         .conversation_id
         .as_deref()
         .ok_or_else(|| "MCP tool request is missing conversationId".to_owned())?;
-    let assistant = database
-        .conversation_runtime_assistant(conversation_id)?;
+    let assistant = database.conversation_runtime_assistant(conversation_id)?;
     let expert_scope = database
         .runtime_conversation_expert_binding(conversation_id)?
         .map(|binding| {
@@ -8678,7 +10326,11 @@ fn execute_mcp_tool_request(
         return Err(format!("[hook.blocked] {reason}"));
     }
     let managed_office = tool == "call_mcp_tool" && input["serverId"] == crate::office::SERVER_ID;
-    let office_access = if managed_office { database.conversation_project_access(conversation_id)? } else { None };
+    let office_access = if managed_office {
+        database.conversation_project_access(conversation_id)?
+    } else {
+        None
+    };
     // The Host's own runtime session store, fetched once and reused by the
     // pre-approval prepare and the execution dispatch. The conversation still
     // comes from the Run authorization, never from the model's arguments.
@@ -8708,8 +10360,15 @@ fn execute_mcp_tool_request(
         None
     };
     let permission_scope = if managed_office {
-        Some(permission_scope_hash("office-project-request", json!({"access":office_access,"input":input}).canonical_string().as_bytes()))
-    } else { mcp_permission_scope(tool, &input) };
+        Some(permission_scope_hash(
+            "office-project-request",
+            json!({"access":office_access,"input":input})
+                .canonical_string()
+                .as_bytes(),
+        ))
+    } else {
+        mcp_permission_scope(tool, &input)
+    };
     let has_conversation_permission = match permission_scope.as_deref() {
         Some(scope) => {
             database.conversation_tool_permission_granted(conversation_id, tool, scope)?
@@ -8726,7 +10385,7 @@ fn execute_mcp_tool_request(
     let office_needs_approval = if managed_office {
         ensure_plan_approved_before_mutation(database, conversation_id, tool, &input)?;
         let access = database.conversation_project_access(conversation_id)?;
-        let permission = database.conversation_permission_mode(conversation_id)?;
+        let permission = companion_run_permission_mode(database, conversation_id, run_id)?;
         let remote_tool = input["tool"].as_str().ok_or("Office 工具名缺失")?;
         // Serialize state-changing calls to the SAME file within this run. A
         // parallel burst (e.g. one import per sheet) would otherwise open one
@@ -8751,7 +10410,10 @@ fn execute_mcp_tool_request(
                     format!(
                         "{}:{}",
                         run_id,
-                        std::path::Path::new(root).join(name).to_string_lossy().to_lowercase()
+                        std::path::Path::new(root)
+                            .join(name)
+                            .to_string_lossy()
+                            .to_lowercase()
                     )
                 });
                 if let Some(key) = key {
@@ -8761,7 +10423,9 @@ fn execute_mcp_tool_request(
                         .active_file_writes
                         .clone();
                     let occupied = {
-                        let mut set = active.lock().map_err(|_| "write set poisoned".to_string())?;
+                        let mut set = active
+                            .lock()
+                            .map_err(|_| "write set poisoned".to_string())?;
                         !set.insert(key.clone())
                     };
                     if occupied {
@@ -8805,7 +10469,9 @@ fn execute_mcp_tool_request(
         };
         office_prepared_target = prepared.target_path().map(std::path::Path::to_path_buf);
         prepared.mutates && permission != "allow" && !has_conversation_permission
-    } else { tool == "call_mcp_tool" && !has_conversation_permission };
+    } else {
+        tool == "call_mcp_tool" && !has_conversation_permission
+    };
     let requires_approval = hook_decision.requires_approval || office_needs_approval;
     let approval_permission_scope = if hook_decision.requires_approval {
         None
@@ -8850,30 +10516,43 @@ fn execute_mcp_tool_request(
             // K4: a companion's catalog is exactly its granted tools on the
             // enabled servers, bounded by the run's frozen snapshot. Other
             // conversations keep the full installed catalog.
-            let companion_catalog: Option<HashMap<String, HashSet<String>>> = match database
-                .conversation_companion_id(conversation_id)?
-            {
-                Some(companion) => {
-                    let ids = match database.run_companion_tools_snapshot(run_id)? {
-                        Some(ids) => ids,
-                        None => database.companion_capability_ids(&companion)?,
-                    };
-                    let mut map: HashMap<String, HashSet<String>> = HashMap::new();
-                    for id in ids {
-                        if let Some(rest) = id.strip_prefix("mcp:") {
-                            if let Some((server, tool)) = rest.split_once(':') {
-                                map.entry(server.to_owned()).or_default().insert(tool.to_owned());
+            let companion_catalog: Option<HashMap<String, HashSet<String>>> =
+                match database.conversation_companion_id(conversation_id)? {
+                    Some(companion) => {
+                        let ids = match database.run_companion_tools_snapshot(run_id)? {
+                            Some(ids) => ids,
+                            None => database.companion_capability_ids(&companion)?,
+                        };
+                        let mut map: HashMap<String, HashSet<String>> = HashMap::new();
+                        for id in ids {
+                            if let Some(rest) = id.strip_prefix("mcp:") {
+                                if let Some((server, tool)) = rest.split_once(':') {
+                                    map.entry(server.to_owned())
+                                        .or_default()
+                                        .insert(tool.to_owned());
+                                }
                             }
                         }
+                        Some(map)
                     }
-                    Some(map)
-                }
-                None => None,
-            };
+                    None => None,
+                };
             let mut items = Vec::new();
-            let binding=database.run_control_binding(run_id)?.ok_or("MCP catalog requires a frozen Run")?;
-            let manifest_hash=runtime_shadow_hash(&format!("manifest|pi|v2|{}",state.lock().map_err(|_|"runtime lock poisoned")?.capabilities));
-            let catalog_token=state.lock().map_err(|_|"runtime lock poisoned")?.cancellation.tool_token(run_id,tool_call_id)?;
+            let binding = database
+                .run_control_binding(run_id)?
+                .ok_or("MCP catalog requires a frozen Run")?;
+            let manifest_hash = runtime_shadow_hash(&format!(
+                "manifest|pi|v2|{}",
+                state
+                    .lock()
+                    .map_err(|_| "runtime lock poisoned")?
+                    .capabilities
+            ));
+            let catalog_token = state
+                .lock()
+                .map_err(|_| "runtime lock poisoned")?
+                .cancellation
+                .tool_token(run_id, tool_call_id)?;
             for server in database
                 .list_mcp_servers()?
                 .into_iter()
@@ -8890,28 +10569,43 @@ fn execute_mcp_tool_request(
                 })
             {
                 let health_started = Instant::now();
-                match mcp_catalog::catalog(&binding,&manifest_hash,&server,&catalog_token,Duration::from_secs(15),true,
-                    || crate::mcp::list_tools(&server)) {
-                    Ok((tools,metadata)) => {
-                        if metadata["cacheHit"] != true { let _ = database.record_mcp_health(
-                            &server.id,
-                            "connected",
-                            None,
-                            Some(health_started.elapsed().as_millis() as i64),
-                            Some(tools.len() as i64),
-                        ); }
+                match mcp_catalog::catalog(
+                    &binding,
+                    &manifest_hash,
+                    &server,
+                    &catalog_token,
+                    Duration::from_secs(15),
+                    true,
+                    || crate::mcp::list_tools(&server),
+                ) {
+                    Ok((tools, metadata)) => {
+                        if metadata["cacheHit"] != true {
+                            let _ = database.record_mcp_health(
+                                &server.id,
+                                "connected",
+                                None,
+                                Some(health_started.elapsed().as_millis() as i64),
+                                Some(tools.len() as i64),
+                            );
+                        }
                         let tools = tools
                             .into_iter()
                             .filter(|item| {
                                 companion_catalog.as_ref().is_none_or(|map| {
-                                    item.get("name").and_then(Value::as_str).is_some_and(|name| {
-                                        map.get(&server.id).is_some_and(|granted| granted.contains(name))
-                                    })
+                                    item.get("name")
+                                        .and_then(Value::as_str)
+                                        .is_some_and(|name| {
+                                            map.get(&server.id)
+                                                .is_some_and(|granted| granted.contains(name))
+                                        })
                                 })
                             })
                             .filter(|item| {
                                 query.is_empty()
-                                    || item.canonical_string().to_ascii_lowercase().contains(&query)
+                                    || item
+                                        .canonical_string()
+                                        .to_ascii_lowercase()
+                                        .contains(&query)
                             })
                             .collect::<Vec<_>>();
                         if !tools.is_empty() {
@@ -8984,7 +10678,8 @@ fn execute_mcp_tool_request(
                     );
                 let approval_id = approval.id.clone();
                 let _ = emit_approval_event(app, database, "fox://approval-requested", &approval);
-                let approval_result = receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
+                let approval_result =
+                    receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
                 if let Ok(runtime_state) = state.lock() {
                     if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
                         pending.remove(&approval_id);
@@ -8996,7 +10691,12 @@ fn execute_mcp_tool_request(
                         if let Ok(Some(resolved)) =
                             database.resolve_approval(&approval_id, ApprovalDecision::Deny)
                         {
-                            let _ = emit_approval_event(app, database, "fox://approval-resolved", &resolved);
+                            let _ = emit_approval_event(
+                                app,
+                                database,
+                                "fox://approval-resolved",
+                                &resolved,
+                            );
                         }
                         return Err(error);
                     }
@@ -9022,7 +10722,9 @@ fn execute_mcp_tool_request(
             });
             let call_result = if managed_office {
                 let access = database.conversation_project_access(conversation_id)?;
-                if access != office_access { return Err("Office 项目或权限在等待期间发生变化，请重新发起操作".into()); }
+                if access != office_access {
+                    return Err("Office 项目或权限在等待期间发生变化，请重新发起操作".into());
+                }
                 ensure_expert_tool_allowed(database, conversation_id, tool)?;
                 // The frozen task's own file roles bound a mutating Office call
                 // here too, exactly as they bound the Kernel path: a path the task
@@ -9033,7 +10735,7 @@ fn execute_mcp_tool_request(
                         remote_tool,
                         &arguments,
                         Some(root),
-                        &database.conversation_permission_mode(conversation_id)?,
+                        &companion_run_permission_mode(database, conversation_id, run_id)?,
                         office_context.as_ref(),
                     ) {
                         if prepared.mutates {
@@ -9048,19 +10750,24 @@ fn execute_mcp_tool_request(
                         }
                     }
                 }
-                let server = database.get_mcp_server(crate::office::SERVER_ID)?.ok_or("Office 连接器不存在")?;
-                let permission = database.conversation_permission_mode(conversation_id)?;
+                let server = database
+                    .get_mcp_server(crate::office::SERVER_ID)?
+                    .ok_or("Office 连接器不存在")?;
+                let permission = companion_run_permission_mode(database, conversation_id, run_id)?;
                 crate::office::execute_with_cancellation(
                     &server,
                     remote_tool,
                     &arguments,
-                    access.as_ref().map(|(root,_)| root.as_str()),
+                    access.as_ref().map(|(root, _)| root.as_str()),
                     &permission,
                     None,
                     Duration::from_secs(120),
                     office_context.as_ref(),
                 )
             } else {
+                native_mcp_recovery::bind_write(
+                    database, run_id, tool_call_id, &server, remote_tool, &arguments,
+                )?;
                 crate::mcp::call_tool(&server, remote_tool, &arguments)
             };
             match call_result {
@@ -9116,9 +10823,7 @@ fn execute_mcp_tool_request(
                                         office_context.as_ref(),
                                     )
                                     .ok()
-                                    .and_then(|prepared| {
-                                        prepared.target_path().map(make_verified)
-                                    })
+                                    .and_then(|prepared| prepared.target_path().map(make_verified))
                                 });
                             if let Some(verified) = verified_target {
                                 use tauri::Manager;
@@ -9168,11 +10873,16 @@ fn execute_mcp_tool_request(
         } else {
             return Err(format!("unsupported MCP proxy tool: {tool}"));
         };
-        let content = if managed_office { result.get("content").cloned().unwrap_or_else(|| json!([])) }
-            else { json!([{ "type": "text", "text": crate::canonical_json::to_string_pretty(&result).unwrap_or_else(|_| result.canonical_string()) }]) };
+        let content = if managed_office {
+            result.get("content").cloned().unwrap_or_else(|| json!([]))
+        } else {
+            json!([{ "type": "text", "text": crate::canonical_json::to_string_pretty(&result).unwrap_or_else(|_| result.canonical_string()) }])
+        };
         // The Host composes the envelope and stamps its provenance; a remote
         // connector body is fenced so it can never read as a Host diagnosis.
-        Ok(connector_provenance::mcp_result_envelope(tool, &input, content, result))
+        Ok(connector_provenance::mcp_result_envelope(
+            tool, &input, content, result,
+        ))
     })();
     finalize_host_tool_execution(
         database,
@@ -9199,7 +10909,11 @@ fn execute_mcp_tool_request(
 /// No directory is created here. A read-only conversation that never produces a
 /// deliverable therefore still creates nothing on disk.
 /// 最近几轮已结束 Run 的后台任务的真实状态（Host 记录为准），没有任务时为 `None`。
-fn previous_run_background_jobs(database: &crate::database::Database, conversation_id: &str, run_id: &str) -> Option<Value> {
+fn previous_run_background_jobs(
+    database: &crate::database::Database,
+    conversation_id: &str,
+    run_id: &str,
+) -> Option<Value> {
     let jobs = match database.recent_finished_run_jobs(conversation_id, run_id) {
         Ok(jobs) => jobs,
         Err(error) => {
@@ -9325,9 +11039,15 @@ fn handle_attachment_tool_request(
     stdin: &Arc<Mutex<ChildStdin>>,
     envelope: RuntimeEnvelope,
 ) {
-    let response =
-        execute_attachment_tool_request(app, database, attachments_dir, sessions_dir, state, &envelope)
-            .unwrap_or_else(|error| json!({ "isError": true, "error": error }));
+    let response = execute_attachment_tool_request(
+        app,
+        database,
+        attachments_dir,
+        sessions_dir,
+        state,
+        &envelope,
+    )
+    .unwrap_or_else(|error| json!({ "isError": true, "error": error }));
     let response_type = if response
         .get("isError")
         .and_then(Value::as_bool)
@@ -9337,7 +11057,9 @@ fn handle_attachment_tool_request(
     } else {
         "tool.execute_completed"
     };
-    if let Err(error) = write_tool_protocol_response(database, state, stdin, &envelope, response_type, response) {
+    if let Err(error) =
+        write_tool_protocol_response(database, state, stdin, &envelope, response_type, response)
+    {
         record_runtime_crash(app, database, state, stdin, error);
     }
 }
@@ -9367,10 +11089,16 @@ fn execute_attachment_tool_request(
         .and_then(Value::as_str)
         .ok_or_else(|| "attachment tool request is missing toolCallId".to_owned())?;
     let tool = payload["tool"].as_str().ok_or("missing attachment tool")?;
-    if !matches!(tool, "read_attachment" | "attachment_compute") { return Err("unsupported attachment tool".into()); }
+    if !matches!(tool, "read_attachment" | "attachment_compute") {
+        return Err("unsupported attachment tool".into());
+    }
     if tool == "attachment_compute" {
-        let binding = database.run_control_binding(run_id)?.ok_or("missing compute run authority")?;
-        if binding.conversation_id != conversation_id { return Err("compute conversation does not own this run".into()); }
+        let binding = database
+            .run_control_binding(run_id)?
+            .ok_or("missing compute run authority")?;
+        if binding.conversation_id != conversation_id {
+            return Err("compute conversation does not own this run".into());
+        }
     }
     ensure_expert_tool_allowed(database, conversation_id, tool)?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
@@ -9379,13 +11107,8 @@ fn execute_attachment_tool_request(
     {
         return Ok(response);
     }
-    let hook_decision = crate::lifecycle_hooks::before_tool(
-        database,
-        run_id,
-        tool_call_id,
-        tool,
-        &input,
-    )?;
+    let hook_decision =
+        crate::lifecycle_hooks::before_tool(database, run_id, tool_call_id, tool, &input)?;
     if let Some(reason) = &hook_decision.blocked {
         return Err(format!("[hook.blocked] {reason}"));
     }
@@ -9420,14 +11143,30 @@ fn execute_attachment_tool_request(
             )?;
         }
         let mut result = if tool == "attachment_compute" {
-            let token=state.lock().map_err(|_| "runtime state lock poisoned")?.cancellation.tool_token(run_id,tool_call_id)?;
-            attachment_compute::execute_for_run(database,attachments_dir,sessions_dir,conversation_id,run_id,&input,move || token.is_cancelled())?
+            let token = state
+                .lock()
+                .map_err(|_| "runtime state lock poisoned")?
+                .cancellation
+                .tool_token(run_id, tool_call_id)?;
+            attachment_compute::execute_for_run(
+                database,
+                attachments_dir,
+                sessions_dir,
+                conversation_id,
+                run_id,
+                &input,
+                move || token.is_cancelled(),
+            )?
         } else {
-            let id=input["attachmentId"].as_str().ok_or("attachmentId is required")?;
-            read_attachment_text(database,attachments_dir,conversation_id,id,&input)?
+            let id = input["attachmentId"]
+                .as_str()
+                .ok_or("attachmentId is required")?;
+            read_attachment_text(database, attachments_dir, conversation_id, id, &input)?
         };
         let content = result.canonical_string();
-        if let Some(metadata) = result.as_object_mut() { metadata.remove("text"); }
+        if let Some(metadata) = result.as_object_mut() {
+            metadata.remove("text");
+        }
         Ok(json!({
                 "content": [{ "type": "text", "text": content }],
                 "details": result,
@@ -9454,8 +11193,15 @@ fn read_attachment_text(
     let attachment = database
         .attachment_for_conversation(conversation_id, attachment_id)?
         .ok_or_else(|| {
-            let project_root = database.conversation_project_root(conversation_id).ok().flatten();
-            attachment_compute::missing_attachment_message(attachment_id, &[], project_root.as_deref())
+            let project_root = database
+                .conversation_project_root(conversation_id)
+                .ok()
+                .flatten();
+            attachment_compute::missing_attachment_message(
+                attachment_id,
+                &[],
+                project_root.as_deref(),
+            )
         })?;
     if attachment.byte_size < 0 || attachment.byte_size as u64 > MAX_ATTACHMENT_FILE_BYTES {
         return Err("Attachment is too large to read (maximum 5 MiB)".to_owned());
@@ -9472,7 +11218,11 @@ fn read_attachment_text(
         return Err("Attachment is not a readable file within the 5 MiB limit".to_owned());
     }
     let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
-    let (office_text, sheets, sheet_count) = crate::local_knowledge_import::extract_office_text_with_outline(&bytes, &attachment.display_name)?;
+    let (office_text, sheets, sheet_count) =
+        crate::local_knowledge_import::extract_office_text_with_outline(
+            &bytes,
+            &attachment.display_name,
+        )?;
     let text = if let Some(text) = office_text {
         text
     } else if attachment_is_docx(&attachment.display_name, attachment.media_type.as_deref()) {
@@ -9510,18 +11260,24 @@ fn attachment_text_page(text: &str, input: &Value) -> Result<Value, String> {
     let read_integer = |key: &str, default: u64| -> Result<usize, String> {
         match input.get(key) {
             None => Ok(default as usize),
-            Some(value) => value.as_u64().and_then(|value| usize::try_from(value).ok())
+            Some(value) => value
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
                 .ok_or_else(|| format!("{key} must be a non-negative integer")),
         }
     };
     let offset = read_integer("offset", 0)?;
     let limit = read_integer("limit", 12000)?.clamp(1, 24000);
     let total = text.chars().count();
-    if offset > total { return Err(format!("offset exceeds attachment length ({total})")); }
+    if offset > total {
+        return Err(format!("offset exceeds attachment length ({total})"));
+    }
     let page: String = text.chars().skip(offset).take(limit).collect();
     let next = offset + page.chars().count();
-    Ok(json!({"text":page,"offset":offset,"nextOffset":if next < total {Some(next)} else {None},
-        "totalCharacters":total,"hasMore":next < total}))
+    Ok(
+        json!({"text":page,"offset":offset,"nextOffset":if next < total {Some(next)} else {None},
+        "totalCharacters":total,"hasMore":next < total}),
+    )
 }
 
 fn attachment_is_docx(filename: &str, media_type: Option<&str>) -> bool {
@@ -9846,7 +11602,9 @@ fn handle_knowledge_tool_request(
     } else {
         "tool.execute_completed"
     };
-    if let Err(error) = write_tool_protocol_response(database, state, stdin, &envelope, response_type, response) {
+    if let Err(error) =
+        write_tool_protocol_response(database, state, stdin, &envelope, response_type, response)
+    {
         record_runtime_crash(app, database, state, stdin, error);
     }
 }
@@ -9924,7 +11682,16 @@ async fn execute_knowledge_tool_request(
         let service = database.get_yuxi_service()?;
         // KB-1: tool_call.cancel / Run cancellation reach the retrieval worker.
         let control = knowledge_retrieval_control(state, run_id, tool_call_id);
-        execute_bound_knowledge_tool(service.as_ref(), yuxi_client, local_knowledge, &bindings, tool, &input, control).await
+        execute_bound_knowledge_tool(
+            service.as_ref(),
+            yuxi_client,
+            local_knowledge,
+            &bindings,
+            tool,
+            &input,
+            control,
+        )
+        .await
     }
     .await;
     finalize_host_tool_execution(
@@ -9958,7 +11725,8 @@ pub(crate) async fn execute_external_mcp_tool(
     input: &Value,
 ) -> Result<Value, String> {
     ensure_expert_tool_allowed(database, conversation_id, tool)?;
-    let hook_decision = crate::lifecycle_hooks::before_tool(database, run_id, tool_call_id, tool, input)?;
+    let hook_decision =
+        crate::lifecycle_hooks::before_tool(database, run_id, tool_call_id, tool, input)?;
     if let Some(reason) = &hook_decision.blocked {
         return Err(format!("[hook.blocked] {reason}"));
     }
@@ -9972,13 +11740,29 @@ pub(crate) async fn execute_external_mcp_tool(
             let context = database
                 .external_conversation_context(conversation_id)?
                 .ok_or_else(|| "[tool.permission_denied] conversation not found".to_owned())?;
-            present_files::execute(database, conversation_id, run_id, tool_call_id, &context.project_root, input)
+            present_files::execute(
+                database,
+                conversation_id,
+                run_id,
+                tool_call_id,
+                &context.project_root,
+                input,
+            )
         }
         "list_knowledge_bases" | "search_knowledge" | "read_knowledge_document" => {
             let bindings = database.conversation_knowledge_reference_bindings(conversation_id)?;
             let service = database.get_yuxi_service()?;
             let control = crate::local_knowledge_vector::RetrievalControl::new(None, None);
-            let result = execute_bound_knowledge_tool(service.as_ref(), yuxi_client, local_knowledge, &bindings, tool, input, control).await?;
+            let result = execute_bound_knowledge_tool(
+                service.as_ref(),
+                yuxi_client,
+                local_knowledge,
+                &bindings,
+                tool,
+                input,
+                control,
+            )
+            .await?;
             // The model-facing text of the bounded result (the bridge caps it
             // again at 64 KiB, the one ceiling every tool shares).
             Ok(result
@@ -9987,7 +11771,9 @@ pub(crate) async fn execute_external_mcp_tool(
                 .map(|text| Value::String(text.to_owned()))
                 .unwrap_or(result))
         }
-        other => Err(format!("[tool.invalid_input] {other} is not a Fox bridge tool")),
+        other => Err(format!(
+            "[tool.invalid_input] {other} is not a Fox bridge tool"
+        )),
     }
 }
 
@@ -10010,8 +11796,12 @@ fn knowledge_retrieval_control(
 }
 
 async fn execute_bound_knowledge_tool(
-    remote_service: Option<&crate::database::YuxiServiceRecord>, yuxi_client: &YuxiClient, local_knowledge: &LocalKnowledgeStore,
-    bindings: &[crate::database::KnowledgeReferenceBindingRecord], tool: &str, input: &Value,
+    remote_service: Option<&crate::database::YuxiServiceRecord>,
+    yuxi_client: &YuxiClient,
+    local_knowledge: &LocalKnowledgeStore,
+    bindings: &[crate::database::KnowledgeReferenceBindingRecord],
+    tool: &str,
+    input: &Value,
     control: crate::local_knowledge_vector::RetrievalControl,
 ) -> Result<Value, String> {
     let ensure_bound = |target: &KnowledgeToolTarget| {
@@ -10154,7 +11944,14 @@ async fn execute_bound_knowledge_tool(
                     let token = get_access_token(&service.base_url)
                         .ok_or_else(|| "Yuxi authentication is not configured".to_owned())?;
                     yuxi_client
-                        .query_knowledge_with_limits(&service.base_url, &token, &target.id, query, requested_limit, requested_max_chars)
+                        .query_knowledge_with_limits(
+                            &service.base_url,
+                            &token,
+                            &target.id,
+                            query,
+                            requested_limit,
+                            requested_max_chars,
+                        )
                         .await?
                 };
                 results.push(json!({ "reference": target.as_json(), "result": value }));
@@ -10223,8 +12020,8 @@ async fn execute_bound_knowledge_tool(
                     .get("startOffset")
                     .and_then(Value::as_u64)
                     .and_then(|value| usize::try_from(value).ok());
-                let service = remote_service
-                    .ok_or_else(|| "Yuxi service is not configured".to_owned())?;
+                let service =
+                    remote_service.ok_or_else(|| "Yuxi service is not configured".to_owned())?;
                 let token = get_access_token(&service.base_url)
                     .ok_or_else(|| "Yuxi authentication is not configured".to_owned())?;
                 let value = yuxi_client
@@ -10265,8 +12062,8 @@ async fn execute_bound_knowledge_tool(
                 .and_then(Value::as_i64)
                 .unwrap_or(80)
                 .clamp(1, 200);
-            let service = remote_service
-                .ok_or_else(|| "Yuxi service is not configured".to_owned())?;
+            let service =
+                remote_service.ok_or_else(|| "Yuxi service is not configured".to_owned())?;
             let token = get_access_token(&service.base_url)
                 .ok_or_else(|| "Yuxi authentication is not configured".to_owned())?;
             let mut results = Vec::with_capacity(targets.len());
@@ -10292,7 +12089,7 @@ async fn execute_bound_knowledge_tool(
         }
         _ => return Err(format!("unsupported knowledge tool: {tool}")),
     };
-        Ok(bounded_knowledge_tool_result(result))
+    Ok(bounded_knowledge_tool_result(result))
 }
 
 #[derive(Debug, Clone)]
@@ -10461,10 +12258,18 @@ fn knowledge_tool_target(value: &Value) -> Result<KnowledgeToolTarget, String> {
 /// KB-8/KB-9: each source has its own continuation parameter. A parameter of
 /// the other source is refused instead of silently ignored.
 fn read_paging_matches_source(source: &str, input: &Value) -> Result<(), String> {
-    if source == "local" && input.get("startOffset").is_some_and(|value| !value.is_null()) {
+    if source == "local"
+        && input
+            .get("startOffset")
+            .is_some_and(|value| !value.is_null())
+    {
         return Err("[local_knowledge.invalid_request] startOffset applies only to remote knowledge bases; continue a local document with startChunkIndex (nextChunkIndex of the previous result)".to_owned());
     }
-    if source != "local" && input.get("startChunkIndex").is_some_and(|value| !value.is_null()) {
+    if source != "local"
+        && input
+            .get("startChunkIndex")
+            .is_some_and(|value| !value.is_null())
+    {
         return Err("[remote_knowledge.invalid_query] startChunkIndex applies only to local knowledge bases; continue a remote document with startOffset (nextOffset of the previous result)".to_owned());
     }
     Ok(())
@@ -10585,7 +12390,13 @@ mod knowledge_tool_contract_tests {
 
     #[test]
     fn remote_knowledge_errors_retry_only_transient_failures() {
-        for code in ["authentication_required", "access_denied", "document_unavailable", "protocol_invalid", "index_unavailable"] {
+        for code in [
+            "authentication_required",
+            "access_denied",
+            "document_unavailable",
+            "protocol_invalid",
+            "index_unavailable",
+        ] {
             assert!(!structured_knowledge_error(&format!("[remote_knowledge.{code}] failed")).2);
         }
         assert!(structured_knowledge_error("[remote_knowledge.retrieval_unavailable] transient").2);
@@ -10597,9 +12408,16 @@ mod knowledge_tool_contract_tests {
         assert!(read_paging_matches_source("local", &json!({ "startChunkIndex": 2 })).is_ok());
         assert!(read_paging_matches_source("remote", &json!({ "startOffset": 8 })).is_ok());
         let local = read_paging_matches_source("local", &json!({ "startOffset": 8 })).unwrap_err();
-        assert_eq!(structured_knowledge_error(&local).0, "local_knowledge.invalid_request");
-        let remote = read_paging_matches_source("remote", &json!({ "startChunkIndex": 1 })).unwrap_err();
-        assert_eq!(structured_knowledge_error(&remote).0, "remote_knowledge.invalid_query");
+        assert_eq!(
+            structured_knowledge_error(&local).0,
+            "local_knowledge.invalid_request"
+        );
+        let remote =
+            read_paging_matches_source("remote", &json!({ "startChunkIndex": 1 })).unwrap_err();
+        assert_eq!(
+            structured_knowledge_error(&remote).0,
+            "remote_knowledge.invalid_query"
+        );
         assert!(!structured_knowledge_error(&remote).2);
     }
 
@@ -10622,7 +12440,8 @@ mod knowledge_tool_contract_tests {
 }
 
 fn bounded_knowledge_tool_result(result: Value) -> Value {
-    let text = crate::canonical_json::to_string_pretty(&result).unwrap_or_else(|_| result.canonical_string());
+    let text = crate::canonical_json::to_string_pretty(&result)
+        .unwrap_or_else(|_| result.canonical_string());
     if text.len() <= MAX_KNOWLEDGE_TOOL_TEXT_BYTES {
         return json!({
             "content": [{ "type": "text", "text": text }],
@@ -10659,40 +12478,93 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
     &value[..end]
 }
 
-fn require_rust_reader_binding(database: &Database, envelope: &RuntimeEnvelope) -> Result<fox_engine_protocol::RunControlBinding, String> {
-    let run_id = envelope.run_id.as_deref().ok_or("reader request has no runId")?;
-    let payload = envelope.payload.as_ref().ok_or("reader request has no payload")?;
-    let binding = database.run_control_binding(run_id)?.ok_or("reader request has no frozen control binding")?;
+fn require_rust_reader_binding(
+    database: &Database,
+    envelope: &RuntimeEnvelope,
+) -> Result<fox_engine_protocol::RunControlBinding, String> {
+    let run_id = envelope
+        .run_id
+        .as_deref()
+        .ok_or("reader request has no runId")?;
+    let payload = envelope
+        .payload
+        .as_ref()
+        .ok_or("reader request has no payload")?;
+    let binding = database
+        .run_control_binding(run_id)?
+        .ok_or("reader request has no frozen control binding")?;
     if envelope.conversation_id.as_deref() != Some(binding.conversation_id.as_str())
         || binding.authority != fox_engine_protocol::ExecutionAuthority::Legacy
         || binding.engine_id != "pi"
         || binding.read_only_executor != fox_engine_protocol::ResourceExecutor::Rust
-        || !payload.get("tool").and_then(Value::as_str).is_some_and(crate::resource_gateway::is_reader)
-        || payload.get("permissionSnapshotId").and_then(Value::as_str) != Some(binding.permission_snapshot_id.as_str()) {
-        return Err("reader identity, executor or permission snapshot does not match the frozen Run".into());
+        || !payload
+            .get("tool")
+            .and_then(Value::as_str)
+            .is_some_and(crate::resource_gateway::is_reader)
+        || payload.get("permissionSnapshotId").and_then(Value::as_str)
+            != Some(binding.permission_snapshot_id.as_str())
+    {
+        return Err(
+            "reader identity, executor or permission snapshot does not match the frozen Run".into(),
+        );
     }
     if payload.get("observationScope").is_some() || payload.get("parentToolCallId").is_some() {
-        let parent_id = payload.get("parentToolCallId").and_then(Value::as_str).ok_or("nested reader has no parent identity")?;
-        let node_id = payload.get("graphNodeId").and_then(Value::as_str).ok_or("nested reader has no node identity")?;
-        let raw_id = payload.get("nodeToolCallId").and_then(Value::as_str).filter(|id| !id.trim().is_empty()).ok_or("nested reader has no local tool identity")?;
-        let parent = database.get_runtime_tool_call(run_id, parent_id)?.ok_or("nested reader parent is missing")?;
-        let expected_id = format!("graph-read:{}", hex::encode(Sha256::digest(crate::canonical_json::to_vec(&[parent_id, node_id, raw_id]).map_err(|e| e.to_string())?)));
+        let parent_id = payload
+            .get("parentToolCallId")
+            .and_then(Value::as_str)
+            .ok_or("nested reader has no parent identity")?;
+        let node_id = payload
+            .get("graphNodeId")
+            .and_then(Value::as_str)
+            .ok_or("nested reader has no node identity")?;
+        let raw_id = payload
+            .get("nodeToolCallId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .ok_or("nested reader has no local tool identity")?;
+        let parent = database
+            .get_runtime_tool_call(run_id, parent_id)?
+            .ok_or("nested reader parent is missing")?;
+        let expected_id = format!(
+            "graph-read:{}",
+            hex::encode(Sha256::digest(
+                crate::canonical_json::to_vec(&[parent_id, node_id, raw_id])
+                    .map_err(|e| e.to_string())?
+            ))
+        );
         if payload.get("observationScope").and_then(Value::as_str) != Some("nested")
             || binding.execution_profile_id != "graph_readonly_preview"
-            || parent.tool_name != "graph_readonly_run" || parent.execution_location != "runtime" || parent.status != "running"
-            || !parent.input.get("nodes").and_then(Value::as_array).is_some_and(|nodes| nodes.iter().any(|node| node.get("id").and_then(Value::as_str) == Some(node_id)))
-            || payload.get("toolCallId").and_then(Value::as_str) != Some(expected_id.as_str()) {
+            || parent.tool_name != "graph_readonly_run"
+            || parent.execution_location != "runtime"
+            || parent.status != "running"
+            || !parent
+                .input
+                .get("nodes")
+                .and_then(Value::as_array)
+                .is_some_and(|nodes| {
+                    nodes
+                        .iter()
+                        .any(|node| node.get("id").and_then(Value::as_str) == Some(node_id))
+                })
+            || payload.get("toolCallId").and_then(Value::as_str) != Some(expected_id.as_str())
+        {
             return Err("nested reader does not belong to the running frozen graph node".into());
         }
     }
     Ok(binding)
 }
 
-fn legacy_artifact_sessions_dir(app: &AppHandle,input: &Value) -> Result<PathBuf,String> {
-    if input.get("artifactId").is_none() {return Ok(PathBuf::new());}
+fn legacy_artifact_sessions_dir(app: &AppHandle, input: &Value) -> Result<PathBuf, String> {
+    if input.get("artifactId").is_none() {
+        return Ok(PathBuf::new());
+    }
     use tauri::Manager;
-    app.try_state::<crate::app_state::AppState>().map(|state|state.runtime_host.sessions_dir.clone())
-        .ok_or_else(||crate::tool_host::ToolErrorCode::PermissionDenied.error("artifact publication requires Host conversation context"))
+    app.try_state::<crate::app_state::AppState>()
+        .map(|state| state.runtime_host.sessions_dir.clone())
+        .ok_or_else(|| {
+            crate::tool_host::ToolErrorCode::PermissionDenied
+                .error("artifact publication requires Host conversation context")
+        })
 }
 
 fn execute_host_tool_request(
@@ -10721,8 +12593,11 @@ fn execute_host_tool_request(
         .get("tool")
         .and_then(Value::as_str)
         .ok_or_else(|| "host tool request is missing tool".to_owned())?;
-    let cancellation = state.lock().map_err(|_| "runtime state lock is poisoned")?
-        .cancellation.tool_token(run_id, tool_call_id)?;
+    let cancellation = state
+        .lock()
+        .map_err(|_| "runtime state lock is poisoned")?
+        .cancellation
+        .tool_token(run_id, tool_call_id)?;
     cancellation.check()?;
     ensure_expert_tool_allowed(database, conversation_id, tool)?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
@@ -10740,10 +12615,21 @@ fn execute_host_tool_request(
         return Err(format!("[hook.blocked] {reason}"));
     }
     if tool == "present_files" {
-        let binding = database.run_control_binding(run_id)?.ok_or("file declaration requires a frozen Run")?;
+        let binding = database
+            .run_control_binding(run_id)?
+            .ok_or("file declaration requires a frozen Run")?;
         let tool_call = match create_fresh_host_tool_call(
-            database, run_id, tool_call_id, tool, &input,
-            if hook_decision.requires_approval { "pending" } else { "running" }, hook_decision.requires_approval,
+            database,
+            run_id,
+            tool_call_id,
+            tool,
+            &input,
+            if hook_decision.requires_approval {
+                "pending"
+            } else {
+                "running"
+            },
+            hook_decision.requires_approval,
         )? {
             HostToolCallExecution::Execute(record) => record,
             HostToolCallExecution::Replay(response) => return Ok(response),
@@ -10751,32 +12637,58 @@ fn execute_host_tool_request(
         // A declaration records existing files without entering writer admission.
         let outcome = (|| {
             if hook_decision.requires_approval {
-                request_declarative_hook_approval(app, database, state, run_id, &tool_call, tool, &input,
-                    hook_decision.approval_reason.as_deref())?;
+                request_declarative_hook_approval(
+                    app,
+                    database,
+                    state,
+                    run_id,
+                    &tool_call,
+                    tool,
+                    &input,
+                    hook_decision.approval_reason.as_deref(),
+                )?;
             }
             present_files::execute(database, &binding.conversation_id, &binding.run_id,
                 tool_call_id, &binding.permission.project_root, &input)
                 .map(|result| json!({"content":[{"type":"text","text":result.canonical_string()}],"details":result}))
         })();
-        return finalize_host_tool_execution(database, run_id, tool_call_id, tool, &input,
-            hook_decision.annotations, outcome);
+        return finalize_host_tool_execution(
+            database,
+            run_id,
+            tool_call_id,
+            tool,
+            &input,
+            hook_decision.annotations,
+            outcome,
+        );
     }
     ensure_plan_approved_before_mutation(database, conversation_id, tool, &input)?;
     let (project_root, permission_mode) = database
         .conversation_project_access(conversation_id)?
         .ok_or_else(|| "this conversation has no authorized project folder".to_owned())?;
-    let manage_command = tool == "run_command" && matches!(input["action"].as_str(), Some("status" | "output" | "cancel"));
+    let manage_command = tool == "run_command"
+        && matches!(
+            input["action"].as_str(),
+            Some("status" | "output" | "cancel")
+        );
     if permission_mode == "read_only" && !manage_command {
         return Err(format!("tool {tool} is blocked in read-only mode"));
     }
 
     let file_policy = if matches!(tool, "write_file" | "edit_file") {
-        let binding = database.run_control_binding(run_id)?.ok_or("file write requires a frozen Run")?;
-        if binding.conversation_id != conversation_id || binding.permission.project_root.as_deref() != Some(project_root.as_str()) {
+        let binding = database
+            .run_control_binding(run_id)?
+            .ok_or("file write requires a frozen Run")?;
+        if binding.conversation_id != conversation_id
+            || binding.permission.project_root.as_deref() != Some(project_root.as_str())
+        {
             return Err("credential_mismatch: file project binding changed".into());
         }
         let policy = database.execution_policy(conversation_id)?;
-        let target = crate::tool_host::canonical_file_identity(Path::new(&project_root), input["path"].as_str().ok_or("missing file path")?)?;
+        let target = crate::tool_host::canonical_file_identity(
+            Path::new(&project_root),
+            input["path"].as_str().ok_or("missing file path")?,
+        )?;
         // The task's own file roles bound what this Run may write at all: a path
         // the task introduced as input material is refused here, so the rule
         // holds at the execution boundary instead of depending on the model (or
@@ -10830,17 +12742,34 @@ fn execute_host_tool_request(
                 .map(|observation| observation.version.as_str()),
         )?;
         Some((policy.version, baseline, observed))
-    } else { None };
+    } else {
+        None
+    };
     let prepared = match (|| -> Result<_, String> {
         if let Some((_, baseline, _)) = &file_policy {
             // `baseline` is the observation the DECLARED precondition selected (or
             // `missing` for a new file), so binding it here preserves the claim
             // instead of replacing it with the newest observation.
-            let sessions_dir=legacy_artifact_sessions_dir(app,&input)?;
-            crate::tool_host::prepare_admitted_file_with_artifact_context(tool, &input, &project_root, baseline,database,&sessions_dir,conversation_id)
+            let sessions_dir = legacy_artifact_sessions_dir(app, &input)?;
+            crate::tool_host::prepare_admitted_file_with_artifact_context(
+                tool,
+                &input,
+                &project_root,
+                baseline,
+                database,
+                &sessions_dir,
+                conversation_id,
+            )
         } else {
-            let sessions_dir=legacy_artifact_sessions_dir(app,&input)?;
-            crate::tool_host::prepare_with_artifact_context(tool, &input, &project_root,database,&sessions_dir,conversation_id)
+            let sessions_dir = legacy_artifact_sessions_dir(app, &input)?;
+            crate::tool_host::prepare_with_artifact_context(
+                tool,
+                &input,
+                &project_root,
+                database,
+                &sessions_dir,
+                conversation_id,
+            )
         }
     })() {
         Ok(prepared) => prepared,
@@ -10854,15 +12783,24 @@ fn execute_host_tool_request(
                 tool_call_id,
                 tool,
                 &input,
-                if hook_decision.requires_approval { "pending" } else { "running" },
+                if hook_decision.requires_approval {
+                    "pending"
+                } else {
+                    "running"
+                },
                 hook_decision.requires_approval,
             )? {
                 HostToolCallExecution::Execute(_) => {}
                 HostToolCallExecution::Replay(response) => return Ok(response),
             }
             return finalize_host_tool_execution(
-                database, run_id, tool_call_id, tool, &input,
-                hook_decision.annotations, Err(error),
+                database,
+                run_id,
+                tool_call_id,
+                tool,
+                &input,
+                hook_decision.annotations,
+                Err(error),
             );
         }
         Err(error) => return Err(error),
@@ -10870,21 +12808,48 @@ fn execute_host_tool_request(
     // A1: one engine decides (block -> protected/outside paths -> mode ->
     // project rules). No conversation-wide grant is read here any more.
     let write_target = if file_policy.is_some() {
-        Some(PathBuf::from(crate::tool_host::canonical_file_identity(Path::new(&project_root), input["path"].as_str().unwrap_or_default())?))
-    } else { None };
+        Some(PathBuf::from(crate::tool_host::canonical_file_identity(
+            Path::new(&project_root),
+            input["path"].as_str().unwrap_or_default(),
+        )?))
+    } else {
+        None
+    };
     // A background command start is credentialed against the policy version
     // the decision below was made under; a mode change before launch refuses it.
-    let command_policy_version = if matches!(prepared, crate::tool_host::PreparedToolAction::CommandJob { .. })
-        && input["action"].as_str() == Some("start") {
+    let command_policy_version = if matches!(
+        prepared,
+        crate::tool_host::PreparedToolAction::CommandJob { .. }
+    ) && input["action"].as_str() == Some("start")
+    {
         Some(database.execution_policy(conversation_id)?.version)
-    } else { None };
-    let policy = decide_tool_approval(database, conversation_id, tool, &input, prepared.preview(), write_target.as_deref())?;
+    } else {
+        None
+    };
+    let policy = decide_tool_approval(
+        database,
+        conversation_id,
+        tool,
+        &input,
+        prepared.preview(),
+        write_target.as_deref(),
+    )?;
     if let Some(refusal) = policy.refusal(tool) {
         if policy.decision.is_block() {
             let preview = prepared.preview();
-            let summary = preview.command.clone().unwrap_or_else(|| preview.summary.clone());
+            let summary = preview
+                .command
+                .clone()
+                .unwrap_or_else(|| preview.summary.clone());
             // 审计写失败不影响拒绝本身。
-            let _ = database.record_permission_audit(conversation_id, Some(run_id), Some(tool_call_id), tool, &policy.decision, &summary);
+            let _ = database.record_permission_audit(
+                conversation_id,
+                Some(run_id),
+                Some(tool_call_id),
+                tool,
+                &policy.decision,
+                &summary,
+            );
         }
         return Err(refusal);
     }
@@ -10915,31 +12880,34 @@ fn execute_host_tool_request(
     // observation AND the model delivery fact together, so a whole-file read
     // whose model view was bounded also lands here.
     let needs_replace_grant = match (&file_policy, tool) {
-        (Some((_, _, Some(baseline))), "write_file") => database.needs_replace_grant(run_id, baseline)?,
+        (Some((_, _, Some(baseline))), "write_file") => {
+            database.needs_replace_grant(run_id, baseline)?
+        }
         _ => false,
     };
     let replace_binding = if needs_replace_grant {
-        file_policy
-            .as_ref()
-            .and_then(|(_, _, observation)| {
-                let observation = observation.as_ref()?;
-                let target = crate::tool_host::canonical_file_identity(
-                    Path::new(&project_root),
-                    input["path"].as_str().unwrap_or_default(),
+        file_policy.as_ref().and_then(|(_, _, observation)| {
+            let observation = observation.as_ref()?;
+            let target = crate::tool_host::canonical_file_identity(
+                Path::new(&project_root),
+                input["path"].as_str().unwrap_or_default(),
+            )
+            .ok();
+            let content = input
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            target.map(|target| {
+                crate::database::kernel_execution_admission::replace_request_binding(
+                    conversation_id,
+                    run_id,
+                    tool_call_id,
+                    &target,
+                    &observation.version,
+                    content,
                 )
-                .ok();
-                let content = input.get("content").and_then(Value::as_str).unwrap_or_default();
-                target.map(|target| {
-                    crate::database::kernel_execution_admission::replace_request_binding(
-                        conversation_id,
-                        run_id,
-                        tool_call_id,
-                        &target,
-                        &observation.version,
-                        content,
-                    )
-                })
             })
+        })
     } else {
         None
     };
@@ -10951,12 +12919,8 @@ fn execute_host_tool_request(
     ) {
         // Propose the request now, in `pending`, so the authorization exists
         // before the human is asked and the confirmation has something to bind.
-        let _ = database.propose_whole_file_replacement(
-            conversation_id,
-            run_id,
-            tool_call_id,
-            binding,
-        );
+        let _ =
+            database.propose_whole_file_replacement(conversation_id, run_id, tool_call_id, binding);
         let _ = baseline;
     }
 
@@ -10995,7 +12959,8 @@ fn execute_host_tool_request(
                 );
             let approval_id = approval.id.clone();
             let _ = emit_approval_event(app, database, "fox://approval-requested", &approval);
-            let approval_result = receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
+            let approval_result =
+                receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
             if let Ok(runtime_state) = state.lock() {
                 if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
                     pending.remove(&approval_id);
@@ -11007,7 +12972,12 @@ fn execute_host_tool_request(
                     if let Ok(Some(resolved)) =
                         database.resolve_approval(&approval_id, ApprovalDecision::Deny)
                     {
-                        let _ = emit_approval_event(app, database, "fox://approval-resolved", &resolved);
+                        let _ = emit_approval_event(
+                            app,
+                            database,
+                            "fox://approval-resolved",
+                            &resolved,
+                        );
                     }
                     return Err(error);
                 }
@@ -11017,30 +12987,70 @@ fn execute_host_tool_request(
             }
             claim_approved_tool_call_for_execution(database, run_id, tool_call_id)?;
         } else {
-            policy.audit_auto_allow(database, conversation_id, run_id, tool_call_id, tool, prepared.preview())?;
+            policy.audit_auto_allow(
+                database,
+                conversation_id,
+                run_id,
+                tool_call_id,
+                tool,
+                prepared.preview(),
+            )?;
         }
 
         if let Some((version, _, observation)) = &file_policy {
             use tauri::Manager;
             let app_state = app.state::<crate::app_state::AppState>();
-            return execute_legacy_admitted_file(database, app_state.runtime_host.managed_files_dir(),
-                run_id, conversation_id, tool_call_id, tool, &input, &project_root,
-                *version, observation.as_ref(), &cancellation);
+            return execute_legacy_admitted_file(
+                database,
+                app_state.runtime_host.managed_files_dir(),
+                run_id,
+                conversation_id,
+                tool_call_id,
+                tool,
+                &input,
+                &project_root,
+                *version,
+                observation.as_ref(),
+                &cancellation,
+            );
         }
-        if let crate::tool_host::PreparedToolAction::CommandJob {root,input,..} = &prepared {
-            let binding=database.run_control_binding(run_id)?.ok_or("command job needs a frozen Run")?;
-            let budget=Duration::from_millis(binding.budgets.limit_operation_ms(binding.budgets.tool_execution_ms, 0).max(0) as u64);
+        if let crate::tool_host::PreparedToolAction::CommandJob { root, input, .. } = &prepared {
+            let binding = database
+                .run_control_binding(run_id)?
+                .ok_or("command job needs a frozen Run")?;
+            let budget = Duration::from_millis(
+                binding
+                    .budgets
+                    .limit_operation_ms(binding.budgets.tool_execution_ms, 0)
+                    .max(0) as u64,
+            );
             if let Some(version) = command_policy_version {
-                return execute_legacy_admitted_command(database, run_id, conversation_id, tool_call_id,
-                    input, root, version, &cancellation, budget);
+                return execute_legacy_admitted_command(
+                    database,
+                    run_id,
+                    conversation_id,
+                    tool_call_id,
+                    input,
+                    root,
+                    version,
+                    &cancellation,
+                    budget,
+                );
             }
-            command_jobs::execute(database,run_id,input,root,&cancellation,budget)
-        } else if matches!(prepared, crate::tool_host::PreparedToolAction::RunCommand { .. }) {
-            let prepared = prepared.with_command_environment(command_proxy_environment_for_mode(policy.decision.mode));
+            command_jobs::execute(database, run_id, input, root, &cancellation, budget)
+        } else if matches!(
+            prepared,
+            crate::tool_host::PreparedToolAction::RunCommand { .. }
+        ) {
+            let prepared = prepared
+                .with_command_environment(command_proxy_environment_for_mode(policy.decision.mode));
             // 13.38（A-2）：前台命令边执行边把已产生的输出写进这张工具卡（每秒最多一次）。
-            let (live_db, live_run, live_call) = (database.clone(), run_id.to_owned(), tool_call_id.to_owned());
+            let (live_db, live_run, live_call) =
+                (database.clone(), run_id.to_owned(), tool_call_id.to_owned());
             crate::tool_host::with_live_output(
-                move |text| { let _ = live_db.update_host_tool_live_output(&live_run, &live_call, text); },
+                move |text| {
+                    let _ = live_db.update_host_tool_live_output(&live_run, &live_call, text);
+                },
                 || crate::tool_host::execute_with_cancellation(prepared, Some(&cancellation)),
             )
         } else {
@@ -11061,12 +13071,20 @@ fn execute_host_tool_request(
 /// Legacy transport shares the same durable file admission and A commit seam.
 /// The transport never supplies a credential or a file-version authority.
 fn execute_legacy_admitted_file(
-    database: &Database, backups_dir: &Path, run_id: &str, conversation_id: &str,
-    tool_call_id: &str, tool: &str, input: &Value, project_root: &str,
-    policy_version: u64, observed: Option<&fox_engine_protocol::HostObservation>,
+    database: &Database,
+    backups_dir: &Path,
+    run_id: &str,
+    conversation_id: &str,
+    tool_call_id: &str,
+    tool: &str,
+    input: &Value,
+    project_root: &str,
+    policy_version: u64,
+    observed: Option<&fox_engine_protocol::HostObservation>,
     token: &crate::kernel::CancellationToken,
 ) -> Result<Value, String> {
-    let durable = database.get_runtime_tool_call(run_id, tool_call_id)?
+    let durable = database
+        .get_runtime_tool_call(run_id, tool_call_id)?
         .ok_or("credential_mismatch: durable Host tool call is missing")?;
     if durable.tool_name != tool || durable.input != *input {
         return Err("credential_mismatch: file input differs from the durable intent".into());
@@ -11075,40 +13093,86 @@ fn execute_legacy_admitted_file(
     let tool = durable.tool_name.as_str();
     let input = &durable.input;
     let credential = database.issue_legacy_file_credential(run_id, tool_call_id, policy_version)?;
-    if credential.intent_digest != crate::database::kernel_execution_admission::launch_params_hash(tool, &input.canonical_string()) {
+    if credential.intent_digest
+        != crate::database::kernel_execution_admission::launch_params_hash(
+            tool,
+            &input.canonical_string(),
+        )
+    {
         return Err("credential_mismatch: file credential input binding differs".into());
     }
     if credential.file_baseline.as_ref() != observed {
         return Err("observation_conflict: file observation changed during approval".into());
     }
-    let outcome = database.claim_execution_attempt(run_id, conversation_id, &credential,
-        &credential.intent_digest, &format!("legacy-host:{tool_call_id}"))?;
+    let outcome = database.claim_execution_attempt(
+        run_id,
+        conversation_id,
+        &credential,
+        &credential.intent_digest,
+        &format!("legacy-host:{tool_call_id}"),
+    )?;
     if outcome != fox_engine_protocol::AttemptOutcome::Claimed {
-        return kernel_host::execution_receipt_result(database, run_id, &credential.dispatch_id, tool, None);
+        return kernel_host::execution_receipt_result(
+            database,
+            run_id,
+            &credential.dispatch_id,
+            tool,
+            None,
+        );
     }
     let scope = crate::database::KernelHostScope {
-        schema_version: 1, tool_names: [tool.to_owned()].into_iter().collect(),
-        mcp_server_hashes: Default::default(), knowledge_reference_hashes: Default::default(),
-        knowledge_connection_hashes: Default::default(), office_tools: Default::default(), lifecycle_hooks: vec![],
+        schema_version: 1,
+        tool_names: [tool.to_owned()].into_iter().collect(),
+        mcp_server_hashes: Default::default(),
+        knowledge_reference_hashes: Default::default(),
+        knowledge_connection_hashes: Default::default(),
+        office_tools: Default::default(),
+        lifecycle_hooks: vec![],
     };
     let mut revalidate = || {
         token.check()?;
         database.revalidate_execution_credential(&credential)?;
-        let (current_root, mode) = database.conversation_project_access(conversation_id)?.ok_or("project grant revoked")?;
-        if current_root != project_root || mode == "read_only" { return Err("project grant revoked".into()); }
+        let (current_root, mode) = database
+            .conversation_project_access(conversation_id)?
+            .ok_or("project grant revoked")?;
+        if current_root != project_root || mode == "read_only" {
+            return Err("project grant revoked".into());
+        }
         Ok(())
     };
     let mode = database.execution_policy(conversation_id)?.mode;
-    let (result, evidence) = managed_files::execute_admitted_file(managed_files::ManagedExecutionContext {
-        database, backups_dir, conversation_id, run_id, project_root: Some(project_root),
-        permission_mode: &mode, scope: &scope, sessions_dir: None,
-    }, tool, input, tool_call_id, &credential, Some(token), &mut revalidate);
+    let (result, evidence) = managed_files::execute_admitted_file(
+        managed_files::ManagedExecutionContext {
+            database,
+            backups_dir,
+            conversation_id,
+            run_id,
+            project_root: Some(project_root),
+            permission_mode: &mode,
+            scope: &scope,
+            sessions_dir: None,
+        },
+        tool,
+        input,
+        tool_call_id,
+        &credential,
+        Some(token),
+        &mut revalidate,
+    );
     let call_outcome = kernel_host::call_outcome(&result);
-    kernel_host::settle_execution_outcome(database, run_id, &credential.dispatch_id, &result, evidence, &call_outcome)?;
+    kernel_host::settle_execution_outcome(
+        database,
+        run_id,
+        &credential.dispatch_id,
+        &result,
+        evidence,
+        &call_outcome,
+    )?;
     let value = match result {
         Ok(value) => value,
         Err(error) => {
-            let mut failure = kernel_host::resource_failure_result_with_input(tool, Some(input), &error);
+            let mut failure =
+                kernel_host::resource_failure_result_with_input(tool, Some(input), &error);
             failure["isError"] = json!(true);
             failure
         }
@@ -11122,12 +13186,19 @@ fn execute_legacy_admitted_file(
 /// or auto-allow audit row) with the Fox Job proof as backend evidence, claims
 /// the single attempt, and settles it from the executor's evidence.
 fn execute_legacy_admitted_command(
-    database: &Database, run_id: &str, conversation_id: &str, tool_call_id: &str,
-    input: &Value, root: &Path, policy_version: u64,
-    token: &crate::kernel::CancellationToken, budget: Duration,
+    database: &Database,
+    run_id: &str,
+    conversation_id: &str,
+    tool_call_id: &str,
+    input: &Value,
+    root: &Path,
+    policy_version: u64,
+    token: &crate::kernel::CancellationToken,
+    budget: Duration,
 ) -> Result<Value, String> {
     use crate::process_jobs::BackendCapabilityProof;
-    let durable = database.get_runtime_tool_call(run_id, tool_call_id)?
+    let durable = database
+        .get_runtime_tool_call(run_id, tool_call_id)?
         .ok_or("credential_mismatch: durable Host tool call is missing")?;
     if durable.tool_name != "run_command" || durable.input != *input {
         return Err("credential_mismatch: command input differs from the durable intent".into());
@@ -11135,22 +13206,56 @@ fn execute_legacy_admitted_command(
     let input = &durable.input;
     let digest = match crate::process_jobs::FoxJobBackend.availability() {
         crate::process_jobs::BackendAvailability::Available { digest, .. } => digest,
-        crate::process_jobs::BackendAvailability::Unavailable(refusal) =>
-            return Err(format!("sandbox_unavailable: {}", refusal.reason())),
+        crate::process_jobs::BackendAvailability::Unavailable(refusal) => {
+            return Err(format!("sandbox_unavailable: {}", refusal.reason()))
+        }
     };
-    let credential = database.issue_legacy_command_credential(run_id, tool_call_id, policy_version, &digest)?;
-    if credential.intent_digest != crate::database::kernel_execution_admission::launch_params_hash("run_command", &input.canonical_string()) {
+    let credential =
+        database.issue_legacy_command_credential(run_id, tool_call_id, policy_version, &digest)?;
+    if credential.intent_digest
+        != crate::database::kernel_execution_admission::launch_params_hash(
+            "run_command",
+            &input.canonical_string(),
+        )
+    {
         return Err("credential_mismatch: command credential input binding differs".into());
     }
-    let outcome = database.claim_execution_attempt(run_id, conversation_id, &credential,
-        &credential.intent_digest, &format!("legacy-host:{tool_call_id}"))?;
+    let outcome = database.claim_execution_attempt(
+        run_id,
+        conversation_id,
+        &credential,
+        &credential.intent_digest,
+        &format!("legacy-host:{tool_call_id}"),
+    )?;
     if outcome != fox_engine_protocol::AttemptOutcome::Claimed {
-        return kernel_host::execution_receipt_result(database, run_id, &credential.dispatch_id, "run_command", None);
+        return kernel_host::execution_receipt_result(
+            database,
+            run_id,
+            &credential.dispatch_id,
+            "run_command",
+            None,
+        );
     }
-    let (result, evidence, call_outcome) =
-        command_jobs::execute_with_credential(database, run_id, input, root, token, budget, &credential);
-    kernel_host::settle_execution_outcome(database, run_id, &credential.dispatch_id, &result, evidence, &call_outcome)?;
-    result.and_then(|value| kernel_host::with_execution_receipt(database, run_id, &credential.dispatch_id, value))
+    let (result, evidence, call_outcome) = command_jobs::execute_with_credential(
+        database,
+        run_id,
+        input,
+        root,
+        token,
+        budget,
+        &credential,
+    );
+    kernel_host::settle_execution_outcome(
+        database,
+        run_id,
+        &credential.dispatch_id,
+        &result,
+        evidence,
+        &call_outcome,
+    )?;
+    result.and_then(|value| {
+        kernel_host::with_execution_receipt(database, run_id, &credential.dispatch_id, value)
+    })
 }
 
 /// Shared production executor seam. Admission is checked again here, before
@@ -11163,28 +13268,81 @@ fn execute_rust_reader_request(
 ) -> Result<Value, String> {
     cancellation.check()?;
     let binding = require_rust_reader_binding(database, envelope)?;
-    let payload = envelope.payload.as_ref().ok_or("reader payload is missing")?;
-    let tool_call_id = payload.get("toolCallId").and_then(Value::as_str).ok_or("reader tool identity is missing")?;
-    let tool = payload.get("tool").and_then(Value::as_str).ok_or("reader tool is missing")?;
+    let payload = envelope
+        .payload
+        .as_ref()
+        .ok_or("reader payload is missing")?;
+    let tool_call_id = payload
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .ok_or("reader tool identity is missing")?;
+    let tool = payload
+        .get("tool")
+        .and_then(Value::as_str)
+        .ok_or("reader tool is missing")?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
-    let record_input = payload.get("originalInput").cloned().unwrap_or_else(|| input.clone());
-    let call = create_fresh_host_tool_call(database, &binding.run_id, tool_call_id, tool, &record_input, "running", false)?;
-    if let HostToolCallExecution::Replay(response) = call { return Ok(response); }
+    let record_input = payload
+        .get("originalInput")
+        .cloned()
+        .unwrap_or_else(|| input.clone());
+    let call = create_fresh_host_tool_call(
+        database,
+        &binding.run_id,
+        tool_call_id,
+        tool,
+        &record_input,
+        "running",
+        false,
+    )?;
+    if let HostToolCallExecution::Replay(response) = call {
+        return Ok(response);
+    }
     let outcome = (|| {
         if payload.get("originalInput").is_some() {
             let mut original = record_input.clone();
-            let object = original.as_object_mut().ok_or("reader original input is not an object")?;
-            if tool != "read" && object.get("path").and_then(Value::as_str).unwrap_or_default().trim().is_empty() {
+            let object = original
+                .as_object_mut()
+                .ok_or("reader original input is not an object")?;
+            if tool != "read"
+                && object
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty()
+            {
                 object.insert("path".into(), json!("."));
             }
-            let approved = crate::tool_guard::approve_read_only_tool(tool, &original, binding.permission.project_root.as_deref())?;
-            if approved.input != input { return Err("reader prepared input differs from the frozen source arguments".into()); }
+            let approved = crate::tool_guard::approve_read_only_tool(
+                tool,
+                &original,
+                binding.permission.project_root.as_deref(),
+            )?;
+            if approved.input != input {
+                return Err(
+                    "reader prepared input differs from the frozen source arguments".into(),
+                );
+            }
         }
-        managed_files::execute_observed_reader(database, &binding, tool, &input,
-            tool_call_id, cancellation,
-            std::time::Duration::from_millis(binding.budgets.tool_execution_ms as u64))
+        managed_files::execute_observed_reader(
+            database,
+            &binding,
+            tool,
+            &input,
+            tool_call_id,
+            cancellation,
+            std::time::Duration::from_millis(binding.budgets.tool_execution_ms as u64),
+        )
     })();
-    finalize_host_tool_execution(database, &binding.run_id, tool_call_id, tool, &record_input, Vec::new(), outcome)
+    finalize_host_tool_execution(
+        database,
+        &binding.run_id,
+        tool_call_id,
+        tool,
+        &record_input,
+        Vec::new(),
+        outcome,
+    )
 }
 
 #[cfg(test)]
@@ -11218,25 +13376,66 @@ fn execute_capability_tool_request(
         .and_then(Value::as_str)
         .ok_or_else(|| "capability tool request is missing tool".to_owned())?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
-    execute_capability_call(app, database, state, conversation_id, run_id, tool_call_id, tool, input, None)
+    execute_capability_call(
+        app,
+        database,
+        state,
+        conversation_id,
+        run_id,
+        tool_call_id,
+        tool,
+        input,
+        None,
+    )
 }
 
 impl RuntimeHost {
-    pub(crate) fn external_web_search(&self, conversation_id: &str, run_id: &str, call_id: &str, input: Value,
-        mode: approval_policy::AccessMode, runtime: &crate::external_backend::DesktopRuntime) -> Result<Value, String> {
-        let response = execute_capability_call(&self.app, &self.database, &self.state, conversation_id, run_id, call_id,
-            "web_search", input, Some((mode, runtime)))?;
+    pub(crate) fn external_web_search(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        call_id: &str,
+        input: Value,
+        mode: approval_policy::AccessMode,
+        runtime: &crate::external_backend::DesktopRuntime,
+    ) -> Result<Value, String> {
+        let response = execute_capability_call(
+            &self.app,
+            &self.database,
+            &self.state,
+            conversation_id,
+            run_id,
+            call_id,
+            "web_search",
+            input,
+            Some((mode, runtime)),
+        )?;
         if response.get("isError").and_then(Value::as_bool) == Some(true) {
-            return Err(response.get("error").map(Value::to_string).unwrap_or_else(|| "网页搜索失败。".into()));
+            return Err(response
+                .get("error")
+                .map(Value::to_string)
+                .unwrap_or_else(|| "网页搜索失败。".into()));
         }
-        response.get("result").cloned().ok_or_else(|| "搜索结果缺失。".into())
+        response
+            .get("result")
+            .cloned()
+            .ok_or_else(|| "搜索结果缺失。".into())
     }
 }
 
 fn execute_capability_call(
-    app: &AppHandle, database: &Database, state: &Arc<Mutex<RuntimeHostState>>,
-    conversation_id: &str, run_id: &str, tool_call_id: &str, tool: &str, input: Value,
-    external: Option<(approval_policy::AccessMode, &crate::external_backend::DesktopRuntime)>,
+    app: &AppHandle,
+    database: &Database,
+    state: &Arc<Mutex<RuntimeHostState>>,
+    conversation_id: &str,
+    run_id: &str,
+    tool_call_id: &str,
+    tool: &str,
+    input: Value,
+    external: Option<(
+        approval_policy::AccessMode,
+        &crate::external_backend::DesktopRuntime,
+    )>,
 ) -> Result<Value, String> {
     use fox_agent_backend::external::ExternalSink;
     ensure_expert_tool_allowed(database, conversation_id, tool)?;
@@ -11253,7 +13452,7 @@ fn execute_capability_call(
     ensure_plan_approved_before_mutation(database, conversation_id, tool, &input)?;
     let project_access = database.conversation_project_access(conversation_id)?;
     let project_root = project_access.as_ref().map(|(root, _)| root.as_str());
-    let persisted_permission_mode = database.conversation_permission_mode(conversation_id)?;
+    let persisted_permission_mode = companion_run_permission_mode(database, conversation_id, run_id)?;
     let permission_mode = persisted_permission_mode.as_str();
     let prepared = capability_tools::prepare(tool, &input, project_root)?;
     if permission_mode == "read_only" && prepared.blocked_in_read_only() {
@@ -11265,19 +13464,43 @@ fn execute_capability_call(
     let policy = if let Some((mode, _)) = external {
         let rules = database.policy_rules_for_conversation(conversation_id)?;
         let decision = approval_policy::decide(&approval_policy::PolicyRequest {
-            tool, subject: &approval_policy::ToolSubject::Network, mode,
-            project_root: None, home: None, rules: &rules,
+            tool,
+            subject: &approval_policy::ToolSubject::Network,
+            mode,
+            project_root: None,
+            home: None,
+            rules: &rules,
         });
-        ToolApprovalPolicy { decision, has_project: false }
+        ToolApprovalPolicy {
+            decision,
+            has_project: false,
+        }
     } else {
-        decide_tool_approval(database, conversation_id, tool, &input, prepared.preview(), None)?
+        decide_tool_approval(
+            database,
+            conversation_id,
+            tool,
+            &input,
+            prepared.preview(),
+            None,
+        )?
     };
     if let Some(refusal) = policy.refusal(tool) {
         if policy.decision.is_block() {
             let preview = prepared.preview();
-            let summary = preview.command.clone().unwrap_or_else(|| preview.summary.clone());
+            let summary = preview
+                .command
+                .clone()
+                .unwrap_or_else(|| preview.summary.clone());
             // 审计写失败不影响拒绝本身。
-            let _ = database.record_permission_audit(conversation_id, Some(run_id), Some(tool_call_id), tool, &policy.decision, &summary);
+            let _ = database.record_permission_audit(
+                conversation_id,
+                Some(run_id),
+                Some(tool_call_id),
+                tool,
+                &policy.decision,
+                &summary,
+            );
         }
         return Err(refusal);
     }
@@ -11339,7 +13562,8 @@ fn execute_capability_call(
                     );
                 let approval_id = approval.id.clone();
                 let _ = emit_approval_event(app, database, "fox://approval-requested", &approval);
-                let approval_result = receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
+                let approval_result =
+                    receive_sidecar_run_approval(database, state, run_id, &approval_id, &receiver);
                 if let Ok(runtime_state) = state.lock() {
                     if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
                         pending.remove(&approval_id);
@@ -11351,7 +13575,12 @@ fn execute_capability_call(
                         if let Ok(Some(resolved)) =
                             database.resolve_approval(&approval_id, ApprovalDecision::Deny)
                         {
-                            let _ = emit_approval_event(app, database, "fox://approval-resolved", &resolved);
+                            let _ = emit_approval_event(
+                                app,
+                                database,
+                                "fox://approval-resolved",
+                                &resolved,
+                            );
                         }
                         return Err(error);
                     }
@@ -11362,12 +13591,26 @@ fn execute_capability_call(
             }
             claim_approved_tool_call_for_execution(database, run_id, tool_call_id)?;
         } else {
-            policy.audit_auto_allow(database, conversation_id, run_id, tool_call_id, tool, prepared.preview())?;
+            policy.audit_auto_allow(
+                database,
+                conversation_id,
+                run_id,
+                tool_call_id,
+                tool,
+                prepared.preview(),
+            )?;
         }
         // 13.38 B5-3: a proxy fake-ip address let through leaves its own audit row.
         if let Some(allowance) = prepared.network_allowance() {
-            database.record_network_allowance_audit(conversation_id, Some(run_id), Some(tool_call_id), tool,
-                policy.decision.mode.as_str(), "proxy_fake_ip", allowance)?;
+            database.record_network_allowance_audit(
+                conversation_id,
+                Some(run_id),
+                Some(tool_call_id),
+                tool,
+                policy.decision.mode.as_str(),
+                "proxy_fake_ip",
+                allowance,
+            )?;
         }
 
         capability_tools::execute(prepared, Some(database))
@@ -11390,9 +13633,14 @@ fn ensure_plan_approved_before_mutation(
     input: &Value,
 ) -> Result<(), String> {
     let mutates_project = matches!(tool, "write_file" | "edit_file")
-        || (tool == "run_command" && !matches!(input["action"].as_str(), Some("status" | "output" | "cancel")))
+        || (tool == "run_command"
+            && !matches!(
+                input["action"].as_str(),
+                Some("status" | "output" | "cancel")
+            ))
         || (tool == "format_code" && input.get("mode").and_then(Value::as_str) == Some("write"))
-        || (tool == "call_mcp_tool" && input["serverId"] == crate::office::SERVER_ID
+        || (tool == "call_mcp_tool"
+            && input["serverId"] == crate::office::SERVER_ID
             && matches!(
                 input["tool"].as_str(),
                 Some(
@@ -11417,29 +13665,52 @@ fn ensure_plan_approved_before_mutation(
 }
 
 fn record_runtime_crash(
-    _app: &AppHandle, _database: &Database, state: &Arc<Mutex<RuntimeHostState>>,
-    stdin: &Arc<Mutex<ChildStdin>>, message: String,
+    _app: &AppHandle,
+    _database: &Database,
+    state: &Arc<Mutex<RuntimeHostState>>,
+    stdin: &Arc<Mutex<ChildStdin>>,
+    message: String,
 ) {
     let child = state.lock().ok().and_then(|mut state| {
         let worker = state.worker.as_ref()?;
-        if !Arc::ptr_eq(&worker.stdin, stdin) { return None; }
+        if !Arc::ptr_eq(&worker.stdin, stdin) {
+            return None;
+        }
         let child = worker.child.clone();
         state.last_error = Some(message);
         Some(child)
     });
-    if let Some(child) = child { if let Ok(mut child) = child.lock() { let _ = child.kill(); } }
+    if let Some(child) = child {
+        if let Ok(mut child) = child.lock() {
+            let _ = child.kill();
+        }
+    }
 }
 
 #[cfg(test)]
 mod attachment_tests {
-    use crate::canonical_json::CanonicalJson;
-    use super::{conversation_prompt_context, conversation_enabled_skill_ids, PromptScopeOverrides, apply_delegated_package_scope, attachment_image_media_type, attachment_is_docx, attachment_is_text, attachment_looks_like_image, bounded_knowledge_tool_result, execute_bound_knowledge_tool, create_fresh_host_tool_call, dispatch_created_work_child, effective_conversation_delegation_scope, effective_digital_colleague_output_limit, ensure_expert_tool_allowed, ensure_plan_approved_before_mutation, event_projection_failure_code, execute_memory_operation, extract_docx_text, finalize_host_tool_execution, inspect_existing_host_tool_call, intersect_mcp_server_scopes, intersect_optional_scopes, node_dependency_is_available, normalized_child_budget, parse_runtime_ready_payload, pending_approval_ids_for_run, redact_diagnostic_line, runtime_expert_package, structured_runtime_error, validate_envelope_identity_scope, validate_runtime_tool_authority, HostToolCallExecution, PendingApproval, RuntimeToolIngress};
-    use crate::database::{
-        AddEvidenceInput, AttachmentRecord, CreateDigitalColleagueInput,
-        CreateGoalInput, CreateTaskInput, Database, EvidenceReferenceKind, EvidenceType,
-        EvidenceValidityStatus, GoalStatus, KnowledgeReference, SaveAgentRequest,
+    use super::{
+        apply_delegated_package_scope, attachment_image_media_type, attachment_is_docx,
+        attachment_is_text, attachment_looks_like_image, bounded_knowledge_tool_result,
+        conversation_enabled_skill_ids, conversation_prompt_context, create_fresh_host_tool_call,
+        dispatch_created_work_child, effective_conversation_delegation_scope,
+        effective_digital_colleague_output_limit, ensure_expert_tool_allowed,
+        ensure_plan_approved_before_mutation, event_projection_failure_code,
+        execute_bound_knowledge_tool, execute_memory_operation, extract_docx_text,
+        finalize_host_tool_execution, inspect_existing_host_tool_call, intersect_mcp_server_scopes,
+        intersect_optional_scopes, node_dependency_is_available, normalized_child_budget,
+        parse_runtime_ready_payload, pending_approval_ids_for_run, redact_diagnostic_line,
+        runtime_expert_package, structured_runtime_error, validate_envelope_identity_scope,
+        validate_runtime_tool_authority, HostToolCallExecution, PendingApproval,
+        PromptScopeOverrides, RuntimeToolIngress,
     };
+    use crate::canonical_json::CanonicalJson;
     use crate::database::companions::CompanionProfileEdit;
+    use crate::database::{
+        AddEvidenceInput, AttachmentRecord, CreateDigitalColleagueInput, CreateGoalInput,
+        CreateTaskInput, Database, EvidenceReferenceKind, EvidenceType, EvidenceValidityStatus,
+        GoalStatus, KnowledgeReference, SaveAgentRequest,
+    };
     use crate::runtime_host::protocol::{
         RuntimeCapabilityManifest, RuntimeEnvelope, RuntimeToolCapability,
         CAPABILITY_MANIFEST_VERSION,
@@ -11728,8 +13999,8 @@ mod attachment_tests {
     /// same information instead of a bare "it failed".
     #[test]
     fn a_reported_execution_failure_stays_failed_and_keeps_its_diagnostics_reachable() {
-        let path = std::env::temp_dir()
-            .join(format!("fox-execution-failure-{}.db", Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("fox-execution-failure-{}.db", Uuid::new_v4()));
         let database = Database::open(path.clone()).unwrap();
         let conversation = database
             .create_conversation(database.default_agent_id(), None, None, None)
@@ -11743,8 +14014,16 @@ mod attachment_tests {
             .unwrap();
         let input = json!({ "command": "tsc --noEmit" });
         assert!(matches!(
-            create_fresh_host_tool_call(&database, &run.id, "call-failed", "run_command", &input, "running", false)
-                .unwrap(),
+            create_fresh_host_tool_call(
+                &database,
+                &run.id,
+                "call-failed",
+                "run_command",
+                &input,
+                "running",
+                false
+            )
+            .unwrap(),
             HostToolCallExecution::Execute(_)
         ));
         let reported = json!({
@@ -11783,13 +14062,27 @@ mod attachment_tests {
             .inspect_host_tool_call_replay(&run.id, "call-failed", "run_command", &input)
             .unwrap()
             .expect("a terminal ToolCall must be persisted");
-        assert_eq!(record.status, "failed", "a reported failure cannot become a completed row");
-        let error = record.error_message.clone().expect("the failure needs a persisted reason");
+        assert_eq!(
+            record.status, "failed",
+            "a reported failure cannot become a completed row"
+        );
+        let error = record
+            .error_message
+            .clone()
+            .expect("the failure needs a persisted reason");
         assert!(error.starts_with("[tool.nonzero_exit]"), "{error}");
-        assert!(error.contains("TS2322"), "the persisted error stays actionable: {error}");
-        let persisted = record.result.expect("the diagnostics stay attached to the row");
+        assert!(
+            error.contains("TS2322"),
+            "the persisted error stays actionable: {error}"
+        );
+        let persisted = record
+            .result
+            .expect("the diagnostics stay attached to the row");
         assert_eq!(persisted["details"]["exitCode"], 2);
-        assert!(persisted["content"][0]["text"].as_str().unwrap().contains("TS2322"));
+        assert!(persisted["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("TS2322"));
 
         let replay = create_fresh_host_tool_call(
             &database,
@@ -11835,8 +14128,16 @@ mod attachment_tests {
             .unwrap();
         let input = json!({ "url": "https://example.test/big" });
         assert!(matches!(
-            create_fresh_host_tool_call(&database, &run.id, "call-big-ok", "http_request", &input, "running", false)
-                .unwrap(),
+            create_fresh_host_tool_call(
+                &database,
+                &run.id,
+                "call-big-ok",
+                "http_request",
+                &input,
+                "running",
+                false
+            )
+            .unwrap(),
             HostToolCallExecution::Execute(_)
         ));
         let body = "数据".repeat(INLINE_CAP * 4);
@@ -11853,9 +14154,16 @@ mod attachment_tests {
         .unwrap();
         let wire = crate::canonical_json::to_string(&response).unwrap();
         assert_eq!(response["isError"], Value::Bool(false));
-        assert!(wire.len() < INLINE_CAP, "success wire must be bounded, got {}", wire.len());
+        assert!(
+            wire.len() < INLINE_CAP,
+            "success wire must be bounded, got {}",
+            wire.len()
+        );
         assert_eq!(response["result"]["truncated"], Value::Bool(true));
-        let reference = response["resultRef"].as_str().expect("a bounded success names its reference").to_owned();
+        let reference = response["resultRef"]
+            .as_str()
+            .expect("a bounded success names its reference")
+            .to_owned();
         assert_eq!(response["resultRefRetrievable"], Value::Bool(true));
         assert_eq!(response["toolResultStorage"]["stored"], Value::Bool(true));
         let range = database
@@ -11865,12 +14173,25 @@ mod attachment_tests {
 
         // A small success keeps its exact shape: no reference is invented.
         assert!(matches!(
-            create_fresh_host_tool_call(&database, &run.id, "call-small-ok", "http_request", &input, "running", false)
-                .unwrap(),
+            create_fresh_host_tool_call(
+                &database,
+                &run.id,
+                "call-small-ok",
+                "http_request",
+                &input,
+                "running",
+                false
+            )
+            .unwrap(),
             HostToolCallExecution::Execute(_)
         ));
         let small = finalize_host_tool_execution(
-            &database, &run.id, "call-small-ok", "http_request", &input, Vec::new(),
+            &database,
+            &run.id,
+            "call-small-ok",
+            "http_request",
+            &input,
+            Vec::new(),
             Ok(json!({ "status": 200, "body": "ok" })),
         )
         .unwrap();
@@ -11890,7 +14211,8 @@ mod attachment_tests {
     #[test]
     fn an_oversized_stdout_only_failure_travels_bounded_and_stays_readable() {
         const INLINE_CAP: usize = crate::database::MAX_STORED_TOOL_RESULT_BYTES;
-        let path = std::env::temp_dir().join(format!("fox-execution-failure-huge-{}.db", Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("fox-execution-failure-huge-{}.db", Uuid::new_v4()));
         let database = Database::open(path.clone()).unwrap();
         let conversation = database
             .create_conversation(database.default_agent_id(), None, None, None)
@@ -11904,8 +14226,16 @@ mod attachment_tests {
             .unwrap();
         let input = json!({ "command": "mvn -q test" });
         assert!(matches!(
-            create_fresh_host_tool_call(&database, &run.id, "call-huge", "run_command", &input, "running", false)
-                .unwrap(),
+            create_fresh_host_tool_call(
+                &database,
+                &run.id,
+                "call-huge",
+                "run_command",
+                &input,
+                "running",
+                false
+            )
+            .unwrap(),
             HostToolCallExecution::Execute(_)
         ));
         // Several megabytes on stdout, nothing on stderr: the exact shape A01 was
@@ -11957,7 +14287,10 @@ mod attachment_tests {
         );
         // Bounded does not mean vague: the head of the real reason is still on
         // the wire, and the bytes behind it have a stated way back.
-        assert!(response["error"].as_str().unwrap().contains("incompatible types"));
+        assert!(response["error"]
+            .as_str()
+            .unwrap()
+            .contains("incompatible types"));
         assert_eq!(response["result"]["truncated"], Value::Bool(true));
         assert_eq!(
             response["resultRef"].as_str(),
@@ -11980,7 +14313,9 @@ mod attachment_tests {
             .as_deref()
             .unwrap()
             .starts_with("[tool.nonzero_exit]"));
-        let inline = record.result.expect("the compacted preview is the stored row");
+        let inline = record
+            .result
+            .expect("the compacted preview is the stored row");
         assert_eq!(inline["truncated"], Value::Bool(true));
         assert_eq!(
             inline["originalBytes"].as_u64().unwrap() as usize,
@@ -11998,9 +14333,15 @@ mod attachment_tests {
             let range = database
                 .tool_result_range(&reference, &conversation.id, offset, 64 * 1024)
                 .unwrap();
-            assert!(range.retrievable, "the blob holds the whole original result");
+            assert!(
+                range.retrievable,
+                "the blob holds the whole original result"
+            );
             assert!(!range.truncated, "ranges are served from the full copy");
-            assert_eq!(range.status, "failed", "a failed call's stored bytes stay readable");
+            assert_eq!(
+                range.status, "failed",
+                "a failed call's stored bytes stay readable"
+            );
             assert_eq!(range.original_bytes, stdout.len());
             pages += 1;
             reassembled.push_str(&range.content);
@@ -12009,8 +14350,15 @@ mod attachment_tests {
                 _ => break,
             }
         }
-        assert_eq!(reassembled, stdout, "paging must reassemble the failure verbatim");
-        assert!(pages > 8, "a {}-byte body needs many pages, got {pages}", stdout.len());
+        assert_eq!(
+            reassembled, stdout,
+            "paging must reassemble the failure verbatim"
+        );
+        assert!(
+            pages > 8,
+            "a {}-byte body needs many pages, got {pages}",
+            stdout.len()
+        );
         assert_eq!(
             database
                 .tool_result_range(&reference, &conversation.id, 0, 64 * 1024)
@@ -12068,15 +14416,10 @@ mod attachment_tests {
         );
         // The read-only inspection the protocol handler uses before dispatch also
         // answers from storage, so the executor is never reached a second time.
-        let inspection = inspect_existing_host_tool_call(
-            &database,
-            &run.id,
-            "call-huge",
-            "run_command",
-            &input,
-        )
-        .unwrap()
-        .expect("a settled call is answered from storage, not by running it again");
+        let inspection =
+            inspect_existing_host_tool_call(&database, &run.id, "call-huge", "run_command", &input)
+                .unwrap()
+                .expect("a settled call is answered from storage, not by running it again");
         assert_eq!(inspection["isError"], Value::Bool(true));
         assert_eq!(inspection["resultRef"].as_str(), Some(reference.as_str()));
         let (_, _, calls) = database
@@ -12097,8 +14440,7 @@ mod attachment_tests {
     /// nothing here widened authorization, which still comes from the row.
     #[test]
     fn failed_and_completed_results_get_the_same_trusted_storage_fact() {
-        let path = std::env::temp_dir()
-            .join(format!("fox-storage-fact-{}.db", Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("fox-storage-fact-{}.db", Uuid::new_v4()));
         let database = Database::open(path.clone()).unwrap();
         let conversation = database
             .create_conversation(database.default_agent_id(), None, None, None)
@@ -12138,7 +14480,12 @@ mod attachment_tests {
 
         // Failed with no result at all (the error channel, e.g. cancellation).
         database
-            .complete_host_tool_call(&run.id, "call-running", None, Some("[tool.cancelled] cancelled"))
+            .complete_host_tool_call(
+                &run.id,
+                "call-running",
+                None,
+                Some("[tool.cancelled] cancelled"),
+            )
             .unwrap();
         assert_eq!(
             database
@@ -12159,8 +14506,16 @@ mod attachment_tests {
         // Failed with a stored result: the diagnostics are paged from storage.
         let failed_input = json!({ "command": "cargo check" });
         assert!(matches!(
-            create_fresh_host_tool_call(&database, &run.id, "call-failed", "run_command", &failed_input, "running", false)
-                .unwrap(),
+            create_fresh_host_tool_call(
+                &database,
+                &run.id,
+                "call-failed",
+                "run_command",
+                &failed_input,
+                "running",
+                false
+            )
+            .unwrap(),
             HostToolCallExecution::Execute(_)
         ));
         database
@@ -12176,7 +14531,10 @@ mod attachment_tests {
             )
             .unwrap();
         let fact = storage_of("call-failed");
-        assert!(fact.stored, "a failed result the Host stored completely is reachable");
+        assert!(
+            fact.stored,
+            "a failed result the Host stored completely is reachable"
+        );
         assert!(
             fact.retrievable_bytes >= 1,
             "the fact has to describe real bytes: {fact:?}"
@@ -12185,8 +14543,16 @@ mod attachment_tests {
         // A completed result keeps behaving exactly as before.
         let done_input = json!({ "path": "a.txt" });
         assert!(matches!(
-            create_fresh_host_tool_call(&database, &run.id, "call-done", "read", &done_input, "running", false)
-                .unwrap(),
+            create_fresh_host_tool_call(
+                &database,
+                &run.id,
+                "call-done",
+                "read",
+                &done_input,
+                "running",
+                false
+            )
+            .unwrap(),
             HostToolCallExecution::Execute(_)
         ));
         database
@@ -12254,7 +14620,13 @@ mod attachment_tests {
         );
         assert!(matches!(
             create_fresh_host_tool_call(
-                &database, &run.id, "call-race", "run_command", &input, "running", false,
+                &database,
+                &run.id,
+                "call-race",
+                "run_command",
+                &input,
+                "running",
+                false,
             )
             .unwrap(),
             HostToolCallExecution::Execute(_)
@@ -12276,10 +14648,17 @@ mod attachment_tests {
             "the first receipt must not degrade a spilled failure to tool.unknown"
         );
         assert_eq!(first["errorDetails"]["code"], "tool.nonzero_exit");
-        assert_eq!(first.get("replayed"), None, "the first receipt is not a replay");
+        assert_eq!(
+            first.get("replayed"),
+            None,
+            "the first receipt is not a replay"
+        );
         assert_eq!(first["result"]["truncated"], Value::Bool(true));
         assert_eq!(first["resultRefRetrievable"], Value::Bool(true));
-        let reference = first["resultRef"].as_str().expect("host-derived reference").to_owned();
+        let reference = first["resultRef"]
+            .as_str()
+            .expect("host-derived reference")
+            .to_owned();
 
         // The second delivery claims success. That is not merely different - it
         // contradicts the authoritative row, so it must be refused there.
@@ -12306,13 +14685,24 @@ mod attachment_tests {
         assert_eq!(contradicting["errorCode"], first["errorCode"]);
         assert_eq!(contradicting["error"], first["error"]);
         assert_eq!(contradicting["result"], first["result"]);
-        assert_eq!(contradicting["toolResultStorage"], first["toolResultStorage"]);
-        assert_eq!(contradicting["resultRef"].as_str(), Some(reference.as_str()));
+        assert_eq!(
+            contradicting["toolResultStorage"],
+            first["toolResultStorage"]
+        );
+        assert_eq!(
+            contradicting["resultRef"].as_str(),
+            Some(reference.as_str())
+        );
         assert_eq!(contradicting["resultRefRetrievable"], Value::Bool(true));
         // The reference the racing loser was handed really pages the bytes.
         assert_eq!(
             database
-                .tool_result_range(contradicting["resultRef"].as_str().unwrap(), &conversation.id, 0, 4_096)
+                .tool_result_range(
+                    contradicting["resultRef"].as_str().unwrap(),
+                    &conversation.id,
+                    0,
+                    4_096
+                )
                 .unwrap()
                 .content,
             stdout[..4_096],
@@ -12348,7 +14738,10 @@ mod attachment_tests {
             .as_deref()
             .unwrap()
             .starts_with("[tool.nonzero_exit]"));
-        assert_eq!(record.result.expect("preview")["truncated"], Value::Bool(true));
+        assert_eq!(
+            record.result.expect("preview")["truncated"],
+            Value::Bool(true)
+        );
         let (_, _, calls) = database
             .load_conversation_trace_records(&conversation.id)
             .unwrap();
@@ -12362,7 +14755,13 @@ mod attachment_tests {
         let other_input = json!({ "command": "gradle test" });
         assert!(matches!(
             create_fresh_host_tool_call(
-                &database, &run.id, "call-race", "run_command", &other_input, "running", false,
+                &database,
+                &run.id,
+                "call-race",
+                "run_command",
+                &other_input,
+                "running",
+                false,
             ),
             Err(_)
         ));
@@ -13866,54 +16265,70 @@ mod attachment_tests {
         let database = Database::open(root.join("test.db")).unwrap();
         let customize_default = |database: &Database| {
             let customized = database.get_agent("fox-general").unwrap().unwrap();
-            database.save_agent(&SaveAgentRequest {
-                id: Some(customized.id),
-                name: customized.name,
-                description: customized.description,
-                icon: customized.icon,
-                category: customized.category,
-                system_prompt: "CUSTOMIZED_BASE_ASSISTANT_PROMPT".into(),
-                default_model: "customized-base-model".into(),
-                opening_suggestions: customized.opening_suggestions,
-                package_manifest: json!({ "skills": [], "allowedTools": ["read"] }),
-            }).unwrap();
+            database
+                .save_agent(&SaveAgentRequest {
+                    id: Some(customized.id),
+                    name: customized.name,
+                    description: customized.description,
+                    icon: customized.icon,
+                    category: customized.category,
+                    system_prompt: "CUSTOMIZED_BASE_ASSISTANT_PROMPT".into(),
+                    default_model: "customized-base-model".into(),
+                    opening_suggestions: customized.opening_suggestions,
+                    package_manifest: json!({ "skills": [], "allowedTools": ["read"] }),
+                })
+                .unwrap();
         };
         customize_default(&database);
-        let source = database.copy_agent("fox-debugger", Some("Snapshot source")).unwrap();
-        let source = database.save_agent(&crate::database::SaveAgentRequest {
-            id: Some(source.id),
-            name: source.name,
-            description: source.description,
-            icon: source.icon,
-            category: source.category,
-            system_prompt: "frozen persona and duty".into(),
-            default_model: source.default_model,
-            opening_suggestions: source.opening_suggestions,
-            package_manifest: json!({
-                "skills": ["frozen-skill"],
-                "allowedTools": ["read", "write_file"]
-            }),
-        }).unwrap();
-        database.set_agent_skill_enabled(&source.id, "frozen-skill", true).unwrap();
+        let source = database
+            .copy_agent("fox-debugger", Some("Snapshot source"))
+            .unwrap();
+        let source = database
+            .save_agent(&crate::database::SaveAgentRequest {
+                id: Some(source.id),
+                name: source.name,
+                description: source.description,
+                icon: source.icon,
+                category: source.category,
+                system_prompt: "frozen persona and duty".into(),
+                default_model: source.default_model,
+                opening_suggestions: source.opening_suggestions,
+                package_manifest: json!({
+                    "skills": ["frozen-skill"],
+                    "allowedTools": ["read", "write_file"]
+                }),
+            })
+            .unwrap();
+        database
+            .set_agent_skill_enabled(&source.id, "frozen-skill", true)
+            .unwrap();
         let companion = database.add_companion(&root, &source.id).unwrap();
         let task_reference = KnowledgeReference::local("a04-task-local-knowledge");
-        let task = database.create_owned_companion_task(&CreateDigitalColleagueInput {
-            name: "A04 companion background task".into(),
-            expert_id: String::new(),
-            objective: "Preserve the private frozen package and task-local knowledge".into(),
-            project_id: None,
-            project_root: None,
-            knowledge_references: vec![task_reference.clone()],
-            max_runs_per_day: 8,
-            max_tokens_per_day: 10_000,
-            max_duration_ms: 60_000,
-            max_output_tokens: 2_000,
-            max_tool_calls: 20,
-            companion_id: Some(companion.profile.id.clone()),
-        }, crate::database::DigitalColleagueScheduleSpec::Interval {
-            interval_seconds: 3600,
-            timezone: "UTC".into(),
-        }, false).unwrap().task;
+        let task = database
+            .create_owned_companion_task(
+                &CreateDigitalColleagueInput {
+                    name: "A04 companion background task".into(),
+                    expert_id: String::new(),
+                    objective: "Preserve the private frozen package and task-local knowledge"
+                        .into(),
+                    project_id: None,
+                    project_root: None,
+                    knowledge_references: vec![task_reference.clone()],
+                    max_runs_per_day: 8,
+                    max_tokens_per_day: 10_000,
+                    max_duration_ms: 60_000,
+                    max_output_tokens: 2_000,
+                    max_tool_calls: 20,
+                    companion_id: Some(companion.profile.id.clone()),
+                },
+                crate::database::DigitalColleagueScheduleSpec::Interval {
+                    interval_seconds: 3600,
+                    timezone: "UTC".into(),
+                },
+                false,
+            )
+            .unwrap()
+            .task;
         assert!(task.expert_id.is_none());
         assert!(task.expert_binding_id.is_none());
         assert!(task.package_hash.is_none());
@@ -13925,30 +16340,49 @@ mod attachment_tests {
                 conversation_id,
                 "next run",
                 run_kind,
-                PromptScopeOverrides { tool_allowlist: None, mcp_server_scope: None },
+                PromptScopeOverrides {
+                    tool_allowlist: None,
+                    mcp_server_scope: None,
+                },
             )
             .unwrap()
         };
         let snapshot = |database: &Database, conversation_id: &str, run_kind: &str| {
             let current = context(database, conversation_id, run_kind);
-            let skills = conversation_enabled_skill_ids(database, &skills_dir, conversation_id).unwrap();
-            (current.assistant_package, current.expert_package, current.system_prompt, current.skill_prompt, skills)
+            let skills =
+                conversation_enabled_skill_ids(database, &skills_dir, conversation_id).unwrap();
+            (
+                current.assistant_package,
+                current.expert_package,
+                current.system_prompt,
+                current.skill_prompt,
+                skills,
+            )
         };
-        let assert_unchanged = |database: &Database,
-                                conversation_id: &str,
-                                run_kind: &str,
-                                expected: &(Value, Option<Value>, String, String, Vec<String>)| {
-            assert_eq!(snapshot(database, conversation_id, run_kind), *expected);
-            let (tools, _) = effective_conversation_delegation_scope(database, conversation_id).unwrap();
-            assert_eq!(tools, Some(HashSet::from(["read".to_owned()])));
-            ensure_expert_tool_allowed(database, conversation_id, "read").unwrap();
-            assert!(ensure_expert_tool_allowed(database, conversation_id, "write_file").is_err());
-        };
+        let assert_unchanged =
+            |database: &Database,
+             conversation_id: &str,
+             run_kind: &str,
+             expected: &(Value, Option<Value>, String, String, Vec<String>)| {
+                assert_eq!(snapshot(database, conversation_id, run_kind), *expected);
+                let (tools, _) =
+                    effective_conversation_delegation_scope(database, conversation_id).unwrap();
+                assert_eq!(tools, Some(HashSet::from(["read".to_owned()])));
+                ensure_expert_tool_allowed(database, conversation_id, "read").unwrap();
+                assert!(
+                    ensure_expert_tool_allowed(database, conversation_id, "write_file").is_err()
+                );
+            };
         let initial_private = snapshot(&database, &companion.conversation_id, "user");
         let initial_task = snapshot(&database, &task.conversation_id, "digital_colleague");
         assert_eq!(initial_private.0["defaultModel"], "customized-base-model");
-        assert!(initial_private.2.starts_with("CUSTOMIZED_BASE_ASSISTANT_PROMPT"));
-        assert_eq!(initial_private.1.as_ref().unwrap()["enabledSkills"], json!(["frozen-skill"]));
+        assert!(initial_private
+            .2
+            .starts_with("CUSTOMIZED_BASE_ASSISTANT_PROMPT"));
+        assert_eq!(
+            initial_private.1.as_ref().unwrap()["enabledSkills"],
+            json!(["frozen-skill"])
+        );
         assert!(initial_private.3.contains("Use the frozen instructions."));
         assert_eq!(initial_private.4, vec!["frozen-skill"]);
         assert_ne!(initial_private.1, initial_task.1);
@@ -13956,54 +16390,107 @@ mod attachment_tests {
             initial_task.1.as_ref().unwrap()["packageManifest"]["knowledgeReferences"],
             json!([task_reference.clone()])
         );
-        let private_binding = database.current_conversation_expert_binding(&companion.conversation_id)
-            .unwrap().unwrap();
-        assert!(database.current_conversation_expert_binding(&task.conversation_id)
-            .unwrap().is_none());
+        let private_binding = database
+            .current_conversation_expert_binding(&companion.conversation_id)
+            .unwrap()
+            .unwrap();
+        assert!(database
+            .current_conversation_expert_binding(&task.conversation_id)
+            .unwrap()
+            .is_none());
         assert_eq!(
-            database.runtime_conversation_expert_binding(&task.conversation_id).unwrap().unwrap().id,
+            database
+                .runtime_conversation_expert_binding(&task.conversation_id)
+                .unwrap()
+                .unwrap()
+                .id,
             private_binding.id
         );
 
-        database.save_agent(&crate::database::SaveAgentRequest {
-            id: Some(source.id.clone()),
-            name: "renamed live source".into(),
-            description: "changed live description".into(),
-            icon: source.icon.clone(),
-            category: source.category.clone(),
-            system_prompt: "changed live persona and duty".into(),
-            default_model: "changed-live-model".into(),
-            opening_suggestions: source.opening_suggestions.clone(),
-            package_manifest: json!({ "skills": [] }),
-        }).unwrap();
-        database.set_agent_skill_enabled(&source.id, "frozen-skill", false).unwrap();
-        assert_unchanged(&database, &companion.conversation_id, "user", &initial_private);
-        assert_unchanged(&database, &task.conversation_id, "digital_colleague", &initial_task);
+        database
+            .save_agent(&crate::database::SaveAgentRequest {
+                id: Some(source.id.clone()),
+                name: "renamed live source".into(),
+                description: "changed live description".into(),
+                icon: source.icon.clone(),
+                category: source.category.clone(),
+                system_prompt: "changed live persona and duty".into(),
+                default_model: "changed-live-model".into(),
+                opening_suggestions: source.opening_suggestions.clone(),
+                package_manifest: json!({ "skills": [] }),
+            })
+            .unwrap();
+        database
+            .set_agent_skill_enabled(&source.id, "frozen-skill", false)
+            .unwrap();
+        assert_unchanged(
+            &database,
+            &companion.conversation_id,
+            "user",
+            &initial_private,
+        );
+        assert_unchanged(
+            &database,
+            &task.conversation_id,
+            "digital_colleague",
+            &initial_task,
+        );
 
         assert!(database.delete_agent(&source.id).unwrap());
-        assert!(database.companion_profile(&companion.profile.id).unwrap().profile.template_agent_id.is_none());
-        let surviving = database.current_conversation_expert_binding(&companion.conversation_id)
-            .unwrap().unwrap();
+        assert!(database
+            .companion_profile(&companion.profile.id)
+            .unwrap()
+            .profile
+            .template_agent_id
+            .is_none());
+        let surviving = database
+            .current_conversation_expert_binding(&companion.conversation_id)
+            .unwrap()
+            .unwrap();
         assert!(surviving.expert_id.is_none());
         assert_eq!(surviving.state, "active");
-        assert_unchanged(&database, &companion.conversation_id, "user", &initial_private);
-        assert_unchanged(&database, &task.conversation_id, "digital_colleague", &initial_task);
+        assert_unchanged(
+            &database,
+            &companion.conversation_id,
+            "user",
+            &initial_private,
+        );
+        assert_unchanged(
+            &database,
+            &task.conversation_id,
+            "digital_colleague",
+            &initial_task,
+        );
         drop(database);
 
         let database = Database::open(root.join("test.db")).unwrap();
         customize_default(&database);
-        assert_unchanged(&database, &companion.conversation_id, "user", &initial_private);
-        assert_unchanged(&database, &task.conversation_id, "digital_colleague", &initial_task);
-        assert!(database.current_conversation_expert_binding(&task.conversation_id)
-            .unwrap().is_none());
-        database.with_connection(|connection| {
-            connection.execute(
+        assert_unchanged(
+            &database,
+            &companion.conversation_id,
+            "user",
+            &initial_private,
+        );
+        assert_unchanged(
+            &database,
+            &task.conversation_id,
+            "digital_colleague",
+            &initial_task,
+        );
+        assert!(database
+            .current_conversation_expert_binding(&task.conversation_id)
+            .unwrap()
+            .is_none());
+        database
+            .with_connection(|connection| {
+                connection.execute(
                 "UPDATE conversation_expert_bindings SET package_hash = 'corrupt-active-snapshot'
                  WHERE conversation_id = ?1 AND state = 'active'",
                 [&companion.conversation_id],
             )?;
-            Ok(())
-        }).unwrap();
+                Ok(())
+            })
+            .unwrap();
         for conversation_id in [&companion.conversation_id, &task.conversation_id] {
             assert!(conversation_prompt_context(
                 &database,
@@ -14011,9 +16498,15 @@ mod attachment_tests {
                 conversation_id,
                 "corrupt snapshot",
                 "user",
-                PromptScopeOverrides { tool_allowlist: None, mcp_server_scope: None },
-            ).is_err());
-            assert!(conversation_enabled_skill_ids(&database, &skills_dir, conversation_id).is_err());
+                PromptScopeOverrides {
+                    tool_allowlist: None,
+                    mcp_server_scope: None
+                },
+            )
+            .is_err());
+            assert!(
+                conversation_enabled_skill_ids(&database, &skills_dir, conversation_id).is_err()
+            );
             assert!(effective_conversation_delegation_scope(&database, conversation_id).is_err());
             assert!(ensure_expert_tool_allowed(&database, conversation_id, "read").is_err());
         }
@@ -14028,40 +16521,129 @@ mod attachment_tests {
         let database = Database::open(root.join("test.db")).unwrap();
         let companion = database.create_blank_companion(&root).unwrap();
         let other = database.create_blank_companion(&root).unwrap();
-        let root_run = database.create_run(&companion.conversation_id, "更新资料", None).unwrap();
-        let other_run = database.create_run(&other.conversation_id, "更新资料", None).unwrap();
-        database.apply_runtime_event(&root_run.run.id, 1, &json!({"type":"run.started"})).unwrap();
-        database.apply_runtime_event(&other_run.run.id, 1, &json!({"type":"run.started"})).unwrap();
-        database.create_host_tool_call(&root_run.run.id, "spawn-profile-child", "child_run_start", &json!({}), "running", false).unwrap();
-        let (child, _, _) = database.create_child_run(crate::database::CreateChildRunInput {
-            parent_run_id: &root_run.run.id, tool_call_id: "spawn-profile-child", worker_agent_id: "fox-general",
-            objective: "核对资料", context: "", budget: &normalized_child_budget(None, 4096).unwrap(),
-            team_run_id: None, team_member_id: None, allowed_tools: None,
-        }).unwrap();
-        let updated = execute_memory_operation(&database, &companion.conversation_id, &root_run.run.id, "companion_profile_update", &json!({
-            "display_name": "小周", "duty": "准备党群汇报", "persona_override": "先给结论"
-        })).unwrap();
+        let root_run = database
+            .create_run(&companion.conversation_id, "更新资料", None)
+            .unwrap();
+        let other_run = database
+            .create_run(&other.conversation_id, "更新资料", None)
+            .unwrap();
+        database
+            .apply_runtime_event(&root_run.run.id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        database
+            .apply_runtime_event(&other_run.run.id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        database
+            .create_host_tool_call(
+                &root_run.run.id,
+                "spawn-profile-child",
+                "child_run_start",
+                &json!({}),
+                "running",
+                false,
+            )
+            .unwrap();
+        let (child, _, _) = database
+            .create_child_run(crate::database::CreateChildRunInput {
+                parent_run_id: &root_run.run.id,
+                tool_call_id: "spawn-profile-child",
+                worker_agent_id: "fox-general",
+                objective: "核对资料",
+                context: "",
+                budget: &normalized_child_budget(None, 4096).unwrap(),
+                team_run_id: None,
+                team_member_id: None,
+                allowed_tools: None,
+            })
+            .unwrap();
+        let updated = execute_memory_operation(
+            &database,
+            &companion.conversation_id,
+            &root_run.run.id,
+            "companion_profile_update",
+            &json!({
+                "display_name": "小周", "duty": "准备党群汇报", "persona_override": "先给结论"
+            }),
+        )
+        .unwrap();
         assert_eq!(updated["displayName"], "小周");
         assert_eq!(updated["personaOverride"], "先给结论");
-        assert_eq!(updated["changes"], json!(["displayName", "duty", "personaOverride"]));
-        let renamed = execute_memory_operation(&database, &companion.conversation_id, &root_run.run.id, "companion_profile_update", &json!({"name":"小周 2"})).unwrap();
+        assert_eq!(
+            updated["changes"],
+            json!(["displayName", "duty", "personaOverride"])
+        );
+        let renamed = execute_memory_operation(
+            &database,
+            &companion.conversation_id,
+            &root_run.run.id,
+            "companion_profile_update",
+            &json!({"name":"小周 2"}),
+        )
+        .unwrap();
         assert_eq!(renamed["duty"], "准备党群汇报");
         assert_eq!(renamed["personaOverride"], "先给结论");
-        assert!(execute_memory_operation(&database, &child.run.conversation_id, &child.run.id, "companion_profile_update", &json!({"name":"伪造子运行"})).is_err());
-        assert!(execute_memory_operation(&database, &child.run.conversation_id, &child.run.id, "memory_write", &json!({"target":"notes","action":"add","content":"非法"})).is_err());
-        assert!(execute_memory_operation(&database, &companion.conversation_id, &root_run.run.id, "companion_profile_update", &json!({"name":"小 Fox","targetId":other.profile.id})).is_err());
-        assert!(execute_memory_operation(&database, &companion.conversation_id, &root_run.run.id, "companion_profile_update", &json!({"name":42,"duty":"不应保存"})).is_err());
-        assert!(execute_memory_operation(&database, &other.conversation_id, &other_run.run.id, "companion_profile_update", &json!({"name":"小周 2"})).is_err());
-        let saved = database.companion_runtime_notes(&companion.conversation_id, "").unwrap().unwrap();
+        assert!(execute_memory_operation(
+            &database,
+            &child.run.conversation_id,
+            &child.run.id,
+            "companion_profile_update",
+            &json!({"name":"伪造子运行"})
+        )
+        .is_err());
+        assert!(execute_memory_operation(
+            &database,
+            &child.run.conversation_id,
+            &child.run.id,
+            "memory_write",
+            &json!({"target":"notes","action":"add","content":"非法"})
+        )
+        .is_err());
+        assert!(execute_memory_operation(
+            &database,
+            &companion.conversation_id,
+            &root_run.run.id,
+            "companion_profile_update",
+            &json!({"name":"小 Fox","targetId":other.profile.id})
+        )
+        .is_err());
+        assert!(execute_memory_operation(
+            &database,
+            &companion.conversation_id,
+            &root_run.run.id,
+            "companion_profile_update",
+            &json!({"name":42,"duty":"不应保存"})
+        )
+        .is_err());
+        assert!(execute_memory_operation(
+            &database,
+            &other.conversation_id,
+            &other_run.run.id,
+            "companion_profile_update",
+            &json!({"name":"小周 2"})
+        )
+        .is_err());
+        let saved = database
+            .companion_runtime_notes(&companion.conversation_id, "")
+            .unwrap()
+            .unwrap();
         assert_eq!(saved["displayName"], "小周 2");
         assert_eq!(saved["duty"], "准备党群汇报");
         assert_eq!(saved["personaOverride"], "先给结论");
 
-        let ordinary = database.create_conversation("fox-general", None, None, None).unwrap();
+        let ordinary = database
+            .create_conversation("fox-general", None, None, None)
+            .unwrap();
         database.with_connection(|connection| {
             connection.execute("INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES ('ordinary',?1,'running','fox',1)", [&ordinary.id])
         }).unwrap();
-        assert!(execute_memory_operation(&database, &ordinary.id, "ordinary", "companion_profile_update", &json!({"name":"普通对话"})).is_err());
+        assert!(execute_memory_operation(
+            &database,
+            &ordinary.id,
+            "ordinary",
+            "companion_profile_update",
+            &json!({"name":"普通对话"})
+        )
+        .is_err());
 
         database.with_connection(|connection| {
             connection.execute_batch(
@@ -14071,27 +16653,76 @@ mod attachment_tests {
                  INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES ('reader-run','reader-chat','running','fox',1);",
             )
         }).unwrap();
-        database.companion_grant_project(&companion.profile.id, "reader-project", true).unwrap();
-        database.companion_project_note_reference_set("reader-chat", Some(&companion.profile.id)).unwrap();
-        assert!(execute_memory_operation(&database, "reader-chat", "reader-run", "companion_profile_update", &json!({"name":"项目读者越权"})).is_err());
+        database
+            .companion_grant_project(&companion.profile.id, "reader-project", true)
+            .unwrap();
+        database
+            .companion_project_note_reference_set("reader-chat", Some(&companion.profile.id))
+            .unwrap();
+        assert!(execute_memory_operation(
+            &database,
+            "reader-chat",
+            "reader-run",
+            "companion_profile_update",
+            &json!({"name":"项目读者越权"})
+        )
+        .is_err());
 
-        let background = database.create_digital_colleague(&crate::database::CreateDigitalColleagueInput {
-            name: "Background profile".into(), expert_id: "fox-security".into(), objective: "profile".into(),
-            project_id: None, project_root: None, knowledge_references: Vec::new(), max_runs_per_day: 1,
-            max_tokens_per_day: 1000, max_duration_ms: 1000, max_output_tokens: 100, max_tool_calls: 1,
-            companion_id: Some(companion.profile.id.clone()),
-        }).unwrap();
+        let background = database
+            .create_digital_colleague(&crate::database::CreateDigitalColleagueInput {
+                name: "Background profile".into(),
+                expert_id: "fox-security".into(),
+                objective: "profile".into(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: Vec::new(),
+                max_runs_per_day: 1,
+                max_tokens_per_day: 1000,
+                max_duration_ms: 1000,
+                max_output_tokens: 100,
+                max_tool_calls: 1,
+                companion_id: Some(companion.profile.id.clone()),
+            })
+            .unwrap();
         database.with_connection(|connection| {
             connection.execute("INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES ('background',?1,'running','fox',1)", [&background.conversation_id])
         }).unwrap();
-        let background_saved = execute_memory_operation(&database, &background.conversation_id, "background", "companion_profile_update", &json!({"persona_override":"尽量简短"})).unwrap();
+        let background_saved = execute_memory_operation(
+            &database,
+            &background.conversation_id,
+            "background",
+            "companion_profile_update",
+            &json!({"persona_override":"尽量简短"}),
+        )
+        .unwrap();
         assert_eq!(background_saved["personaOverride"], "先给结论\n尽量简短");
-        let replaced = execute_memory_operation(&database, &companion.conversation_id, &root_run.run.id, "companion_profile_update", &json!({"persona_override":"完整替换", "preferenceOperation":"replace"})).unwrap();
+        let replaced = execute_memory_operation(
+            &database,
+            &companion.conversation_id,
+            &root_run.run.id,
+            "companion_profile_update",
+            &json!({"persona_override":"完整替换", "preferenceOperation":"replace"}),
+        )
+        .unwrap();
         assert_eq!(replaced["personaOverride"], "完整替换");
-        let cleared = execute_memory_operation(&database, &companion.conversation_id, &root_run.run.id, "companion_profile_update", &json!({"preferenceOperation":"clear"})).unwrap();
+        let cleared = execute_memory_operation(
+            &database,
+            &companion.conversation_id,
+            &root_run.run.id,
+            "companion_profile_update",
+            &json!({"preferenceOperation":"clear"}),
+        )
+        .unwrap();
         assert_eq!(cleared["personaOverride"], Value::Null);
         assert_eq!(cleared["duty"], "准备党群汇报");
-        let cleared_duty = execute_memory_operation(&database, &companion.conversation_id, &root_run.run.id, "companion_profile_update", &json!({"duty":"   "})).unwrap();
+        let cleared_duty = execute_memory_operation(
+            &database,
+            &companion.conversation_id,
+            &root_run.run.id,
+            "companion_profile_update",
+            &json!({"duty":"   "}),
+        )
+        .unwrap();
         assert_eq!(cleared_duty["duty"], "");
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
@@ -14114,13 +16745,17 @@ mod attachment_tests {
                 companion.conversation_id, companion.conversation_id, other.conversation_id,
             ))
         }).unwrap();
-        let schedule = json!({"kind":"weekly","weekdays":[5],"localTime":"15:00","timezone":"Asia/Shanghai"});
+        let schedule =
+            json!({"kind":"weekly","weekdays":[5],"localTime":"15:00","timezone":"Asia/Shanghai"});
         let created = execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_create", &json!({
             "name":"Friday review", "objective":"Review the saved evidence", "schedule":schedule,
         })).unwrap();
         let task_id = created["task"]["id"].as_str().unwrap();
         assert_eq!(created["task"]["companionId"], companion.profile.id);
-        assert_eq!(created["task"]["reportConversationId"], companion.conversation_id);
+        assert_eq!(
+            created["task"]["reportConversationId"],
+            companion.conversation_id
+        );
         assert_eq!(created["task"]["expertId"], Value::Null);
         assert_eq!(created["task"]["expertBindingId"], Value::Null);
         assert_eq!(created["task"]["packageHash"], Value::Null);
@@ -14133,7 +16768,14 @@ mod attachment_tests {
         assert_eq!(created["schedule"]["catchupWindowSeconds"], 3_600);
         assert_eq!(created["schedule"]["timezone"], "Asia/Shanghai");
         assert!(created["schedule"]["nextDueAt"].as_i64().unwrap() > crate::database::now_ms());
-        assert!(execute_memory_operation(&database, &companion.conversation_id, "task-child", "companion_task_list", &json!({})).is_err());
+        assert!(execute_memory_operation(
+            &database,
+            &companion.conversation_id,
+            "task-child",
+            "companion_task_list",
+            &json!({})
+        )
+        .is_err());
         assert!(execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_create", &json!({
             "name":"Wrong owner", "objective":"Reject", "schedule":schedule, "companionId":other.profile.id,
         })).is_err());
@@ -14143,41 +16785,143 @@ mod attachment_tests {
         assert!(execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_create", &json!({
             "name":"Ambiguous", "objective":"Reject", "schedule":{"kind":"once","timezone":"UTC"},
         })).is_err());
-        assert!(execute_memory_operation(&database, &other.conversation_id, "task-other", "companion_task_update", &json!({
-            "taskId":task_id, "objective":"Cross-owner write",
-        })).is_err());
-        assert!(execute_memory_operation(&database, &other.conversation_id, "task-other", "companion_task_history", &json!({"taskId":task_id})).is_err());
-        let updated = execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_update", &json!({
-            "taskId":task_id, "objective":"Use the revised objective",
-        })).unwrap();
+        assert!(execute_memory_operation(
+            &database,
+            &other.conversation_id,
+            "task-other",
+            "companion_task_update",
+            &json!({
+                "taskId":task_id, "objective":"Cross-owner write",
+            })
+        )
+        .is_err());
+        assert!(execute_memory_operation(
+            &database,
+            &other.conversation_id,
+            "task-other",
+            "companion_task_history",
+            &json!({"taskId":task_id})
+        )
+        .is_err());
+        let updated = execute_memory_operation(
+            &database,
+            &companion.conversation_id,
+            "task-root",
+            "companion_task_update",
+            &json!({
+                "taskId":task_id, "objective":"Use the revised objective",
+            }),
+        )
+        .unwrap();
         assert_eq!(updated["task"]["objective"], "Use the revised objective");
         assert_eq!(updated["schedule"]["timezone"], "Asia/Shanghai");
         assert!(execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_update", &json!({
             "taskId":task_id, "schedule":{"kind":"weekly","weekdays":[5],"localTime":"15:00","timezone":"UTC"},
         })).is_err());
-        let paused = execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_pause", &json!({"taskId":task_id})).unwrap();
+        let paused = execute_memory_operation(
+            &database,
+            &companion.conversation_id,
+            "task-root",
+            "companion_task_pause",
+            &json!({"taskId":task_id}),
+        )
+        .unwrap();
         assert_eq!(paused["schedule"]["enabled"], false);
-        let resumed = execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_resume", &json!({"taskId":task_id})).unwrap();
+        let resumed = execute_memory_operation(
+            &database,
+            &companion.conversation_id,
+            "task-root",
+            "companion_task_resume",
+            &json!({"taskId":task_id}),
+        )
+        .unwrap();
         assert_eq!(resumed["schedule"]["enabled"], true);
-        let listed = execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_list", &json!({})).unwrap();
+        let listed = execute_memory_operation(
+            &database,
+            &companion.conversation_id,
+            "task-root",
+            "companion_task_list",
+            &json!({}),
+        )
+        .unwrap();
         assert_eq!(listed.as_array().unwrap().len(), 1);
-        assert!(execute_memory_operation(&database, &other.conversation_id, "task-other", "companion_task_list", &json!({})).unwrap().as_array().unwrap().is_empty());
-        let accepted = database.accept_digital_colleague_trigger(task_id, "manual", None, "host-history", &json!({}), None, "user").unwrap();
+        assert!(execute_memory_operation(
+            &database,
+            &other.conversation_id,
+            "task-other",
+            "companion_task_list",
+            &json!({})
+        )
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .is_empty());
+        let accepted = database
+            .accept_digital_colleague_trigger(
+                task_id,
+                "manual",
+                None,
+                "host-history",
+                &json!({}),
+                None,
+                "user",
+            )
+            .unwrap();
         assert!(accepted.prepared.is_some());
-        let history = execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_history", &json!({"taskId":task_id})).unwrap();
+        let history = execute_memory_operation(
+            &database,
+            &companion.conversation_id,
+            "task-root",
+            "companion_task_history",
+            &json!({"taskId":task_id}),
+        )
+        .unwrap();
         assert_eq!(history.as_array().unwrap().len(), 1);
-        database.apply_runtime_event(accepted.trigger.run_id.as_deref().unwrap(), 1, &json!({"type":"run.started"})).unwrap();
-        database.apply_runtime_event(accepted.trigger.run_id.as_deref().unwrap(), 2, &json!({"type":"run.completed"})).unwrap();
-        execute_memory_operation(&database, &companion.conversation_id, "task-root", "companion_task_delete", &json!({"taskId":task_id})).unwrap();
-        assert_eq!(database.get_digital_colleague(task_id).unwrap().unwrap().status, "revoked");
-        assert_eq!(database.list_digital_colleague_triggers(task_id, 20).unwrap().len(), 1);
+        database
+            .apply_runtime_event(
+                accepted.trigger.run_id.as_deref().unwrap(),
+                1,
+                &json!({"type":"run.started"}),
+            )
+            .unwrap();
+        database
+            .apply_runtime_event(
+                accepted.trigger.run_id.as_deref().unwrap(),
+                2,
+                &json!({"type":"run.completed"}),
+            )
+            .unwrap();
+        execute_memory_operation(
+            &database,
+            &companion.conversation_id,
+            "task-root",
+            "companion_task_delete",
+            &json!({"taskId":task_id}),
+        )
+        .unwrap();
+        assert_eq!(
+            database
+                .get_digital_colleague(task_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "revoked"
+        );
+        assert_eq!(
+            database
+                .list_digital_colleague_triggers(task_id, 20)
+                .unwrap()
+                .len(),
+            1
+        );
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn blank_companion_uses_shipped_assistant_not_customized_default_agent() {
-        let root = std::env::temp_dir().join(format!("fox-blank-shipped-assistant-{}", Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("fox-blank-shipped-assistant-{}", Uuid::new_v4()));
         let skills_dir = root.join("skills");
         fs::create_dir_all(skills_dir.join("custom-default-skill")).unwrap();
         fs::write(
@@ -14187,28 +16931,37 @@ mod attachment_tests {
         .unwrap();
         let database = Database::open(root.join("test.db")).unwrap();
         let default_companion = database.seed_default_companion(&root).unwrap();
-        database.edit_companion(&default_companion.profile.id, &CompanionProfileEdit {
-            display_name: None,
-            avatar_ref: None,
-            duty: Some("DEFAULT_COMPANION_ONLY_DUTY".into()),
-            persona_override: Some("DEFAULT_COMPANION_ONLY_PERSONA".into()),
-        }).unwrap();
+        database
+            .edit_companion(
+                &default_companion.profile.id,
+                &CompanionProfileEdit {
+                    display_name: None,
+                    avatar_ref: None,
+                    duty: Some("DEFAULT_COMPANION_ONLY_DUTY".into()),
+                    persona_override: Some("DEFAULT_COMPANION_ONLY_PERSONA".into()),
+                },
+            )
+            .unwrap();
         let customized = database.get_agent("fox-general").unwrap().unwrap();
-        database.save_agent(&SaveAgentRequest {
-            id: Some(customized.id),
-            name: customized.name,
-            description: customized.description,
-            icon: customized.icon,
-            category: customized.category,
-            system_prompt: "CUSTOMIZED_DEFAULT_AGENT_PROMPT".into(),
-            default_model: "user-default-model".into(),
-            opening_suggestions: customized.opening_suggestions,
-            package_manifest: json!({
-                "skills": ["custom-default-skill"],
-                "allowedTools": ["read"]
-            }),
-        }).unwrap();
-        database.set_agent_skill_enabled("fox-general", "custom-default-skill", true).unwrap();
+        database
+            .save_agent(&SaveAgentRequest {
+                id: Some(customized.id),
+                name: customized.name,
+                description: customized.description,
+                icon: customized.icon,
+                category: customized.category,
+                system_prompt: "CUSTOMIZED_DEFAULT_AGENT_PROMPT".into(),
+                default_model: "user-default-model".into(),
+                opening_suggestions: customized.opening_suggestions,
+                package_manifest: json!({
+                    "skills": ["custom-default-skill"],
+                    "allowedTools": ["read"]
+                }),
+            })
+            .unwrap();
+        database
+            .set_agent_skill_enabled("fox-general", "custom-default-skill", true)
+            .unwrap();
 
         let blank = database.create_blank_companion(&root).unwrap();
         let context = conversation_prompt_context(
@@ -14217,8 +16970,12 @@ mod attachment_tests {
             &blank.conversation_id,
             "blank companion",
             "user",
-            PromptScopeOverrides { tool_allowlist: None, mcp_server_scope: None },
-        ).unwrap();
+            PromptScopeOverrides {
+                tool_allowlist: None,
+                mcp_server_scope: None,
+            },
+        )
+        .unwrap();
         let serialized = context.assistant_package.to_string();
         for marker in [
             "CUSTOMIZED_DEFAULT_AGENT_PROMPT",
@@ -14227,18 +16984,40 @@ mod attachment_tests {
             "DEFAULT_COMPANION_ONLY_DUTY",
             "DEFAULT_COMPANION_ONLY_PERSONA",
         ] {
-            assert!(!serialized.contains(marker), "blank assistant inherited {marker}");
-            assert!(!context.system_prompt.contains(marker), "blank prompt inherited {marker}");
-            assert!(!context.skill_prompt.contains(marker), "blank skills inherited {marker}");
+            assert!(
+                !serialized.contains(marker),
+                "blank assistant inherited {marker}"
+            );
+            assert!(
+                !context.system_prompt.contains(marker),
+                "blank prompt inherited {marker}"
+            );
+            assert!(
+                !context.skill_prompt.contains(marker),
+                "blank skills inherited {marker}"
+            );
         }
-        assert!(context.system_prompt.starts_with("You are Fox, a careful general-purpose desktop assistant."));
-        assert_eq!(context.assistant_package["defaultModel"], "configured-model");
+        assert!(context
+            .system_prompt
+            .starts_with("You are Fox, a careful general-purpose desktop assistant."));
+        assert_eq!(
+            context.assistant_package["defaultModel"],
+            "configured-model"
+        );
         assert_eq!(context.assistant_package["enabledSkills"], json!([]));
-        assert_eq!(context.assistant_package["packageManifest"]["skills"], json!([]));
+        assert_eq!(
+            context.assistant_package["packageManifest"]["skills"],
+            json!([])
+        );
         assert!(context.assistant_package["packageManifest"]["allowedTools"]
-            .as_array().unwrap().contains(&json!("skill_load")));
-        assert!(conversation_enabled_skill_ids(&database, &skills_dir, &blank.conversation_id)
-            .unwrap().is_empty());
+            .as_array()
+            .unwrap()
+            .contains(&json!("skill_load")));
+        assert!(
+            conversation_enabled_skill_ids(&database, &skills_dir, &blank.conversation_id)
+                .unwrap()
+                .is_empty()
+        );
 
         let default_context = conversation_prompt_context(
             &database,
@@ -14246,47 +17025,89 @@ mod attachment_tests {
             &default_companion.conversation_id,
             "seeded default companion",
             "user",
-            PromptScopeOverrides { tool_allowlist: None, mcp_server_scope: None },
-        ).unwrap();
-        assert!(default_context.system_prompt.starts_with("CUSTOMIZED_DEFAULT_AGENT_PROMPT"));
-        assert_eq!(default_context.assistant_package["defaultModel"], "user-default-model");
-        assert_eq!(default_context.assistant_package["enabledSkills"], json!(["custom-default-skill"]));
-        assert!(default_context.skill_prompt.contains("CUSTOM_DEFAULT_SKILL_INSTRUCTIONS"));
-        let default_profile = database.companion_profile(&default_companion.profile.id).unwrap();
+            PromptScopeOverrides {
+                tool_allowlist: None,
+                mcp_server_scope: None,
+            },
+        )
+        .unwrap();
+        assert!(default_context
+            .system_prompt
+            .starts_with("CUSTOMIZED_DEFAULT_AGENT_PROMPT"));
+        assert_eq!(
+            default_context.assistant_package["defaultModel"],
+            "user-default-model"
+        );
+        assert_eq!(
+            default_context.assistant_package["enabledSkills"],
+            json!(["custom-default-skill"])
+        );
+        assert!(default_context
+            .skill_prompt
+            .contains("CUSTOM_DEFAULT_SKILL_INSTRUCTIONS"));
+        let default_profile = database
+            .companion_profile(&default_companion.profile.id)
+            .unwrap();
         assert_eq!(default_profile.profile.duty, "DEFAULT_COMPANION_ONLY_DUTY");
-        assert_eq!(default_profile.profile.persona_override.as_deref(), Some("DEFAULT_COMPANION_ONLY_PERSONA"));
-        let ordinary = database.create_conversation("fox-general", Some("ordinary"), None, None).unwrap();
+        assert_eq!(
+            default_profile.profile.persona_override.as_deref(),
+            Some("DEFAULT_COMPANION_ONLY_PERSONA")
+        );
+        let ordinary = database
+            .create_conversation("fox-general", Some("ordinary"), None, None)
+            .unwrap();
         let ordinary_context = conversation_prompt_context(
             &database,
             &skills_dir,
             &ordinary.id,
             "ordinary chat",
             "user",
-            PromptScopeOverrides { tool_allowlist: None, mcp_server_scope: None },
-        ).unwrap();
-        assert!(ordinary_context.system_prompt.starts_with("CUSTOMIZED_DEFAULT_AGENT_PROMPT"));
-        assert_eq!(ordinary_context.assistant_package["defaultModel"], "user-default-model");
-        assert_eq!(ordinary_context.assistant_package["enabledSkills"], json!(["custom-default-skill"]));
-        assert!(ordinary_context.skill_prompt.contains("CUSTOM_DEFAULT_SKILL_INSTRUCTIONS"));
+            PromptScopeOverrides {
+                tool_allowlist: None,
+                mcp_server_scope: None,
+            },
+        )
+        .unwrap();
+        assert!(ordinary_context
+            .system_prompt
+            .starts_with("CUSTOMIZED_DEFAULT_AGENT_PROMPT"));
+        assert_eq!(
+            ordinary_context.assistant_package["defaultModel"],
+            "user-default-model"
+        );
+        assert_eq!(
+            ordinary_context.assistant_package["enabledSkills"],
+            json!(["custom-default-skill"])
+        );
+        assert!(ordinary_context
+            .skill_prompt
+            .contains("CUSTOM_DEFAULT_SKILL_INSTRUCTIONS"));
 
         let create_task = |name: &str, companion_id: String, reference: KnowledgeReference| {
-            database.create_owned_companion_task(&CreateDigitalColleagueInput {
-                name: name.into(),
-                expert_id: String::new(),
-                objective: "Task binding must not reclassify the base assistant".into(),
-                project_id: None,
-                project_root: None,
-                knowledge_references: vec![reference],
-                max_runs_per_day: 8,
-                max_tokens_per_day: 10_000,
-                max_duration_ms: 60_000,
-                max_output_tokens: 2_000,
-                max_tool_calls: 20,
-                companion_id: Some(companion_id),
-            }, crate::database::DigitalColleagueScheduleSpec::Interval {
-                interval_seconds: 3600,
-                timezone: "UTC".into(),
-            }, false).unwrap().task
+            database
+                .create_owned_companion_task(
+                    &CreateDigitalColleagueInput {
+                        name: name.into(),
+                        expert_id: String::new(),
+                        objective: "Task binding must not reclassify the base assistant".into(),
+                        project_id: None,
+                        project_root: None,
+                        knowledge_references: vec![reference],
+                        max_runs_per_day: 8,
+                        max_tokens_per_day: 10_000,
+                        max_duration_ms: 60_000,
+                        max_output_tokens: 2_000,
+                        max_tool_calls: 20,
+                        companion_id: Some(companion_id),
+                    },
+                    crate::database::DigitalColleagueScheduleSpec::Interval {
+                        interval_seconds: 3600,
+                        timezone: "UTC".into(),
+                    },
+                    false,
+                )
+                .unwrap()
+                .task
         };
         let blank_reference = KnowledgeReference::local("blank-task-local-knowledge");
         let blank_task = create_task(
@@ -14300,18 +17121,32 @@ mod attachment_tests {
             &blank_task.conversation_id,
             "blank companion task",
             "digital_colleague",
-            PromptScopeOverrides { tool_allowlist: None, mcp_server_scope: None },
-        ).unwrap();
-        assert!(blank_task_context.system_prompt.starts_with("You are Fox, a careful general-purpose desktop assistant."));
-        assert_eq!(blank_task_context.assistant_package["defaultModel"], "configured-model");
-        assert_eq!(blank_task_context.assistant_package["enabledSkills"], json!([]));
+            PromptScopeOverrides {
+                tool_allowlist: None,
+                mcp_server_scope: None,
+            },
+        )
+        .unwrap();
+        assert!(blank_task_context
+            .system_prompt
+            .starts_with("You are Fox, a careful general-purpose desktop assistant."));
+        assert_eq!(
+            blank_task_context.assistant_package["defaultModel"],
+            "configured-model"
+        );
+        assert_eq!(
+            blank_task_context.assistant_package["enabledSkills"],
+            json!([])
+        );
         assert_eq!(
             blank_task_context.assistant_package["packageManifest"]["knowledgeReferences"],
             json!([blank_reference])
         );
         assert!(blank_task_context.expert_package.is_none());
-        assert!(database.current_conversation_expert_binding(&blank_task.conversation_id)
-            .unwrap().is_none());
+        assert!(database
+            .current_conversation_expert_binding(&blank_task.conversation_id)
+            .unwrap()
+            .is_none());
 
         let default_reference = KnowledgeReference::local("default-task-local-knowledge");
         let default_task = create_task(
@@ -14325,59 +17160,83 @@ mod attachment_tests {
             &default_task.conversation_id,
             "seeded default companion task",
             "digital_colleague",
-            PromptScopeOverrides { tool_allowlist: None, mcp_server_scope: None },
-        ).unwrap();
-        assert!(default_task_context.system_prompt.starts_with("CUSTOMIZED_DEFAULT_AGENT_PROMPT"));
-        assert_eq!(default_task_context.assistant_package["defaultModel"], "user-default-model");
-        assert_eq!(default_task_context.assistant_package["enabledSkills"], json!(["custom-default-skill"]));
-        assert!(default_task_context.skill_prompt.contains("CUSTOM_DEFAULT_SKILL_INSTRUCTIONS"));
+            PromptScopeOverrides {
+                tool_allowlist: None,
+                mcp_server_scope: None,
+            },
+        )
+        .unwrap();
+        assert!(default_task_context
+            .system_prompt
+            .starts_with("CUSTOMIZED_DEFAULT_AGENT_PROMPT"));
+        assert_eq!(
+            default_task_context.assistant_package["defaultModel"],
+            "user-default-model"
+        );
+        assert_eq!(
+            default_task_context.assistant_package["enabledSkills"],
+            json!(["custom-default-skill"])
+        );
+        assert!(default_task_context
+            .skill_prompt
+            .contains("CUSTOM_DEFAULT_SKILL_INSTRUCTIONS"));
         assert_eq!(
             default_task_context.assistant_package["packageManifest"]["knowledgeReferences"],
             json!([default_reference])
         );
         assert!(default_task_context.expert_package.is_none());
-        assert!(database.current_conversation_expert_binding(&default_task.conversation_id)
-            .unwrap().is_none());
+        assert!(database
+            .current_conversation_expert_binding(&default_task.conversation_id)
+            .unwrap()
+            .is_none());
         drop(database);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn background_task_package_and_host_share_task_knowledge_scope() {
-        let root = std::env::temp_dir().join(format!("fox-task-knowledge-scope-{}", Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("fox-task-knowledge-scope-{}", Uuid::new_v4()));
         let skills_dir = root.join("skills");
         fs::create_dir_all(&skills_dir).unwrap();
         let database = Database::open(root.join("test.db")).unwrap();
         let private = database.add_companion(&root, "fox-debugger").unwrap();
-        let local_knowledge = crate::local_knowledge::LocalKnowledgeStore::open(root.join("knowledge")).unwrap();
-        let task_base = local_knowledge.create_base(crate::local_knowledge::CreateLocalKnowledgeBaseRequest {
-            name: "Task knowledge A".into(),
-            description: None,
-            embedding_model_id: None,
-            chunk_size: None,
-            chunk_overlap: None,
-            search_mode: None,
-        }).unwrap();
+        let local_knowledge =
+            crate::local_knowledge::LocalKnowledgeStore::open(root.join("knowledge")).unwrap();
+        let task_base = local_knowledge
+            .create_base(crate::local_knowledge::CreateLocalKnowledgeBaseRequest {
+                name: "Task knowledge A".into(),
+                description: None,
+                embedding_model_id: None,
+                chunk_size: None,
+                chunk_overlap: None,
+                search_mode: None,
+            })
+            .unwrap();
         let task_reference = KnowledgeReference::local(&task_base.id);
         let private_reference = KnowledgeReference::local("private-knowledge-b");
-        database.set_knowledge_references(
-            &private.conversation_id,
-            &[(private_reference.clone(), "Private B".into())],
-        ).unwrap();
-        let task = database.create_digital_colleague(&CreateDigitalColleagueInput {
-            name: "Scoped task".into(),
-            expert_id: "fox-debugger".into(),
-            objective: "Use only task-selected knowledge".into(),
-            project_id: None,
-            project_root: None,
-            knowledge_references: vec![task_reference.clone()],
-            max_runs_per_day: 8,
-            max_tokens_per_day: 10_000,
-            max_duration_ms: 60_000,
-            max_output_tokens: 2_000,
-            max_tool_calls: 20,
-            companion_id: Some(private.profile.id.clone()),
-        }).unwrap();
+        database
+            .set_knowledge_references(
+                &private.conversation_id,
+                &[(private_reference.clone(), "Private B".into())],
+            )
+            .unwrap();
+        let task = database
+            .create_digital_colleague(&CreateDigitalColleagueInput {
+                name: "Scoped task".into(),
+                expert_id: "fox-debugger".into(),
+                objective: "Use only task-selected knowledge".into(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: vec![task_reference.clone()],
+                max_runs_per_day: 8,
+                max_tokens_per_day: 10_000,
+                max_duration_ms: 60_000,
+                max_output_tokens: 2_000,
+                max_tool_calls: 20,
+                companion_id: Some(private.profile.id.clone()),
+            })
+            .unwrap();
 
         let context = conversation_prompt_context(
             &database,
@@ -14385,13 +17244,19 @@ mod attachment_tests {
             &task.conversation_id,
             "scoped task",
             "digital_colleague",
-            PromptScopeOverrides { tool_allowlist: None, mcp_server_scope: None },
-        ).unwrap();
+            PromptScopeOverrides {
+                tool_allowlist: None,
+                mcp_server_scope: None,
+            },
+        )
+        .unwrap();
         assert_eq!(
             context.expert_package.as_ref().unwrap()["packageManifest"]["knowledgeReferences"],
             json!([task_reference.clone()])
         );
-        let bindings = database.conversation_knowledge_reference_bindings(&task.conversation_id).unwrap();
+        let bindings = database
+            .conversation_knowledge_reference_bindings(&task.conversation_id)
+            .unwrap();
         assert_eq!(bindings.len(), 1);
         assert_eq!(json!(bindings[0].reference), json!(task_reference));
 
@@ -14417,7 +17282,10 @@ mod attachment_tests {
             control,
         ))
         .unwrap_err();
-        assert!(rejected.contains("local_knowledge.binding_invalid"), "{rejected}");
+        assert!(
+            rejected.contains("local_knowledge.binding_invalid"),
+            "{rejected}"
+        );
         drop(local_knowledge);
         drop(database);
         fs::remove_dir_all(root).unwrap();
@@ -14556,12 +17424,32 @@ mod attachment_tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
         let output = std::process::Command::new("node")
             .arg(root.join("services/agent-runtime/test/fixtures/ready-handshake.mjs"))
-            .current_dir(&root).output().expect("start real runtime handshake probe");
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("real ready payload");
-        let (_, _, capabilities) = parse_runtime_ready_payload(&payload).expect("production startup validation");
-        for name in ["attachment_compute", "skill_load", "compute_job_start", "read_tool_result"] {
-            assert!(capabilities["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == name), "{name}");
+            .current_dir(&root)
+            .output()
+            .expect("start real runtime handshake probe");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let payload: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("real ready payload");
+        let (_, _, capabilities) =
+            parse_runtime_ready_payload(&payload).expect("production startup validation");
+        for name in [
+            "attachment_compute",
+            "skill_load",
+            "compute_job_start",
+            "read_tool_result",
+        ] {
+            assert!(
+                capabilities["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|tool| tool["name"] == name),
+                "{name}"
+            );
         }
     }
 
@@ -14698,22 +17586,35 @@ mod attachment_tests {
             wrapped["details"]["originalBytes"].as_u64().unwrap()
                 > super::MAX_KNOWLEDGE_TOOL_TEXT_BYTES as u64
         );
-        assert!(crate::canonical_json::to_vec(&wrapped).unwrap().len() < super::MAX_PROTOCOL_LINE_BYTES / 2);
+        assert!(
+            crate::canonical_json::to_vec(&wrapped).unwrap().len()
+                < super::MAX_PROTOCOL_LINE_BYTES / 2
+        );
     }
 
     #[test]
     fn attachment_pages_preserve_unicode_and_bound_protocol_size() {
         let text = "AGV等待🦊\n".repeat(55000);
         let old_result = json!({"content":[{"type":"text","text":text}],"details":{"text":text}});
-        assert!(crate::canonical_json::to_vec(&old_result).unwrap().len() > super::MAX_PROTOCOL_LINE_BYTES);
+        assert!(
+            crate::canonical_json::to_vec(&old_result).unwrap().len()
+                > super::MAX_PROTOCOL_LINE_BYTES
+        );
         let mut offset = 0;
         let mut recovered = String::new();
         loop {
-            let page = super::attachment_text_page(&text, &json!({"offset":offset,"limit":24000})).unwrap();
-            let wrapped = json!({"content":[{"type":"text","text":page.canonical_string()}],"details":page});
-            assert!(crate::canonical_json::to_vec(&wrapped).unwrap().len() < super::MAX_PROTOCOL_LINE_BYTES / 2);
+            let page = super::attachment_text_page(&text, &json!({"offset":offset,"limit":24000}))
+                .unwrap();
+            let wrapped =
+                json!({"content":[{"type":"text","text":page.canonical_string()}],"details":page});
+            assert!(
+                crate::canonical_json::to_vec(&wrapped).unwrap().len()
+                    < super::MAX_PROTOCOL_LINE_BYTES / 2
+            );
             recovered.push_str(page["text"].as_str().unwrap());
-            if !page["hasMore"].as_bool().unwrap() { break; }
+            if !page["hasMore"].as_bool().unwrap() {
+                break;
+            }
             offset = page["nextOffset"].as_u64().unwrap();
         }
         assert_eq!(recovered, text);
@@ -14723,26 +17624,60 @@ mod attachment_tests {
 
     #[test]
     fn attachment_sheet_directory_jumps_to_unicode_sheet_without_scanning() {
-        let root = std::env::temp_dir().join(format!("fox-sheet-directory-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("fox-sheet-directory-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let database = Database::open(root.join("test.db")).unwrap();
-        let conversation = database.create_conversation(database.default_agent_id(), None, None, None).unwrap();
+        let conversation = database
+            .create_conversation(database.default_agent_id(), None, None, None)
+            .unwrap();
         let file = root.join("AGV.xlsx");
         let bytes = include_bytes!("../../tests/fixtures/office-reading.xlsx");
         std::fs::write(&file, bytes).unwrap();
-        database.add_attachments(&[crate::database::AttachmentRecord {
-            id: "agv".into(), conversation_id: conversation.id.clone(), message_id: None,
-            display_name: "AGV.xlsx".into(), storage_path: file.to_string_lossy().into_owned(),
-            media_type: None, byte_size: bytes.len() as i64, sha256: None, status: "ready".into(), created_at: 0,
-        }]).unwrap();
-        let overview = super::read_attachment_text(&database, &root, &conversation.id, "agv", &json!({"limit": 1})).unwrap();
+        database
+            .add_attachments(&[crate::database::AttachmentRecord {
+                id: "agv".into(),
+                conversation_id: conversation.id.clone(),
+                message_id: None,
+                display_name: "AGV.xlsx".into(),
+                storage_path: file.to_string_lossy().into_owned(),
+                media_type: None,
+                byte_size: bytes.len() as i64,
+                sha256: None,
+                status: "ready".into(),
+                created_at: 0,
+            }])
+            .unwrap();
+        let overview = super::read_attachment_text(
+            &database,
+            &root,
+            &conversation.id,
+            "agv",
+            &json!({"limit": 1}),
+        )
+        .unwrap();
         assert_eq!(overview["sheetCount"], 2);
         assert_eq!(overview["sheetDirectoryTruncated"], false);
         assert_eq!(overview["sheets"][1]["name"], "第二页");
-        let direct = super::read_attachment_text(&database, &root, &conversation.id, "agv", &json!({"offset":overview["sheets"][1]["offset"]})).unwrap();
-        assert!(direct["text"].as_str().unwrap().starts_with("[Sheet: 第二页]"));
-        assert!(super::read_attachment_text(&database, &root, "foreign", "agv", &json!({})).is_err());
-        assert!(crate::canonical_json::to_vec(&overview).unwrap().len() < super::MAX_PROTOCOL_LINE_BYTES / 2);
+        let direct = super::read_attachment_text(
+            &database,
+            &root,
+            &conversation.id,
+            "agv",
+            &json!({"offset":overview["sheets"][1]["offset"]}),
+        )
+        .unwrap();
+        assert!(direct["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("[Sheet: 第二页]"));
+        assert!(
+            super::read_attachment_text(&database, &root, "foreign", "agv", &json!({})).is_err()
+        );
+        assert!(
+            crate::canonical_json::to_vec(&overview).unwrap().len()
+                < super::MAX_PROTOCOL_LINE_BYTES / 2
+        );
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }

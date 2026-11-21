@@ -1,17 +1,15 @@
 use crate::{
     app_state::AppState,
+    companion_team::{self, CompanionTeamAction, Decision},
     companion_workspace,
     database::{
-        companions::{
-            CompanionError, CompanionProfileEdit, CompanionView,
-            CompanionsList,
-        },
+        companions::{CompanionError, CompanionProfileEdit, CompanionView, CompanionsList},
         ApiResponse, Database,
     },
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use tauri::State;
+use tauri::{Emitter, State};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,9 +18,68 @@ pub(crate) struct CompanionId {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct AssignmentConversation { conversation_id: String }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct AssignmentAnswer { assignment_id: String, answer: String }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct AssignmentId { assignment_id: String }
+
+#[tauri::command]
+pub(crate) fn companion_assignments_list(state: State<'_, AppState>, request: AssignmentConversation)
+    -> ApiResponse<Vec<crate::database::companion_coordination::Assignment>> {
+    match state.database.companion_assignments_list(&request.conversation_id) {
+        Ok(items) => ApiResponse::success(items),
+        Err(error) => ApiResponse::failure("companion.coordination", error, false),
+    }
+}
+
+#[tauri::command]
+pub(crate) fn companion_assignment_answer(state: State<'_, AppState>, request: AssignmentAnswer)
+    -> ApiResponse<crate::database::companion_coordination::Assignment> {
+    match state.database.answer_companion_assignment(&request.assignment_id, &request.answer) {
+        Ok(item) => {
+            state.runtime_host.notify_companion_assignments(std::slice::from_ref(&item));
+            ApiResponse::success(item)
+        }
+        Err(error) => ApiResponse::failure("companion.coordination", error, false),
+    }
+}
+
+#[tauri::command]
+pub(crate) fn companion_assignment_cancel(state: State<'_, AppState>, request: AssignmentId)
+    -> ApiResponse<crate::database::companion_coordination::Assignment> {
+    match state.database.cancel_companion_assignment(&request.assignment_id) {
+        Ok(item) => {
+            state.runtime_host.notify_companion_assignments(std::slice::from_ref(&item));
+            ApiResponse::success(item)
+        }
+        Err(error) => ApiResponse::failure("companion.coordination", error, false),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ResolveTeamAction {
+    action_id: String,
+    decision: Decision,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AddExpert {
     expert_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BlankCompanionProfile {
+    display_name: Option<String>,
+    avatar_ref: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -88,6 +145,12 @@ pub(crate) struct SetCompanionCapability {
 pub(crate) struct PinCompanion {
     companion_id: String,
     pinned: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CompanionOrder {
+    ids: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -177,6 +240,30 @@ pub(crate) fn companions_list(state: State<'_, AppState>) -> ApiResponse<Compani
 }
 
 #[tauri::command]
+pub(crate) fn companion_team_actions_list(
+    state: State<'_, AppState>,
+    request: CompanionId,
+) -> ApiResponse<Vec<CompanionTeamAction>> {
+    response(companion_team::list(&state.database, &request.companion_id))
+}
+
+#[tauri::command]
+pub(crate) fn companion_team_action_resolve(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    request: ResolveTeamAction,
+) -> ApiResponse<CompanionTeamAction> {
+    let result = companion_team::resolve(&state, &request.action_id, request.decision);
+    if let Ok(action) = &result {
+        let _ = app.emit(
+            "companion-team-actions-changed",
+            serde_json::json!({"companionId": action.companion_id}),
+        );
+    }
+    response(result)
+}
+
+#[tauri::command]
 pub(crate) fn companion_ensure_default(state: State<'_, AppState>) -> ApiResponse<CompanionView> {
     match ensure_default(&state.database, &state.data_dir) {
         Ok(view) => ApiResponse::success(view),
@@ -198,13 +285,24 @@ pub(crate) fn companion_add_from_expert(
 }
 
 #[tauri::command]
-pub(crate) fn companion_create_blank(state: State<'_, AppState>) -> ApiResponse<CompanionView> {
-    response(
-        state
-            .database
-            .create_blank_companion(&state.data_dir)
-            .and_then(|view| prepare_new_workspace(&state.database, &state.data_dir, view)),
-    )
+pub(crate) fn companion_create_blank(
+    state: State<'_, AppState>,
+    request: Option<BlankCompanionProfile>,
+) -> ApiResponse<CompanionView> {
+    let created = match request {
+        Some(profile) => state.database.create_blank_companion_with_profile(
+            &state.data_dir,
+            profile.display_name.as_deref(),
+            profile.avatar_ref.as_deref(),
+        ),
+        None => state.database.create_blank_companion(&state.data_dir),
+    };
+    response(created.and_then(|view| prepare_new_workspace(&state.database, &state.data_dir, view)))
+}
+
+#[tauri::command]
+pub(crate) fn companion_next_default_name(state: State<'_, AppState>) -> ApiResponse<String> {
+    response(state.database.next_companion_default_name())
 }
 
 #[tauri::command]
@@ -219,6 +317,11 @@ pub(crate) fn companion_open(
             .and_then(|view| {
                 if view.profile.archived_at.is_some() {
                     Err(CompanionError::Archived)
+                } else if view.profile.is_default {
+                    state.database.refresh_default_companion_guide(&view.profile.id)?;
+                    state.database.ensure_companion_helper_followup(&view.profile.id)
+                        .map_err(CompanionError::Storage)?;
+                    state.database.companion_profile(&view.profile.id)
                 } else {
                     Ok(view)
                 }
@@ -243,11 +346,11 @@ pub(crate) fn companion_set_model(
     state: State<'_, AppState>,
     request: SetCompanionModel,
 ) -> ApiResponse<CompanionView> {
-    response(
-        state
-            .database
-            .set_companion_model(&request.companion_id, request.provider_id.as_deref(), request.model_ref.as_deref()),
-    )
+    response(state.database.set_companion_model(
+        &request.companion_id,
+        request.provider_id.as_deref(),
+        request.model_ref.as_deref(),
+    ))
 }
 
 /// C02: the profile's capability list. Grants are the user's choice; the tool
@@ -263,35 +366,52 @@ pub(crate) fn companion_capabilities_get(
         Err(error) => return ApiResponse::failure("storage.error", error, true),
     };
     let granted = |server: &str, tool: &str| grants.iter().any(|(s, t)| s == server && t == tool);
-    let web = crate::database::WEB_TOOLS.iter()
-        .map(|tool| WebCapability { tool: (*tool).to_owned(), granted: granted(crate::database::WEB_SERVER_ID, tool) })
+    let web = crate::database::WEB_TOOLS
+        .iter()
+        .map(|tool| WebCapability {
+            tool: (*tool).to_owned(),
+            granted: granted(crate::database::WEB_SERVER_ID, tool),
+        })
         .collect();
     let servers = match state.database.list_mcp_servers() {
         Ok(servers) => servers,
         Err(error) => return ApiResponse::failure("storage.error", error, true),
     };
-    let connectors = servers.into_iter().map(|server| {
-        let (tools, last_error) = if server.enabled {
-            match crate::mcp::list_tools(&server) {
-                Ok(list) => (list.into_iter()
-                    .filter_map(|item| item.get("name").and_then(|value| value.as_str()).map(str::to_owned))
-                    .map(|name| ConnectorTool { granted: granted(&server.id, &name), name })
-                    .collect::<Vec<_>>(), None),
-                Err(error) => (Vec::new(), Some(error)),
+    let connectors = servers
+        .into_iter()
+        .map(|server| {
+            let (tools, last_error) = if server.enabled {
+                match crate::mcp::list_tools(&server) {
+                    Ok(list) => (
+                        list.into_iter()
+                            .filter_map(|item| {
+                                item.get("name")
+                                    .and_then(|value| value.as_str())
+                                    .map(str::to_owned)
+                            })
+                            .map(|name| ConnectorTool {
+                                granted: granted(&server.id, &name),
+                                name,
+                            })
+                            .collect::<Vec<_>>(),
+                        None,
+                    ),
+                    Err(error) => (Vec::new(), Some(error)),
+                }
+            } else {
+                (Vec::new(), server.last_error.clone())
+            };
+            ConnectorCapability {
+                server_id: server.id,
+                name: server.name,
+                transport: server.transport,
+                enabled: server.enabled,
+                status: server.status,
+                last_error,
+                tools,
             }
-        } else {
-            (Vec::new(), server.last_error.clone())
-        };
-        ConnectorCapability {
-            server_id: server.id,
-            name: server.name,
-            transport: server.transport,
-            enabled: server.enabled,
-            status: server.status,
-            last_error,
-            tools,
-        }
-    }).collect();
+        })
+        .collect();
     ApiResponse::success(CompanionCapabilities { web, connectors })
 }
 
@@ -300,7 +420,12 @@ pub(crate) fn companion_capability_set(
     state: State<'_, AppState>,
     request: SetCompanionCapability,
 ) -> ApiResponse<()> {
-    match state.database.set_companion_tool_grant(&request.companion_id, &request.server_id, &request.tool, request.granted) {
+    match state.database.set_companion_tool_grant(
+        &request.companion_id,
+        &request.server_id,
+        &request.tool,
+        request.granted,
+    ) {
         Ok(affected) => {
             // D1-2: best-effort Host refresh of the invalidated cards/waiters. The
             // persistent barrier committed above is authoritative even if this
@@ -324,6 +449,22 @@ pub(crate) fn companion_set_pinned(
             .database
             .pin_companion(&request.companion_id, request.pinned),
     )
+}
+
+#[tauri::command]
+pub(crate) fn companion_set_work_shortcuts(
+    state: State<'_, AppState>,
+    request: CompanionOrder,
+) -> ApiResponse<()> {
+    response(state.database.set_companion_work_shortcuts(&request.ids))
+}
+
+#[tauri::command]
+pub(crate) fn companion_set_pinned_order(
+    state: State<'_, AppState>,
+    request: CompanionOrder,
+) -> ApiResponse<()> {
+    response(state.database.set_companion_pinned_order(&request.ids))
 }
 
 #[tauri::command]
@@ -410,7 +551,11 @@ pub(crate) fn companion_favorites_list(
     state: State<'_, AppState>,
     request: CompanionId,
 ) -> ApiResponse<Vec<crate::database::ContactFavoriteEntry>> {
-    response(state.database.companion_favorites(&request.companion_id, 200))
+    response(
+        state
+            .database
+            .companion_favorites(&request.companion_id, 200),
+    )
 }
 
 #[tauri::command]

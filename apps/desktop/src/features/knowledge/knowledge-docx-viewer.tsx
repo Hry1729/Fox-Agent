@@ -6,7 +6,7 @@ import type { DocumentViewPosition } from './document-activity-model'
 import { assertSafeZipArchive } from './knowledge-archive-safety'
 import { PreviewIconButton, PreviewToolbar } from './knowledge-preview-controls'
 import './knowledge-reader-viewers.css'
-import { openKnowledgeCachedPreviewSource, type KnowledgeCachedPreviewOpener } from './knowledge-preview-source'
+import { openKnowledgeCachedPreviewSource, type WholeFilePreviewOpener, type WholeFilePreviewSource } from './knowledge-preview-source'
 
 const MAX_DOCX_BYTES = 64 * 1024 * 1024
 const DOCX_ZIP_LIMITS = {
@@ -30,12 +30,12 @@ export default function KnowledgeDocxViewer({
   knowledgeBaseId: string
   documentId: string
   filename: string
-  metadata: KnowledgeDocumentSourceMetadata
+  metadata?: KnowledgeDocumentSourceMetadata
   sourceLocator?: KnowledgeSourceLocator | null
   requestedPosition?: DocumentViewPosition
   onPositionChange?(position: DocumentViewPosition): void
   onFailure(message: string): void
-  openPreviewSource?: KnowledgeCachedPreviewOpener
+  openPreviewSource?: WholeFilePreviewOpener
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const wheelDeltaRef = useRef(0)
@@ -75,7 +75,7 @@ export default function KnowledgeDocxViewer({
     let disposed = false
     const abortController = new AbortController()
     const load = async () => {
-      let source: Awaited<ReturnType<typeof openKnowledgeCachedPreviewSource>> | null = null
+      let source: WholeFilePreviewSource | null = null
       try {
         setLoading(true)
         const [{ renderAsync }, nextSource] = await Promise.all([

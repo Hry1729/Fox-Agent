@@ -204,9 +204,14 @@ fn collect_folder_files(root: &Path) -> Result<Vec<PickedLocalKnowledgeFile>, St
 
 #[cfg(windows)]
 fn pick_files_windows() -> Result<Vec<PickedLocalKnowledgeFile>, String> {
-    pick_file_paths_windows()?.iter().enumerate().map(|(index, path)|
-        validate_picked_file(path).map_err(|error| format!("第 {} 个所选文件无效：{error}", index + 1))
-    ).collect()
+    pick_file_paths_windows()?
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            validate_picked_file(path)
+                .map_err(|error| format!("第 {} 个所选文件无效：{error}", index + 1))
+        })
+        .collect()
 }
 
 #[cfg(windows)]

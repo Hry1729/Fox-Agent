@@ -42,6 +42,15 @@ struct TaskEntry {
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CoordinationEntry {
+    conversation_id: String,
+    title: String,
+    runs: i64,
+    messages: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Plan {
     companion_id: String,
     template_agent_id: String,
@@ -50,6 +59,8 @@ struct Plan {
     /// Stored plans from before contact tasks existed deserialize with no tasks.
     #[serde(default)]
     tasks: Vec<TaskEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    coordination: Vec<CoordinationEntry>,
     workspace_path: PathBuf,
     workspace_files: u64,
     workspace_bytes: u64,
@@ -70,7 +81,9 @@ fn on_db<T>(
 }
 
 fn hash(plan: &Plan) -> DeletionResult<String> {
-    Ok(hex::encode(Sha256::digest(crate::canonical_json::to_vec(plan)?)))
+    Ok(hex::encode(Sha256::digest(crate::canonical_json::to_vec(
+        plan,
+    )?)))
 }
 
 fn normalized(path: &Path) -> io::Result<PathBuf> {
@@ -224,13 +237,18 @@ fn file_entries(
 }
 
 fn plan(conn: &Connection, data: &Path, id: &str) -> DeletionResult<Plan> {
-    let (template, name, conversation, default, stored): (Option<String>, String, String, bool, String) =
-        conn.query_row(
-            "SELECT p.template_agent_id,p.display_name,c.id,p.is_default,p.workspace_dir
+    let (template, name, conversation, default, stored): (
+        Option<String>,
+        String,
+        String,
+        bool,
+        String,
+    ) = conn.query_row(
+        "SELECT p.template_agent_id,p.display_name,c.id,p.is_default,p.workspace_dir
          FROM companion_profiles p JOIN conversations c ON c.companion_id=p.id WHERE p.id=?1",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        )?;
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+    )?;
     if default {
         return Err("companion.default_not_deletable".into());
     }
@@ -256,6 +274,22 @@ fn plan(conn: &Connection, data: &Path, id: &str) -> DeletionResult<Plan> {
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(task_query);
+    let mut coordination_query = conn.prepare(
+        "SELECT c.id,c.title,(SELECT count(*) FROM runs r WHERE r.conversation_id=c.id),
+                (SELECT count(*) FROM messages m WHERE m.conversation_id=c.id)
+         FROM companion_coordination_threads t JOIN conversations c ON c.id=t.conversation_id
+         WHERE t.recipient_companion_id=?1 OR t.source_companion_id=?1 ORDER BY c.id",
+    )?;
+    let coordination = coordination_query
+        .query_map([id], |r| {
+            Ok(CoordinationEntry {
+                conversation_id: r.get(0)?,
+                title: r.get(1)?,
+                runs: r.get(2)?,
+                messages: r.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     let active = |conversation: &str| {
         count(
             "SELECT count(*) FROM runs WHERE conversation_id=?1 AND status IN ('queued','running','cancelling','awaiting_confirmation')",
@@ -267,6 +301,11 @@ fn plan(conn: &Connection, data: &Path, id: &str) -> DeletionResult<Plan> {
     }
     for task in &tasks {
         if active(&task.conversation_id)? > 0 {
+            return Err("companion.run_active".into());
+        }
+    }
+    for thread in &coordination {
+        if active(&thread.conversation_id)? > 0 {
             return Err("companion.run_active".into());
         }
     }
@@ -288,7 +327,18 @@ fn plan(conn: &Connection, data: &Path, id: &str) -> DeletionResult<Plan> {
         return Err("联系人的工作目录已指向别处".into());
     }
     let (workspace_files, workspace_bytes) = size(&expected_root)?;
-    let files = file_entries(conn, data, &canonical_data, &conversation, &expected_root)?;
+    let mut files = file_entries(conn, data, &canonical_data, &conversation, &expected_root)?;
+    for thread in &coordination {
+        files.extend(file_entries(
+            conn,
+            data,
+            &canonical_data,
+            &thread.conversation_id,
+            &expected_root,
+        )?);
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    files.dedup_by(|a, b| a.path == b.path);
     let mut grants = conn.prepare(
         "SELECT p.name FROM companion_project_grants g JOIN projects p ON p.id=g.project_id
         WHERE companion_id=?1 AND revoked_at IS NULL ORDER BY p.name,p.id",
@@ -323,6 +373,7 @@ fn plan(conn: &Connection, data: &Path, id: &str) -> DeletionResult<Plan> {
         )?,
         conversation_id: conversation,
         tasks,
+        coordination,
         workspace_path: workspace,
         workspace_files,
         workspace_bytes,
@@ -383,7 +434,16 @@ fn purge_rows(db: &Database, plan: &Plan) -> Result<(), String> {
         // profile with ON DELETE RESTRICT. Both go before the profile; runs,
         // messages, triggers and report ledger rows cascade from them.
         for task in &plan.tasks {
-            tx.execute("DELETE FROM conversations WHERE id=?1", [&task.conversation_id])?;
+            tx.execute(
+                "DELETE FROM conversations WHERE id=?1",
+                [&task.conversation_id],
+            )?;
+        }
+        for thread in &plan.coordination {
+            tx.execute(
+                "DELETE FROM conversations WHERE id=?1",
+                [&thread.conversation_id],
+            )?;
         }
         tx.execute(
             "DELETE FROM digital_colleagues WHERE companion_id=?1 AND companion_bound=1",
@@ -451,6 +511,9 @@ fn finish(
             for task in &plan.tasks {
                 purge_sessions(&task.conversation_id)?;
             }
+            for thread in &plan.coordination {
+                purge_sessions(&thread.conversation_id)?;
+            }
             let notes = companion_notes_dir(&data.canonicalize().map_err(|e| e.to_string())?, id);
             if normalized(&notes).map_err(|e|e.to_string())? != notes { return Err("笔记目录已指向其他位置".into()); }
             match fs::remove_dir_all(&notes) {
@@ -487,15 +550,29 @@ fn result(db: &Database, plan: &Plan) -> Result<Value, String> {
 }
 
 fn resume(state: &AppState, id: &str) -> Result<Value, String> {
-    let result = finish(&state.database, &state.data_dir, id, |conversation| {
-        state
-            .runtime_host
-            .purge_conversation_session_files(conversation)
-            .map(|_| ())
-            .map_err(|e| e.message)
-    });
+    resume_with(&state.database, &state.data_dir, id, |conversation| {
+        purge_sessions(&state.runtime_host, conversation)
+    })
+}
+
+pub(crate) fn purge_sessions(
+    host: &crate::runtime_host::RuntimeHost,
+    conversation: &str,
+) -> Result<(), String> {
+    host.purge_conversation_session_files(conversation)
+        .map(|_| ())
+        .map_err(|e| e.message)
+}
+
+fn resume_with(
+    db: &Database,
+    data: &Path,
+    id: &str,
+    purge_sessions: impl FnMut(&str) -> Result<(), String>,
+) -> Result<Value, String> {
+    let result = finish(db, data, id, purge_sessions);
     if let Err(error) = &result {
-        state.database.with_connection(|c| {
+        db.with_connection(|c| {
             c.execute("UPDATE companion_deletions SET error=?2 WHERE companion_id=?1 AND state='deleting'", params![id,error])?;
             Ok(())
         })?;
@@ -554,10 +631,45 @@ pub(crate) fn companion_delete_preview(
     state: State<'_, AppState>,
     companion_id: String,
 ) -> ApiResponse<Value> {
-    response(on_db(&state.database, |c| {
-        let plan = plan(c, &state.data_dir, &companion_id)?;
-        Ok(json!({"planHash":hash(&plan)?,"plan":plan}))
-    }))
+    response(
+        state
+            .database
+            .with_connection(|c| Ok(preview_on(c, &state.data_dir, &companion_id)))
+            .and_then(std::convert::identity),
+    )
+}
+
+pub(crate) fn preview_on(
+    conn: &Connection,
+    data: &Path,
+    companion_id: &str,
+) -> Result<Value, String> {
+    let plan = plan(conn, data, companion_id).map_err(|error| error.to_string())?;
+    let plan_hash = hash(&plan).map_err(|error| error.to_string())?;
+    Ok(json!({"planHash":plan_hash,"plan":plan}))
+}
+
+pub(crate) fn delete_with_plan_locked(
+    db: &Database,
+    data: &Path,
+    companion_id: &str,
+    plan_hash: &str,
+    purge_sessions: impl FnMut(&str) -> Result<(), String>,
+) -> Result<Value, String> {
+    let existing: Option<String> = db.with_connection(|c| {
+        c.query_row(
+            "SELECT plan_hash FROM companion_deletions WHERE companion_id=?1",
+            [companion_id],
+            |r| r.get(0),
+        )
+        .optional()
+    })?;
+    match existing {
+        Some(signature) if signature != plan_hash => return Err("companion.plan_changed".into()),
+        Some(_) => {}
+        None => collect(db, data, companion_id, plan_hash)?,
+    }
+    resume_with(db, data, companion_id, purge_sessions)
 }
 
 #[tauri::command]
@@ -575,22 +687,13 @@ pub(crate) fn companion_delete(
         .and_then(|()| host.drain_companion_runs(&companion_id))
         .and_then(|()| {
             host.companion_transition().and_then(|_guard| {
-                let existing: Option<String> = state.database.with_connection(|c| {
-                    c.query_row(
-                        "SELECT plan_hash FROM companion_deletions WHERE companion_id=?1",
-                        [&companion_id],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                })?;
-                match existing {
-                    Some(signature) if signature != plan_hash => {
-                        return Err("companion.plan_changed".into())
-                    }
-                    Some(_) => {}
-                    None => collect(&state.database, &state.data_dir, &companion_id, &plan_hash)?,
-                }
-                resume(&state, &companion_id)
+                delete_with_plan_locked(
+                    &state.database,
+                    &state.data_dir,
+                    &companion_id,
+                    &plan_hash,
+                    |conversation| purge_sessions(host, conversation),
+                )
             })
         });
     host.end_companion_stop(&companion_id);
@@ -722,20 +825,22 @@ mod tests {
             }).unwrap();
             // K2: a bound task executes in its own conversation, so the manifest
             // lists the task together with the runs and messages removed with it.
-            let colleague = db.create_digital_colleague(&crate::database::CreateDigitalColleagueInput {
-                name: "报价整理".into(),
-                expert_id: "fox-debugger".into(),
-                objective: "整理报价".into(),
-                project_id: None,
-                project_root: None,
-                knowledge_references: Vec::new(),
-                max_runs_per_day: 2,
-                max_tokens_per_day: 10_000,
-                max_duration_ms: 60_000,
-                max_output_tokens: 1_024,
-                max_tool_calls: 8,
-                companion_id: Some(id.clone()),
-            }).unwrap();
+            let colleague = db
+                .create_digital_colleague(&crate::database::CreateDigitalColleagueInput {
+                    name: "报价整理".into(),
+                    expert_id: "fox-debugger".into(),
+                    objective: "整理报价".into(),
+                    project_id: None,
+                    project_root: None,
+                    knowledge_references: Vec::new(),
+                    max_runs_per_day: 2,
+                    max_tokens_per_day: 10_000,
+                    max_duration_ms: 60_000,
+                    max_output_tokens: 1_024,
+                    max_tool_calls: 8,
+                    companion_id: Some(id.clone()),
+                })
+                .unwrap();
             db.with_connection(|c| {
                 c.execute("INSERT INTO runs(id,conversation_id,status,model,last_seq,created_at)
                     VALUES('task-run',?1,'completed','model',1,1)", [&colleague.conversation_id])?;
@@ -773,13 +878,22 @@ mod tests {
             let result = finish(&db, &data, id, |_| Ok(())).unwrap();
             assert_eq!(result["removedFiles"], 4);
             assert_eq!(result["keptFiles"], 2);
-            let purged: (i64, i64, i64) = db.with_connection(|c| c.query_row(
-                "SELECT (SELECT count(*) FROM conversations WHERE id=?1),
+            let purged: (i64, i64, i64) = db
+                .with_connection(|c| {
+                    c.query_row(
+                        "SELECT (SELECT count(*) FROM conversations WHERE id=?1),
                         (SELECT count(*) FROM runs WHERE id='task-run'),
                         (SELECT count(*) FROM digital_colleagues WHERE id=?2)",
-                params![colleague.conversation_id, colleague.id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))).unwrap();
-            assert_eq!(purged, (0, 0, 0), "删除联系人一并移除后台任务的执行会话、运行与任务本身");
+                        params![colleague.conversation_id, colleague.id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                })
+                .unwrap();
+            assert_eq!(
+                purged,
+                (0, 0, 0),
+                "删除联系人一并移除后台任务的执行会话、运行与任务本身"
+            );
             let memories: (String,i64) = db.with_connection(|c| c.query_row(
                 "SELECT source_label,(SELECT count(*) FROM memory_entities WHERE id='unresolved') FROM memory_entities WHERE id='saved'",
                 [],|r| Ok((r.get(0)?,r.get(1)?)))).unwrap();

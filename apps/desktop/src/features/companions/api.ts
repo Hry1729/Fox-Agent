@@ -1,10 +1,14 @@
 import { command } from '@/features/conversations/api/desktop-client'
-import type { ContactBubbleMarkRecord, ConversationContextReset, MemoryEntityRecord } from '@/features/conversations/model/types'
+import type { CompanionAssignment, ContactBubbleMarkRecord, ConversationContextReset, MemoryEntityRecord } from '@/features/conversations/model/types'
 
 export interface Companion {
   id: string
   conversationId: string
   latestMessagePreview?: string | null
+  lastMessageAt?: number | null
+  latestFailureSummary?: string | null
+  latestBubbleId?: string | null
+  latestDeliveryOrder?: number | null
   templateAgentId: string | null
   displayName: string
   avatarRef: string
@@ -15,6 +19,8 @@ export interface Companion {
   workspaceError: string | null
   isDefault: boolean
   pinnedAt: number | null
+  pinnedOrder?: number | null
+  workShortcutOrder: number | null
   lastReadOrdinal: number
   modelProviderId: string | null
   modelRef: string | null
@@ -52,6 +58,29 @@ export interface DeletePlan {
   grantedProjects: string[]
   files: Array<{ kind: string; disposition: string; path: string; bytes: number }>
 }
+
+export type CompanionDeletePreview = { planHash: string; plan: DeletePlan }
+export type CompanionTeamValues = Partial<Record<'name' | 'duty' | 'instructions' | 'providerId' | 'modelRef', string | null>>
+export type CompanionTeamDecision = 'undo' | 'confirm' | 'dismiss'
+
+export interface CompanionTeamAction {
+  id: string
+  companionId: string
+  conversationId: string
+  runId: string
+  targetId: string
+  targetName: string
+  kind: 'create' | 'profile' | 'model' | 'delete' | 'archive'
+  status: 'applied' | 'pending' | 'undone' | 'confirmed' | 'dismissed'
+  before?: CompanionTeamValues | null
+  after?: CompanionTeamValues | null
+  preview?: CompanionDeletePreview | null
+  createdAt: number
+  updatedAt: number
+}
+
+export const COMPANION_TEAM_ACTIONS_CHANGED = 'companion-team-actions-changed'
+export const COMPANION_ASSIGNMENTS_CHANGED = 'companion-assignments-changed'
 
 export interface NoteTopic {
   id: string; title: string; aliases: string[]; contentSha256: string; revision: number
@@ -116,7 +145,8 @@ export const contacts = {
   list: () => command<CompanionsList>('companions_list'),
   open: (companionId: string) => command<Companion>('companion_open', { companionId }),
   add: (expertId: string) => command<Companion>('companion_add_from_expert', { expertId }),
-  createBlank: () => command<Companion>('companion_create_blank'),
+  createBlank: (profile?: { displayName?: string; avatarRef?: string }) => command<Companion>('companion_create_blank', profile),
+  nextDefaultName: () => command<string>('companion_next_default_name'),
   profile: (companionId: string, edit: Partial<Pick<Companion, 'displayName' | 'avatarRef' | 'duty' | 'personaOverride'>>) => command<Companion>('companion_update_profile', { companionId, ...edit }),
   setModel: (companionId: string, providerId: string | null, modelRef: string | null) => command<Companion>('companion_set_model', { companionId, providerId, modelRef }),
   capabilities: (companionId: string) => command<CompanionCapabilities>('companion_capabilities_get', { companionId }),
@@ -125,6 +155,8 @@ export const contacts = {
   openFile: (companionId: string, kind: CompanionFileEntry['kind'], fileId: string) => command<void>('companion_file_open', { companionId, kind, fileId }),
   saveFile: (companionId: string, kind: CompanionFileEntry['kind'], fileId: string) => command<string | null>('companion_file_save', { companionId, kind, fileId }),
   pin: (companionId: string, pinned: boolean) => command<Companion>('companion_set_pinned', { companionId, pinned }),
+  setPinnedOrder: (ids: string[]) => command<void>('companion_set_pinned_order', { ids }),
+  setWorkShortcuts: (ids: string[]) => command<void>('companion_set_work_shortcuts', { ids }),
   markRead: (companionId: string, deliveryOrder: number, observedAt: number) => command<Companion>('companion_mark_read', { companionId, deliveryOrder, observedAt }),
   markUnread: (companionId: string, bubbleId: string) => command<Companion>('companion_mark_unread', { companionId, bubbleId }),
   setReminderMode: (companionId: string, mode: ReminderMode) => command<Companion>('companion_set_reminder_mode', { companionId, mode }),
@@ -138,7 +170,12 @@ export const contacts = {
   repairWorkspace: (companionId: string) => direct<string>('companion_workspace_repair', { companionId }),
   importFiles: (companionId: string, paths?: string[]) => direct<string[]>('companion_import_files', { companionId, paths }),
   exportFile: (companionId: string, path: string) => direct<string | null>('companion_export_file', { companionId, path }),
-  preview: (companionId: string) => direct<{ planHash: string; plan: DeletePlan }>('companion_delete_preview', { companionId }),
+  preview: (companionId: string) => direct<CompanionDeletePreview>('companion_delete_preview', { companionId }),
+  teamActions: (companionId: string) => command<CompanionTeamAction[]>('companion_team_actions_list', { companionId }),
+  resolveTeamAction: (actionId: string, decision: CompanionTeamDecision) => command<CompanionTeamAction>('companion_team_action_resolve', { actionId, decision }),
+  assignments: (conversationId: string) => command<CompanionAssignment[]>('companion_assignments_list', { conversationId }),
+  answerAssignment: (assignmentId: string, answer: string) => command<CompanionAssignment>('companion_assignment_answer', { assignmentId, answer }),
+  cancelAssignment: (assignmentId: string) => command<CompanionAssignment>('companion_assignment_cancel', { assignmentId }),
   delete: (companionId: string, planHash: string) => direct('companion_delete', { companionId, planHash }),
   resume: (companionId: string) => direct('companion_delete_resume', { companionId }),
   retained: () => direct<RetainedWorkspace[]>('companion_retained_list'),

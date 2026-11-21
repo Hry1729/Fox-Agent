@@ -1,6 +1,8 @@
 use crate::database::{CreateGoalInput, Database, GoalRecord, GoalStatus, WorkEventRecord};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -98,6 +100,13 @@ const EXPLICIT_GOAL_PREFIXES: &[&str] = &[
     "enter work mode",
 ];
 
+static EXPLICIT_NAMED_GOAL_REQUEST: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"^(?:请(?:帮我)?|帮我)?\s*(?:在\s*fox\s*的目标功能中\s*)?创建并跟踪\s*(?:“[^”\r\n]+”|「[^」\r\n]+」|"[^"\r\n]+")\s*(?:这个|这一|这项)目标(?:$|[\s，。、：；！？,.!:;?])"#,
+    )
+    .expect("valid explicit named goal request pattern")
+});
+
 pub fn evaluate(input: WorkModeGateInput<'_>) -> GateEvaluation {
     let normalized = input.request.trim().to_lowercase();
     if contains_any(&normalized, NO_CHANGE_PHRASES) {
@@ -115,6 +124,7 @@ pub fn evaluate(input: WorkModeGateInput<'_>) -> GateEvaluation {
     if EXPLICIT_GOAL_PREFIXES
         .iter()
         .any(|prefix| normalized.starts_with(prefix))
+        || EXPLICIT_NAMED_GOAL_REQUEST.is_match(&normalized)
     {
         return evaluation(
             WorkModeDecision::RequestConfirmation,
@@ -503,6 +513,8 @@ mod tests {
         for request in [
             "请把下面这个独立子任务委派给合适的子 Agent，并在完成后汇总、验证它的结果：\n\n优化下前面生成的代码",
             "目标生成窗口的按钮太矮了，请优化一下",
+            "解释一下‘创建并跟踪“整理资料包”这个目标’是什么意思",
+            "创建并跟踪“最小误差”这个目标函数的运行时间",
         ] {
             assert_eq!(
                 evaluate(WorkModeGateInput::user_request(request)).decision,
@@ -518,6 +530,8 @@ mod tests {
             "/目标 优化前面生成的代码",
             "请创建一个目标来持续跟踪这个改造",
             "列个目标，再制定计划，依次修改这几个问题",
+            "创建并跟踪“整理资料包”这个目标，包括清点输入、生成目录、检查遗漏三个步骤。完成后告诉我各步骤状态。",
+            "请在 Fox 的目标功能中创建并跟踪“整理资料包”这个目标。分三步执行：清点 `input/`、将文件目录写入 `output/index.md`、核对是否有遗漏。完成后告诉我各步骤的实际状态。",
         ] {
             assert_eq!(
                 evaluate(WorkModeGateInput::user_request(request)).decision,

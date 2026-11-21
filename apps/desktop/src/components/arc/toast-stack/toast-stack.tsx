@@ -23,6 +23,8 @@ export interface ToastOptions {
   type?: ToastType;
   title: string;
   description?: string;
+  /** Optional product-specific source artwork, such as a companion avatar. */
+  icon?: ReactNode;
   action?: ToastAction;
   /** Milliseconds before the toast closes itself. Defaults by type; loading toasts wait for an update. Pass Infinity to keep it until closed. */
   duration?: number;
@@ -63,7 +65,7 @@ export interface ToastStackProps {
   className?: string;
 }
 
-type ToastRecord = { id: string; type: ToastType; title: string; description?: string; action?: ToastAction; duration: number; seq: number; version: number };
+type ToastRecord = { id: string; type: ToastType; title: string; description?: string; icon?: ReactNode; action?: ToastAction; duration: number; seq: number; version: number };
 type ToastStore = ToastStackApi & { subscribe: (listener: () => void) => () => void; getSnapshot: () => ToastRecord[]; runAction: (id: string) => void };
 type Target = { y: number; scale: number; height: number; opacity: number; content: number };
 
@@ -370,9 +372,9 @@ function ToastItem({ toast, target, expanded, front, hidden, paused, reduce, sto
     <motion.div ref={cardRef} className={styles.card} style={{ x, opacity: swipeFade }} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={event => onPointerEnd(event, false)} onPointerCancel={event => onPointerEnd(event, true)} onClick={onCardClick}>
       <motion.div ref={contentRef} className={styles.content} style={{ opacity: contentOpacity }}>
         {/* A new type morphs its icon in place: the old glyph shrinks into a blur while the new one grows out of it. */}
-        <span className={styles.icon} data-type={toast.type} aria-hidden="true">
+        <span className={styles.icon} data-type={toast.type} data-avatar={toast.icon ? 'true' : undefined} aria-hidden="true">
           <AnimatePresence mode="popLayout" initial={false}>
-            <Swap key={toast.type} className={styles.glyph} {...(reduce ? fadeOnly : iconSwap)}>{Icon ? <Icon width={18} height={18} strokeWidth={1.75} /> : <span className={styles.spinner} />}</Swap>
+            <Swap key={toast.type} className={styles.glyph} {...(reduce ? fadeOnly : iconSwap)}>{toast.icon ?? (Icon ? <Icon width={18} height={18} strokeWidth={1.75} /> : <span className={styles.spinner} />)}</Swap>
           </AnimatePresence>
         </span>
         <div className={styles.copy}>

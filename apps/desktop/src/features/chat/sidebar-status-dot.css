@@ -1,0 +1,15 @@
+.fox-sidebar-status-dot {
+  position: absolute;
+  inset-inline-end: calc(var(--fox-sidebar-action-inset) + (var(--fox-sidebar-action-size) - 7px) / 2);
+  top: 50%;
+  transform: translateY(-50%);
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--foreground);
+  pointer-events: none;
+}
+.fox-sidebar-status-dot[data-status='approval'] { background: var(--fox-status-yellow, #bd850c); }
+.fox-sidebar-status-dot[data-status='error'] { background: var(--destructive); }
+:is(.fox-sidebar-tree-row,.fox-contact-row):is(:hover,:focus-within,:has([data-state='open'])) > .fox-sidebar-status-dot { visibility: hidden; }
+@media (hover: none) { .fox-sidebar-status-dot { visibility: hidden; } }

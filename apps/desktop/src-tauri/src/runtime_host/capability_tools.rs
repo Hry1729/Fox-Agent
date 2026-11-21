@@ -1,6 +1,6 @@
-use crate::search_service::SearchProvider;
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
+use crate::search_service::SearchProvider;
 use crate::tool_host::ToolPreview;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use quick_xml::{events::Event, Reader, XmlVersion};
@@ -16,7 +16,6 @@ use std::{
 };
 use sysinfo::{Disks, System};
 use url::Url;
-
 
 pub const CAPABILITY_TOOLS: &[&str] = &[
     "web_search",
@@ -50,33 +49,47 @@ thread_local! {
     static EXECUTION_CONTROL: std::cell::RefCell<Option<(crate::kernel::CancellationToken,Instant)>> = const { std::cell::RefCell::new(None) };
 }
 
-fn check_execution_control() -> Result<(),String> {
+fn check_execution_control() -> Result<(), String> {
     EXECUTION_CONTROL.with(|control| {
-        if let Some((token,deadline)) = control.borrow().as_ref() {
+        if let Some((token, deadline)) = control.borrow().as_ref() {
             token.check()?;
-            if Instant::now() >= *deadline { return Err("capability execution budget exceeded".into()); }
+            if Instant::now() >= *deadline {
+                return Err("capability execution budget exceeded".into());
+            }
         }
         Ok(())
     })
 }
 
-fn bounded_timeout(requested: Duration) -> Result<Duration,String> {
+fn bounded_timeout(requested: Duration) -> Result<Duration, String> {
     check_execution_control()?;
     EXECUTION_CONTROL.with(|control| match control.borrow().as_ref() {
-        Some((_,deadline)) => deadline.checked_duration_since(Instant::now()).map(|remaining| remaining.min(requested))
+        Some((_, deadline)) => deadline
+            .checked_duration_since(Instant::now())
+            .map(|remaining| remaining.min(requested))
             .ok_or_else(|| "capability execution budget exceeded".into()),
         None => Ok(requested),
     })
 }
 
 #[cfg(test)]
-pub(super) fn execute_with_cancellation(action: PreparedCapabilityTool, token: &crate::kernel::CancellationToken, budget: Duration) -> Result<Value,String> {
-    struct Restore(Option<(crate::kernel::CancellationToken,Instant)>);
+pub(super) fn execute_with_cancellation(
+    action: PreparedCapabilityTool,
+    token: &crate::kernel::CancellationToken,
+    budget: Duration,
+) -> Result<Value, String> {
+    struct Restore(Option<(crate::kernel::CancellationToken, Instant)>);
     impl Drop for Restore {
-        fn drop(&mut self) { EXECUTION_CONTROL.with(|slot| { slot.replace(self.0.take()); }); }
+        fn drop(&mut self) {
+            EXECUTION_CONTROL.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
     }
     token.check()?;
-    let _restore = Restore(EXECUTION_CONTROL.with(|slot| slot.replace(Some((token.clone(),Instant::now()+budget)))));
+    let _restore = Restore(
+        EXECUTION_CONTROL.with(|slot| slot.replace(Some((token.clone(), Instant::now() + budget)))),
+    );
     let result = execute(action, None);
     check_execution_control()?;
     result
@@ -179,7 +192,12 @@ impl PreparedCapabilityTool {
     /// was allowed to reach, if any.
     pub fn network_allowance(&self) -> Option<&str> {
         match self {
-            Self::WebRead { network_allowance, .. } | Self::HttpRequest { network_allowance, .. } => network_allowance.as_deref(),
+            Self::WebRead {
+                network_allowance, ..
+            }
+            | Self::HttpRequest {
+                network_allowance, ..
+            } => network_allowance.as_deref(),
             _ => None,
         }
     }
@@ -308,7 +326,10 @@ pub fn prepare(
     }
 }
 
-pub fn execute(action: PreparedCapabilityTool, database: Option<&crate::database::Database>) -> Result<Value, String> {
+pub fn execute(
+    action: PreparedCapabilityTool,
+    database: Option<&crate::database::Database>,
+) -> Result<Value, String> {
     check_execution_control()?;
     match action {
         PreparedCapabilityTool::WebSearch {
@@ -367,7 +388,8 @@ pub fn execute(action: PreparedCapabilityTool, database: Option<&crate::database
             // snapshot copied from that handle. Nothing reopens the path by
             // name after the check.
             let snapshot = private_sqlite_snapshot(&path, &root)?;
-            let result = execute_sqlite_read(snapshot.path(), &query, &parameters, row_limit, timeout);
+            let result =
+                execute_sqlite_read(snapshot.path(), &query, &parameters, row_limit, timeout);
             drop(snapshot);
             result
         }
@@ -561,9 +583,8 @@ fn prepare_http_request(input: &Value) -> Result<PreparedCapabilityTool, String>
         .get("body")
         .map(|value| match value {
             Value::String(value) => Ok(value.as_bytes().to_vec()),
-            value => {
-                crate::canonical_json::to_vec(value).map_err(|error| format!("invalid HTTP body: {error}"))
-            }
+            value => crate::canonical_json::to_vec(value)
+                .map_err(|error| format!("invalid HTTP body: {error}")),
         })
         .transpose()?;
     if body
@@ -878,7 +899,10 @@ fn prepare_test_run(input: &Value, project_root: &str) -> Result<PreparedCapabil
     let target = optional_string(input, "target");
     // A1 / TX-12: a target is a test selector, never an option to the runner
     // (`--config=build.rustc-wrapper=...` would run an arbitrary program).
-    if target.as_deref().is_some_and(|target| target.trim_start().starts_with('-')) {
+    if target
+        .as_deref()
+        .is_some_and(|target| target.trim_start().starts_with('-'))
+    {
         return Err("test_run target must not start with '-': it selects tests and cannot pass options to the runner".to_owned());
     }
     let (program, args) = test_command(&cwd, &runner, script.as_deref(), target.as_deref())?;
@@ -1056,8 +1080,15 @@ fn execute_web_search(
     include_domains: &[String],
     exclude_domains: &[String],
 ) -> Result<Value, String> {
-    let config = database.map(crate::search_service::load).transpose()?.unwrap_or_default();
-    let requested_provider = if database.is_some() { config.provider } else { provider };
+    let config = database
+        .map(crate::search_service::load)
+        .transpose()?
+        .unwrap_or_default();
+    let requested_provider = if database.is_some() {
+        config.provider
+    } else {
+        provider
+    };
     let provider = match requested_provider {
         SearchProvider::Auto => SearchProvider::DuckDuckGo,
         other => other,
@@ -1198,7 +1229,12 @@ fn search_query_with_domains(
     terms.join(" ")
 }
 
-fn search_brave(client: &Client, key: &str, query: &str, max_results: usize) -> Result<Value, String> {
+fn search_brave(
+    client: &Client,
+    key: &str,
+    query: &str,
+    max_results: usize,
+) -> Result<Value, String> {
     client
         .get("https://api.search.brave.com/res/v1/web/search")
         .header("X-Subscription-Token", key)
@@ -1264,7 +1300,12 @@ fn search_exa(
         .map_err(|error| format!("Exa returned invalid JSON: {error}"))
 }
 
-fn search_searxng(client: &Client, base: &str, query: &str, max_results: usize) -> Result<Value, String> {
+fn search_searxng(
+    client: &Client,
+    base: &str,
+    query: &str,
+    max_results: usize,
+) -> Result<Value, String> {
     let mut url =
         Url::parse(base).map_err(|error| format!("FOX_SEARXNG_URL is invalid: {error}"))?;
     if !matches!(url.scheme(), "http" | "https") {
@@ -1600,9 +1641,7 @@ fn normalize_search_results(
         | SearchProvider::DuckDuckGo => raw.get("results").and_then(Value::as_array),
         SearchProvider::Auto => None,
     }
-    .ok_or_else(|| {
-        format!("{provider:?} response omitted results")
-    })?;
+    .ok_or_else(|| format!("{provider:?} response omitted results"))?;
     Ok(items
         .iter()
         .take(max_results)
@@ -1906,14 +1945,17 @@ const MAX_SQLITE_SNAPSHOT_BYTES: u64 = 256 * 1024 * 1024;
 /// Open a project file and prove, by its handle, that it is inside the
 /// project root (shared by sqlite_read and tabular_data / structured_data).
 fn open_verified_project_file(path: &Path, root: &Path) -> Result<fs::File, String> {
-    let file = fs::File::open(path).map_err(|error| format!("failed to open project file: {error}"))?;
+    let file =
+        fs::File::open(path).map_err(|error| format!("failed to open project file: {error}"))?;
     crate::resource_gateway::verify_opened_path(&file, path, root)?;
     Ok(file)
 }
 
 struct PrivateSnapshot(PathBuf);
 impl PrivateSnapshot {
-    fn path(&self) -> &Path { &self.0 }
+    fn path(&self) -> &Path {
+        &self.0
+    }
 }
 impl Drop for PrivateSnapshot {
     fn drop(&mut self) {
@@ -1928,12 +1970,19 @@ fn private_sqlite_snapshot(path: &Path, root: &Path) -> Result<PrivateSnapshot, 
         return Err("sqlite_read database exceeds the 256 MiB snapshot limit".to_owned());
     }
     let directory = env::temp_dir().join("fox-sqlite-snapshots");
-    fs::create_dir_all(&directory).map_err(|error| format!("failed to prepare SQLite snapshot: {error}"))?;
-    let snapshot = PrivateSnapshot(directory.join(format!("{}.sqlite", uuid::Uuid::new_v4())));
-    let mut target = fs::OpenOptions::new().write(true).create_new(true).open(snapshot.path())
+    fs::create_dir_all(&directory)
         .map_err(|error| format!("failed to prepare SQLite snapshot: {error}"))?;
-    std::io::copy(&mut (&mut source).take(MAX_SQLITE_SNAPSHOT_BYTES + 1), &mut target)
-        .map_err(|error| format!("failed to snapshot SQLite database: {error}"))?;
+    let snapshot = PrivateSnapshot(directory.join(format!("{}.sqlite", uuid::Uuid::new_v4())));
+    let mut target = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(snapshot.path())
+        .map_err(|error| format!("failed to prepare SQLite snapshot: {error}"))?;
+    std::io::copy(
+        &mut (&mut source).take(MAX_SQLITE_SNAPSHOT_BYTES + 1),
+        &mut target,
+    )
+    .map_err(|error| format!("failed to snapshot SQLite database: {error}"))?;
     Ok(snapshot)
 }
 
@@ -1955,7 +2004,10 @@ fn execute_sqlite_read(
         .map_err(|error| format!("failed to configure SQLite timeout: {error}"))?;
     let started = Instant::now();
     let deadline_started = started;
-    connection.progress_handler(1_000, Some(move || deadline_started.elapsed() >= timeout || check_execution_control().is_err()));
+    connection.progress_handler(
+        1_000,
+        Some(move || deadline_started.elapsed() >= timeout || check_execution_control().is_err()),
+    );
     let mut statement = connection
         .prepare(query)
         .map_err(|error| format!("failed to prepare SQLite query: {error}"))?;
@@ -2160,7 +2212,10 @@ fn check_public_url(url: &Url) -> Result<PublicUrl, String> {
     check_public_url_with(url, || crate::system_proxy::detect())
 }
 
-fn check_public_url_with(url: &Url, proxy: impl FnOnce() -> crate::system_proxy::ProxySettings) -> Result<PublicUrl, String> {
+fn check_public_url_with(
+    url: &Url,
+    proxy: impl FnOnce() -> crate::system_proxy::ProxySettings,
+) -> Result<PublicUrl, String> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err("web URL must use http or https".to_owned());
     }
@@ -2182,20 +2237,38 @@ fn check_public_url_with(url: &Url, proxy: impl FnOnce() -> crate::system_proxy:
     classify_addresses(host, addresses, proxy)
 }
 
-fn classify_addresses(host: &str, addresses: Vec<IpAddr>, proxy: impl FnOnce() -> crate::system_proxy::ProxySettings) -> Result<PublicUrl, String> {
-    let blocked: Vec<IpAddr> = addresses.iter().copied().filter(|address| !is_public_ip(*address)).collect();
+fn classify_addresses(
+    host: &str,
+    addresses: Vec<IpAddr>,
+    proxy: impl FnOnce() -> crate::system_proxy::ProxySettings,
+) -> Result<PublicUrl, String> {
+    let blocked: Vec<IpAddr> = addresses
+        .iter()
+        .copied()
+        .filter(|address| !is_public_ip(*address))
+        .collect();
     if blocked.is_empty() {
-        return Ok(PublicUrl { addresses, allowance: None });
+        return Ok(PublicUrl {
+            addresses,
+            allowance: None,
+        });
     }
     if blocked.iter().all(|address| is_proxy_fake_ip(*address)) {
         let settings = proxy();
         if settings.proxy_in_use() {
-            let shown = blocked.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+            let shown = blocked
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
             let allowance = format!(
                 "代理 fake-ip 放行：{host} 解析到 {shown}（198.18.0.0/15，代理软件 fake-ip 模式使用的地址段）；检测到代理设置（来源：{}），按公网地址处理",
                 settings.sources().join("、")
             );
-            return Ok(PublicUrl { addresses, allowance: Some(allowance) });
+            return Ok(PublicUrl {
+                addresses,
+                allowance: Some(allowance),
+            });
         }
     }
     let shown = blocked.first().map(ToString::to_string).unwrap_or_default();
@@ -2349,7 +2422,13 @@ fn execute_git_read(
     }
     let mut git_args = git_safety_overrides(root)?;
     git_args.extend(args);
-    let output = run_process_with_env("git", &git_args, root, Duration::from_secs(60), GIT_HARDENED_ENV)?;
+    let output = run_process_with_env(
+        "git",
+        &git_args,
+        root,
+        Duration::from_secs(60),
+        GIT_HARDENED_ENV,
+    )?;
     if output.exit_code != Some(0) {
         return Err(format!("Git command failed: {}", output.stderr.trim()));
     }
@@ -2449,7 +2528,8 @@ fn execute_tabular_data(
     if matches!(operation, TableOperation::Aggregate) {
         let value = aggregate_table(&rows, aggregate, aggregate_column)?;
         return Ok(tool_result(
-            crate::canonical_json::to_string_pretty(&value).unwrap_or_else(|_| value.canonical_string()),
+            crate::canonical_json::to_string_pretty(&value)
+                .unwrap_or_else(|_| value.canonical_string()),
             json!({
                 "operation": "aggregate",
                 "aggregate": aggregate_name(aggregate),
@@ -2475,7 +2555,8 @@ fn execute_tabular_data(
         "hasMore": offset.saturating_add(limit) < total_rows,
     });
     Ok(tool_result(
-        crate::canonical_json::to_string_pretty(&details).unwrap_or_else(|_| details.canonical_string()),
+        crate::canonical_json::to_string_pretty(&details)
+            .unwrap_or_else(|_| details.canonical_string()),
         details,
     ))
 }
@@ -2648,7 +2729,9 @@ fn parse_structured_value(source: &str, format: DataFormat) -> Result<Value, Str
 
 fn render_structured_value(value: &Value, format: DataFormat) -> Result<String, String> {
     match format {
-        DataFormat::Json => crate::canonical_json::to_string_pretty(value).map_err(|error| error.to_string()),
+        DataFormat::Json => {
+            crate::canonical_json::to_string_pretty(value).map_err(|error| error.to_string())
+        }
         DataFormat::Yaml => serde_yaml::to_string(value).map_err(|error| error.to_string()),
         DataFormat::Toml => toml::to_string_pretty(value)
             .map_err(|error| format!("value cannot be represented as TOML: {error}")),
@@ -3087,8 +3170,14 @@ fn package_script_command(cwd: &Path, script: &str) -> (String, Vec<String>) {
 /// no optional lock writes, no pager.
 const GIT_HARDENED_ENV: &[(&str, &str)] = &[
     ("GIT_CONFIG_NOSYSTEM", "1"),
-    ("GIT_CONFIG_GLOBAL", if cfg!(windows) { "NUL" } else { "/dev/null" }),
-    ("GIT_CONFIG_SYSTEM", if cfg!(windows) { "NUL" } else { "/dev/null" }),
+    (
+        "GIT_CONFIG_GLOBAL",
+        if cfg!(windows) { "NUL" } else { "/dev/null" },
+    ),
+    (
+        "GIT_CONFIG_SYSTEM",
+        if cfg!(windows) { "NUL" } else { "/dev/null" },
+    ),
     ("GIT_TERMINAL_PROMPT", "0"),
     ("GIT_OPTIONAL_LOCKS", "0"),
     ("GIT_PAGER", "cat"),
@@ -3120,7 +3209,10 @@ fn git_safety_overrides(root: &Path) -> Result<Vec<String>, String> {
     // process. git_read therefore starts exactly one git process, and global
     // and system config are switched off for it (`GIT_HARDENED_ENV`).
     args.push("-c".to_owned());
-    args.push(format!("core.hooksPath={}", if cfg!(windows) { "NUL" } else { "/dev/null" }));
+    args.push(format!(
+        "core.hooksPath={}",
+        if cfg!(windows) { "NUL" } else { "/dev/null" }
+    ));
     let names = repository_config_names(root)?;
     args.extend(git_driver_overrides(&names));
     Ok(args)
@@ -3133,11 +3225,19 @@ fn git_safety_overrides(root: &Path) -> Result<Vec<String>, String> {
 fn repository_config_names(root: &Path) -> Result<String, String> {
     let dot_git = root.join(".git");
     let git_dir = if dot_git.is_file() {
-        let text = fs::read_to_string(&dot_git).map_err(|error| format!("Git directory could not be read: {error}"))?;
-        let pointer = text.lines().find_map(|line| line.trim().strip_prefix("gitdir:")).map(str::trim)
+        let text = fs::read_to_string(&dot_git)
+            .map_err(|error| format!("Git directory could not be read: {error}"))?;
+        let pointer = text
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("gitdir:"))
+            .map(str::trim)
             .ok_or("Git directory pointer is malformed")?;
         let pointer = Path::new(pointer);
-        if pointer.is_absolute() { pointer.to_path_buf() } else { root.join(pointer) }
+        if pointer.is_absolute() {
+            pointer.to_path_buf()
+        } else {
+            root.join(pointer)
+        }
     } else if dot_git.is_dir() {
         dot_git
     } else {
@@ -3146,7 +3246,11 @@ fn repository_config_names(root: &Path) -> Result<String, String> {
     let mut files = vec![git_dir.join("config"), git_dir.join("config.worktree")];
     if let Ok(common) = fs::read_to_string(git_dir.join("commondir")) {
         let common = Path::new(common.trim());
-        let common = if common.is_absolute() { common.to_path_buf() } else { git_dir.join(common) };
+        let common = if common.is_absolute() {
+            common.to_path_buf()
+        } else {
+            git_dir.join(common)
+        };
         files.push(common.join("config"));
     }
     let mut names = Vec::new();
@@ -3155,12 +3259,20 @@ fn repository_config_names(root: &Path) -> Result<String, String> {
         if names.len() > 10_000 || !seen.insert(file.clone()) {
             continue;
         }
-        let Ok(text) = fs::read_to_string(&file) else { continue };
+        let Ok(text) = fs::read_to_string(&file) else {
+            continue;
+        };
         for (name, value) in parse_git_config(&text) {
             let lower = name.to_ascii_lowercase();
-            if lower == "include.path" || (lower.starts_with("includeif.") && lower.ends_with(".path")) {
+            if lower == "include.path"
+                || (lower.starts_with("includeif.") && lower.ends_with(".path"))
+            {
                 let include = Path::new(value.trim());
-                files.push(if include.is_absolute() { include.to_path_buf() } else { file.parent().unwrap_or(&git_dir).join(include) });
+                files.push(if include.is_absolute() {
+                    include.to_path_buf()
+                } else {
+                    file.parent().unwrap_or(&git_dir).join(include)
+                });
             }
             names.push(name);
         }
@@ -3184,7 +3296,11 @@ fn parse_git_config(text: &str) -> Vec<(String, String)> {
             let header = &line[1..end];
             section = match header.split_once(char::is_whitespace) {
                 Some((name, sub)) => {
-                    let sub = sub.trim().trim_matches('"').replace("\\\"", "\"").replace("\\\\", "\\");
+                    let sub = sub
+                        .trim()
+                        .trim_matches('"')
+                        .replace("\\\"", "\"")
+                        .replace("\\\\", "\\");
                     format!("{}.{}", name.trim(), sub)
                 }
                 None => header.trim().to_owned(),
@@ -3211,7 +3327,11 @@ fn parse_git_config(text: &str) -> Vec<(String, String)> {
 
 fn git_driver_overrides(config_names_nul: &str) -> Vec<String> {
     let mut drivers = std::collections::BTreeSet::new();
-    for name in config_names_nul.split('\0').map(str::trim).filter(|name| !name.is_empty()) {
+    for name in config_names_nul
+        .split('\0')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
         let lower = name.to_ascii_lowercase();
         let (section, rest) = match lower.split_once('.') {
             Some(parts) => parts,
@@ -3220,7 +3340,9 @@ fn git_driver_overrides(config_names_nul: &str) -> Vec<String> {
         if section != "filter" && section != "diff" {
             continue;
         }
-        let Some((_, key)) = rest.rsplit_once('.') else { continue };
+        let Some((_, key)) = rest.rsplit_once('.') else {
+            continue;
+        };
         let dangerous = match section {
             "filter" => matches!(key, "clean" | "smudge" | "process"),
             _ => matches!(key, "textconv" | "command"),
@@ -3279,11 +3401,8 @@ fn run_process_with_env(
         extra_env,
         &check_execution_control,
     )?;
-    let (stdout, stderr, streams_truncated) = bound_process_streams(
-        &output.stdout,
-        &output.stderr,
-        MAX_PROCESS_OUTPUT_BYTES,
-    );
+    let (stdout, stderr, streams_truncated) =
+        bound_process_streams(&output.stdout, &output.stderr, MAX_PROCESS_OUTPUT_BYTES);
     Ok(ProcessOutput {
         exit_code: output.exit_code,
         truncated: output.truncated || streams_truncated,
@@ -3511,7 +3630,8 @@ impl DataInput {
                 // after the check.
                 let file = open_verified_project_file(path, root)?;
                 let mut bytes = Vec::new();
-                file.take(MAX_INLINE_DATA_BYTES as u64 + 1).read_to_end(&mut bytes)
+                file.take(MAX_INLINE_DATA_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)
                     .map_err(|error| format!("failed to read data file: {error}"))?;
                 if bytes.len() > MAX_INLINE_DATA_BYTES {
                     return Err("data file exceeds the 4 MiB limit".to_owned());
@@ -3537,7 +3657,11 @@ pub(super) fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, S
     Ok(canonical)
 }
 
-pub(super) fn resolve_project_path(root: &Path, requested: &str, must_exist: bool) -> Result<PathBuf, String> {
+pub(super) fn resolve_project_path(
+    root: &Path,
+    requested: &str,
+    must_exist: bool,
+) -> Result<PathBuf, String> {
     let requested = Path::new(requested);
     if requested.components().any(|component| {
         matches!(
@@ -3632,8 +3756,6 @@ fn process_timeout(input: &Value) -> Duration {
             .clamp(1, MAX_PROCESS_SECONDS),
     )
 }
-
-
 
 fn git_operation_name(operation: GitOperation) -> &'static str {
     match operation {
@@ -3927,10 +4049,23 @@ mod tests {
             execute_git_read(&root, operation, None, None, None, false, 20, None, None)
                 .expect("git_read succeeds without running helpers");
         }
-        execute_git_read(&root, GitOperation::Blame, Some(&root.join("a.txt")), None, None, false, 20, None, None)
-            .expect("blame succeeds without running helpers");
+        execute_git_read(
+            &root,
+            GitOperation::Blame,
+            Some(&root.join("a.txt")),
+            None,
+            None,
+            false,
+            20,
+            None,
+            None,
+        )
+        .expect("blame succeeds without running helpers");
         for name in ["clean", "textconv", "fsmonitor"] {
-            assert!(!marker(name).exists(), "repository-configured {name} helper ran");
+            assert!(
+                !marker(name).exists(),
+                "repository-configured {name} helper ran"
+            );
         }
         let _ = fs::remove_dir_all(&root);
     }
@@ -3953,7 +4088,14 @@ mod tests {
         let registry = crate::kernel::CancellationRegistry::default();
         registry.register_run("capability-scope").unwrap();
         let token = registry.run_token("capability-scope").unwrap();
-        let action = || prepare("structured_data", &json!({"data":"{\"ok\":true}","inputFormat":"json"}), None).unwrap();
+        let action = || {
+            prepare(
+                "structured_data",
+                &json!({"data":"{\"ok\":true}","inputFormat":"json"}),
+                None,
+            )
+            .unwrap()
+        };
         assert!(execute_with_cancellation(action(), &token, Duration::from_secs(2)).is_ok());
         assert!(EXECUTION_CONTROL.with(|slot| slot.borrow().is_none()));
         assert!(execute_with_cancellation(action(), &token, Duration::ZERO).is_err());
@@ -3969,7 +4111,10 @@ mod tests {
         registry.request_run_cancel("capability-scope");
         assert!(execute_with_cancellation(action(), &token, Duration::from_secs(2)).is_err());
         assert!(EXECUTION_CONTROL.with(|slot| slot.borrow().is_none()));
-        assert!(execute(action(), None).is_ok(), "legacy execution must not inherit another Run's cancellation");
+        assert!(
+            execute(action(), None).is_ok(),
+            "legacy execution must not inherit another Run's cancellation"
+        );
     }
 
     #[test]
@@ -4088,27 +4233,75 @@ mod tests {
     /// 13.38 B5-3：检测到代理时 198.18.0.0/15（fake-ip）按公网处理，并给出审计说明。
     #[test]
     fn proxy_fake_ip_is_allowed_only_with_a_proxy_and_is_audited() {
-        let allowed = classify_addresses("example.com", ips(&["198.18.0.7"]), with_proxy).expect("fake-ip with proxy");
+        let allowed = classify_addresses("example.com", ips(&["198.18.0.7"]), with_proxy)
+            .expect("fake-ip with proxy");
         let allowance = allowed.allowance.expect("audit sentence");
-        assert!(allowance.contains("example.com") && allowance.contains("198.18.0.7") && allowance.contains("wininet"), "{allowance}");
-        assert!(classify_addresses("example.com", ips(&["198.19.255.1"]), with_proxy).unwrap().allowance.is_some(), "整个 /15");
-        assert!(classify_addresses("example.com", ips(&["::ffff:198.18.0.7"]), with_proxy).unwrap().allowance.is_some(), "IPv4 映射");
-        let refused = classify_addresses("example.com", ips(&["198.18.0.7"]), crate::system_proxy::ProxySettings::default)
-            .err().expect("no proxy: still private");
-        assert!(refused.starts_with("[tool.permission_denied] 网络保护拦截了这次访问"), "{refused}");
-        let public = classify_addresses("example.com", ips(&["93.184.215.14"]), || panic!("public addresses never read the proxy")).unwrap();
+        assert!(
+            allowance.contains("example.com")
+                && allowance.contains("198.18.0.7")
+                && allowance.contains("wininet"),
+            "{allowance}"
+        );
+        assert!(
+            classify_addresses("example.com", ips(&["198.19.255.1"]), with_proxy)
+                .unwrap()
+                .allowance
+                .is_some(),
+            "整个 /15"
+        );
+        assert!(
+            classify_addresses("example.com", ips(&["::ffff:198.18.0.7"]), with_proxy)
+                .unwrap()
+                .allowance
+                .is_some(),
+            "IPv4 映射"
+        );
+        let refused = classify_addresses(
+            "example.com",
+            ips(&["198.18.0.7"]),
+            crate::system_proxy::ProxySettings::default,
+        )
+        .err()
+        .expect("no proxy: still private");
+        assert!(
+            refused.starts_with("[tool.permission_denied] 网络保护拦截了这次访问"),
+            "{refused}"
+        );
+        let public = classify_addresses("example.com", ips(&["93.184.215.14"]), || {
+            panic!("public addresses never read the proxy")
+        })
+        .unwrap();
         assert!(public.allowance.is_none());
     }
 
     /// 本机和私有地址在有代理时照样拦截；混着私有地址的 fake-ip 结果也拦截。
     #[test]
     fn private_and_local_addresses_stay_blocked_with_a_proxy() {
-        for address in ["127.0.0.1", "10.1.2.3", "192.168.1.5", "172.16.0.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "fe80::1", "fd00::1", "198.51.100.1"] {
-            let error = classify_addresses("internal.example", ips(&[address]), with_proxy).err().unwrap_or_else(|| panic!("{address} must stay blocked"));
+        for address in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "192.168.1.5",
+            "172.16.0.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "::1",
+            "fe80::1",
+            "fd00::1",
+            "198.51.100.1",
+        ] {
+            let error = classify_addresses("internal.example", ips(&[address]), with_proxy)
+                .err()
+                .unwrap_or_else(|| panic!("{address} must stay blocked"));
             assert!(error.contains("内网、本机或保留地址"), "{address}: {error}");
             assert!(!error.contains("web_read blocks"), "普通提示不带英文原文");
         }
-        assert!(classify_addresses("mixed.example", ips(&["198.18.0.7", "127.0.0.1"]), with_proxy).is_err());
+        assert!(classify_addresses(
+            "mixed.example",
+            ips(&["198.18.0.7", "127.0.0.1"]),
+            with_proxy
+        )
+        .is_err());
     }
 
     #[test]
@@ -4228,7 +4421,6 @@ mod tests {
                 ..
             }
         ));
-
     }
 
     /// stdout 远超额度时，stderr 仍占住自己的保底，1 KiB 必须原样留下。

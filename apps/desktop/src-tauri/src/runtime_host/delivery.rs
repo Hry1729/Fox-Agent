@@ -21,9 +21,7 @@
 
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use crate::database::{
-    Database, DeliveryChecklistSeed,
-};
+use crate::database::{Database, DeliveryChecklistSeed};
 use crate::database::{
     DeliveryChecklistSeed as StoredChecklistSeed, DeliveryRequirement as StoredRequirement,
     RequirementKind as StoredRequirementKind,
@@ -101,7 +99,7 @@ pub(crate) use p2b_consumer::display_pass_of_finding;
 // question about the same durable row, so they must take one decision and not
 // four. It only ever withholds a pass; it never re-derives a status, so the write
 // side's own `failed` verdicts survive, and it can never promote a pass either.
-pub(crate) use p2b_contract_identity::{PassQualification, passed_qualification_of_row};
+pub(crate) use p2b_contract_identity::{passed_qualification_of_row, PassQualification};
 
 // Test-only re-exports, so the real-Host consumer tests registered beside the
 // coordinator can build a verdict and decode a stored one.
@@ -177,14 +175,37 @@ impl ArtifactKind {
 /// language ("两份 Excel") to count as a promised deliverable; analysing or
 /// reading an existing file never seeds a checklist.
 const PRODUCTION_VERBS: &[&str] = &[
-    "生成", "产出", "制作", "制备", "导出", "出具", "输出", "保存", "写成", "撰写", "编写",
-    "整理成", "汇总成", "打印成", "交付", "create", "generate", "produce", "export", "save",
-    "write", "build", "deliver",
+    "生成",
+    "产出",
+    "制作",
+    "制备",
+    "导出",
+    "出具",
+    "输出",
+    "保存",
+    "写成",
+    "撰写",
+    "编写",
+    "整理成",
+    "汇总成",
+    "打印成",
+    "交付",
+    "create",
+    "generate",
+    "produce",
+    "export",
+    "save",
+    "write",
+    "build",
+    "deliver",
     // Natural variants users actually type. "汇总到 out/summary.md" and
     // "整理为 out/report.md" promised a deliverable just as plainly as the "成" forms,
     // and a ledger that only understands one spelling makes trust depend on wording.
-    "汇总到", "整理为", "更新",
-    "合并为", "合并成",
+    "汇总到",
+    "整理为",
+    "更新",
+    "合并为",
+    "合并成",
 ];
 
 const FILE_EXTENSIONS: &[&str] = &[
@@ -264,31 +285,42 @@ fn local_action_at(text: &str, at: usize) -> Option<(usize, MentionRole)> {
     let mut best = None;
     // Counted outputs also use production-only verbs such as 产出. Keep
     // their scope local; an earlier task-wide production verb grants nothing.
-    for (verb, role) in TARGET_OUTPUT_VERBS.iter().chain(PRODUCTION_VERBS.iter())
+    for (verb, role) in TARGET_OUTPUT_VERBS
+        .iter()
+        .chain(PRODUCTION_VERBS.iter())
         .map(|verb| (*verb, MentionRole::Output))
-        .chain(SOURCE_INPUT_VERBS.iter().map(|verb| (*verb, MentionRole::Input))) {
-            for (position, _) in lowered.match_indices(verb) {
-                let absolute = offset + position;
-                // In “两份 Excel 汇总表与一份 Word”, 汇总表 is the counted
-                // output's noun. It does not introduce a new input action.
-                if role==MentionRole::Input && verb=="汇总"
-                    && prefix[position+verb.len()..].starts_with('表') {continue;}
-                if verb_boundary_ok(prefix, position, position + verb.len())
-                    && !mentions
-                        .iter()
-                        .any(|m| absolute >= m.name_start && absolute < m.name_start + m.name.len())
-                    && best.is_none_or(|(previous, _)| absolute > previous)
-                {
-                    best = Some((
-                        absolute,
-                        if negates_verb(&prefix[..position]) {
-                            MentionRole::Input
-                        } else {
-                            role
-                        },
-                    ));
-                }
+        .chain(
+            SOURCE_INPUT_VERBS
+                .iter()
+                .map(|verb| (*verb, MentionRole::Input)),
+        )
+    {
+        for (position, _) in lowered.match_indices(verb) {
+            let absolute = offset + position;
+            // In “两份 Excel 汇总表与一份 Word”, 汇总表 is the counted
+            // output's noun. It does not introduce a new input action.
+            if role == MentionRole::Input
+                && verb == "汇总"
+                && prefix[position + verb.len()..].starts_with('表')
+            {
+                continue;
             }
+            if verb_boundary_ok(prefix, position, position + verb.len())
+                && !mentions
+                    .iter()
+                    .any(|m| absolute >= m.name_start && absolute < m.name_start + m.name.len())
+                && best.is_none_or(|(previous, _)| absolute > previous)
+            {
+                best = Some((
+                    absolute,
+                    if negates_verb(&prefix[..position]) {
+                        MentionRole::Input
+                    } else {
+                        role
+                    },
+                ));
+            }
+        }
     }
     best
 }
@@ -330,7 +362,7 @@ fn post_path_output_role(text: &str, mention: &Mention) -> bool {
         .or_else(|| after.strip_prefix('内'))
         .unwrap_or(after)
         .trim_start();
-    ["给出", "写入", "输出", "保存", "write ", "save ", "record "]
+    ["给出", "写入", "输出", "保存", "列出", "填入", "write ", "save ", "record "]
         .iter()
         .any(|verb| after.starts_with(verb))
 }
@@ -375,7 +407,8 @@ fn target_directory_for(text: &str, at: usize) -> Option<String> {
             .unwrap_or(suffix)
             .trim_start();
         let leading_output = TARGET_OUTPUT_VERBS
-            .iter().chain(PRODUCTION_VERBS.iter())
+            .iter()
+            .chain(PRODUCTION_VERBS.iter())
             .any(|verb| suffix.starts_with(verb));
         // A future directory belongs to this action only when it is a trailing
         // placement clause, never when it introduces another production verb.
@@ -400,7 +433,8 @@ fn target_directory_for(text: &str, at: usize) -> Option<String> {
                 text[position + marker.len()..at].trim_start_matches([' ', '的', '中', '内']);
             let output_scope = local_intent_role(text, position) == Some(MentionRole::Output)
                 || TARGET_OUTPUT_VERBS
-                    .iter().chain(PRODUCTION_VERBS.iter())
+                    .iter()
+                    .chain(PRODUCTION_VERBS.iter())
                     .any(|verb| suffix.starts_with(verb));
             if !mention_is_example(text, position)
                 && !mention_is_prohibited(text, position)
@@ -545,21 +579,81 @@ fn recognized_count_in_action(text: &str, at: usize, seeds: &[DeliveryChecklistS
     })
 }
 
+pub(crate) const DEFAULT_PROJECT_OUTPUT: &str = "output";
+
+pub(crate) fn check_csv_placement(text: &str, root: &Path, relative: &Path) -> Result<(), String> {
+    if relative.extension().is_none_or(|ext| !ext.eq_ignore_ascii_case("csv")) {
+        return Ok(());
+    }
+    let reference = task_delivery_reference(text, &json!({"projectRoot":root}));
+    let path = path_key(&relative.to_string_lossy());
+    let mut allowed = Vec::new();
+    for target in reference["targets"].as_array().into_iter().flatten() {
+        if let Some(file) = target["path"].as_str().filter(|file| file.to_ascii_lowercase().ends_with(".csv")) {
+            let expected = project_relative_path_for_u1(file, Some(&root.to_string_lossy()))
+                .unwrap_or_else(|| file.to_owned());
+            if path == path_key(&expected) {
+                return Ok(());
+            }
+            allowed.push(expected);
+        } else if target["itemKey"] == "slot:csv:1" {
+            let directory = target["directory"].as_str().unwrap_or(DEFAULT_PROJECT_OUTPUT);
+            let expected = project_relative_path_for_u1(directory, Some(&root.to_string_lossy()))
+                .unwrap_or_else(|| directory.to_owned());
+            if expected == "." || path.starts_with(&path_key(&format!("{}/", expected.trim_end_matches('/')))) {
+                return Ok(());
+            }
+            allowed.push(format!("{}/", expected.trim_end_matches('/')));
+        }
+    }
+    if allowed.is_empty() {
+        return Ok(());
+    }
+    Err(format!("[tool.invalid_input] CSV 交付目标应为 {}。请保留用户已指定的路径，未指定文件名时可自行命名。", allowed.join(" 或 ")))
+}
+
+#[cfg(test)]
+#[test]
+fn csv_placement_respects_default_directory_and_explicit_path() {
+    let root = Path::new("test-project");
+    let task = "分批核对六个账目文件。最后把总表作为 CSV 交付，每份账目列出来源文件和金额。";
+    assert!(check_csv_placement(task, root, Path::new("output/账目汇总.csv")).is_ok());
+    assert!(check_csv_placement(task, root, Path::new("fox/账目汇总.csv")).is_err());
+    let explicit = "将六个账目金额汇总，输出到 `reports/totals.csv`。";
+    assert!(check_csv_placement(explicit, root, Path::new("reports/totals.csv")).is_ok());
+    assert!(check_csv_placement(explicit, root, Path::new("output/totals.csv")).is_err());
+}
+
 pub(crate) fn task_delivery_reference(text: &str, project_context: &Value) -> Value {
     let seeds = expectations_from_task(text);
     let unresolved = unresolved_delivery_intent(text, &seeds);
-    json!({"schemaVersion":1,"recognition":if unresolved {"unresolved"} else if seeds.is_empty() {"no_file_deliverables"} else {"recognized"},
-        "defaultDirectory":project_context["deliverableRoot"],"targets":seeds.iter().map(|seed|json!({"itemKey":seed.item_key,
+    let default_directory = project_context["projectRoot"].as_str().map(|_| DEFAULT_PROJECT_OUTPUT);
+    let mut targets = seeds.iter().map(|seed|json!({"itemKey":seed.item_key,
             "path":seed.target_path,"directory":seed.requirements.iter().find_map(|r|match &r.kind {
                 StoredRequirementKind::TargetDirectory{directory}=>Some(directory.as_str()),_=>None}).map(Value::from)
-                .unwrap_or_else(||if seed.target_path.is_none(){project_context["deliverableRoot"].clone()}else{Value::Null})})).collect::<Vec<_>>()})
+                .unwrap_or_else(||if seed.target_path.is_none(){json!(default_directory)}else{Value::Null})})).collect::<Vec<_>>();
+    if !targets.iter().any(|target| target["path"].as_str().is_some_and(|path| path.to_ascii_lowercase().ends_with(".csv"))) {
+        static CSV: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let csv = CSV.get_or_init(|| regex::Regex::new(r"(?i-u:\bCSV\b)").unwrap());
+        if let Some(at) = csv.find_iter(text).map(|found| found.start()).find(|&at| {
+            let after = text[at + 3..].trim_start();
+            !mention_is_example(text, at) && !mention_is_prohibited(text, at)
+                && (local_intent_role(text, at) == Some(MentionRole::Output)
+                    || ["交付", "输出", "导出", "保存"].iter().any(|verb| after.starts_with(verb)))
+        }) {
+            targets.push(json!({"itemKey":"slot:csv:1", "path":null,
+                "directory":target_directory_for(text, at).or_else(|| default_directory.map(str::to_owned))}));
+        }
+    }
+    json!({"schemaVersion":1,"recognition":if targets.is_empty() { if unresolved { "unresolved" } else { "no_file_deliverables" } } else { "recognized" },
+        "defaultDirectory":default_directory, "targets":targets})
 }
 
 /// Backtracking from an explicit extension stops at these CJK characters,
 /// which mark the prose before the actual file name (`生成AGV报告.xlsx`).
 const CJK_NAME_STOPS: &[char] = &[
-    '成', '为', '给', '把', '将', '在', '到', '请', '，', '。', '；', '：', '！', '？', '、',
-    '的', '与', '和',
+    '成', '为', '给', '把', '将', '在', '到', '请', '，', '。', '；', '：', '！', '？', '、', '的',
+    '与', '和',
 ];
 
 /// True when the task states a production verb that is not itself negated: a
@@ -600,10 +694,38 @@ fn is_word_boundary(character: Option<char>) -> bool {
             value.is_whitespace()
                 || matches!(
                     value,
-                    '(' | ')' | '（' | '）' | '"' | '“' | '”' | '‘' | '’' | '「' | '」'
-                        | '『' | '』' | '`' | '[' | ']' | '【' | '】' | ',' | '，' | ';' | '；'
-                        | ':' | '：' | '、' | '。' | '！' | '？' | '…' | '·'
-                        | '\n' | '\r' | '\t'
+                    '(' | ')'
+                        | '（'
+                        | '）'
+                        | '"'
+                        | '“'
+                        | '”'
+                        | '‘'
+                        | '’'
+                        | '「'
+                        | '」'
+                        | '『'
+                        | '』'
+                        | '`'
+                        | '['
+                        | ']'
+                        | '【'
+                        | '】'
+                        | ','
+                        | '，'
+                        | ';'
+                        | '；'
+                        | ':'
+                        | '：'
+                        | '、'
+                        | '。'
+                        | '！'
+                        | '？'
+                        | '…'
+                        | '·'
+                        | '\n'
+                        | '\r'
+                        | '\t'
                 )
         }
     }
@@ -630,9 +752,7 @@ fn is_name_start_boundary(character: Option<char>) -> bool {
 fn is_extension_end_boundary(character: Option<char>) -> bool {
     match character {
         None => true,
-        Some(value) => {
-            is_word_boundary(Some(value)) || ('一'..='鿿').contains(&value)
-        }
+        Some(value) => is_word_boundary(Some(value)) || ('一'..='鿿').contains(&value),
     }
 }
 
@@ -654,8 +774,8 @@ pub(crate) fn expectations_from_task(text: &str) -> Vec<DeliveryChecklistSeed> {
     let lower_text = text.to_lowercase();
 
     let push = |seeds: &mut Vec<DeliveryChecklistSeed>,
-                    used: &mut BTreeSet<String>,
-                    seed: DeliveryChecklistSeed| {
+                used: &mut BTreeSet<String>,
+                seed: DeliveryChecklistSeed| {
         if seeds.len() < MAX_SEEDED_ITEMS && used.insert(seed.item_key.clone()) {
             seeds.push(seed);
         }
@@ -692,8 +812,8 @@ pub(crate) fn expectations_from_task(text: &str) -> Vec<DeliveryChecklistSeed> {
             &mut seeds,
             &mut used_keys,
             DeliveryChecklistSeed {
-                item_key: format!("file:{}", path_key(&resolved_output_name(text,mention))),
-                target_path: Some(resolved_output_name(text,mention)),
+                item_key: format!("file:{}", path_key(&resolved_output_name(text, mention))),
+                target_path: Some(resolved_output_name(text, mention)),
                 artifact_id: None,
                 display_name: mention.name.clone(),
                 checks: kind
@@ -727,8 +847,10 @@ pub(crate) fn expectations_from_task(text: &str) -> Vec<DeliveryChecklistSeed> {
                 {
                     continue;
                 }
-                if local_intent_role(text,at) != Some(MentionRole::Output)
-                    || mention_is_example(text,at) || mention_is_prohibited(text,at) {
+                if local_intent_role(text, at) != Some(MentionRole::Output)
+                    || mention_is_example(text, at)
+                    || mention_is_prohibited(text, at)
+                {
                     continue;
                 }
                 // Walk back over an optional measure word 份/个/张/篇/部.
@@ -783,14 +905,21 @@ pub(crate) fn expectations_from_task(text: &str) -> Vec<DeliveryChecklistSeed> {
                 if !(1..=6).contains(&count) {
                     continue;
                 }
-                let explicit=mentions.iter().zip(&roles).filter(|(mention,role)|**role==MentionRole::Output
-                    && mention.kind==kind && same_output_requirement(text,at,mention)).count() as i64;
+                let explicit = mentions
+                    .iter()
+                    .zip(&roles)
+                    .filter(|(mention, role)| {
+                        **role == MentionRole::Output
+                            && mention.kind == kind
+                            && same_output_requirement(text, at, mention)
+                    })
+                    .count() as i64;
                 for ordinal in 1..=count {
                     if ordinal <= explicit {
                         continue;
                     }
                     slot_for_keyword += 1;
-                    let key=format!("slot:{expected_extension}:{slot_for_keyword}");
+                    let key = format!("slot:{expected_extension}:{slot_for_keyword}");
                     push(
                         &mut seeds,
                         &mut used_keys,
@@ -804,7 +933,8 @@ pub(crate) fn expectations_from_task(text: &str) -> Vec<DeliveryChecklistSeed> {
                                 .iter()
                                 .map(|value| (*value).to_owned())
                                 .collect(),
-                            requirements: target_directory_for(text,at).map(|directory|vec![directory_requirement(&key,&directory)])
+                            requirements: target_directory_for(text, at)
+                                .map(|directory| vec![directory_requirement(&key, &directory)])
                                 .unwrap_or_default(),
                         },
                     );
@@ -902,7 +1032,7 @@ pub(crate) fn read_only_path_roles(text: &str, project_root: Option<&str>) -> Pa
         .iter()
         .zip(roles.iter())
         .filter(|(_, role)| **role == MentionRole::Output)
-        .map(|(mention, _)| path_key(&resolved_output_name(text,mention)))
+        .map(|(mention, _)| path_key(&resolved_output_name(text, mention)))
         .collect();
     let mut resolved = PathRoles::default();
     for (mention, role) in mentions.iter().zip(roles.iter()) {
@@ -923,7 +1053,8 @@ pub(crate) fn read_only_path_roles(text: &str, project_root: Option<&str>) -> Pa
         if !mention_is_input(text, at) && !mention_names_input_directory(text, directory) {
             continue;
         }
-        if let Some(relative) = project_relative_path(directory.trim_end_matches(['/', '\\']), project_root)
+        if let Some(relative) =
+            project_relative_path(directory.trim_end_matches(['/', '\\']), project_root)
         {
             if let Some(identity) = directory_identity(&relative) {
                 resolved.read_only_dirs.insert(identity);
@@ -939,7 +1070,14 @@ pub(crate) fn read_only_path_roles(text: &str, project_root: Option<&str>) -> Pa
 /// URLs and in ordinary writing.
 fn collect_directory_mentions(text: &str) -> Vec<&str> {
     const DIRECTORY_WORDS: [&str; 8] = [
-        "目录", "文件夹", "目录下", "文件夹下", "directory", "folder", "directories", "folders",
+        "目录",
+        "文件夹",
+        "目录下",
+        "文件夹下",
+        "directory",
+        "folder",
+        "directories",
+        "folders",
     ];
     let mut found = Vec::new();
     let bytes = text.as_bytes();
@@ -1014,7 +1152,9 @@ fn fold_windows_spelling(value: &str) -> String {
     // marker is a namespace, not a directory named `UNC`. Only a namespaced path
     // is read this way, so a genuine relative `UNC/` folder keeps its name.
     match without_prefix.get(..4) {
-        Some(marker) if marker.eq_ignore_ascii_case("unc/") => format!("//{}", &without_prefix[4..]),
+        Some(marker) if marker.eq_ignore_ascii_case("unc/") => {
+            format!("//{}", &without_prefix[4..])
+        }
         _ => without_prefix.to_owned(),
     }
 }
@@ -1123,7 +1263,10 @@ fn project_relative_path(named: &str, project_root: Option<&str>) -> Option<Stri
 /// the U1 acceptance rule, which has to resolve the accepted candidate against
 /// the **current** authorization root. It is the same function, not a second
 /// spelling of the rule, so the two cannot drift apart.
-pub(crate) fn project_relative_path_for_u1(named: &str, project_root: Option<&str>) -> Option<String> {
+pub(crate) fn project_relative_path_for_u1(
+    named: &str,
+    project_root: Option<&str>,
+) -> Option<String> {
     project_relative_path(named, project_root)
 }
 
@@ -1137,7 +1280,14 @@ fn mention_names_input_directory(text: &str, token: &str) -> bool {
         return true;
     }
     let before = text[..at].trim_end();
-    let tail: String = before.chars().rev().take(6).collect::<String>().chars().rev().collect();
+    let tail: String = before
+        .chars()
+        .rev()
+        .take(6)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     tail.contains('从') || tail.contains('自') || tail.ends_with("读取") || tail.ends_with("基于")
 }
 
@@ -1186,14 +1336,12 @@ fn collect_mentions(text: &str) -> Vec<Mention> {
                 // Spaces are legal inside a file name, but only between
                 // ASCII name characters: "结果写入 report/x.csv" must
                 // backtrack to "report/x.csv", not swallow the prose.
-                let preceded_by_ascii = text[..index]
-                    .chars()
-                    .next_back()
-                    .is_some_and(|value| value.is_ascii_alphanumeric() || matches!(value, '_' | '-' | '.' | '/'));
-                let followed_by_ascii = text[start..]
-                    .chars()
-                    .next()
-                    .is_some_and(|value| value.is_ascii_alphanumeric() || matches!(value, '_' | '-' | '.' | '/'));
+                let preceded_by_ascii = text[..index].chars().next_back().is_some_and(|value| {
+                    value.is_ascii_alphanumeric() || matches!(value, '_' | '-' | '.' | '/')
+                });
+                let followed_by_ascii = text[start..].chars().next().is_some_and(|value| {
+                    value.is_ascii_alphanumeric() || matches!(value, '_' | '-' | '.' | '/')
+                });
                 // An ASCII word in front of the space may be prose rather than
                 // part of the name: "Read in/source.csv" names in/source.csv, not
                 // "Read in/source.csv". A word that contains a known verb is an
@@ -1223,22 +1371,34 @@ fn collect_mentions(text: &str) -> Vec<Mention> {
         }
         // Explicit quoting makes spaces and CJK particles part of the filename,
         // rather than instruction text. The quotes themselves are not a path.
-        for (open,close) in [('"','"'),('\'','\''),('`','`'),('“','”'),('「','」')] {
+        for (open, close) in [
+            ('"', '"'),
+            ('\'', '\''),
+            ('`', '`'),
+            ('“', '”'),
+            ('「', '」'),
+        ] {
             if text[end..].starts_with(close) {
-                if let Some(at)=text[..dot].rfind(open) {
-                    let candidate=&text[at+open.len_utf8()..end];
-                    if !candidate.contains(['\n','\r']) && candidate.chars().all(|c|
-                        c.is_alphanumeric() || matches!(c,' '|'_'|'-'|'.'|'/'|'\\'|':')) {
-                        start=at+open.len_utf8();break;
+                if let Some(at) = text[..dot].rfind(open) {
+                    let candidate = &text[at + open.len_utf8()..end];
+                    if !candidate.contains(['\n', '\r'])
+                        && candidate.chars().all(|c| {
+                            c.is_alphanumeric()
+                                || matches!(c, ' ' | '_' | '-' | '.' | '/' | '\\' | ':')
+                        })
+                    {
+                        start = at + open.len_utf8();
+                        break;
                     }
                 }
             }
         }
         let name = text[start..end].trim();
         let name_start = end - name.len();
-        let traverses_root = name.replace('\\', "/").split('/').any(|segment| {
-            segment.is_empty() || segment == "." || segment == ".."
-        });
+        let traverses_root = name
+            .replace('\\', "/")
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..");
         // With '/' allowed inside relative names, backtracking can walk into a
         // URL ("https://host/report.docx"). A drive-letter prefix ("D:\work\a.csv",
         // "C:/work/a.csv") is the opposite case: it is an ordinary absolute path
@@ -1257,8 +1417,7 @@ fn collect_mentions(text: &str) -> Vec<Mention> {
             || preceding_token.contains("://")
             || (preceding_token.contains(':') && !absolute_path)
             || preceding_token.contains('@')
-            || !(is_name_start_boundary(text[..name_start].chars().next_back())
-                || absolute_path)
+            || !(is_name_start_boundary(text[..name_start].chars().next_back()) || absolute_path)
         {
             continue;
         }
@@ -1315,9 +1474,7 @@ fn extend_to_absolute_path(text: &str, start: usize) -> Option<usize> {
     }
     // The separator may already be inside the token (`D:\work\`) or may be the
     // very character the name starts at (`C:/proj/in/a.csv`).
-    let separator = characters
-        .next()
-        .or_else(|| text[start..].chars().next());
+    let separator = characters.next().or_else(|| text[start..].chars().next());
     matches!(separator, Some('\\') | Some('/')).then_some(index)
 }
 
@@ -1325,7 +1482,9 @@ fn extend_to_absolute_path(text: &str, start: usize) -> Option<usize> {
 fn classify_mentions(text: &str, mentions: &[Mention]) -> Vec<MentionRole> {
     let mut roles: Vec<MentionRole> = Vec::with_capacity(mentions.len());
     for (index, mention) in mentions.iter().enumerate() {
-        if mention_is_example(text,mention.name_start) || is_explanation_request(text,mention.name_start) {
+        if mention_is_example(text, mention.name_start)
+            || is_explanation_request(text, mention.name_start)
+        {
             roles.push(MentionRole::Unclassified);
             continue;
         }
@@ -1337,7 +1496,7 @@ fn classify_mentions(text: &str, mentions: &[Mention]) -> Vec<MentionRole> {
             roles.push(MentionRole::Intermediate);
             continue;
         }
-        if post_path_output_role(text,mention) {
+        if post_path_output_role(text, mention) {
             roles.push(MentionRole::Output);
             continue;
         }
@@ -1466,29 +1625,66 @@ fn list_introducer_role(text: &str, name_start: usize) -> Option<MentionRole> {
 
 fn mention_is_intermediate(text: &str, mentions: &[Mention], index: usize) -> bool {
     let at = mentions[index].name_start;
-    let previous_end = index.checked_sub(1)
+    let previous_end = index
+        .checked_sub(1)
         .map(|previous| mentions[previous].name_start + mentions[previous].name.len())
         .unwrap_or(0);
     let clause_start = text[..at]
-        .char_indices().rev()
+        .char_indices()
+        .rev()
         .find(|(_, character)| matches!(character, '。' | '！' | '？' | '\n' | '；' | ';'))
         .map(|(position, character)| position + character.len_utf8())
         .unwrap_or(0)
         .max(previous_end);
-    let prefix = text[clause_start..at].chars().rev().take(32).collect::<String>()
-        .chars().rev().collect::<String>().to_lowercase();
-    if ["临时", "中间文件", "过程文件", "草稿", "调试文件", "scratch", "temporary", "intermediate"]
-        .iter().any(|marker| prefix.contains(marker)) {
+    let prefix = text[clause_start..at]
+        .chars()
+        .rev()
+        .take(32)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>()
+        .to_lowercase();
+    if [
+        "临时",
+        "中间文件",
+        "过程文件",
+        "草稿",
+        "调试文件",
+        "scratch",
+        "temporary",
+        "intermediate",
+    ]
+    .iter()
+    .any(|marker| prefix.contains(marker))
+    {
         return true;
     }
     let end = at + mentions[index].name.len();
-    let next = mentions.get(index + 1).map(|mention| mention.name_start).unwrap_or(text.len());
+    let next = mentions
+        .get(index + 1)
+        .map(|mention| mention.name_start)
+        .unwrap_or(text.len());
     let suffix = text[end..next]
         .split(['。', '！', '？', '\n', '；', ';'])
-        .next().unwrap_or_default()
-        .chars().take(20).collect::<String>().to_lowercase();
-    ["作为临时", "用作临时", "仅作临时", "作为中间", "用作中间", "仅作中间", "for scratch", "as temporary"]
-        .iter().any(|marker| suffix.contains(marker))
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(20)
+        .collect::<String>()
+        .to_lowercase();
+    [
+        "作为临时",
+        "用作临时",
+        "仅作临时",
+        "作为中间",
+        "用作中间",
+        "仅作中间",
+        "for scratch",
+        "as temporary",
+    ]
+    .iter()
+    .any(|marker| suffix.contains(marker))
 }
 
 /// User-stated purpose for this exact project path. An undecided mention never
@@ -1506,7 +1702,11 @@ pub(crate) fn explicit_file_purpose(
     let roles = classify_mentions(text, &mentions);
     let mut purpose = None;
     for (mention, role) in mentions.iter().zip(roles.iter()) {
-        let named=if *role==MentionRole::Output {resolved_output_name(text,mention)}else{mention.name.clone()};
+        let named = if *role == MentionRole::Output {
+            resolved_output_name(text, mention)
+        } else {
+            mention.name.clone()
+        };
         let key = path_key(&normalize_path_text(&named));
         if key != relative_key && key != absolute_key {
             continue;
@@ -1514,7 +1714,7 @@ pub(crate) fn explicit_file_purpose(
         match role {
             MentionRole::Output => purpose = Some(ArtifactClass::Deliverable),
             MentionRole::Intermediate => purpose = Some(ArtifactClass::Process),
-            MentionRole::Input | MentionRole::Unclassified => {},
+            MentionRole::Input | MentionRole::Unclassified => {}
         }
     }
     purpose
@@ -1589,28 +1789,121 @@ fn normalize_path_text(value: &str) -> String {
 /// only consumes never becomes a deliverable the Run has to write. A path the
 /// task also writes stays an output — output verbs win.
 const SOURCE_INPUT_VERBS: &[&str] = &[
-    "读取", "读", "阅读", "基于", "根据", "依据", "参照", "参考", "按照", "依照", "结合",
-    "使用", "采用", "输入", "来自", "来源", "分析", "解析", "只读",
+    "读取",
+    "读",
+    "阅读",
+    "基于",
+    "根据",
+    "依据",
+    "参照",
+    "参考",
+    "按照",
+    "依照",
+    "结合",
+    "使用",
+    "采用",
+    "输入",
+    "来自",
+    "来源",
+    "分析",
+    "解析",
+    "只读",
     // Consume / process / answer-with verbs.
-    "清洗", "核对", "审核", "检查", "校验", "比对", "比较", "对比", "处理", "统计", "汇总",
-    "回答", "查询", "检索", "搜索", "查看", "浏览", "打开", "导入", "不改", "不改变", "保持",
+    "清洗",
+    "核对",
+    "审核",
+    "检查",
+    "校验",
+    "比对",
+    "比较",
+    "对比",
+    "处理",
+    "统计",
+    "汇总",
+    "回答",
+    "查询",
+    "检索",
+    "搜索",
+    "查看",
+    "浏览",
+    "打开",
+    "导入",
+    "不改",
+    "不改变",
+    "保持",
     // English equivalents, matched at a word boundary.
-    "read", "from", "based on", "using", "use", "given", "clean", "check", "review",
-    "compare", "analyze", "parse", "answer", "query", "search", "inspect", "load",
-    "import", "refer",
+    "read",
+    "from",
+    "based on",
+    "using",
+    "use",
+    "given",
+    "clean",
+    "check",
+    "review",
+    "compare",
+    "analyze",
+    "parse",
+    "answer",
+    "query",
+    "search",
+    "inspect",
+    "load",
+    "import",
+    "refer",
 ];
 
 /// Verbs that introduce a file as the **target to write**. A file can be both:
 /// "读取 report.docx，修改内容并保存 report.docx" names one path twice, and the
 /// second mention is a save request.
 const TARGET_OUTPUT_VERBS: &[&str] = &[
-    "保存", "另存", "存入", "存成", "写入", "写到", "写回", "回写", "覆盖", "更新", "修改",
-    "改动", "编辑", "改写", "填充", "追加", "导出", "输出", "生成", "创建", "新建", "制作",
-    "整理成", "汇总成", "撰写", "编写", "制备", "出具", "打印成", "交付",
+    "保存",
+    "另存",
+    "存入",
+    "存成",
+    "写入",
+    "写到",
+    "写回",
+    "回写",
+    "覆盖",
+    "更新",
+    "修改",
+    "改动",
+    "编辑",
+    "改写",
+    "填充",
+    "追加",
+    "导出",
+    "输出",
+    "生成",
+    "创建",
+    "新建",
+    "制作",
+    "整理成",
+    "汇总成",
+    "撰写",
+    "编写",
+    "制备",
+    "出具",
+    "打印成",
+    "交付",
     // See PRODUCTION_VERBS: the "到/为" variants are ordinary user phrasings.
-    "汇总到", "整理为", "合并为", "合并成", "命名为",
-    "save", "write", "append", "overwrite", "update", "modify", "edit", "export",
-    "generate", "create", "produce",
+    "汇总到",
+    "整理为",
+    "合并为",
+    "合并成",
+    "命名为",
+    "save",
+    "write",
+    "append",
+    "overwrite",
+    "update",
+    "modify",
+    "edit",
+    "export",
+    "generate",
+    "create",
+    "produce",
 ];
 
 /// The verb that introduces **this** mention of a file name, judged from the
@@ -1731,7 +2024,11 @@ fn introducing_verb_role(
     let verbs = TARGET_OUTPUT_VERBS
         .iter()
         .map(|verb| (*verb, MentionRole::Output))
-        .chain(SOURCE_INPUT_VERBS.iter().map(|verb| (*verb, MentionRole::Input)));
+        .chain(
+            SOURCE_INPUT_VERBS
+                .iter()
+                .map(|verb| (*verb, MentionRole::Input)),
+        );
     for (verb, role) in verbs {
         let mut from = 0usize;
         while let Some(relative) = lowered[from..].find(verb) {
@@ -1808,10 +2105,37 @@ const NAME_WINDOW_CHARS: usize = 16;
 /// before the verb, so an unrelated earlier negation cannot silence a real
 /// instruction ("没有模板，生成 a.docx" still produces `a.docx`).
 const NEGATED_VERB_MARKERS: &[&str] = &[
-    "不要", "不得", "不能", "不需", "不用", "无需", "无须", "禁止", "严禁", "不准", "不许",
-    "别", "勿", "莫", "免", "不可", "不应该", "避免", "防止", "切勿", "切忌",
-    "do not", "don't", "dont", "never", "must not", "cannot", "can't", "without",
-    "avoid", "no ",
+    "不要",
+    "不得",
+    "不能",
+    "不需",
+    "不用",
+    "无需",
+    "无须",
+    "禁止",
+    "严禁",
+    "不准",
+    "不许",
+    "别",
+    "勿",
+    "莫",
+    "免",
+    "不可",
+    "不应该",
+    "避免",
+    "防止",
+    "切勿",
+    "切忌",
+    "do not",
+    "don't",
+    "dont",
+    "never",
+    "must not",
+    "cannot",
+    "can't",
+    "without",
+    "avoid",
+    "no ",
 ];
 
 /// Characters a negation marker can end in. A window that clips a long marker
@@ -1831,7 +2155,14 @@ fn negates_verb(before: &str) -> bool {
     let before = sentence_tail(before);
     let trimmed = before.trim_end_matches([' ', '　', '\t', '\n', '\r', '，', ',', '。', '、']);
     // The marker sits immediately before what follows it.
-    let tail: String = trimmed.chars().rev().take(6).collect::<String>().chars().rev().collect();
+    let tail: String = trimmed
+        .chars()
+        .rev()
+        .take(6)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     if NEGATED_VERB_MARKERS
         .iter()
         .any(|marker| tail.to_lowercase().ends_with(&marker.to_lowercase()))
@@ -1865,9 +2196,29 @@ fn negates_verb(before: &str) -> bool {
 /// introduces. Stripping is repeated, so "读取本地文件 X" resolves to "读取".
 fn strip_name_modifier(value: &str) -> Option<&str> {
     const MODIFIERS: &[&str] = &[
-        "本题", "本任务", "本次", "本地", "给定", "所给", "上述", "下面", "以下", "附件",
-        "材料", "文件", "这个", "该", "此", "本",
-        "the", "file", "given", "provided", "attached", "a", "an",
+        "本题",
+        "本任务",
+        "本次",
+        "本地",
+        "给定",
+        "所给",
+        "上述",
+        "下面",
+        "以下",
+        "附件",
+        "材料",
+        "文件",
+        "这个",
+        "该",
+        "此",
+        "本",
+        "the",
+        "file",
+        "given",
+        "provided",
+        "attached",
+        "a",
+        "an",
     ];
     MODIFIERS
         .iter()
@@ -2041,8 +2392,7 @@ pub(crate) enum RequirementVerdict {
     Unverified(String),
 }
 
-impl RequirementVerdict {
-}
+impl RequirementVerdict {}
 
 /// Write a stored-only OOXML/ZIP container from `(name, bytes)` entries.
 ///
@@ -2142,16 +2492,28 @@ mod tests {
         use crate::runtime_host::artifact_store::ArtifactClass;
         let root = Path::new(r"C:\proj");
         assert_eq!(
-            explicit_file_purpose("请在项目根目录生成 summary.json", root, Path::new(r"C:\proj\summary.json")),
+            explicit_file_purpose(
+                "请在项目根目录生成 summary.json",
+                root,
+                Path::new(r"C:\proj\summary.json")
+            ),
             Some(ArtifactClass::Deliverable),
         );
         assert_eq!(
-            explicit_file_purpose("生成 fox/task/tmp.json 作为临时文件", root, Path::new(r"C:\proj\fox\task\tmp.json")),
+            explicit_file_purpose(
+                "生成 fox/task/tmp.json 作为临时文件",
+                root,
+                Path::new(r"C:\proj\fox\task\tmp.json")
+            ),
             Some(ArtifactClass::Process),
         );
         assert!(expectations_from_task("生成 fox/task/tmp.json 作为临时文件").is_empty());
         assert_eq!(
-            explicit_file_purpose("读取 input.docx，然后修改并保存 input.docx", root, Path::new(r"C:\proj\input.docx")),
+            explicit_file_purpose(
+                "读取 input.docx，然后修改并保存 input.docx",
+                root,
+                Path::new(r"C:\proj\input.docx")
+            ),
             Some(ArtifactClass::Deliverable),
         );
         assert_eq!(
@@ -2160,10 +2522,7 @@ mod tests {
         );
     }
 
-    fn seed_by_key<'a>(
-        seeds: &'a [DeliveryChecklistSeed],
-        key: &str,
-    ) -> &'a DeliveryChecklistSeed {
+    fn seed_by_key<'a>(seeds: &'a [DeliveryChecklistSeed], key: &str) -> &'a DeliveryChecklistSeed {
         seeds
             .iter()
             .find(|seed| seed.item_key == key)
@@ -2262,7 +2621,10 @@ mod tests {
                 "请读取 inputs/a.txt，生成 out/notes/a.md，全部完成后生成 out/summary.md。",
                 vec!["out/notes/a.md", "out/summary.md"],
             ),
-            ("请核对数据后汇总到 out/summary.md。", vec!["out/summary.md"]),
+            (
+                "请核对数据后汇总到 out/summary.md。",
+                vec!["out/summary.md"],
+            ),
             ("请核对数据后整理为 out/report.md。", vec!["out/report.md"]),
             ("请更新 out/progress.csv。", vec!["out/progress.csv"]),
         ] {
@@ -2290,7 +2652,10 @@ mod tests {
             assert!(
                 seeds.is_empty(),
                 "a read-only check must seed nothing, got {:?} for: {text}",
-                seeds.iter().map(|seed| seed.display_name.clone()).collect::<Vec<_>>()
+                seeds
+                    .iter()
+                    .map(|seed| seed.display_name.clone())
+                    .collect::<Vec<_>>()
             );
         }
     }
@@ -2344,7 +2709,11 @@ mod tests {
         const PROMPT: &str = "请读取 inputs/equipment.csv，为每台设备生成 out/notes/EQ001.md、out/notes/EQ002.md、out/notes/EQ003.md，然后把汇总结果汇总到 out/summary.md，并更新 out/totals.csv。";
         let mut got: Vec<String> = expectations_from_task(PROMPT)
             .into_iter()
-            .map(|seed| seed.target_path.clone().unwrap_or(seed.display_name.clone()))
+            .map(|seed| {
+                seed.target_path
+                    .clone()
+                    .unwrap_or(seed.display_name.clone())
+            })
             .collect();
         got.sort();
         assert_eq!(
@@ -2371,7 +2740,11 @@ mod tests {
         ] {
             let mut got: Vec<String> = expectations_from_task(text)
                 .into_iter()
-                .map(|seed| seed.target_path.clone().unwrap_or(seed.display_name.clone()))
+                .map(|seed| {
+                    seed.target_path
+                        .clone()
+                        .unwrap_or(seed.display_name.clone())
+                })
                 .collect();
             got.sort();
             assert_eq!(
@@ -2386,12 +2759,19 @@ mod tests {
     #[test]
     fn repeated_and_quoted_mentions_keep_one_identity() {
         for (text, expected) in [
-            ("读取 inputs/a.csv 并生成 out/x.csv，另外再生成 out/x.csv。", vec!["out/x.csv"]),
+            (
+                "读取 inputs/a.csv 并生成 out/x.csv，另外再生成 out/x.csv。",
+                vec!["out/x.csv"],
+            ),
             ("生成 `out/quoted.md`。", vec!["out/quoted.md"]),
         ] {
             let mut got: Vec<String> = expectations_from_task(text)
                 .into_iter()
-                .map(|seed| seed.target_path.clone().unwrap_or(seed.display_name.clone()))
+                .map(|seed| {
+                    seed.target_path
+                        .clone()
+                        .unwrap_or(seed.display_name.clone())
+                })
                 .collect();
             got.sort();
             let mut want: Vec<String> = expected.iter().map(|v| v.to_string()).collect();
@@ -2440,7 +2820,9 @@ mod tests {
         let far = expectations_from_task("不要改动任何内容请生成 out/a.md。");
         println!(
             "[boundary] far marker seeded = {:?}",
-            far.iter().map(|s| s.display_name.clone()).collect::<Vec<_>>()
+            far.iter()
+                .map(|s| s.display_name.clone())
+                .collect::<Vec<_>>()
         );
         // The common-noun tails this fix removed must stay non-prohibitions.
         for (text, expected) in [
@@ -2493,7 +2875,9 @@ mod tests {
     #[test]
     fn a_new_instruction_after_a_list_neither_inherits_nor_promotes_prose() {
         assert_eq!(
-            seeded_paths("生成以下文件（每行一个）：\nout/a.md\nout/b.md\n读取 in/c.csv，并概括其内容。"),
+            seeded_paths(
+                "生成以下文件（每行一个）：\nout/a.md\nout/b.md\n读取 in/c.csv，并概括其内容。"
+            ),
             vec!["out/a.md", "out/b.md"]
         );
         assert_eq!(
@@ -2515,7 +2899,8 @@ mod tests {
         );
         assert!(!roles.contains_relative("b.json"), "{roles:?}");
         // A forward-slash absolute path protects the same file.
-        let forward = read_only_path_roles("读取 C:/proj/in/a.csv，生成 out/b.json。", Some("C:/proj"));
+        let forward =
+            read_only_path_roles("读取 C:/proj/in/a.csv，生成 out/b.json。", Some("C:/proj"));
         assert!(forward.contains_relative("in/a.csv"), "{forward:?}");
         // A path outside the frozen root is not this gate's business.
         let outside = read_only_path_roles(r"读取 D:\other\a.csv，生成 b.json。", Some(r"D:\work"));
@@ -2532,7 +2917,10 @@ mod tests {
         assert_ne!(path_key("a%2fb.csv"), path_key("a/b.csv"));
         // Separator spelling and case still fold: they name one file.
         assert_eq!(path_key("Source\\A.CSV"), path_key("source/a.csv"));
-        assert_eq!(path_key("in/messy_sales.csv"), path_key("IN\\MESSY_SALES.CSV"));
+        assert_eq!(
+            path_key("in/messy_sales.csv"),
+            path_key("IN\\MESSY_SALES.CSV")
+        );
         // CJK and underscore combinations stay distinct.
         assert_ne!(path_key("数据/汇总.csv"), path_key("数据_汇总.csv"));
         assert_ne!(path_key("报表_a/结果.csv"), path_key("报表_a_结果.csv"));
@@ -2569,7 +2957,10 @@ mod tests {
             roles.contains_relative("in/docs/operations.md"),
             "any file under the read directory is input material: {roles:?}"
         );
-        assert!(roles.contains_relative("in/docs/nested/deep.md"), "{roles:?}");
+        assert!(
+            roles.contains_relative("in/docs/nested/deep.md"),
+            "{roles:?}"
+        );
         assert!(
             !roles.contains_relative("in/docs-old/operations.md"),
             "a prefix must not be mistaken for the directory itself: {roles:?}"
@@ -2583,14 +2974,14 @@ mod tests {
         seeds
             .iter()
             .flat_map(|seed| {
-                seed.requirements.iter().filter_map(|requirement| {
-                    match &requirement.kind {
-                        crate::database::RequirementKind::FieldConvention { target_path, .. } => {
-                            Some((seed.item_key.clone(), target_path.clone()))
-                        }
+                seed.requirements
+                    .iter()
+                    .filter_map(|requirement| match &requirement.kind {
+                        crate::database::RequirementKind::FieldConvention {
+                            target_path, ..
+                        } => Some((seed.item_key.clone(), target_path.clone())),
                         _ => None,
-                    }
-                })
+                    })
             })
             .collect()
     }
@@ -2606,9 +2997,7 @@ mod tests {
                 .find(|seed| seed.target_path.as_deref() == Some(path))
         };
         let csv = by_path("report/summary.csv").expect("csv target");
-        assert!(csv
-            .checks
-            .contains(&"consistent_columns".to_owned()));
+        assert!(csv.checks.contains(&"consistent_columns".to_owned()));
         assert!(by_path("stats.json").is_some());
         assert!(by_path("a.pdf").is_some());
         assert!(by_path("b.pdf").is_some());
@@ -2627,7 +3016,10 @@ mod tests {
             "请生成一份结论摘要。",
             "联系我：user@example.com",
         ] {
-            assert!(expectations_from_task(text).is_empty(), "seeded for: {text}");
+            assert!(
+                expectations_from_task(text).is_empty(),
+                "seeded for: {text}"
+            );
         }
     }
 
@@ -2918,7 +3310,8 @@ mod tests {
     /// the output are the same path and it is still owed back.
     #[test]
     fn editing_an_existing_document_in_place_promises_that_document_once() {
-        let seeds = expectations_from_task("打开 会议纪要.docx，把第二段改短后保存 会议纪要.docx。");
+        let seeds =
+            expectations_from_task("打开 会议纪要.docx，把第二段改短后保存 会议纪要.docx。");
         let paths: Vec<_> = seeds
             .iter()
             .filter_map(|seed| seed.target_path.clone())
@@ -2948,6 +3341,4 @@ mod tests {
             expectations_from_task("读取 report.docx 并总结它的要点。")
         );
     }
-
 }
-

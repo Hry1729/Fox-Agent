@@ -85,7 +85,8 @@ mod tests {
     use super::*;
 
     fn temp_root(tag: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("fox-data-paths-{tag}-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("fox-data-paths-{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         root
     }
@@ -98,12 +99,21 @@ mod tests {
         let locks = sessions.join("kernel-run-locks");
         std::fs::write(&locks, b"x").unwrap();
         let error = ensure_directory(&locks, "Kernel 锁目录").unwrap_err();
-        assert_eq!(error, format!("Kernel 锁目录：{} 应为目录但是文件", locks.display()));
+        assert_eq!(
+            error,
+            format!("Kernel 锁目录：{} 应为目录但是文件", locks.display())
+        );
         // A file higher up (cache replaced by a file) is named too.
         std::fs::write(root.join("cache"), b"x").unwrap();
         let preview = root.join("cache").join("knowledge-preview");
         let error = ensure_directory(&preview, "预览缓存目录").unwrap_err();
-        assert!(error.contains(&format!("{} 应为目录但是文件", root.join("cache").display())), "{error}");
+        assert!(
+            error.contains(&format!(
+                "{} 应为目录但是文件",
+                root.join("cache").display()
+            )),
+            "{error}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -115,14 +125,34 @@ mod tests {
         std::fs::create_dir_all(root.join("cache")).unwrap();
         std::fs::write(root.join("cache").join("knowledge-preview"), b"x").unwrap();
         let text = run_create_failure(&root, "unable to open database file");
-        assert!(text.contains(&format!("{} 应为目录但是文件", root.join("runtime-sessions").join("kernel-run-locks").display())), "{text}");
-        assert!(text.contains(&format!("{} 应为目录但是文件", root.join("cache").join("knowledge-preview").display())), "{text}");
-        assert!(text.contains(&root.join("fox.db").display().to_string()), "{text}");
+        assert!(
+            text.contains(&format!(
+                "{} 应为目录但是文件",
+                root.join("runtime-sessions")
+                    .join("kernel-run-locks")
+                    .display()
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "{} 应为目录但是文件",
+                root.join("cache").join("knowledge-preview").display()
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains(&root.join("fox.db").display().to_string()),
+            "{text}"
+        );
         assert!(text.contains("unable to open database file"));
         let healthy = temp_root("run-create-ok");
         assert_eq!(
             run_create_failure(&healthy, "disk I/O error"),
-            format!("无法写入数据库 {}：disk I/O error", healthy.join("fox.db").display())
+            format!(
+                "无法写入数据库 {}：disk I/O error",
+                healthy.join("fox.db").display()
+            )
         );
         assert!(ensure_directory(&healthy.join("a").join("b"), "目录").is_ok());
         let _ = std::fs::remove_dir_all(root);

@@ -46,10 +46,18 @@ fn required_capability(tool: &str, input: Option<&Value>) -> Result<Option<Strin
             // Event ingress (tool.started/updated/completed) carries no input;
             // the execute ingress already verified the exact tool, so the
             // event only needs the connector capability to exist at all.
-            let Some(input) = input else { return Ok(Some("mcp:*".to_owned())) };
-            let server = input.get("serverId").and_then(Value::as_str).filter(|value| !value.is_empty())
+            let Some(input) = input else {
+                return Ok(Some("mcp:*".to_owned()));
+            };
+            let server = input
+                .get("serverId")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
                 .ok_or("缺少连接器 serverId")?;
-            let remote = input.get("tool").and_then(Value::as_str).filter(|value| !value.is_empty())
+            let remote = input
+                .get("tool")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
                 .ok_or("缺少连接器工具名")?;
             Ok(Some(capability_id(server, remote)))
         }
@@ -59,7 +67,10 @@ fn required_capability(tool: &str, input: Option<&Value>) -> Result<Option<Strin
 
 /// Read-only view of [`required_capability`] for the Host notification refresh,
 /// which re-derives the capability of an already-persisted approval input.
-pub(crate) fn required_capability_for(tool: &str, input: Option<&Value>) -> Result<Option<String>, String> {
+pub(crate) fn required_capability_for(
+    tool: &str,
+    input: Option<&Value>,
+) -> Result<Option<String>, String> {
     required_capability(tool, input)
 }
 
@@ -98,30 +109,80 @@ fn ensure_granted_inner(
     input: Option<&Value>,
     strict_snapshot: bool,
 ) -> Result<(), String> {
-    let Some(scope) = super::companion_ownership::resolve_run_on(connection, run_id)? else {
+    let scope = super::companion_ownership::resolve_run_on(connection, run_id)?;
+    if super::companion_coordination::consultation_on(connection, run_id)
+        .map_err(|error| error.to_string())?
+        && !crate::companion_workspace::is_consultation_tool(tool)
+    {
+        return Err("咨询仅允许读取信息，不能修改文件、派活或执行其他操作。".into());
+    }
+    if crate::companion_workspace::is_companion_peer_tool(tool) {
+        if tool == "companion_coordinate" && scope.is_none() {
+            return Err("伙伴转派仅在伙伴会话中可用。当前任务可使用子 Agent 或专家。".into());
+        }
+        let child: bool = connection.query_row(
+            "SELECT run_kind='child' OR parent_run_id IS NOT NULL FROM runs WHERE id=?1",
+            [run_id], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        if child || scope.as_ref().is_some_and(|scope| scope.is_child) {
+            return Err("临时子 Agent 不能发起伙伴协作。".into());
+        }
+    } else if crate::companion_workspace::is_companion_team_tool(tool) {
+        let owner = scope.as_ref().filter(|scope| !scope.is_child);
+        let is_default = match owner {
+            Some(scope) => connection.query_row(
+                "SELECT is_default = 1 AND archived_at IS NULL AND deleting_at IS NULL FROM companion_profiles WHERE id=?1",
+                [&scope.companion_id], |row| row.get::<_, bool>(0),
+            ).map_err(|error| error.to_string())?,
+            None => false,
+        };
+        if !is_default {
+            return Err("只有小狐的根运行可以管理其他伙伴，子任务不能使用管家工具。".into());
+        }
+    }
+    let Some(scope) = scope else {
         return Ok(());
     };
-    if scope.is_child && matches!(tool,
-        "companion_profile_update" | "companion_task_create" | "companion_task_update"
-        | "companion_task_pause" | "companion_task_resume" | "companion_task_run_now"
-        | "companion_task_delete" | "memory_write" | "note_organize") {
+    if scope.is_child
+        && matches!(
+            tool,
+            "companion_profile_update"
+                | "companion_task_create"
+                | "companion_task_update"
+                | "companion_task_pause"
+                | "companion_task_resume"
+                | "companion_task_run_now"
+                | "companion_task_delete"
+                | "memory_write"
+                | "note_organize"
+        )
+    {
         return Err(format!("子任务不可使用工具 {tool}"));
     }
     let frozen = run_snapshot_on(connection, run_id)?;
     if scope.is_child && frozen.is_none() {
-        return Err(format!("工具 {tool} 的本轮能力快照缺失，无法按原授权恢复此批准；请重新发起对话"));
+        return Err(format!(
+            "工具 {tool} 的本轮能力快照缺失，无法按原授权恢复此批准；请重新发起对话"
+        ));
     }
-    if frozen.as_ref().and_then(|snapshot| snapshot.allowed_tools.as_ref())
-        .is_some_and(|tools| !tools.iter().any(|name| name == tool)) {
+    if frozen
+        .as_ref()
+        .and_then(|snapshot| snapshot.allowed_tools.as_ref())
+        .is_some_and(|tools| !tools.iter().any(|name| name == tool))
+    {
         return Err(format!("工具 {tool} 不在本轮冻结的工具目录中"));
     }
     let companion = scope.companion_id;
-    let Some(required) = required_capability(tool, input)? else { return Ok(()) };
+    let Some(required) = required_capability(tool, input)? else {
+        return Ok(());
+    };
     let current = current_capability_ids_on(connection, &companion)?;
     let snapshot = match frozen {
         Some(snapshot) => snapshot.capabilities,
         None if strict_snapshot || scope.is_child => {
-            return Err(format!("工具 {tool} 的本轮能力快照缺失，无法按原授权恢复此批准；请重新发起对话"));
+            return Err(format!(
+                "工具 {tool} 的本轮能力快照缺失，无法按原授权恢复此批准；请重新发起对话"
+            ));
         }
         None => current.clone(),
     };
@@ -136,13 +197,19 @@ fn ensure_granted_inner(
         snapshot.contains(&required)
     };
     if !granted_now && !in_snapshot {
-        return Err(format!("联系人未启用工具 {tool}，请在资料页的可用能力中开启"));
+        return Err(format!(
+            "联系人未启用工具 {tool}，请在资料页的可用能力中开启"
+        ));
     }
     if !granted_now {
-        return Err(format!("联系人已撤销对工具 {tool} 的授权；重新授权后请重新发起，旧的批准不会恢复"));
+        return Err(format!(
+            "联系人已撤销对工具 {tool} 的授权；重新授权后请重新发起，旧的批准不会恢复"
+        ));
     }
     if !in_snapshot {
-        return Err(format!("工具 {tool} 在本轮开始后才启用，将从下一轮对话开始可用"));
+        return Err(format!(
+            "工具 {tool} 在本轮开始后才启用，将从下一轮对话开始可用"
+        ));
     }
     Ok(())
 }
@@ -192,19 +259,31 @@ pub(crate) fn invalidate_companion_capability_in_tx(
                  AND (?1 IS NULL OR COALESCE(c.companion_id, dc.companion_id) = ?1)
            )",
     )?;
-    let rows = query.query_map(params![companion_id], |row| Ok((
-        row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
-    )))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows = query
+        .query_map(params![companion_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(query);
     let mut affected = Vec::new();
     for (approval_id, tool_name, input_json) in rows {
-        let Ok(input) = serde_json::from_str::<Value>(&input_json) else { continue };
-        let Ok(Some(required)) = required_capability(&tool_name, Some(&input)) else { continue };
+        let Ok(input) = serde_json::from_str::<Value>(&input_json) else {
+            continue;
+        };
+        let Ok(Some(required)) = required_capability(&tool_name, Some(&input)) else {
+            continue;
+        };
         let matches = match &target {
             Some(target) => required == *target,
             None => required.starts_with(&prefix),
         };
-        if !matches { continue; }
+        if !matches {
+            continue;
+        }
         register_approval_invalidation_in_tx(transaction, &approval_id, refusal, now)?;
         affected.push(approval_id);
     }
@@ -214,23 +293,38 @@ pub(crate) fn invalidate_companion_capability_in_tx(
 /// Current effective capability ids: grants intersected with the installed,
 /// enabled connectors. A grant for a removed or disabled server authorizes
 /// nothing until the server is back.
-fn current_capability_ids_on(connection: &Connection, companion_id: &str) -> Result<Vec<String>, String> {
-    let mut statement = connection.prepare(
-        "SELECT g.server_id, g.tool FROM companion_tool_grants g
+fn current_capability_ids_on(
+    connection: &Connection,
+    companion_id: &str,
+) -> Result<Vec<String>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT g.server_id, g.tool FROM companion_tool_grants g
          LEFT JOIN mcp_servers s ON s.id = g.server_id
          WHERE g.companion_id = ?1 AND (g.server_id = ?2 OR (s.id IS NOT NULL AND s.enabled = 1))",
-    ).map_err(|error| error.to_string())?;
-    let rows = statement.query_map(params![companion_id, WEB_SERVER_ID], |row| {
-        Ok(capability_id(&row.get::<_, String>(0)?, &row.get::<_, String>(1)?))
-    }).map_err(|error| error.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![companion_id, WEB_SERVER_ID], |row| {
+            Ok(capability_id(
+                &row.get::<_, String>(0)?,
+                &row.get::<_, String>(1)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
 }
 
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum StoredSnapshot {
     Legacy(Vec<String>),
-    Catalog { capabilities: Vec<String>, #[serde(rename = "allowedTools")] allowed_tools: Vec<String> },
+    Catalog {
+        capabilities: Vec<String>,
+        #[serde(rename = "allowedTools")]
+        allowed_tools: Vec<String>,
+    },
 }
 
 struct CompanionSnapshot {
@@ -239,20 +333,35 @@ struct CompanionSnapshot {
 }
 
 fn parse_snapshot(json: &str) -> Result<CompanionSnapshot, String> {
-    let stored: StoredSnapshot = serde_json::from_str(json)
-        .map_err(|error| format!("运行的能力快照无法读取: {error}"))?;
+    let stored: StoredSnapshot =
+        serde_json::from_str(json).map_err(|error| format!("运行的能力快照无法读取: {error}"))?;
     Ok(match stored {
-        StoredSnapshot::Legacy(capabilities) => CompanionSnapshot { capabilities, allowed_tools: None },
-        StoredSnapshot::Catalog { capabilities, allowed_tools } => CompanionSnapshot { capabilities, allowed_tools: Some(allowed_tools) },
+        StoredSnapshot::Legacy(capabilities) => CompanionSnapshot {
+            capabilities,
+            allowed_tools: None,
+        },
+        StoredSnapshot::Catalog {
+            capabilities,
+            allowed_tools,
+        } => CompanionSnapshot {
+            capabilities,
+            allowed_tools: Some(allowed_tools),
+        },
     })
 }
 
-fn run_snapshot_on(connection: &Connection, run_id: &str) -> Result<Option<CompanionSnapshot>, String> {
-    let raw: Option<Option<String>> = connection.query_row(
-        "SELECT companion_tools_snapshot FROM runs WHERE id = ?1",
-        [run_id],
-        |row| row.get(0),
-    ).optional().map_err(|error| error.to_string())?;
+fn run_snapshot_on(
+    connection: &Connection,
+    run_id: &str,
+) -> Result<Option<CompanionSnapshot>, String> {
+    let raw: Option<Option<String>> = connection
+        .query_row(
+            "SELECT companion_tools_snapshot FROM runs WHERE id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
     match raw.flatten() {
         Some(json) => parse_snapshot(&json).map(Some),
         None => Ok(None),
@@ -260,7 +369,10 @@ fn run_snapshot_on(connection: &Connection, run_id: &str) -> Result<Option<Compa
 }
 
 impl Database {
-    pub fn companion_tool_grants(&self, companion_id: &str) -> Result<Vec<(String, String)>, String> {
+    pub fn companion_tool_grants(
+        &self,
+        companion_id: &str,
+    ) -> Result<Vec<(String, String)>, String> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
                 "SELECT server_id, tool FROM companion_tool_grants WHERE companion_id = ?1 ORDER BY server_id, tool",
@@ -339,7 +451,10 @@ impl Database {
     }
 
     pub fn companion_capability_ids(&self, companion_id: &str) -> Result<Vec<String>, String> {
-        let connection = self.connection.lock().map_err(|_| "database lock is poisoned".to_owned())?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "database lock is poisoned".to_owned())?;
         current_capability_ids_on(&connection, companion_id)
     }
 
@@ -356,10 +471,16 @@ impl Database {
         })
     }
 
-    pub fn freeze_run_companion_catalog(&self, run_id: &str, capability_ids: &[String], allowed_tools: &[String]) -> Result<(), String> {
+    pub fn freeze_run_companion_catalog(
+        &self,
+        run_id: &str,
+        capability_ids: &[String],
+        allowed_tools: &[String],
+    ) -> Result<(), String> {
         let json = crate::canonical_json::to_string(&serde_json::json!({
             "capabilities": capability_ids, "allowedTools": allowed_tools,
-        })).map_err(|error| error.to_string())?;
+        }))
+        .map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
             connection.execute(
                 "UPDATE runs SET companion_tools_snapshot = ?2 WHERE id = ?1 AND companion_tools_snapshot IS NULL",
@@ -369,7 +490,11 @@ impl Database {
         })
     }
 
-    pub fn freeze_child_companion_tools(&self, child_run_id: &str, parent_run_id: &str) -> Result<(), String> {
+    pub fn freeze_child_companion_tools(
+        &self,
+        child_run_id: &str,
+        parent_run_id: &str,
+    ) -> Result<(), String> {
         self.with_connection(|connection| {
             let snapshot: Option<String> = connection.query_row(
                 "SELECT companion_tools_snapshot FROM runs WHERE id = ?1", [parent_run_id], |row| row.get(0),
@@ -395,18 +520,35 @@ impl Database {
         })
     }
 
-    pub fn run_companion_tools_snapshot(&self, run_id: &str) -> Result<Option<Vec<String>>, String> {
-        let connection = self.connection.lock().map_err(|_| "database lock is poisoned".to_owned())?;
+    pub fn run_companion_tools_snapshot(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<Vec<String>>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "database lock is poisoned".to_owned())?;
         Ok(run_snapshot_on(&connection, run_id)?.map(|snapshot| snapshot.capabilities))
     }
 
     pub fn run_companion_tool_catalog(&self, run_id: &str) -> Result<Option<Vec<String>>, String> {
-        let connection = self.connection.lock().map_err(|_| "database lock is poisoned".to_owned())?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "database lock is poisoned".to_owned())?;
         Ok(run_snapshot_on(&connection, run_id)?.and_then(|snapshot| snapshot.allowed_tools))
     }
 
-    pub fn ensure_companion_tool_granted(&self, run_id: &str, tool: &str, input: Option<&Value>) -> Result<(), String> {
-        let connection = self.connection.lock().map_err(|_| "database lock is poisoned".to_owned())?;
+    pub fn ensure_companion_tool_granted(
+        &self,
+        run_id: &str,
+        tool: &str,
+        input: Option<&Value>,
+    ) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "database lock is poisoned".to_owned())?;
         ensure_granted_on(&connection, run_id, tool, input)
     }
 }
@@ -426,24 +568,34 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let root = std::env::temp_dir().join(format!("fox-capability-test-{}", uuid::Uuid::new_v4()));
+            let root =
+                std::env::temp_dir().join(format!("fox-capability-test-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir(&root).unwrap();
             let db = Database::open(root.join("fox.db")).unwrap();
             let view = db.add_companion(&root, "fox-debugger").unwrap();
-            Self { root, db, companion: view.profile.id, chat: view.conversation_id }
+            Self {
+                root,
+                db,
+                companion: view.profile.id,
+                chat: view.conversation_id,
+            }
         }
 
         fn seed_server(&self, id: &str, enabled: bool) {
-            self.db.execute_raw_sql(&format!(
-                "INSERT INTO mcp_servers(id,name,command,enabled,created_at,updated_at)
+            self.db
+                .execute_raw_sql(&format!(
+                    "INSERT INTO mcp_servers(id,name,command,enabled,created_at,updated_at)
                  VALUES ('{id}','飞书','node',{},1,1)",
-                enabled as i64
-            )).unwrap();
+                    enabled as i64
+                ))
+                .unwrap();
         }
 
         fn running_run(&self) -> String {
             let started = self.db.create_run(&self.chat, "查一下日历", None).unwrap();
-            self.db.apply_runtime_event(&started.run.id, 1, &json!({"type":"run.started"})).unwrap();
+            self.db
+                .apply_runtime_event(&started.run.id, 1, &json!({"type":"run.started"}))
+                .unwrap();
             started.run.id
         }
     }
@@ -452,35 +604,86 @@ mod tests {
     fn frozen_catalog_is_write_once_and_legacy_snapshots_remain_readable() {
         use crate::database::{ChildRunBudget, CreateChildRunInput};
         let f = Fixture::new();
-        f.db.set_companion_tool_grant(&f.companion, WEB_SERVER_ID, "web_search", true).unwrap();
+        f.db.set_companion_tool_grant(&f.companion, WEB_SERVER_ID, "web_search", true)
+            .unwrap();
         let run = f.running_run();
         let capabilities = vec!["web_search".to_owned()];
         let allowed = vec!["read".to_owned(), "web_search".to_owned()];
-        f.db.freeze_run_companion_catalog(&run, &capabilities, &allowed).unwrap();
-        f.db.freeze_run_companion_catalog(&run, &[], &["write_file".to_owned()]).unwrap();
-        assert_eq!(f.db.run_companion_tools_snapshot(&run).unwrap(), Some(capabilities));
-        assert_eq!(f.db.run_companion_tool_catalog(&run).unwrap(), Some(allowed));
-        f.db.ensure_companion_tool_granted(&run, "read", None).unwrap();
-        f.db.ensure_companion_tool_granted(&run, "web_search", None).unwrap();
-        assert!(f.db.ensure_companion_tool_granted(&run, "write_file", None).unwrap_err().contains("工具目录"));
-        f.db.create_host_tool_call(&run, "delegate", "child_run_start", &json!({}), "running", false).unwrap();
-        let budget = ChildRunBudget { max_duration_ms: 30_000, max_total_tokens: 4_000, max_output_tokens: 1_000, max_tool_calls: 4 };
-        let (child, _, _) = f.db.create_child_run(CreateChildRunInput {
-            parent_run_id: &run, tool_call_id: "delegate", worker_agent_id: "fox-general",
-            objective: "Inspect", context: "Inspect", budget: &budget,
-            team_run_id: None, team_member_id: None, allowed_tools: None,
-        }).unwrap();
-        f.db.freeze_child_companion_tools(&child.run.id, &run).unwrap();
-        f.db.freeze_child_companion_tools(&child.run.id, &run).unwrap();
-        assert_eq!(f.db.run_companion_tool_catalog(&child.run.id).unwrap(), Some(vec!["read".to_owned(), "web_search".to_owned()]));
-        assert!(f.db.ensure_companion_tool_granted(&child.run.id, "write_file", None).is_err());
-        f.db.apply_runtime_event(&run, 2, &json!({"type":"run.completed"})).unwrap();
+        f.db.freeze_run_companion_catalog(&run, &capabilities, &allowed)
+            .unwrap();
+        f.db.freeze_run_companion_catalog(&run, &[], &["write_file".to_owned()])
+            .unwrap();
+        assert_eq!(
+            f.db.run_companion_tools_snapshot(&run).unwrap(),
+            Some(capabilities)
+        );
+        assert_eq!(
+            f.db.run_companion_tool_catalog(&run).unwrap(),
+            Some(allowed)
+        );
+        f.db.ensure_companion_tool_granted(&run, "read", None)
+            .unwrap();
+        f.db.ensure_companion_tool_granted(&run, "web_search", None)
+            .unwrap();
+        assert!(f
+            .db
+            .ensure_companion_tool_granted(&run, "write_file", None)
+            .unwrap_err()
+            .contains("工具目录"));
+        f.db.create_host_tool_call(
+            &run,
+            "delegate",
+            "child_run_start",
+            &json!({}),
+            "running",
+            false,
+        )
+        .unwrap();
+        let budget = ChildRunBudget {
+            max_duration_ms: 30_000,
+            max_total_tokens: 4_000,
+            max_output_tokens: 1_000,
+            max_tool_calls: 4,
+        };
+        let (child, _, _) =
+            f.db.create_child_run(CreateChildRunInput {
+                parent_run_id: &run,
+                tool_call_id: "delegate",
+                worker_agent_id: "fox-general",
+                objective: "Inspect",
+                context: "Inspect",
+                budget: &budget,
+                team_run_id: None,
+                team_member_id: None,
+                allowed_tools: None,
+            })
+            .unwrap();
+        f.db.freeze_child_companion_tools(&child.run.id, &run)
+            .unwrap();
+        f.db.freeze_child_companion_tools(&child.run.id, &run)
+            .unwrap();
+        assert_eq!(
+            f.db.run_companion_tool_catalog(&child.run.id).unwrap(),
+            Some(vec!["read".to_owned(), "web_search".to_owned()])
+        );
+        assert!(f
+            .db
+            .ensure_companion_tool_granted(&child.run.id, "write_file", None)
+            .is_err());
+        f.db.apply_runtime_event(&run, 2, &json!({"type":"run.completed"}))
+            .unwrap();
         let legacy = f.running_run();
-        f.db.freeze_run_companion_tools(&legacy, &["web_search".to_owned()]).unwrap();
-        f.db.freeze_run_companion_catalog(&legacy, &[], &[]).unwrap();
-        assert_eq!(f.db.run_companion_tools_snapshot(&legacy).unwrap(), Some(vec!["web_search".to_owned()]));
+        f.db.freeze_run_companion_tools(&legacy, &["web_search".to_owned()])
+            .unwrap();
+        f.db.freeze_run_companion_catalog(&legacy, &[], &[])
+            .unwrap();
+        assert_eq!(
+            f.db.run_companion_tools_snapshot(&legacy).unwrap(),
+            Some(vec!["web_search".to_owned()])
+        );
         assert_eq!(f.db.run_companion_tool_catalog(&legacy).unwrap(), None);
-        f.db.ensure_companion_tool_granted(&legacy, "write_file", None).unwrap();
+        f.db.ensure_companion_tool_granted(&legacy, "write_file", None)
+            .unwrap();
         drop(f.db);
         std::fs::remove_dir_all(f.root).unwrap();
     }
@@ -489,45 +692,102 @@ mod tests {
     fn grants_intersect_enabled_servers_and_the_run_snapshot_is_write_once() {
         let f = Fixture::new();
         f.seed_server("feishu", true);
-        f.db.set_companion_tool_grant(&f.companion, "feishu", "read_calendar", true).unwrap();
-        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true).unwrap();
-        f.db.set_companion_tool_grant(&f.companion, WEB_SERVER_ID, "web_search", true).unwrap();
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "read_calendar", true)
+            .unwrap();
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true)
+            .unwrap();
+        f.db.set_companion_tool_grant(&f.companion, WEB_SERVER_ID, "web_search", true)
+            .unwrap();
         let ids = f.db.companion_capability_ids(&f.companion).unwrap();
-        assert_eq!(ids, vec!["web_search", "mcp:feishu:read_calendar", "mcp:feishu:send_message"]);
+        assert_eq!(
+            ids,
+            vec![
+                "web_search",
+                "mcp:feishu:read_calendar",
+                "mcp:feishu:send_message"
+            ]
+        );
 
-        f.db.execute_raw_sql("UPDATE mcp_servers SET enabled=0").unwrap();
-        assert_eq!(f.db.companion_capability_ids(&f.companion).unwrap(), vec!["web_search"], "停用的连接器不授权任何工具");
-        f.db.execute_raw_sql("UPDATE mcp_servers SET enabled=1").unwrap();
+        f.db.execute_raw_sql("UPDATE mcp_servers SET enabled=0")
+            .unwrap();
+        assert_eq!(
+            f.db.companion_capability_ids(&f.companion).unwrap(),
+            vec!["web_search"],
+            "停用的连接器不授权任何工具"
+        );
+        f.db.execute_raw_sql("UPDATE mcp_servers SET enabled=1")
+            .unwrap();
 
         let run = f.running_run();
         f.db.freeze_run_companion_tools(&run, &ids).unwrap();
-        f.db.set_companion_tool_grant(&f.companion, "feishu", "create_doc", true).unwrap();
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "create_doc", true)
+            .unwrap();
         let widened = f.db.companion_capability_ids(&f.companion).unwrap();
         f.db.freeze_run_companion_tools(&run, &widened).unwrap();
-        assert_eq!(f.db.run_companion_tools_snapshot(&run).unwrap().unwrap(), ids, "快照只写一次");
+        assert_eq!(
+            f.db.run_companion_tools_snapshot(&run).unwrap().unwrap(),
+            ids,
+            "快照只写一次"
+        );
 
         let call = |tool: &str| json!({"serverId":"feishu","tool":tool,"arguments":{}});
-        f.db.ensure_companion_tool_granted(&run, "call_mcp_tool", Some(&call("read_calendar"))).unwrap();
-        f.db.ensure_companion_tool_granted(&run, "web_search", None).unwrap();
-        f.db.ensure_companion_tool_granted(&run, "list_mcp_tools", None).unwrap();
-        assert!(f.db.ensure_companion_tool_granted(&run, "call_mcp_tool", Some(&call("create_doc"))).unwrap_err().contains("下一轮"),
-            "本轮开始后新增的授权不能扩大本轮");
-        assert!(f.db.ensure_companion_tool_granted(&run, "web_read", None).unwrap_err().contains("未启用"));
-        assert!(f.db.ensure_companion_tool_granted(&run, "run_command", None).unwrap_err().contains("私聊不可使用工具"));
+        f.db.ensure_companion_tool_granted(&run, "call_mcp_tool", Some(&call("read_calendar")))
+            .unwrap();
+        f.db.ensure_companion_tool_granted(&run, "web_search", None)
+            .unwrap();
+        f.db.ensure_companion_tool_granted(&run, "list_mcp_tools", None)
+            .unwrap();
+        assert!(
+            f.db.ensure_companion_tool_granted(&run, "call_mcp_tool", Some(&call("create_doc")))
+                .unwrap_err()
+                .contains("下一轮"),
+            "本轮开始后新增的授权不能扩大本轮"
+        );
+        assert!(f
+            .db
+            .ensure_companion_tool_granted(&run, "web_read", None)
+            .unwrap_err()
+            .contains("未启用"));
+        assert!(f
+            .db
+            .ensure_companion_tool_granted(&run, "run_command", None)
+            .unwrap_err()
+            .contains("私聊不可使用工具"));
 
-        f.db.set_companion_tool_grant(&f.companion, "feishu", "read_calendar", false).unwrap();
-        assert!(f.db.ensure_companion_tool_granted(&run, "call_mcp_tool", Some(&call("read_calendar"))).unwrap_err().contains("撤销"));
-        f.db.ensure_companion_tool_granted(&run, "call_mcp_tool", Some(&call("send_message"))).unwrap();
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "read_calendar", false)
+            .unwrap();
+        assert!(f
+            .db
+            .ensure_companion_tool_granted(&run, "call_mcp_tool", Some(&call("read_calendar")))
+            .unwrap_err()
+            .contains("撤销"));
+        f.db.ensure_companion_tool_granted(&run, "call_mcp_tool", Some(&call("send_message")))
+            .unwrap();
 
-        let plain = f.db.create_conversation("fox-general", Some("普通对话"), None, None).unwrap();
+        let plain =
+            f.db.create_conversation("fox-general", Some("普通对话"), None, None)
+                .unwrap();
         let plain_run = f.db.create_run(&plain.id, "普通问题", None).unwrap();
-        f.db.ensure_companion_tool_granted(&plain_run.run.id, "run_command", None).unwrap();
-        f.db.ensure_companion_tool_granted(&plain_run.run.id, "call_mcp_tool", Some(&call("anything"))).unwrap();
+        f.db.ensure_companion_tool_granted(&plain_run.run.id, "run_command", None)
+            .unwrap();
+        f.db.ensure_companion_tool_granted(
+            &plain_run.run.id,
+            "call_mcp_tool",
+            Some(&call("anything")),
+        )
+        .unwrap();
 
         drop(f.db);
         let db = Database::open(f.root.join("fox.db")).unwrap();
-        assert_eq!(db.run_companion_tools_snapshot(&run).unwrap().unwrap(), ids, "重开后快照仍在");
-        assert!(db.companion_tool_grants(&f.companion).unwrap().contains(&("feishu".to_owned(), "send_message".to_owned())));
+        assert_eq!(
+            db.run_companion_tools_snapshot(&run).unwrap().unwrap(),
+            ids,
+            "重开后快照仍在"
+        );
+        assert!(db
+            .companion_tool_grants(&f.companion)
+            .unwrap()
+            .contains(&("feishu".to_owned(), "send_message".to_owned())));
         drop(db);
         std::fs::remove_dir_all(&f.root).unwrap();
     }
@@ -536,31 +796,85 @@ mod tests {
     fn an_approved_call_is_refused_after_revocation_and_never_revives() {
         let f = Fixture::new();
         f.seed_server("feishu", true);
-        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true).unwrap();
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true)
+            .unwrap();
         let run = f.running_run();
-        f.db.freeze_run_companion_tools(&run, &f.db.companion_capability_ids(&f.companion).unwrap()).unwrap();
+        f.db.freeze_run_companion_tools(
+            &run,
+            &f.db.companion_capability_ids(&f.companion).unwrap(),
+        )
+        .unwrap();
         let input = json!({"serverId":"feishu","tool":"send_message","arguments":{"text":"你好"}});
-        let tool = f.db.create_host_tool_call(&run, "call-1", "call_mcp_tool", &input, "pending", true).unwrap();
+        let tool =
+            f.db.create_host_tool_call(&run, "call-1", "call_mcp_tool", &input, "pending", true)
+                .unwrap();
         let approval = f.db.create_approval(&tool.id, "发送消息", &input).unwrap();
-        f.db.resolve_approval(&approval.id, ApprovalDecision::AllowOnce).unwrap();
+        f.db.resolve_approval(&approval.id, ApprovalDecision::AllowOnce)
+            .unwrap();
 
-        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", false).unwrap();
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", false)
+            .unwrap();
         let error = f.db.claim_approved_tool_call(&run, "call-1").unwrap_err();
         assert!(error.contains("撤销"), "{error}");
-        let (status, message): (String, String) = f.db.with_connection(|connection| {
-            connection.query_row("SELECT status, error_message FROM tool_calls WHERE id=?1", [&tool.id],
-                |row| Ok((row.get(0)?, row.get(1)?)))
-        }).unwrap();
+        let (status, message): (String, String) =
+            f.db.with_connection(|connection| {
+                connection.query_row(
+                    "SELECT status, error_message FROM tool_calls WHERE id=?1",
+                    [&tool.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
         assert_eq!(status, "failed", "撤权后的待执行调用落为失败并写明原因");
         assert!(message.contains("撤销"));
-        assert!(!f.db.claim_approved_tool_call(&run, "call-1").unwrap(), "恢复路径也不能复活旧批准");
+        assert!(
+            !f.db.claim_approved_tool_call(&run, "call-1").unwrap(),
+            "恢复路径也不能复活旧批准"
+        );
 
-        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true).unwrap();
-        assert!(!f.db.claim_approved_tool_call(&run, "call-1").unwrap(), "重新授权不复活旧批准");
-        let again = f.db.create_host_tool_call(&run, "call-2", "call_mcp_tool", &input, "pending", true).unwrap();
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true)
+            .unwrap();
+        assert!(
+            !f.db.claim_approved_tool_call(&run, "call-1").unwrap(),
+            "重新授权不复活旧批准"
+        );
+        let again =
+            f.db.create_host_tool_call(&run, "call-2", "call_mcp_tool", &input, "pending", true)
+                .unwrap();
         let approval = f.db.create_approval(&again.id, "发送消息", &input).unwrap();
-        f.db.resolve_approval(&approval.id, ApprovalDecision::AllowOnce).unwrap();
-        assert!(f.db.claim_approved_tool_call(&run, "call-2").unwrap(), "重新发起的新批准可以执行");
+        f.db.resolve_approval(&approval.id, ApprovalDecision::AllowOnce)
+            .unwrap();
+        assert!(
+            f.db.claim_approved_tool_call(&run, "call-2").unwrap(),
+            "重新发起的新批准可以执行"
+        );
+        drop(f.db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    #[test]
+    fn companion_dispatch_gate_requires_companion_ownership() {
+        let f = Fixture::new();
+        let ordinary = f
+            .db
+            .create_conversation(f.db.default_agent_id(), None, None, None)
+            .unwrap();
+        let run = f.db.create_run(&ordinary.id, "核对项目资料", None).unwrap();
+        let (code, message) = crate::companion_workspace::check_run_tool(
+            &f.db, &f.root, &run.run.id, "companion_coordinate", None, None,
+        )
+        .unwrap_err();
+        assert_eq!(code, "companion.tool_not_available");
+        assert!(message.contains("伙伴会话"));
+        for tool in ["child_agent_list", "child_run_start", "child_run_collect", "child_run_cancel", "team_start"] {
+            crate::companion_workspace::check_run_tool(&f.db, &f.root, &run.run.id, tool, None, None)
+                .unwrap();
+        }
+        let companion = f.running_run();
+        f.db
+            .ensure_companion_tool_granted(&companion, "companion_coordinate", None)
+            .unwrap();
+        assert!(f.db.companion_assignments_list(&ordinary.id).unwrap().is_empty());
         drop(f.db);
         std::fs::remove_dir_all(f.root).unwrap();
     }
@@ -572,13 +886,37 @@ mod tests {
         let run = f.running_run();
         f.db.freeze_run_companion_tools(&run, &[]).unwrap();
         let input = json!({"serverId":"feishu","tool":"send_message","arguments":{}});
-        let (code, _) = crate::companion_workspace::check_run_tool(&f.db, &f.root, &run, "call_mcp_tool", Some(&input), None).unwrap_err();
+        let (code, _) = crate::companion_workspace::check_run_tool(
+            &f.db,
+            &f.root,
+            &run,
+            "call_mcp_tool",
+            Some(&input),
+            None,
+        )
+        .unwrap_err();
         assert_eq!(code, "companion.tool_not_available");
-        let (code, _) = crate::companion_workspace::check_run_tool(&f.db, &f.root, &run, "web_search", Some(&json!({"query":"报价"})), None).unwrap_err();
+        let (code, _) = crate::companion_workspace::check_run_tool(
+            &f.db,
+            &f.root,
+            &run,
+            "web_search",
+            Some(&json!({"query":"报价"})),
+            None,
+        )
+        .unwrap_err();
         assert_eq!(code, "companion.tool_not_available");
         // A base-whitelist tool passes the grant gate and only then meets the
         // workspace readiness rule (the fixture workspace is still pending).
-        let (code, _) = crate::companion_workspace::check_run_tool(&f.db, &f.root, &run, "read", Some(&json!({"path":"a.txt"})), None).unwrap_err();
+        let (code, _) = crate::companion_workspace::check_run_tool(
+            &f.db,
+            &f.root,
+            &run,
+            "read",
+            Some(&json!({"path":"a.txt"})),
+            None,
+        )
+        .unwrap_err();
         assert_eq!(code, "companion.workspace_unavailable");
         drop(f.db);
         std::fs::remove_dir_all(f.root).unwrap();
@@ -588,14 +926,33 @@ mod tests {
     fn grant_validation_rejects_unknown_companions_servers_and_web_tools() {
         let f = Fixture::new();
         f.seed_server("feishu", true);
-        assert!(f.db.set_companion_tool_grant("cmp_missing", "feishu", "x", true).is_err());
-        assert!(f.db.set_companion_tool_grant(&f.companion, "missing", "x", true).is_err());
-        assert!(f.db.set_companion_tool_grant(&f.companion, WEB_SERVER_ID, "http_request", true).is_err());
-        assert!(f.db.set_companion_tool_grant(&f.companion, "feishu", "", true).is_err());
-        f.db.set_companion_tool_grant(&f.companion, "feishu", "read_calendar", true).unwrap();
-        f.db.set_companion_tool_grant(&f.companion, "feishu", "read_calendar", true).unwrap();
-        assert_eq!(f.db.companion_tool_grants(&f.companion).unwrap().len(), 1, "重复授权幂等");
-        f.db.set_companion_tool_grant(&f.companion, "feishu", "read_calendar", false).unwrap();
+        assert!(f
+            .db
+            .set_companion_tool_grant("cmp_missing", "feishu", "x", true)
+            .is_err());
+        assert!(f
+            .db
+            .set_companion_tool_grant(&f.companion, "missing", "x", true)
+            .is_err());
+        assert!(f
+            .db
+            .set_companion_tool_grant(&f.companion, WEB_SERVER_ID, "http_request", true)
+            .is_err());
+        assert!(f
+            .db
+            .set_companion_tool_grant(&f.companion, "feishu", "", true)
+            .is_err());
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "read_calendar", true)
+            .unwrap();
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "read_calendar", true)
+            .unwrap();
+        assert_eq!(
+            f.db.companion_tool_grants(&f.companion).unwrap().len(),
+            1,
+            "重复授权幂等"
+        );
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "read_calendar", false)
+            .unwrap();
         assert!(f.db.companion_tool_grants(&f.companion).unwrap().is_empty());
         drop(f.db);
         std::fs::remove_dir_all(f.root).unwrap();
@@ -610,35 +967,75 @@ mod tests {
     fn revocation_registers_a_persistent_barrier_that_survives_regrant_and_restart() {
         let f = Fixture::new();
         f.seed_server("feishu", true);
-        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true).unwrap();
-        f.db.set_companion_tool_grant(&f.companion, "feishu", "read_calendar", true).unwrap();
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true)
+            .unwrap();
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "read_calendar", true)
+            .unwrap();
         let run = f.running_run();
-        f.db.freeze_run_companion_tools(&run, &f.db.companion_capability_ids(&f.companion).unwrap()).unwrap();
+        f.db.freeze_run_companion_tools(
+            &run,
+            &f.db.companion_capability_ids(&f.companion).unwrap(),
+        )
+        .unwrap();
         let send = json!({"serverId":"feishu","tool":"send_message","arguments":{}});
         let read = json!({"serverId":"feishu","tool":"read_calendar","arguments":{}});
-        let send_call = f.db.create_host_tool_call(&run, "call-send", "call_mcp_tool", &send, "pending", true).unwrap();
-        let send_approval = f.db.create_approval(&send_call.id, "发送消息", &send).unwrap();
-        let read_call = f.db.create_host_tool_call(&run, "call-read", "call_mcp_tool", &read, "pending", true).unwrap();
-        let read_approval = f.db.create_approval(&read_call.id, "读日历", &read).unwrap();
+        let send_call =
+            f.db.create_host_tool_call(&run, "call-send", "call_mcp_tool", &send, "pending", true)
+                .unwrap();
+        let send_approval =
+            f.db.create_approval(&send_call.id, "发送消息", &send)
+                .unwrap();
+        let read_call =
+            f.db.create_host_tool_call(&run, "call-read", "call_mcp_tool", &read, "pending", true)
+                .unwrap();
+        let read_approval =
+            f.db.create_approval(&read_call.id, "读日历", &read)
+                .unwrap();
 
-        let affected = f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", false).unwrap();
-        assert_eq!(affected, vec![send_approval.id.clone()], "只登记精确匹配的工具");
+        let affected =
+            f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", false)
+                .unwrap();
+        assert_eq!(
+            affected,
+            vec![send_approval.id.clone()],
+            "只登记精确匹配的工具"
+        );
         assert!(invalidated(&f.db, &send_approval.id));
-        assert_eq!(f.db.approval_record(&send_approval.id).unwrap().status, "pending", "登记失效不立即结算 pending");
-        assert!(!invalidated(&f.db, &read_approval.id), "同 server 的其他工具不受影响");
+        assert_eq!(
+            f.db.approval_record(&send_approval.id).unwrap().status,
+            "pending",
+            "登记失效不立即结算 pending"
+        );
+        assert!(
+            !invalidated(&f.db, &read_approval.id),
+            "同 server 的其他工具不受影响"
+        );
 
-        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true).unwrap();
-        assert!(invalidated(&f.db, &send_approval.id), "重新授权不删除失效标记");
-        let error = f.db.resolve_approval(&send_approval.id, ApprovalDecision::AllowOnce).unwrap_err();
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true)
+            .unwrap();
+        assert!(
+            invalidated(&f.db, &send_approval.id),
+            "重新授权不删除失效标记"
+        );
+        let error =
+            f.db.resolve_approval(&send_approval.id, ApprovalDecision::AllowOnce)
+                .unwrap_err();
         assert!(error.contains("撤销"), "{error}");
         let settled = f.db.approval_record(&send_approval.id).unwrap();
         assert_ne!(settled.status, "denied", "失效结算不是用户主动拒绝");
         assert_ne!(settled.status, "approved", "失效批准不能被重新授予");
         assert!(crate::database::approval_invalidation(settled.decision.as_ref()).is_some());
-        assert!(!f.db.claim_approved_tool_call(&run, "call-send").unwrap(), "结算后不能执行");
+        assert!(
+            !f.db.claim_approved_tool_call(&run, "call-send").unwrap(),
+            "结算后不能执行"
+        );
 
-        f.db.resolve_approval(&read_approval.id, ApprovalDecision::AllowOnce).unwrap();
-        assert!(f.db.claim_approved_tool_call(&run, "call-read").unwrap(), "未撤销的工具照常执行");
+        f.db.resolve_approval(&read_approval.id, ApprovalDecision::AllowOnce)
+            .unwrap();
+        assert!(
+            f.db.claim_approved_tool_call(&run, "call-read").unwrap(),
+            "未撤销的工具照常执行"
+        );
 
         drop(f.db);
         let db = Database::open(f.root.join("fox.db")).unwrap();
@@ -652,21 +1049,33 @@ mod tests {
         let f = Fixture::new();
         f.seed_server("feishu", true);
         f.seed_server("other", true);
-        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true).unwrap();
-        f.db.set_companion_tool_grant(&f.companion, "other", "ping", true).unwrap();
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true)
+            .unwrap();
+        f.db.set_companion_tool_grant(&f.companion, "other", "ping", true)
+            .unwrap();
         let run = f.running_run();
-        f.db.freeze_run_companion_tools(&run, &f.db.companion_capability_ids(&f.companion).unwrap()).unwrap();
+        f.db.freeze_run_companion_tools(
+            &run,
+            &f.db.companion_capability_ids(&f.companion).unwrap(),
+        )
+        .unwrap();
         let a = json!({"serverId":"feishu","tool":"send_message","arguments":{}});
         let b = json!({"serverId":"other","tool":"ping","arguments":{}});
-        let ca = f.db.create_host_tool_call(&run, "call-a", "call_mcp_tool", &a, "pending", true).unwrap();
+        let ca =
+            f.db.create_host_tool_call(&run, "call-a", "call_mcp_tool", &a, "pending", true)
+                .unwrap();
         let aa = f.db.create_approval(&ca.id, "A", &a).unwrap();
-        let cb = f.db.create_host_tool_call(&run, "call-b", "call_mcp_tool", &b, "pending", true).unwrap();
+        let cb =
+            f.db.create_host_tool_call(&run, "call-b", "call_mcp_tool", &b, "pending", true)
+                .unwrap();
         let ab = f.db.create_approval(&cb.id, "B", &b).unwrap();
 
         f.db.set_mcp_server_enabled("feishu", false).unwrap();
         assert!(invalidated(&f.db, &aa.id));
         assert!(!invalidated(&f.db, &ab.id), "其他 server 不受影响");
-        let affected = f.db.invalidated_companion_approvals_for_server("feishu").unwrap();
+        let affected =
+            f.db.invalidated_companion_approvals_for_server("feishu")
+                .unwrap();
         assert_eq!(affected.len(), 1);
         assert_eq!(affected[0].id, aa.id);
 
@@ -683,15 +1092,26 @@ mod tests {
     fn create_approval_refuses_to_reuse_an_invalidated_record_after_regrant() {
         let f = Fixture::new();
         f.seed_server("feishu", true);
-        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true).unwrap();
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true)
+            .unwrap();
         let run = f.running_run();
-        f.db.freeze_run_companion_tools(&run, &f.db.companion_capability_ids(&f.companion).unwrap()).unwrap();
+        f.db.freeze_run_companion_tools(
+            &run,
+            &f.db.companion_capability_ids(&f.companion).unwrap(),
+        )
+        .unwrap();
         let input = json!({"serverId":"feishu","tool":"send_message","arguments":{}});
-        let call = f.db.create_host_tool_call(&run, "call-1", "call_mcp_tool", &input, "pending", true).unwrap();
+        let call =
+            f.db.create_host_tool_call(&run, "call-1", "call_mcp_tool", &input, "pending", true)
+                .unwrap();
         f.db.create_approval(&call.id, "发送消息", &input).unwrap();
-        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", false).unwrap();
-        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true).unwrap();
-        let error = f.db.create_approval(&call.id, "发送消息", &input).unwrap_err();
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", false)
+            .unwrap();
+        f.db.set_companion_tool_grant(&f.companion, "feishu", "send_message", true)
+            .unwrap();
+        let error =
+            f.db.create_approval(&call.id, "发送消息", &input)
+                .unwrap_err();
         assert!(error.contains("失效"), "{error}");
         drop(f.db);
         std::fs::remove_dir_all(&f.root).unwrap();

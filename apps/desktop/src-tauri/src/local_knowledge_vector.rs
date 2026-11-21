@@ -81,8 +81,13 @@ impl RetrievalControl {
         if self.is_cancelled() {
             return Err(LocalKnowledgeError::cancelled("知识库检索已取消"));
         }
-        if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return Err(LocalKnowledgeError::storage("知识库检索超出本次工具的剩余时间"));
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(LocalKnowledgeError::storage(
+                "知识库检索超出本次工具的剩余时间",
+            ));
         }
         Ok(())
     }
@@ -665,7 +670,8 @@ fn run_retrieval_worker_process(
     let executable = std::env::current_exe().map_err(|error| {
         LocalKnowledgeError::storage(format!("无法定位 Fox 当前可执行文件：{error}"))
     })?;
-    let request_json = crate::canonical_json::to_string(request).map_err(LocalKnowledgeError::storage)?;
+    let request_json =
+        crate::canonical_json::to_string(request).map_err(LocalKnowledgeError::storage)?;
     let mut command = Command::new(executable);
     command
         .env(RETRIEVAL_WORKER_ROOT_ENV, store.root.as_os_str())
@@ -682,8 +688,11 @@ fn run_retrieval_worker_process(
     })?;
     // KB-1: the worker belongs to a KILL_ON_JOB_CLOSE Job. If Fox dies, the OS
     // reaps it, so it can never hold the index or knowledge.db as an orphan.
-    let _job = crate::runtime_host::process_job::ProcessJob::attach_or_kill(&mut child, "知识库检索 worker")
-        .map_err(LocalKnowledgeError::storage)?;
+    let _job = crate::runtime_host::process_job::ProcessJob::attach_or_kill(
+        &mut child,
+        "知识库检索 worker",
+    )
+    .map_err(LocalKnowledgeError::storage)?;
     let stdout = child.stdout.take().ok_or_else(|| {
         let _ = child.kill();
         let _ = child.wait();
@@ -709,7 +718,9 @@ fn run_retrieval_worker_process(
             let _ = child.wait();
             let _ = finish_retrieval_worker_stream(stdout_reader);
             let _ = finish_retrieval_worker_stream(stderr_reader);
-            return Err(LocalKnowledgeError::cancelled("知识库检索已取消，检索 worker 已终止"));
+            return Err(LocalKnowledgeError::cancelled(
+                "知识库检索已取消，检索 worker 已终止",
+            ));
         }
         let status = match child.try_wait() {
             Ok(status) => status,
@@ -1005,7 +1016,8 @@ impl LocalKnowledgeStore {
                 manifest.id,
                 manifest.version,
                 total_bytes,
-                crate::canonical_json::to_string(&manifest).map_err(LocalKnowledgeError::storage)?,
+                crate::canonical_json::to_string(&manifest)
+                    .map_err(LocalKnowledgeError::storage)?,
                 now,
             ],
         )?;
@@ -1424,7 +1436,8 @@ impl LocalKnowledgeStore {
                 },
                 manifest.version,
                 manifest.dimension as i64,
-                crate::canonical_json::to_string(&manifest.languages).unwrap_or_else(|_| "[]".to_owned()),
+                crate::canonical_json::to_string(&manifest.languages)
+                    .unwrap_or_else(|_| "[]".to_owned()),
                 manifest.license,
                 destination.to_string_lossy(),
                 normalize_sha256(&manifest.hash)?,
@@ -1520,7 +1533,9 @@ fn validate_embedding_package(
     }
     let model = path.join("model.onnx");
     if !model.is_file() {
-        return Err(LocalKnowledgeError::invalid("向量模型文件缺失（model.onnx）。请到「设置 → 资料库」重新下载或导入模型，再重试检索。"));
+        return Err(LocalKnowledgeError::invalid(
+            "向量模型文件缺失（model.onnx）。请到「设置 → 资料库」重新下载或导入模型，再重试检索。",
+        ));
     }
     let expected = normalize_sha256(&manifest.hash)?;
     let actual = sha256_file(&model)?;
@@ -1688,24 +1703,43 @@ impl LocalKnowledgeStore {
         expected_count: usize,
     ) -> Result<(), LocalKnowledgeError> {
         // This cache is only for page capability status; retrieval still opens and validates its index.
-        let directory = self.root.join("indexes").join(knowledge_base_id).join(generation_id);
-        let key = format!("{}:{knowledge_base_id}:{generation_id}:{dimension}:{expected_count}:{:?}", self.root.display(), self.zvec_resource_dir);
+        let directory = self
+            .root
+            .join("indexes")
+            .join(knowledge_base_id)
+            .join(generation_id);
+        let key = format!(
+            "{}:{knowledge_base_id}:{generation_id}:{dimension}:{expected_count}:{:?}",
+            self.root.display(),
+            self.zvec_resource_dir
+        );
         let fingerprint = generation_status_fingerprint(&directory)?;
-        if self.generation_checks.lock().map_err(|_| LocalKnowledgeError::storage("generation status cache poisoned"))?
-            .get(&key).is_some_and(|(checked, previous)| checked.elapsed().as_secs() < 30 && previous == &fingerprint) {
+        if self
+            .generation_checks
+            .lock()
+            .map_err(|_| LocalKnowledgeError::storage("generation status cache poisoned"))?
+            .get(&key)
+            .is_some_and(|(checked, previous)| {
+                checked.elapsed().as_secs() < 30 && previous == &fingerprint
+            })
+        {
             return Ok(());
         }
-        self.zvec_vector_store()
-            .and_then(|store| {
-                store
-                    .open_generation(knowledge_base_id, generation_id, dimension, expected_count)
-                    .map_err(|error| LocalKnowledgeError::storage(error.to_string()))
-            })?;
+        self.zvec_vector_store().and_then(|store| {
+            store
+                .open_generation(knowledge_base_id, generation_id, dimension, expected_count)
+                .map_err(|error| LocalKnowledgeError::storage(error.to_string()))
+        })?;
         // Opening Zvec may update its manifest. Record the settled state, and never cache failures.
         let fingerprint = generation_status_fingerprint(&directory)?;
-        let mut cache = self.generation_checks.lock().map_err(|_| LocalKnowledgeError::storage("generation status cache poisoned"))?;
+        let mut cache = self
+            .generation_checks
+            .lock()
+            .map_err(|_| LocalKnowledgeError::storage("generation status cache poisoned"))?;
         cache.retain(|_, (checked, _)| checked.elapsed().as_secs() < 30);
-        if cache.len() >= 256 { cache.clear(); }
+        if cache.len() >= 256 {
+            cache.clear();
+        }
         cache.insert(key, (std::time::Instant::now(), fingerprint));
         Ok(())
     }
@@ -2597,7 +2631,8 @@ impl LocalKnowledgeStore {
         let job_id = Uuid::new_v4().to_string();
         let operation_id = Uuid::new_v4().to_string();
         let now = now_ms();
-        let checkpoint = crate::canonical_json::to_string(&request).map_err(LocalKnowledgeError::storage)?;
+        let checkpoint =
+            crate::canonical_json::to_string(&request).map_err(LocalKnowledgeError::storage)?;
         self.connection()?.execute(
             "INSERT INTO local_kb_jobs(
                 id, parent_operation_id, knowledge_base_id, job_type, status, stage,
@@ -3113,10 +3148,15 @@ mod tests {
 
     #[test]
     fn missing_embedding_model_stops_package_validation_with_chinese_remedy() {
-        let root = std::env::temp_dir().join(format!("fox-missing-vector-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("fox-missing-vector-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let manifest = serde_json::json!({ "version":"fixture", "dimension":3, "tokenizer":"tokenizer.json", "hash":"0".repeat(64), "license":"fixture" });
-        fs::write(root.join("manifest.json"), crate::canonical_json::to_vec(&manifest).unwrap()).unwrap();
+        fs::write(
+            root.join("manifest.json"),
+            crate::canonical_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
         let error = validate_embedding_package(&root).unwrap_err();
         assert!(error.to_string().contains("向量模型文件缺失"));
         assert!(error.to_string().contains("重新下载或导入模型"));
@@ -3139,9 +3179,18 @@ mod tests {
         assert_eq!(excerpt.chars().count(), 500 + SUFFIX.chars().count());
         assert!(excerpt.ends_with(SUFFIX));
         assert!(excerpt.contains('检'), "截断边界上的汉字必须完整");
-        assert!(!excerpt.contains('\u{FFFD}'), "中文不能变成替换字符：{excerpt}");
-        assert_eq!(retrieval_diagnostic_excerpt("诊断信息：检索失败"), "诊断信息：检索失败");
-        assert_eq!(retrieval_diagnostic_excerpt(&"中".repeat(500)), "中".repeat(500));
+        assert!(
+            !excerpt.contains('\u{FFFD}'),
+            "中文不能变成替换字符：{excerpt}"
+        );
+        assert_eq!(
+            retrieval_diagnostic_excerpt("诊断信息：检索失败"),
+            "诊断信息：检索失败"
+        );
+        assert_eq!(
+            retrieval_diagnostic_excerpt(&"中".repeat(500)),
+            "中".repeat(500)
+        );
 
         let error = retrieval_worker_error(
             RetrievalWorkerResponse {
@@ -3468,15 +3517,20 @@ mod tests {
 }
 
 #[cfg(feature = "zvec")]
-fn generation_status_fingerprint(root: &std::path::Path) -> Result<Vec<(std::path::PathBuf, u64, Option<std::time::SystemTime>)>, LocalKnowledgeError> {
+fn generation_status_fingerprint(
+    root: &std::path::Path,
+) -> Result<Vec<(std::path::PathBuf, u64, Option<std::time::SystemTime>)>, LocalKnowledgeError> {
     let mut entries = Vec::new();
     let mut directories = vec![root.to_path_buf()];
     while let Some(directory) = directories.pop() {
         for entry in std::fs::read_dir(directory)? {
             let entry = entry?;
             let metadata = entry.metadata()?;
-            if entry.file_type()?.is_dir() { directories.push(entry.path()); }
-            else { entries.push((entry.path(), metadata.len(), metadata.modified().ok())); }
+            if entry.file_type()?.is_dir() {
+                directories.push(entry.path());
+            } else {
+                entries.push((entry.path(), metadata.len(), metadata.modified().ok()));
+            }
         }
     }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
@@ -3488,7 +3542,8 @@ mod generation_status_tests {
     use super::*;
     #[test]
     fn fingerprint_detects_file_changes_and_missing_generations() {
-        let root = std::env::temp_dir().join(format!("fox-generation-status-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("fox-generation-status-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(root.join("segment")).unwrap();
         std::fs::write(root.join("segment/index"), b"first").unwrap();
         let first = generation_status_fingerprint(&root).unwrap();
@@ -3504,14 +3559,20 @@ mod generation_status_tests {
 #[cfg(test)]
 mod kb1_retrieval_control_tests {
     use super::*;
-    use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
 
     #[test]
     fn kb1_cancel_probe_and_deadline_stop_a_retrieval() {
         assert!(RetrievalControl::default().check().is_ok());
         let flag = Arc::new(AtomicBool::new(false));
         let probe_flag = flag.clone();
-        let control = RetrievalControl::new(Some(Arc::new(move || probe_flag.load(Ordering::Acquire))), None);
+        let control = RetrievalControl::new(
+            Some(Arc::new(move || probe_flag.load(Ordering::Acquire))),
+            None,
+        );
         assert!(control.check().is_ok());
         flag.store(true, Ordering::Release);
         let error = control.check().unwrap_err();
@@ -3523,7 +3584,10 @@ mod kb1_retrieval_control_tests {
         let started = Instant::now();
         let soon = started + Duration::from_secs(5);
         let bounded = RetrievalControl::new(None, Some(soon));
-        assert_eq!(bounded.deadline_from(started, RETRIEVAL_WORKER_TIMEOUT), soon);
+        assert_eq!(
+            bounded.deadline_from(started, RETRIEVAL_WORKER_TIMEOUT),
+            soon
+        );
         assert_eq!(
             RetrievalControl::default().deadline_from(started, RETRIEVAL_WORKER_TIMEOUT),
             started + RETRIEVAL_WORKER_TIMEOUT

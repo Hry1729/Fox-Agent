@@ -45,11 +45,16 @@ export interface AssistantUiChatProps {
  */
 export default function AssistantUiChat({ statusBar, approvalSlot, conversation, callbacks, pendingMessage, isSendDisabled, suggestions, onStart, planRevision, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer, onResolveApproval, onSubmitQuestion }: AssistantUiChatProps) {
   const companion = useContacts()
-  const runtime = useFoxRuntime(conversation, callbacks, { pendingMessage, isSendDisabled })
+  const runtime = useFoxRuntime(conversation, callbacks, {
+    pendingMessage, isSendDisabled, stableAssistantTurns: companion?.privateChat,
+  })
   // The workbench provides knowledge bindings and the open-source action through
   // this context for the whole chat stage; reuse them instead of new props.
   const timelineContext = useContext(TimelineRuntimeContext)
   const detail = conversation.detail
+  const oldestMessageAt = useMemo(() => detail?.hasEarlierMessages && detail.messages.length
+    ? detail.messages.reduce((oldest, message) => Math.min(oldest, message.createdAt), Infinity)
+    : null, [detail])
   // Tool rows and the process group read the raw run events; grouping once per
   // detail change keeps every message's event array reference stable.
   const events = useMemo(() => detail?.runtimeEvents ?? [], [detail])
@@ -142,7 +147,9 @@ export default function AssistantUiChat({ statusBar, approvalSlot, conversation,
   }), [companion?.privateChat, companion?.current?.conversationId, detail, onResolveApproval, onSubmitQuestion, events, eventsByRun, contactBubblesByRun, contactKernelPreviewsByRun, contactUserBubbleIds, contactBubbleMarks, contactMessageQuotes, toolCalls, attachmentNames, attachmentsByMessage, timelineContext.knowledgeBindings, timelineContext.onOpenSource, groupHelpers, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer])
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <FoxThread statusBar={statusBar} approvalSlot={approvalSlot} fox={fox} suggestions={suggestions} onStart={onStart} planRevision={planRevision} turnRailMessages={detail?.messages} turnRailArtifacts={detail?.artifacts} />
+      <FoxThread statusBar={statusBar} approvalSlot={approvalSlot}
+        assignmentConversationId={detail?.conversation.id} oldestMessageAt={oldestMessageAt}
+        fox={fox} suggestions={suggestions} onStart={onStart} planRevision={planRevision} turnRailMessages={detail?.messages} turnRailArtifacts={detail?.artifacts} />
     </AssistantRuntimeProvider>
   )
 }

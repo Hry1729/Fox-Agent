@@ -93,7 +93,9 @@ fn chat_artifact_source(
     chat: &str,
     run_id: Option<&str>,
 ) -> Result<Option<CompanionFileSource>, String> {
-    let Some(run_id) = run_id else { return Ok(None) };
+    let Some(run_id) = run_id else {
+        return Ok(None);
+    };
     let bubble: Option<(String, String, i64)> = connection
         .query_row(
             "SELECT bubble_id, source_message_id, delivered_at FROM contact_bubbles
@@ -105,7 +107,11 @@ fn chat_artifact_source(
         .optional()
         .map_err(|error| error.to_string())?;
     if let Some((bubble_id, message_id, at)) = bubble {
-        return Ok(Some(CompanionFileSource { bubble_id, message_id, at }));
+        return Ok(Some(CompanionFileSource {
+            bubble_id,
+            message_id,
+            at,
+        }));
     }
     let message: Option<(String, i64)> = connection
         .query_row(
@@ -117,7 +123,11 @@ fn chat_artifact_source(
         )
         .optional()
         .map_err(|error| error.to_string())?;
-    Ok(message.map(|(id, at)| CompanionFileSource { bubble_id: id.clone(), message_id: id, at }))
+    Ok(message.map(|(id, at)| CompanionFileSource {
+        bubble_id: id.clone(),
+        message_id: id,
+        at,
+    }))
 }
 
 /// A task artifact's source is the report bubble in the fixed private chat.
@@ -130,7 +140,9 @@ fn task_artifact_source(
     companion_id: &str,
     run_id: Option<&str>,
 ) -> Result<Option<CompanionFileSource>, String> {
-    let Some(run_id) = run_id else { return Ok(None) };
+    let Some(run_id) = run_id else {
+        return Ok(None);
+    };
     let report: Option<(String, i64)> = connection
         .query_row(
             "SELECT message_id, created_at FROM companion_task_reports
@@ -226,7 +238,9 @@ fn list_on(connection: &Connection, companion_id: &str) -> Result<Vec<CompanionF
                 message_id,
                 at: created_at,
             }),
-            missing: !std::fs::metadata(&storage_path).map(|m| m.is_file()).unwrap_or(false),
+            missing: !std::fs::metadata(&storage_path)
+                .map(|m| m.is_file())
+                .unwrap_or(false),
             storage_path,
         });
     }
@@ -311,14 +325,19 @@ fn list_on(connection: &Connection, companion_id: &str) -> Result<Vec<CompanionF
             origin,
             task_name,
             source,
-            missing: !std::fs::metadata(&storage_path).map(|m| m.is_file()).unwrap_or(false),
+            missing: !std::fs::metadata(&storage_path)
+                .map(|m| m.is_file())
+                .unwrap_or(false),
             storage_path,
         });
     }
     Ok(entries)
 }
 
-fn artifact_by_id_on(connection: &Connection, artifact_id: &str) -> Result<Option<ArtifactRecord>, String> {
+fn artifact_by_id_on(
+    connection: &Connection,
+    artifact_id: &str,
+) -> Result<Option<ArtifactRecord>, String> {
     connection
         .query_row(
             "SELECT id, conversation_id, run_id, display_name, artifact_type,
@@ -416,7 +435,10 @@ impl Database {
         &self,
         companion_id: &str,
     ) -> Result<Vec<CompanionFileEntry>, String> {
-        let connection = self.connection.lock().map_err(|_| "database lock is poisoned".to_owned())?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "database lock is poisoned".to_owned())?;
         list_on(&connection, companion_id)
     }
 
@@ -426,7 +448,10 @@ impl Database {
         kind: &str,
         file_id: &str,
     ) -> Result<CompanionFile, String> {
-        let connection = self.connection.lock().map_err(|_| "database lock is poisoned".to_owned())?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "database lock is poisoned".to_owned())?;
         resolve_on(&connection, companion_id, kind, file_id)
     }
 }
@@ -450,7 +475,8 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let root = std::env::temp_dir().join(format!("fox-companion-files-{}", uuid::Uuid::new_v4()));
+            let root =
+                std::env::temp_dir().join(format!("fox-companion-files-{}", uuid::Uuid::new_v4()));
             fs::create_dir(&root).unwrap();
             let db = Database::open(root.join("fox.db")).unwrap();
             let a = db.add_companion(&root, "fox-debugger").unwrap();
@@ -476,27 +502,43 @@ mod tests {
             }).unwrap();
         }
 
-        fn attachment(&self, chat: &str, id: &str, message_id: &str, name: &str, bytes: &[u8]) -> PathBuf {
+        fn attachment(
+            &self,
+            chat: &str,
+            id: &str,
+            message_id: &str,
+            name: &str,
+            bytes: &[u8],
+        ) -> PathBuf {
             let dir = self.root.join("attachments").join(chat);
             fs::create_dir_all(&dir).unwrap();
             let path = dir.join(format!("{id}.txt"));
             fs::write(&path, bytes).unwrap();
-            self.db.add_attachments(&[AttachmentRecord {
-                id: id.into(),
-                conversation_id: chat.into(),
-                message_id: Some(message_id.into()),
-                display_name: name.into(),
-                storage_path: path.to_string_lossy().into_owned(),
-                media_type: Some("text/plain".into()),
-                byte_size: bytes.len() as i64,
-                sha256: None,
-                status: "ready".into(),
-                created_at: 100,
-            }]).unwrap();
+            self.db
+                .add_attachments(&[AttachmentRecord {
+                    id: id.into(),
+                    conversation_id: chat.into(),
+                    message_id: Some(message_id.into()),
+                    display_name: name.into(),
+                    storage_path: path.to_string_lossy().into_owned(),
+                    media_type: Some("text/plain".into()),
+                    byte_size: bytes.len() as i64,
+                    sha256: None,
+                    status: "ready".into(),
+                    created_at: 100,
+                }])
+                .unwrap();
             path
         }
 
-        fn artifact(&self, chat: &str, id: &str, run_id: Option<&str>, name: &str, bytes: &[u8]) -> PathBuf {
+        fn artifact(
+            &self,
+            chat: &str,
+            id: &str,
+            run_id: Option<&str>,
+            name: &str,
+            bytes: &[u8],
+        ) -> PathBuf {
             let dir = self.root.join("out").join(chat);
             fs::create_dir_all(&dir).unwrap();
             let path = dir.join(name);
@@ -514,31 +556,45 @@ mod tests {
         }
 
         fn project_bubbles(&self, run_id: &str) {
-            self.db.with_connection(|connection| {
-                super::super::contact_bubbles::project_run_in_transaction(connection, run_id)
-            }).unwrap();
+            self.db
+                .with_connection(|connection| {
+                    super::super::contact_bubbles::project_run_in_transaction(connection, run_id)
+                })
+                .unwrap();
         }
 
         /// A bound contact task with its accepted trigger Run. The report is
         /// delivered separately so a test can break the chain after delivery.
         fn task(&self, companion_id: &str, key: &str) -> BackgroundTask {
-            let colleague = self.db.create_digital_colleague(&CreateDigitalColleagueInput {
-                name: "每日整理".into(),
-                expert_id: "fox-debugger".into(),
-                objective: "整理目录并回报".into(),
-                project_id: None,
-                project_root: None,
-                knowledge_references: Vec::<KnowledgeReference>::new(),
-                max_runs_per_day: 8,
-                max_tokens_per_day: 10_000,
-                max_duration_ms: 60_000,
-                max_output_tokens: 2_000,
-                max_tool_calls: 20,
-                companion_id: Some(companion_id.to_owned()),
-            }).unwrap();
-            let accepted = self.db.accept_digital_colleague_trigger(
-                &colleague.id, "manual", None, key, &json!({}), None, "user",
-            ).unwrap();
+            let colleague = self
+                .db
+                .create_digital_colleague(&CreateDigitalColleagueInput {
+                    name: "每日整理".into(),
+                    expert_id: "fox-debugger".into(),
+                    objective: "整理目录并回报".into(),
+                    project_id: None,
+                    project_root: None,
+                    knowledge_references: Vec::<KnowledgeReference>::new(),
+                    max_runs_per_day: 8,
+                    max_tokens_per_day: 10_000,
+                    max_duration_ms: 60_000,
+                    max_output_tokens: 2_000,
+                    max_tool_calls: 20,
+                    companion_id: Some(companion_id.to_owned()),
+                })
+                .unwrap();
+            let accepted = self
+                .db
+                .accept_digital_colleague_trigger(
+                    &colleague.id,
+                    "manual",
+                    None,
+                    key,
+                    &json!({}),
+                    None,
+                    "user",
+                )
+                .unwrap();
             BackgroundTask {
                 colleague_id: colleague.id,
                 conversation_id: colleague.conversation_id,
@@ -547,18 +603,24 @@ mod tests {
         }
 
         fn deliver_report(&self, run_id: &str) {
-            self.db.apply_runtime_event(run_id, 1, &json!({"type": "run.started"})).unwrap();
-            self.db.apply_runtime_event(run_id, 2, &json!({"type": "run.completed"})).unwrap();
+            self.db
+                .apply_runtime_event(run_id, 1, &json!({"type": "run.started"}))
+                .unwrap();
+            self.db
+                .apply_runtime_event(run_id, 2, &json!({"type": "run.completed"}))
+                .unwrap();
         }
 
         fn set_report_chat(&self, colleague_id: &str, chat: Option<&str>) {
-            self.db.with_connection(|connection| {
-                connection.execute(
-                    "UPDATE digital_colleagues SET report_conversation_id = ?1 WHERE id = ?2",
-                    params![chat, colleague_id],
-                )?;
-                Ok(())
-            }).unwrap();
+            self.db
+                .with_connection(|connection| {
+                    connection.execute(
+                        "UPDATE digital_colleagues SET report_conversation_id = ?1 WHERE id = ?2",
+                        params![chat, colleague_id],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
         }
 
         /// An artifact whose Run row is gone. Reachable only outside Fox (the
@@ -616,7 +678,13 @@ mod tests {
 
         // A second copy for the same contact is a distinct row, not a merge.
         f.message(&f.a_chat, "msg-a2", "user", None, 2);
-        f.attachment(&f.a_chat, "att-a2", "msg-a2", "报价.txt", b"contact A again");
+        f.attachment(
+            &f.a_chat,
+            "att-a2",
+            "msg-a2",
+            "报价.txt",
+            b"contact A again",
+        );
         let a_files = f.db.companion_files_list(&f.a).unwrap();
         assert_eq!(a_files.len(), 2);
         assert_ne!(a_files[0].id, a_files[1].id);
@@ -629,54 +697,85 @@ mod tests {
     #[test]
     fn a_background_artifact_survives_restart_and_points_at_its_report() {
         let f = Fixture::new();
-        let colleague = f.db.create_digital_colleague(&CreateDigitalColleagueInput {
-            name: "每日整理".into(),
-            expert_id: "fox-debugger".into(),
-            objective: "整理目录并回报".into(),
-            project_id: None,
-            project_root: None,
-            knowledge_references: Vec::<KnowledgeReference>::new(),
-            max_runs_per_day: 8,
-            max_tokens_per_day: 10_000,
-            max_duration_ms: 60_000,
-            max_output_tokens: 2_000,
-            max_tool_calls: 20,
-            companion_id: Some(f.a.clone()),
-        }).unwrap();
-        let accepted = f.db.accept_digital_colleague_trigger(
-            &colleague.id, "manual", None, "manual:c05", &json!({}), None, "user",
-        ).unwrap();
+        let colleague =
+            f.db.create_digital_colleague(&CreateDigitalColleagueInput {
+                name: "每日整理".into(),
+                expert_id: "fox-debugger".into(),
+                objective: "整理目录并回报".into(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: Vec::<KnowledgeReference>::new(),
+                max_runs_per_day: 8,
+                max_tokens_per_day: 10_000,
+                max_duration_ms: 60_000,
+                max_output_tokens: 2_000,
+                max_tool_calls: 20,
+                companion_id: Some(f.a.clone()),
+            })
+            .unwrap();
+        let accepted =
+            f.db.accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "manual:c05",
+                &json!({}),
+                None,
+                "user",
+            )
+            .unwrap();
         let run_id = accepted.trigger.run_id.clone().unwrap();
-        f.artifact(&colleague.conversation_id, "art-task", Some(&run_id), "汇总.md", "# 汇总".as_bytes());
-        f.db.apply_runtime_event(&run_id, 1, &json!({"type": "run.started"})).unwrap();
-        f.db.apply_runtime_event(&run_id, 2, &json!({"type": "run.completed"})).unwrap();
+        f.artifact(
+            &colleague.conversation_id,
+            "art-task",
+            Some(&run_id),
+            "汇总.md",
+            "# 汇总".as_bytes(),
+        );
+        f.db.apply_runtime_event(&run_id, 1, &json!({"type": "run.started"}))
+            .unwrap();
+        f.db.apply_runtime_event(&run_id, 2, &json!({"type": "run.completed"}))
+            .unwrap();
 
         // Close the connection, then reopen the same file to simulate a restart.
-        let Fixture { root, db, a, a_chat, .. } = f;
+        let Fixture {
+            root,
+            db,
+            a,
+            a_chat,
+            ..
+        } = f;
         let db_path = root.join("fox.db");
         drop(db);
         let reopened = Database::open(db_path).unwrap();
         let files = reopened.companion_files_list(&a).unwrap();
-        let task = files.iter().find(|entry| entry.id == "art-task").expect("task artifact listed");
+        let task = files
+            .iter()
+            .find(|entry| entry.id == "art-task")
+            .expect("task artifact listed");
         assert_eq!(task.kind, "artifact");
         assert_eq!(task.origin, "task");
         assert_eq!(task.task_name.as_deref(), Some("每日整理"));
         let source = task.source.as_ref().expect("report source");
         assert_eq!(source.bubble_id, format!("dc-report-{run_id}"));
         // The source is a real K1 bubble in the fixed private chat.
-        reopened.with_connection(|connection| {
-            let (bubble_id, conversation_id): (String, String) = connection.query_row(
-                "SELECT bubble_id, conversation_id FROM contact_bubbles WHERE bubble_id = ?1",
-                [&source.bubble_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
-            assert_eq!(bubble_id, source.message_id);
-            assert_eq!(conversation_id, a_chat);
-            Ok(())
-        }).unwrap();
+        reopened
+            .with_connection(|connection| {
+                let (bubble_id, conversation_id): (String, String) = connection.query_row(
+                    "SELECT bubble_id, conversation_id FROM contact_bubbles WHERE bubble_id = ?1",
+                    [&source.bubble_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                assert_eq!(bubble_id, source.message_id);
+                assert_eq!(conversation_id, a_chat);
+                Ok(())
+            })
+            .unwrap();
         // The verified chain resolves for the owner after the restart too.
         assert!(matches!(
-            reopened.companion_file_resolve(&a, "artifact", "art-task").unwrap(),
+            reopened
+                .companion_file_resolve(&a, "artifact", "art-task")
+                .unwrap(),
             CompanionFile::Artifact(_)
         ));
         drop(reopened);
@@ -696,45 +795,88 @@ mod tests {
         let run = f.db.create_run(&f.a_chat, "生成", None).unwrap().run.id;
         f.artifact(&f.a_chat, "art-a", Some(&run), "a.md", b"a");
 
-        let colleague = f.db.create_digital_colleague(&CreateDigitalColleagueInput {
-            name: "每日整理".into(),
-            expert_id: "fox-debugger".into(),
-            objective: "整理目录并回报".into(),
-            project_id: None,
-            project_root: None,
-            knowledge_references: Vec::<KnowledgeReference>::new(),
-            max_runs_per_day: 8,
-            max_tokens_per_day: 10_000,
-            max_duration_ms: 60_000,
-            max_output_tokens: 2_000,
-            max_tool_calls: 20,
-            companion_id: Some(f.a.clone()),
-        }).unwrap();
-        let accepted = f.db.accept_digital_colleague_trigger(
-            &colleague.id, "manual", None, "manual:c05-refuse", &json!({}), None, "user",
-        ).unwrap();
+        let colleague =
+            f.db.create_digital_colleague(&CreateDigitalColleagueInput {
+                name: "每日整理".into(),
+                expert_id: "fox-debugger".into(),
+                objective: "整理目录并回报".into(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: Vec::<KnowledgeReference>::new(),
+                max_runs_per_day: 8,
+                max_tokens_per_day: 10_000,
+                max_duration_ms: 60_000,
+                max_output_tokens: 2_000,
+                max_tool_calls: 20,
+                companion_id: Some(f.a.clone()),
+            })
+            .unwrap();
+        let accepted =
+            f.db.accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "manual:c05-refuse",
+                &json!({}),
+                None,
+                "user",
+            )
+            .unwrap();
         let task_run = accepted.trigger.run_id.clone().unwrap();
-        f.artifact(&colleague.conversation_id, "art-task", Some(&task_run), "task.md", b"t");
+        f.artifact(
+            &colleague.conversation_id,
+            "art-task",
+            Some(&task_run),
+            "task.md",
+            b"t",
+        );
 
         // Contact B cannot open A's chat artifact, A's attachment, or A's task
         // artifact — even though it knows the exact ids.
-        for (kind, id) in [("artifact", "art-a"), ("attachment", "att-a"), ("artifact", "art-task")] {
+        for (kind, id) in [
+            ("artifact", "art-a"),
+            ("attachment", "att-a"),
+            ("artifact", "art-task"),
+        ] {
             let error = f.db.companion_file_resolve(&f.b, kind, id).unwrap_err();
             assert!(error.contains(FILE_NOT_FOUND), "{kind} {id}: {error}");
         }
         // A nonexistent contact id resolves nothing either.
-        assert!(f.db.companion_file_resolve("cmp_forged", "artifact", "art-a").is_err());
-        assert!(f.db.companion_file_resolve(&f.a, "artifact", "art-missing").is_err());
-        assert!(f.db.companion_file_resolve(&f.a, "unknown", "art-a").is_err());
+        assert!(f
+            .db
+            .companion_file_resolve("cmp_forged", "artifact", "art-a")
+            .is_err());
+        assert!(f
+            .db
+            .companion_file_resolve(&f.a, "artifact", "art-missing")
+            .is_err());
+        assert!(f
+            .db
+            .companion_file_resolve(&f.a, "unknown", "art-a")
+            .is_err());
         // The owner resolves its own files.
-        assert!(f.db.companion_file_resolve(&f.a, "artifact", "art-a").is_ok());
-        assert!(f.db.companion_file_resolve(&f.a, "artifact", "art-task").is_ok());
-        assert!(f.db.companion_file_resolve(&f.a, "attachment", "att-a").is_ok());
+        assert!(f
+            .db
+            .companion_file_resolve(&f.a, "artifact", "art-a")
+            .is_ok());
+        assert!(f
+            .db
+            .companion_file_resolve(&f.a, "artifact", "art-task")
+            .is_ok());
+        assert!(f
+            .db
+            .companion_file_resolve(&f.a, "attachment", "att-a")
+            .is_ok());
 
         // An ordinary conversation's artifact never belongs to a contact.
-        let ordinary = f.db.create_conversation("fox-general", Some("普通对话"), None, None).unwrap();
+        let ordinary =
+            f.db.create_conversation("fox-general", Some("普通对话"), None, None)
+                .unwrap();
         f.artifact(&ordinary.id, "art-ordinary", None, "o.md", b"o");
-        assert!(f.db.companion_file_resolve(&f.a, "artifact", "art-ordinary").is_err());
+        assert!(f
+            .db
+            .companion_file_resolve(&f.a, "artifact", "art-ordinary")
+            .is_err());
 
         // A broken background chain refuses instead of falling back.
         f.db.with_connection(|connection| {
@@ -743,9 +885,15 @@ mod tests {
                 [&colleague.id],
             )?;
             Ok(())
-        }).unwrap();
-        let error = f.db.companion_file_resolve(&f.a, "artifact", "art-task").unwrap_err();
-        assert!(error.contains(crate::database::OWNERSHIP_MISSING), "{error}");
+        })
+        .unwrap();
+        let error =
+            f.db.companion_file_resolve(&f.a, "artifact", "art-task")
+                .unwrap_err();
+        assert!(
+            error.contains(crate::database::OWNERSHIP_MISSING),
+            "{error}"
+        );
         drop(f.db);
         fs::remove_dir_all(f.root).unwrap();
     }
@@ -755,7 +903,11 @@ mod tests {
     #[test]
     fn missing_files_are_flagged_and_chat_artifacts_point_at_the_last_bubble() {
         let f = Fixture::new();
-        let run = f.db.create_run(&f.a_chat, "生成两个文件", None).unwrap().run.id;
+        let run =
+            f.db.create_run(&f.a_chat, "生成两个文件", None)
+                .unwrap()
+                .run
+                .id;
         f.message(&f.a_chat, "assistant-1", "assistant", Some(&run), 2);
         f.project_bubbles(&run);
         let good = f.artifact(&f.a_chat, "art-good", Some(&run), "好的.md", b"ok");
@@ -770,7 +922,10 @@ mod tests {
         assert!(good.exists());
         let source = good_entry.source.as_ref().expect("bubble source");
         assert_eq!(source.message_id, "assistant-1");
-        assert_eq!(source.bubble_id, "assistant-1", "message-mode projection keeps the message id");
+        assert_eq!(
+            source.bubble_id, "assistant-1",
+            "message-mode projection keeps the message id"
+        );
         assert_eq!(good_entry.origin, "chat");
         assert!(good_entry.task_name.is_none());
         drop(f.db);
@@ -790,13 +945,22 @@ mod tests {
         f.artifact(&f.a_chat, "art-chat", Some(&chat_run), "chat.md", b"c");
 
         let task = f.task(&f.a, "manual:c05-chain");
-        f.artifact(&task.conversation_id, "art-task", Some(&task.run_id), "task.md", b"t");
+        f.artifact(
+            &task.conversation_id,
+            "art-task",
+            Some(&task.run_id),
+            "task.md",
+            b"t",
+        );
         f.deliver_report(&task.run_id);
         let report_bubble = format!("dc-report-{}", task.run_id);
 
         // Intact chain: the artifact is listed with its own report bubble.
         let files = f.db.companion_files_list(&f.a).unwrap();
-        let listed = files.iter().find(|entry| entry.id == "art-task").expect("task artifact listed");
+        let listed = files
+            .iter()
+            .find(|entry| entry.id == "art-task")
+            .expect("task artifact listed");
         assert_eq!(listed.origin, "task");
         assert_eq!(listed.source.as_ref().unwrap().bubble_id, report_bubble);
 
@@ -809,17 +973,31 @@ mod tests {
             );
             // No surviving entry may carry the old report jump either.
             assert!(files.iter().all(|entry| {
-                entry.source.as_ref().map(|source| source.bubble_id.as_str())
+                entry
+                    .source
+                    .as_ref()
+                    .map(|source| source.bubble_id.as_str())
                     != Some(report_bubble.as_str())
             }));
             // The private chat's own files are unaffected by the broken task.
             assert!(files.iter().any(|entry| entry.id == "att-a"));
             assert!(files.iter().any(|entry| entry.id == "art-chat"));
             // List and open / save-as now refuse the same file.
-            assert!(f.db.companion_file_resolve(&f.a, "artifact", "art-task").is_err());
+            assert!(f
+                .db
+                .companion_file_resolve(&f.a, "artifact", "art-task")
+                .is_err());
             // Repointing the report chat at B never hands B the artifact.
-            assert!(f.db.companion_files_list(&f.b).unwrap().iter().all(|entry| entry.id != "art-task"));
-            assert!(f.db.companion_file_resolve(&f.b, "artifact", "art-task").is_err());
+            assert!(f
+                .db
+                .companion_files_list(&f.b)
+                .unwrap()
+                .iter()
+                .all(|entry| entry.id != "art-task"));
+            assert!(f
+                .db
+                .companion_file_resolve(&f.b, "artifact", "art-task")
+                .is_err());
         }
         drop(f.db);
         fs::remove_dir_all(f.root).unwrap();
@@ -839,9 +1017,18 @@ mod tests {
         let b_chat_run = f.db.create_run(&f.b_chat, "生成", None).unwrap().run.id;
 
         // The honest pairing resolves and keeps its own report jump.
-        f.artifact(&task.conversation_id, "art-own", Some(&task.run_id), "own.md", b"o");
+        f.artifact(
+            &task.conversation_id,
+            "art-own",
+            Some(&task.run_id),
+            "own.md",
+            b"o",
+        );
         f.deliver_report(&task.run_id);
-        assert!(f.db.companion_file_resolve(&f.a, "artifact", "art-own").is_ok());
+        assert!(f
+            .db
+            .companion_file_resolve(&f.a, "artifact", "art-own")
+            .is_ok());
 
         let forged: [(&str, Option<&str>); 5] = [
             ("art-no-run", None),
@@ -852,12 +1039,17 @@ mod tests {
         ];
         for (id, run_id) in forged {
             f.artifact(&task.conversation_id, id, run_id, &format!("{id}.md"), b"x");
-            let error = f.db.companion_file_resolve(&f.a, "artifact", id).unwrap_err();
+            let error =
+                f.db.companion_file_resolve(&f.a, "artifact", id)
+                    .unwrap_err();
             assert!(error.contains(FILE_NOT_FOUND), "{id}: {error}");
             // Save-as shares this resolve, and the list must not keep offering a
             // file that open / save-as refuse.
             assert!(
-                f.db.companion_files_list(&f.a).unwrap().iter().all(|entry| entry.id != id),
+                f.db.companion_files_list(&f.a)
+                    .unwrap()
+                    .iter()
+                    .all(|entry| entry.id != id),
                 "{id} is still listed"
             );
             assert!(f.db.companion_file_resolve(&f.b, "artifact", id).is_err());
@@ -865,21 +1057,52 @@ mod tests {
 
         // A Run row that no longer exists is refused as well.
         f.orphan_artifact(&task.conversation_id, "art-orphan-run", "run_forged");
-        assert!(f.db.companion_file_resolve(&f.a, "artifact", "art-orphan-run").is_err());
-        assert!(f.db.companion_files_list(&f.a).unwrap().iter().all(|entry| entry.id != "art-orphan-run"));
+        assert!(f
+            .db
+            .companion_file_resolve(&f.a, "artifact", "art-orphan-run")
+            .is_err());
+        assert!(f
+            .db
+            .companion_files_list(&f.a)
+            .unwrap()
+            .iter()
+            .all(|entry| entry.id != "art-orphan-run"));
 
         // A chat artifact whose Run executed in a task conversation is refused
         // too: the Run must belong to the artifact's own conversation.
-        f.artifact(&f.a_chat, "art-chat-forged", Some(&task.run_id), "chat-forged.md", b"c");
-        assert!(f.db.companion_file_resolve(&f.a, "artifact", "art-chat-forged").is_err());
-        assert!(f.db.companion_files_list(&f.a).unwrap().iter().all(|entry| entry.id != "art-chat-forged"));
+        f.artifact(
+            &f.a_chat,
+            "art-chat-forged",
+            Some(&task.run_id),
+            "chat-forged.md",
+            b"c",
+        );
+        assert!(f
+            .db
+            .companion_file_resolve(&f.a, "artifact", "art-chat-forged")
+            .is_err());
+        assert!(f
+            .db
+            .companion_files_list(&f.a)
+            .unwrap()
+            .iter()
+            .all(|entry| entry.id != "art-chat-forged"));
 
         // None of the forgeries disturbed the honest artifact or its source.
         let files = f.db.companion_files_list(&f.a).unwrap();
-        let own = files.iter().find(|entry| entry.id == "art-own").expect("honest artifact listed");
+        let own = files
+            .iter()
+            .find(|entry| entry.id == "art-own")
+            .expect("honest artifact listed");
         assert_eq!(own.origin, "task");
-        assert_eq!(own.source.as_ref().unwrap().bubble_id, format!("dc-report-{}", task.run_id));
-        assert!(f.db.companion_file_resolve(&f.a, "artifact", "art-own").is_ok());
+        assert_eq!(
+            own.source.as_ref().unwrap().bubble_id,
+            format!("dc-report-{}", task.run_id)
+        );
+        assert!(f
+            .db
+            .companion_file_resolve(&f.a, "artifact", "art-own")
+            .is_ok());
         drop(f.db);
         fs::remove_dir_all(f.root).unwrap();
     }

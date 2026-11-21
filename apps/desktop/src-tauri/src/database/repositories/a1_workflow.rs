@@ -1,6 +1,6 @@
+use super::{now_ms, Database};
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::{now_ms, Database};
 use crate::database::{AcceptanceRecord, PlanRevisionRecord, ReviewFindingRecord};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::Value;

@@ -18,9 +18,9 @@
 //!   * revocation and expiry are checked on every read, so a revoked grant cannot
 //!     be resurrected by a cached decision.
 
+use super::{now_ms, Database};
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::{now_ms, Database};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -210,16 +210,26 @@ impl Database {
         if scope_key.starts_with("office-edit-v1:") {
             let actual = self.kernel_decided_approval_call(run_id, approval_tool_call_id)?;
             let actual_scope = actual.and_then(|(actual_tool, input)| {
-                if actual_tool != tool || tool != "call_mcp_tool" { return None; }
+                if actual_tool != tool || tool != "call_mcp_tool" {
+                    return None;
+                }
                 let input: serde_json::Value = serde_json::from_str(&input).ok()?;
-                crate::runtime_host::office_grants::reusable_edit_scope(&input, project_root.as_deref())
+                crate::runtime_host::office_grants::reusable_edit_scope(
+                    &input,
+                    project_root.as_deref(),
+                )
             });
             if actual_scope.is_none_or(|scope| scope.key != scope_key) {
-                return Ok(GrantRegistration::Skipped { reason: GrantSkipReason::UnnameableScope });
+                return Ok(GrantRegistration::Skipped {
+                    reason: GrantSkipReason::UnnameableScope,
+                });
             }
         }
         let run_budget_ms = frozen.and_then(|binding| {
-            binding.budgets.run_execution_limited.then_some(binding.budgets.run_execution_ms)
+            binding
+                .budgets
+                .run_execution_limited
+                .then_some(binding.budgets.run_execution_ms)
         });
         let (result, created) = self.with_connection(|connection| {
             // Serialize against policy changes and grant revocation. The early
@@ -300,15 +310,23 @@ impl Database {
         if let Some((grant_id, policy_version)) = created {
             if scope_key.starts_with("office-edit-v1:") && tool == "call_mcp_tool" {
                 if let Some(project_root) = project_root {
-                    let mut leases = self.office_reuse_grants.lock()
+                    let mut leases = self
+                        .office_reuse_grants
+                        .lock()
                         .map_err(|_| "Office grant registry lock is poisoned".to_owned())?;
                     leases.retain(|lease| lease.grant_id != grant_id);
                     leases.push(ProcessOfficeGrant {
-                            grant_id, source_run_id: run_id.to_owned(), conversation_id,
-                            project_root, policy_version, tool: tool.to_owned(),
-                            scope_value: scope_key.to_owned(),
-                        });
-                    if leases.len() > 256 { leases.remove(0); }
+                        grant_id,
+                        source_run_id: run_id.to_owned(),
+                        conversation_id,
+                        project_root,
+                        policy_version,
+                        tool: tool.to_owned(),
+                        scope_value: scope_key.to_owned(),
+                    });
+                    if leases.len() > 256 {
+                        leases.remove(0);
+                    }
                 }
             }
         }
@@ -385,32 +403,58 @@ impl Database {
         })?;
         // The registry is copied before any database work. It is never a
         // durable permission and never holds its lock while SQLite is locked.
-        let leases = self.office_reuse_grants.lock()
-            .map_err(|_| "Office grant registry lock is poisoned".to_owned())?.clone();
-        if leases.is_empty() { return Ok(grants); }
-        let Some(binding) = self.run_control_binding(run_id)? else { return Ok(grants); };
-        let Some(root) = binding.permission.project_root.as_deref() else { return Ok(grants); };
+        let leases = self
+            .office_reuse_grants
+            .lock()
+            .map_err(|_| "Office grant registry lock is poisoned".to_owned())?
+            .clone();
+        if leases.is_empty() {
+            return Ok(grants);
+        }
+        let Some(binding) = self.run_control_binding(run_id)? else {
+            return Ok(grants);
+        };
+        let Some(root) = binding.permission.project_root.as_deref() else {
+            return Ok(grants);
+        };
         let policy_version = self.execution_policy(&binding.conversation_id)?.version;
         for lease in leases {
-            if lease.source_run_id == run_id || lease.conversation_id != binding.conversation_id
-                || lease.project_root != root || lease.policy_version != policy_version
-            { continue; }
-            let live: Option<String> = self.with_connection(|connection| connection.query_row(
-                "SELECT g.approval_id FROM kernel_authorization_grants g
+            if lease.source_run_id == run_id
+                || lease.conversation_id != binding.conversation_id
+                || lease.project_root != root
+                || lease.policy_version != policy_version
+            {
+                continue;
+            }
+            let live: Option<String> = self.with_connection(|connection| {
+                connection
+                    .query_row(
+                        "SELECT g.approval_id FROM kernel_authorization_grants g
                    JOIN kernel_approvals a ON a.run_id=g.run_id AND a.tool_call_id=g.approval_id
                    JOIN kernel_execution_policies p ON p.conversation_id=g.conversation_id
                   WHERE g.id=?1 AND g.run_id=?2 AND g.conversation_id=?3 AND g.project_root=?4
                     AND g.tool=?5 AND g.scope_value=?6 AND g.scope_kind='office_request'
                     AND g.revoked_at IS NULL AND a.state='allow_conversation'
                     AND a.policy_version=?7 AND p.version=?7",
-                params![lease.grant_id, lease.source_run_id, lease.conversation_id,
-                    lease.project_root, lease.tool, lease.scope_value, lease.policy_version],
-                |row| row.get(0),
-            ).optional())?;
+                        params![
+                            lease.grant_id,
+                            lease.source_run_id,
+                            lease.conversation_id,
+                            lease.project_root,
+                            lease.tool,
+                            lease.scope_value,
+                            lease.policy_version
+                        ],
+                        |row| row.get(0),
+                    )
+                    .optional()
+            })?;
             if let Some(approval_id) = live {
                 grants.push(AdditionalGrant {
-                    tool: lease.tool, scope_value: lease.scope_value,
-                    kind: GrantScopeKind::OfficeRequest, approval_id,
+                    tool: lease.tool,
+                    scope_value: lease.scope_value,
+                    kind: GrantScopeKind::OfficeRequest,
+                    approval_id,
                     source_run_id: lease.source_run_id,
                 });
             }
@@ -481,7 +525,13 @@ mod tests {
         seed_run_with_budget_root(database, run_id, conversation, limited, None);
     }
 
-    fn seed_run_with_budget_root(database: &Database, run_id: &str, conversation: &str, limited: bool, project_root: Option<&str>) {
+    fn seed_run_with_budget_root(
+        database: &Database,
+        run_id: &str,
+        conversation: &str,
+        limited: bool,
+        project_root: Option<&str>,
+    ) {
         let tool_call_id = format!("{run_id}-call");
         database
             .with_connection(|connection| {
@@ -500,13 +550,25 @@ mod tests {
                 Ok(())
             })
             .expect("conversation and legacy run");
-        let policy_version = database.execution_policy(conversation).expect("policy").version;
-        database.freeze_kernel_run_control(run_id, "legacy", fox_engine_protocol::TimeBudgets {
-            model_request_ms: 120_000, model_first_response_ms: 60_000,
-            model_idle_ms: 120_000, tool_execution_ms: 600_000,
-            run_execution_ms: 600_000, run_execution_limited: limited,
-            approval_wait_ms: 300_000,
-        }).expect("frozen budget");
+        let policy_version = database
+            .execution_policy(conversation)
+            .expect("policy")
+            .version;
+        database
+            .freeze_kernel_run_control(
+                run_id,
+                "legacy",
+                fox_engine_protocol::TimeBudgets {
+                    model_request_ms: 120_000,
+                    model_first_response_ms: 60_000,
+                    model_idle_ms: 120_000,
+                    tool_execution_ms: 600_000,
+                    run_execution_ms: 600_000,
+                    run_execution_limited: limited,
+                    approval_wait_ms: 300_000,
+                },
+            )
+            .expect("frozen budget");
         let config = crate::kernel::RunFrozenConfig {
             engine_id: "pi".into(),
             kernel_mode: "authoritative".into(),
@@ -588,18 +650,40 @@ mod tests {
     fn existing_grant_reuses_within_its_run_but_not_a_new_run() {
         let (database, path) = new_database();
         seed_run(&database, "run-1", "conv-1");
-        assert!(matches!(database.kernel_register_authorization_grant(
-            "run-1", "run-1-call", "allow_conversation", "write_file",
-            Some("host-target:sha256:abc"),
-        ).unwrap(), GrantRegistration::Registered { .. }));
-        assert_eq!(database.kernel_effective_authorization_grants("run-1", now_ms()).unwrap().len(), 1);
-        database.with_connection(|connection| {
-            connection.execute("UPDATE runs SET status='completed' WHERE id='run-1'", [])?;
-            connection.execute("UPDATE kernel_runs SET state='completed' WHERE run_id='run-1'", [])?;
-            Ok(())
-        }).unwrap();
+        assert!(matches!(
+            database
+                .kernel_register_authorization_grant(
+                    "run-1",
+                    "run-1-call",
+                    "allow_conversation",
+                    "write_file",
+                    Some("host-target:sha256:abc"),
+                )
+                .unwrap(),
+            GrantRegistration::Registered { .. }
+        ));
+        assert_eq!(
+            database
+                .kernel_effective_authorization_grants("run-1", now_ms())
+                .unwrap()
+                .len(),
+            1
+        );
+        database
+            .with_connection(|connection| {
+                connection.execute("UPDATE runs SET status='completed' WHERE id='run-1'", [])?;
+                connection.execute(
+                    "UPDATE kernel_runs SET state='completed' WHERE run_id='run-1'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
         seed_run(&database, "run-2", "conv-1");
-        assert!(database.kernel_effective_authorization_grants("run-2", now_ms()).unwrap().is_empty());
+        assert!(database
+            .kernel_effective_authorization_grants("run-2", now_ms())
+            .unwrap()
+            .is_empty());
         drop(database);
         let _ = std::fs::remove_file(path);
     }
@@ -620,25 +704,54 @@ mod tests {
                 params!["run-1", input.canonical_string()])?;
             Ok(())
         }).unwrap();
-        let scope = crate::runtime_host::office_grants::reusable_edit_scope(&input, Some(root_text)).expect("narrow scope");
-        assert!(matches!(database.kernel_register_authorization_grant(
-            "run-1", "run-1-call", "allow_conversation", "call_mcp_tool",
-            Some("office-edit-v1:sha256:forged"),
-        ).unwrap(), GrantRegistration::Skipped { reason: GrantSkipReason::UnnameableScope }));
-        let registered = database.kernel_register_authorization_grant(
-            "run-1", "run-1-call", "allow_conversation", "call_mcp_tool", Some(&scope.key),
-        ).unwrap();
+        let scope =
+            crate::runtime_host::office_grants::reusable_edit_scope(&input, Some(root_text))
+                .expect("narrow scope");
+        assert!(matches!(
+            database
+                .kernel_register_authorization_grant(
+                    "run-1",
+                    "run-1-call",
+                    "allow_conversation",
+                    "call_mcp_tool",
+                    Some("office-edit-v1:sha256:forged"),
+                )
+                .unwrap(),
+            GrantRegistration::Skipped {
+                reason: GrantSkipReason::UnnameableScope
+            }
+        ));
+        let registered = database
+            .kernel_register_authorization_grant(
+                "run-1",
+                "run-1-call",
+                "allow_conversation",
+                "call_mcp_tool",
+                Some(&scope.key),
+            )
+            .unwrap();
         assert!(matches!(registered, GrantRegistration::Registered { .. }));
         seed_run_with_budget_root(&database, "run-2", "conv-1", true, Some(root_text));
-        let reuse = database.kernel_effective_authorization_grants("run-2", now_ms()).unwrap();
+        let reuse = database
+            .kernel_effective_authorization_grants("run-2", now_ms())
+            .unwrap();
         assert_eq!(reuse.len(), 1);
         assert!(reuse[0].matches("call_mcp_tool", &scope.key));
         assert_eq!(reuse[0].source_run_id, "run-1");
         seed_run_with_budget_root(&database, "run-other", "conv-other", true, Some(root_text));
-        assert!(database.kernel_effective_authorization_grants("run-other", now_ms()).unwrap().is_empty());
+        assert!(database
+            .kernel_effective_authorization_grants("run-other", now_ms())
+            .unwrap()
+            .is_empty());
         drop(database);
         let reopened = Database::open(path.clone()).unwrap();
-        assert!(reopened.kernel_effective_authorization_grants("run-2", now_ms()).unwrap().is_empty(), "restart clears lease");
+        assert!(
+            reopened
+                .kernel_effective_authorization_grants("run-2", now_ms())
+                .unwrap()
+                .is_empty(),
+            "restart clears lease"
+        );
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -659,12 +772,33 @@ mod tests {
                 params!["run-1", input.canonical_string()])?;
             Ok(())
         }).unwrap();
-        let scope = crate::runtime_host::office_grants::reusable_edit_scope(&input, Some(root_text)).unwrap();
-        database.kernel_register_authorization_grant("run-1", "run-1-call", "allow_conversation", "call_mcp_tool", Some(&scope.key)).unwrap();
+        let scope =
+            crate::runtime_host::office_grants::reusable_edit_scope(&input, Some(root_text))
+                .unwrap();
+        database
+            .kernel_register_authorization_grant(
+                "run-1",
+                "run-1-call",
+                "allow_conversation",
+                "call_mcp_tool",
+                Some(&scope.key),
+            )
+            .unwrap();
         seed_run_with_budget_root(&database, "run-2", "conv-1", true, Some(root_text));
-        assert_eq!(database.kernel_effective_authorization_grants("run-2", now_ms()).unwrap().len(), 1);
-        database.kernel_revoke_authorization_grants("conv-1", "user withdrew").unwrap();
-        assert!(database.kernel_effective_authorization_grants("run-2", now_ms()).unwrap().is_empty());
+        assert_eq!(
+            database
+                .kernel_effective_authorization_grants("run-2", now_ms())
+                .unwrap()
+                .len(),
+            1
+        );
+        database
+            .kernel_revoke_authorization_grants("conv-1", "user withdrew")
+            .unwrap();
+        assert!(database
+            .kernel_effective_authorization_grants("run-2", now_ms())
+            .unwrap()
+            .is_empty());
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -673,21 +807,46 @@ mod tests {
     fn unknown_or_stale_approval_version_cannot_register_a_grant() {
         let (database, path) = new_database();
         seed_run(&database, "run-1", "conv-1");
-        database.with_connection(|connection| {
-            connection.execute("UPDATE kernel_approvals SET policy_version=NULL WHERE run_id='run-1'", [])?;
-            Ok(())
-        }).unwrap();
-        let register = || database.kernel_register_authorization_grant(
-            "run-1", "run-1-call", "allow_conversation", "write_file", Some("host-target:sha256:abc"),
-        ).unwrap();
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE kernel_approvals SET policy_version=NULL WHERE run_id='run-1'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let register = || {
+            database
+                .kernel_register_authorization_grant(
+                    "run-1",
+                    "run-1-call",
+                    "allow_conversation",
+                    "write_file",
+                    Some("host-target:sha256:abc"),
+                )
+                .unwrap()
+        };
         assert!(matches!(register(), GrantRegistration::Skipped { .. }));
-        let stale = database.execution_policy("conv-1").unwrap().version.saturating_add(1);
-        database.with_connection(|connection| {
-            connection.execute("UPDATE kernel_approvals SET policy_version=?1 WHERE run_id='run-1'", [stale])?;
-            Ok(())
-        }).unwrap();
+        let stale = database
+            .execution_policy("conv-1")
+            .unwrap()
+            .version
+            .saturating_add(1);
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE kernel_approvals SET policy_version=?1 WHERE run_id='run-1'",
+                    [stale],
+                )?;
+                Ok(())
+            })
+            .unwrap();
         assert!(matches!(register(), GrantRegistration::Skipped { .. }));
-        assert!(database.kernel_effective_authorization_grants("run-1", 0).unwrap().is_empty());
+        assert!(database
+            .kernel_effective_authorization_grants("run-1", 0)
+            .unwrap()
+            .is_empty());
         let _ = std::fs::remove_file(path);
     }
 
@@ -695,24 +854,61 @@ mod tests {
     fn grant_retry_keeps_identity_and_new_approval_records_its_actual_source() {
         let (database, path) = new_database();
         seed_run(&database, "run-1", "conv-1");
-        let register = |approval: &str| database.kernel_register_authorization_grant(
-            "run-1", approval, "allow_conversation", "write_file", Some("host-target:sha256:abc"),
-        ).unwrap();
+        let register = |approval: &str| {
+            database
+                .kernel_register_authorization_grant(
+                    "run-1",
+                    approval,
+                    "allow_conversation",
+                    "write_file",
+                    Some("host-target:sha256:abc"),
+                )
+                .unwrap()
+        };
         let first = register("run-1-call");
-        let GrantRegistration::Registered { grant_id } = first else { panic!("first approval did not register") };
-        let deadline: Option<i64> = database.with_connection(|connection| connection.query_row(
-            "SELECT expires_at FROM kernel_authorization_grants WHERE id=?1", [&grant_id], |row| row.get(0),
-        )).unwrap();
+        let GrantRegistration::Registered { grant_id } = first else {
+            panic!("first approval did not register")
+        };
+        let deadline: Option<i64> = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT expires_at FROM kernel_authorization_grants WHERE id=?1",
+                    [&grant_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
         assert!(deadline.is_some(), "limited run has a fixed deadline");
-        database.kernel_note_authorization_grant_use("run-1", "write_file", "host-target:sha256:abc").unwrap();
-        assert_eq!(register("run-1-call"), GrantRegistration::Registered { grant_id: grant_id.clone() });
-        let (used, replay_deadline): (i64, Option<i64>) = database.with_connection(|connection| connection.query_row(
-            "SELECT use_count,expires_at FROM kernel_authorization_grants WHERE id=?1", [&grant_id], |row| Ok((row.get(0)?,row.get(1)?)),
-        )).unwrap();
+        database
+            .kernel_note_authorization_grant_use("run-1", "write_file", "host-target:sha256:abc")
+            .unwrap();
+        assert_eq!(
+            register("run-1-call"),
+            GrantRegistration::Registered {
+                grant_id: grant_id.clone()
+            }
+        );
+        let (used, replay_deadline): (i64, Option<i64>) = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT use_count,expires_at FROM kernel_authorization_grants WHERE id=?1",
+                    [&grant_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
         assert_eq!(used, 1, "a retry does not reset the usage record");
-        assert_eq!(replay_deadline, deadline, "a retry cannot extend the deadline");
-        database.kernel_revoke_authorization_grants("conv-1", "test withdrawal").unwrap();
-        assert!(matches!(register("run-1-call"), GrantRegistration::Skipped { .. }));
+        assert_eq!(
+            replay_deadline, deadline,
+            "a retry cannot extend the deadline"
+        );
+        database
+            .kernel_revoke_authorization_grants("conv-1", "test withdrawal")
+            .unwrap();
+        assert!(matches!(
+            register("run-1-call"),
+            GrantRegistration::Skipped { .. }
+        ));
         let reissued_version = database.execution_policy("conv-1").unwrap().version;
         database.with_connection(|connection| {
             connection.execute(
@@ -722,8 +918,15 @@ mod tests {
             )?;
             Ok(())
         }).unwrap();
-        assert_eq!(register("run-1-call"), GrantRegistration::Registered { grant_id: grant_id.clone() });
-        database.kernel_revoke_authorization_grants("conv-1", "second withdrawal").unwrap();
+        assert_eq!(
+            register("run-1-call"),
+            GrantRegistration::Registered {
+                grant_id: grant_id.clone()
+            }
+        );
+        database
+            .kernel_revoke_authorization_grants("conv-1", "second withdrawal")
+            .unwrap();
         let next_version = database.execution_policy("conv-1").unwrap().version;
         database.with_connection(|connection| {
             connection.execute(
@@ -736,17 +939,36 @@ mod tests {
             )?;
             Ok(())
         }).unwrap();
-        assert_eq!(register("second-call"), GrantRegistration::Registered { grant_id: grant_id.clone() });
-        let (stored_source, revoked): (String, Option<i64>) = database.with_connection(|connection| connection.query_row(
-            "SELECT approval_id,revoked_at FROM kernel_authorization_grants WHERE id=?1", [&grant_id],
-            |row| Ok((row.get(0)?,row.get(1)?)),
-        )).unwrap();
+        assert_eq!(
+            register("second-call"),
+            GrantRegistration::Registered {
+                grant_id: grant_id.clone()
+            }
+        );
+        let (stored_source, revoked): (String, Option<i64>) = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT approval_id,revoked_at FROM kernel_authorization_grants WHERE id=?1",
+                    [&grant_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
         assert_eq!(stored_source, "second-call");
         assert_eq!(revoked, None);
-        let renewed_deadline: Option<i64> = database.with_connection(|connection| connection.query_row(
-            "SELECT expires_at FROM kernel_authorization_grants WHERE id=?1", [&grant_id], |row| row.get(0),
-        )).unwrap();
-        assert!(renewed_deadline.is_some(), "a genuinely new approval receives a finite TTL");
+        let renewed_deadline: Option<i64> = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT expires_at FROM kernel_authorization_grants WHERE id=?1",
+                    [&grant_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert!(
+            renewed_deadline.is_some(),
+            "a genuinely new approval receives a finite TTL"
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -754,15 +976,31 @@ mod tests {
     fn unlimited_run_grant_has_no_expiration_deadline() {
         let (database, path) = new_database();
         seed_run_with_budget(&database, "run-unlimited", "conv-unlimited", false);
-        let register = || database.kernel_register_authorization_grant(
-            "run-unlimited", "run-unlimited-call", "allow_conversation", "write_file", Some("host-target:sha256:abc"),
-        ).unwrap();
+        let register = || {
+            database
+                .kernel_register_authorization_grant(
+                    "run-unlimited",
+                    "run-unlimited-call",
+                    "allow_conversation",
+                    "write_file",
+                    Some("host-target:sha256:abc"),
+                )
+                .unwrap()
+        };
         let first = register();
         assert_eq!(register(), first);
-        let GrantRegistration::Registered { grant_id } = first else { panic!("grant not registered") };
-        let deadline: Option<i64> = database.with_connection(|connection| connection.query_row(
-            "SELECT expires_at FROM kernel_authorization_grants WHERE id=?1", [&grant_id], |row| row.get(0),
-        )).unwrap();
+        let GrantRegistration::Registered { grant_id } = first else {
+            panic!("grant not registered")
+        };
+        let deadline: Option<i64> = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT expires_at FROM kernel_authorization_grants WHERE id=?1",
+                    [&grant_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
         assert_eq!(deadline, None);
         let _ = std::fs::remove_file(path);
     }

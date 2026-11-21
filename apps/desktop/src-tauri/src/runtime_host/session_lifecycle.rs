@@ -83,11 +83,17 @@ impl ResetRefusal {
     }
 
     pub(crate) fn run_active() -> Self {
-        Self::new(RESET_RUN_ACTIVE, "当前对话正在运行，请先停止生成再重置会话上下文")
+        Self::new(
+            RESET_RUN_ACTIVE,
+            "当前对话正在运行，请先停止生成再重置会话上下文",
+        )
     }
 
     fn new(code: &str, message: impl Into<String>) -> Self {
-        Self { code: code.to_owned(), message: message.into() }
+        Self {
+            code: code.to_owned(),
+            message: message.into(),
+        }
     }
 
     fn from_open(error: SessionOpenError) -> Self {
@@ -114,7 +120,10 @@ pub(crate) struct SessionFileRefusal {
 
 impl SessionFileRefusal {
     fn new(code: &str, message: impl Into<String>) -> Self {
-        Self { code: code.to_owned(), message: message.into() }
+        Self {
+            code: code.to_owned(),
+            message: message.into(),
+        }
     }
 }
 
@@ -154,7 +163,11 @@ pub(crate) struct ResetAvailability {
 
 impl ResetAvailability {
     pub(crate) fn supported() -> Self {
-        Self { supported: true, code: None, reason: None }
+        Self {
+            supported: true,
+            code: None,
+            reason: None,
+        }
     }
 
     pub(crate) fn unsupported(code: &str, reason: impl Into<String>) -> Self {
@@ -219,7 +232,10 @@ pub(crate) enum OpenDecision {
     /// Reopen the recorded session (native or legacy, per `resume_plan`).
     Resume,
     /// Refuse, reporting a recovery problem. Never a fresh context.
-    Refuse { code: &'static str, detail: &'static str },
+    Refuse {
+        code: &'static str,
+        detail: &'static str,
+    },
     /// An `allocated` native session whose file Pi never wrote and whose
     /// worker is gone: there is no context to lose, so the session Pi creates
     /// now may be adopted *into the same generation* instead of forcing a
@@ -257,10 +273,7 @@ pub(crate) fn allocated_mapping_is_live(
 /// empty-but-present file, a corrupt file or an identity mismatch never
 /// qualifies: those are recovery problems, and they keep refusing exactly as
 /// before.
-pub(crate) fn adoption_is_safe(
-    mapping: &RuntimeSessionRecord,
-    session_file_exists: bool,
-) -> bool {
+pub(crate) fn adoption_is_safe(mapping: &RuntimeSessionRecord, session_file_exists: bool) -> bool {
     mapping.is_native()
         && matches!(mapping.status_kind(), Some(RuntimeSessionStatus::Allocated))
         && mapping.native_path().is_some()
@@ -292,12 +305,11 @@ pub(crate) fn open_decision(
     if record.is_native() {
         return match record.status_kind() {
             Some(RuntimeSessionStatus::Ready) => OpenDecision::Resume,
-            Some(RuntimeSessionStatus::Allocated) if native_file_persisted => {
-                OpenDecision::Resume
-            }
+            Some(RuntimeSessionStatus::Allocated) if native_file_persisted => OpenDecision::Resume,
             Some(RuntimeSessionStatus::Allocated) => OpenDecision::Refuse {
                 code: SESSION_NOT_PERSISTED,
-                detail: "Pi 还没有把该会话写入磁盘（进程在第一次写入前就结束了），没有可恢复的上下文",
+                detail:
+                    "Pi 还没有把该会话写入磁盘（进程在第一次写入前就结束了），没有可恢复的上下文",
             },
             // `unavailable`, or a status this build does not know: both are
             // "do not pretend this can be reopened".
@@ -320,19 +332,35 @@ fn classify_open(
     live_runtime_session_id: Option<&str>,
 ) -> OpenDecision {
     match open_decision(mapping, persisted) {
-        OpenDecision::Refuse { code: SESSION_NOT_PERSISTED, .. }
-            if mapping.is_some_and(|record| record.native_path().is_some()
-                && allocated_mapping_is_live(record, live_runtime_session_id)) => OpenDecision::ReuseLive,
-        OpenDecision::Refuse { code: SESSION_NOT_PERSISTED, .. }
-            if mapping.is_some_and(|record| adoption_is_safe(record, recorded_file_exists)) => OpenDecision::Adopt,
+        OpenDecision::Refuse {
+            code: SESSION_NOT_PERSISTED,
+            ..
+        } if mapping.is_some_and(|record| {
+            record.native_path().is_some()
+                && allocated_mapping_is_live(record, live_runtime_session_id)
+        }) =>
+        {
+            OpenDecision::ReuseLive
+        }
+        OpenDecision::Refuse {
+            code: SESSION_NOT_PERSISTED,
+            ..
+        } if mapping.is_some_and(|record| adoption_is_safe(record, recorded_file_exists)) => {
+            OpenDecision::Adopt
+        }
         other => other,
     }
 }
 
-pub(crate) fn context_recovery_issue(mapping: Option<&RuntimeSessionRecord>, live: Option<&str>) -> Option<(&'static str, &'static str)> {
+pub(crate) fn context_recovery_issue(
+    mapping: Option<&RuntimeSessionRecord>,
+    live: Option<&str>,
+) -> Option<(&'static str, &'static str)> {
     let record = mapping.filter(|record| record.is_native())?;
     let path = record.native_path();
-    let persisted = path.as_deref().is_some_and(native_session_file_is_persisted);
+    let persisted = path
+        .as_deref()
+        .is_some_and(native_session_file_is_persisted);
     let exists = path.is_some_and(|path| std::fs::symlink_metadata(path).is_ok());
     match classify_open(Some(record), persisted, exists, live) {
         OpenDecision::Refuse { code, detail } => Some((code, detail)),
@@ -348,11 +376,7 @@ pub(crate) fn context_recovery_issue(mapping: Option<&RuntimeSessionRecord>, liv
 pub(crate) fn event_proves_persistence(event_type: &str) -> bool {
     matches!(
         event_type,
-        "message.completed"
-            | "run.completed"
-            | "run.failed"
-            | "run.cancelled"
-            | "run.interrupted"
+        "message.completed" | "run.completed" | "run.failed" | "run.cancelled" | "run.interrupted"
     )
 }
 
@@ -441,7 +465,12 @@ impl<'a> SessionLifecycle<'a> {
             }
             _ => (false, false),
         };
-        let decision = classify_open(mapping.as_ref(), persisted, recorded_file_exists, live_runtime_session_id);
+        let decision = classify_open(
+            mapping.as_ref(),
+            persisted,
+            recorded_file_exists,
+            live_runtime_session_id,
+        );
         match decision {
             OpenDecision::Create => self.create(conversation_id, link),
             OpenDecision::Resume => {
@@ -511,13 +540,12 @@ impl<'a> SessionLifecycle<'a> {
             .database
             .next_runtime_session_generation(conversation_id)
             .map_err(SessionOpenError::Failed)?;
-        let (runtime_session_id, file, native_ref, status) =
-            self.allocate(
-                conversation_id,
-                link,
-                context_generation,
-                Uuid::new_v4().to_string(),
-            )?;
+        let (runtime_session_id, file, native_ref, status) = self.allocate(
+            conversation_id,
+            link,
+            context_generation,
+            Uuid::new_v4().to_string(),
+        )?;
         if let Err(error) = self.database.ensure_native_runtime_session(
             conversation_id,
             &runtime_session_id,
@@ -652,8 +680,8 @@ impl<'a> SessionLifecycle<'a> {
             .database
             .next_runtime_session_generation(conversation_id)
             .map_err(|error| ResetRefusal::new(RESET_FAILED, error))?;
-        let (runtime_session_id, file, native_ref, status) =
-            self.allocate(
+        let (runtime_session_id, file, native_ref, status) = self
+            .allocate(
                 conversation_id,
                 link,
                 context_generation,
@@ -767,7 +795,10 @@ impl<'a> SessionLifecycle<'a> {
         existing: &RuntimeSessionRecord,
         link: &mut dyn SessionRuntimeLink,
     ) -> Result<OpenedSession, SessionOpenError> {
-        let plan = resume_plan(existing, self.legacy_session_path(&existing.runtime_session_id));
+        let plan = resume_plan(
+            existing,
+            self.legacy_session_path(&existing.runtime_session_id),
+        );
         let native = matches!(plan, ResumePlan::Native { .. });
         let (payload, path) = match &plan {
             ResumePlan::Native { path, session_id } => (
@@ -823,6 +854,9 @@ impl<'a> SessionLifecycle<'a> {
             .unwrap_or("session.resume_failed")
             .to_owned();
         let message = response_error(&response, "Pi session could not be resumed");
+        if native && code == "session.native_recovery_pending" {
+            return Err(SessionOpenError::Failed(format!("[{code}] {message}")));
+        }
         self.database
             .mark_runtime_session_unavailable(conversation_id)
             .map_err(SessionOpenError::Failed)?;
@@ -910,11 +944,7 @@ impl<'a> SessionLifecycle<'a> {
 }
 
 fn mapping_is_allocated(record: &RuntimeSessionRecord) -> bool {
-    record.is_native()
-        && matches!(
-            record.status_kind(),
-            Some(RuntimeSessionStatus::Allocated)
-        )
+    record.is_native() && matches!(record.status_kind(), Some(RuntimeSessionStatus::Allocated))
 }
 
 /// Remove every session file this conversation owns — the live generation and
@@ -1000,7 +1030,10 @@ pub(crate) fn purge_owned_session_files(
             if !canonical.is_file() {
                 return Err(refused(
                     SESSION_FILE_NOT_REGULAR,
-                    format!("会话路径不是普通文件，已拒绝删除：{}", canonical.to_string_lossy()),
+                    format!(
+                        "会话路径不是普通文件，已拒绝删除：{}",
+                        canonical.to_string_lossy()
+                    ),
                 ));
             }
             if let Some(other) = other_owner {

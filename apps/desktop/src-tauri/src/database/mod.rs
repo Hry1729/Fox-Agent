@@ -1,10 +1,10 @@
-mod migrations;
 mod migration_backup;
+#[cfg(test)]
+mod migration_copy_tests;
+mod migrations;
 mod models;
 mod repositories;
 mod schedule;
-#[cfg(test)]
-mod migration_copy_tests;
 
 /// v100 remains unused. v106 adds contacts and their private conversations.
 /// v107 adds the persisted contact bubble projection (C00/K1).
@@ -16,55 +16,78 @@ mod migration_copy_tests;
 /// v113 adds message quotes and the user's own bubble marks (C07).
 /// v114 makes companion source experts optional and freezes binding skills.
 /// v115 adds typed timezone-aware schedules and nullable task source experts.
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 115;
-pub(crate) use repositories::{AcceptanceBinding, AcceptanceRow, AcceptanceWrite};
-pub(crate) use repositories::kernel_execution_admission;
-pub(crate) use repositories::permission_rules::{ConversationAccess, PermissionAuditRecord, PermissionRuleRecord};
-pub(crate) use repositories::companions;
-pub(crate) use repositories::companion_capabilities::{
-    capability_id, ensure_granted_on, invalidate_companion_capability_in_tx,
-    WEB_SERVER_ID, WEB_TOOLS,
-};
-pub(crate) use repositories::companion_files::{CompanionFile, CompanionFileEntry};
-pub(crate) use repositories::contact_marks::prompt_block as contact_quote_prompt_block;
-pub(crate) use repositories::companion_ownership::OWNERSHIP_MISSING;
-pub(crate) use repositories::RunBackendIdentity;
-pub(crate) use repositories::{EXECUTOR_ROUTE_RETIRED, EXECUTOR_ROUTE_RETIRED_MESSAGE, EXECUTOR_ROUTE_UNKNOWN};
-pub(crate) use repositories::ApprovalRefusal;
+/// v116 adds the ordered work-page companion shortcuts.
+/// v117 adds the default companion's team action cards.
+/// v118 adds companion coordination threads and their durable handoff ledger.
+/// v119 adds stored sidebar pin order and coordination-aware memory ownership.
+/// v120 binds recoverable MCP writes to their original connector.
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 120;
+pub use models::*;
 #[cfg(test)]
 pub(crate) use repositories::approval_invalidation;
-pub(crate) use repositories::kernel_reconciliation::*;
-pub(crate) use repositories::{BudgetTier, ContinuableRun, ContinuationRequest, GrantRegistration, GrantScopeKind, GrantSkipReason};
-pub(crate) use repositories::{JobSnapshot, JobStartOutcome, JobStartRequest, JobState};
-pub(crate) use repositories::{
-    run_budget_for_tier, PreparedContinuation, VerifiedContinuationPermission,
+pub(crate) use repositories::bounded_tool_result_preview;
+pub(crate) use repositories::companion_capabilities::{
+    capability_id, ensure_granted_on, invalidate_companion_capability_in_tx, WEB_SERVER_ID,
+    WEB_TOOLS,
 };
+pub(crate) use repositories::companion_files::{CompanionFile, CompanionFileEntry};
+pub(crate) use repositories::companion_coordination;
+pub(crate) use repositories::companion_ownership::OWNERSHIP_MISSING;
+pub(crate) use repositories::companions;
+pub(crate) use repositories::contact_marks::prompt_block as contact_quote_prompt_block;
 #[cfg(test)]
 pub(crate) use repositories::finalize_fault;
+pub(crate) use repositories::kernel_execution_admission;
+pub(crate) use repositories::kernel_reconciliation::*;
 #[cfg(test)]
 pub(crate) use repositories::native_session_fault;
+pub(crate) use repositories::permission_rules::{
+    ConversationAccess, PermissionAuditRecord, PermissionRuleRecord,
+};
 #[cfg(test)]
 pub(crate) use repositories::stage_fault;
-pub use models::*;
+pub(crate) use repositories::ApprovalRefusal;
+pub(crate) use repositories::RunBackendIdentity;
 /// Cap on `tool_calls.result_json`. Published here because the model-view binder
 /// uses it to decide whether omitted bytes are recoverable at all — one source
 /// of truth for "what Host keeps" instead of a duplicated literal.
 pub(crate) use repositories::MAX_STORED_TOOL_RESULT_BYTES;
-pub(crate) use repositories::bounded_tool_result_preview;
 #[allow(unused_imports)]
-pub use repositories::{now_ms, ActivateReadOnlyGraphInput, ActiveGraphNodeReviewRequest, AddEvidenceInput, AppNotificationRecord, AppNotificationUpsert, CreateGoalInput, CreateGraphNodeCancelIntentInput, CreateGraphNodeReviewRequestInput, CreateReadOnlyGraphAcceptanceInput, CreateTaskInput, Database, FinishReadOnlyGraphNodeInput, FinishTaskAttemptInput, GlobalSearchRecord, GraphAcceptanceIntentResult, GraphAcceptanceResult, GraphCriterionEvidenceInput, GraphNodeReviewActivationResult, GraphNodeReviewDecisionResult, GraphNodeReviewOutcome, GraphNodeReviewRequestResult, GraphReviewerDispatchResult, MessageFeedbackRecord, NotificationPreferencesRecord, PendingGraphAcceptance, PreflightTaskRepairOverrideInput, ProjectManagementRecord, RepositoryError, StartReadyReadOnlyGraphNodeInput, StartTaskAttemptInput, StartTaskRepairOverrideInput, WORK_EVENT_TYPES};
+pub use repositories::{
+    now_ms, ActivateReadOnlyGraphInput, ActiveGraphNodeReviewRequest, AddEvidenceInput,
+    AppNotificationRecord, AppNotificationUpsert, CreateGoalInput,
+    CreateGraphNodeCancelIntentInput, CreateGraphNodeReviewRequestInput,
+    CreateReadOnlyGraphAcceptanceInput, CreateTaskInput, Database, FinishReadOnlyGraphNodeInput,
+    FinishTaskAttemptInput, GlobalSearchRecord, GraphAcceptanceIntentResult, GraphAcceptanceResult,
+    GraphCriterionEvidenceInput, GraphNodeReviewActivationResult, GraphNodeReviewDecisionResult,
+    GraphNodeReviewOutcome, GraphNodeReviewRequestResult, GraphReviewerDispatchResult,
+    MessageFeedbackRecord, NotificationPreferencesRecord, PendingGraphAcceptance,
+    PreflightTaskRepairOverrideInput, ProjectManagementRecord, RepositoryError,
+    StartReadyReadOnlyGraphNodeInput, StartTaskAttemptInput, StartTaskRepairOverrideInput,
+    WORK_EVENT_TYPES,
+};
 pub(crate) use repositories::{
-    package_snapshot_hash, CreateChildRunInput,
-    DeliveryChecklistSeed, DeliveryRequirement, RequirementKind,
+    package_snapshot_hash, CreateChildRunInput, DeliveryChecklistSeed, DeliveryRequirement,
     KernelHostScope, ManagedFileSource, ManagedFileVersion, ManagedFileVersionInput,
-    RestoreClaim, RestoreRequestRecord,
-    MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS,
-    SkillActivationRecord, SteeringMessage, MAX_STEERING_FOLLOWUPS,
-    STEERING_LANE_CURRENT, STEERING_LANE_NEXT_TURN,
+    RequirementKind, RestoreClaim, RestoreRequestRecord, SkillActivationRecord, SteeringMessage,
+    MAX_STEERING_FOLLOWUPS, MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS, STEERING_LANE_CURRENT,
+    STEERING_LANE_NEXT_TURN,
+};
+pub(crate) use repositories::{
+    run_budget_for_tier, PreparedContinuation, VerifiedContinuationPermission,
+};
+pub(crate) use repositories::{AcceptanceBinding, AcceptanceRow, AcceptanceWrite};
+pub(crate) use repositories::{
+    BudgetTier, ContinuableRun, ContinuationRequest, GrantRegistration, GrantScopeKind,
+    GrantSkipReason,
 };
 #[allow(unused_imports)]
 pub use repositories::{
     GraphLeadActivationResult, GraphLeadEdgeSnapshot, GraphLeadNodeFinishResult,
     GraphLeadNodeReadiness, GraphLeadNodeSnapshot, GraphLeadNodeStartResult, GraphLeadSnapshot,
+};
+pub(crate) use repositories::{JobSnapshot, JobStartOutcome, JobStartRequest, JobState};
+pub(crate) use repositories::{
+    EXECUTOR_ROUTE_RETIRED, EXECUTOR_ROUTE_RETIRED_MESSAGE, EXECUTOR_ROUTE_UNKNOWN,
 };
 pub use schedule::*;

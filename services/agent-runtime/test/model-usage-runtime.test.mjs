@@ -133,6 +133,26 @@ test('Run cancellation settles only its admitted request and keeps missing usage
     [{ inputTokens: null, outputTokens: null, status: 'cancelled' }])
 })
 
+test('an agent gets only one first-response retry and reports the second timeout', async () => {
+  const failures = []
+  let openings = 0
+  const { session, settlements, records } = harness(() => {
+    openings += 1
+    return streamFor(message(), { stall: true, initial: 'start' })
+  }, {
+    stage: 'agent',
+    beforeAttempt: async () => limits({ firstResponseMs: 20 }),
+    onFailure: error => failures.push(error.code),
+  })
+  const stream = await session.agent.streamFunction(model, {})
+  await assert.rejects(stream.result(), { code: 'runtime.model_first_response_timeout' })
+  assert.equal(openings, 2)
+  assert.deepEqual(settlements.map(entry => entry.status), ['failed', 'failed'])
+  assert.equal(new Set(records.map(entry => entry.requestId)).size, 2)
+  assert.equal(new Set(records.map(entry => entry.logicalRequestId)).size, 1)
+  assert.deepEqual(failures, ['runtime.model_first_response_timeout'])
+})
+
 test('an all-zero SDK usage object remains unknown at Host completion', async () => {
   const { session, settlements } = harness(() => streamFor(message({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })))
   const stream = await session.agent.streamFunction(model, {})

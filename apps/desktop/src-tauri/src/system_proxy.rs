@@ -50,10 +50,16 @@ impl ProxySettings {
                 if value.is_empty() {
                     continue;
                 }
-                let Some(canonical) = PROXY_VARIABLES.iter().copied().find(|known| known.eq_ignore_ascii_case(name.trim())) else {
+                let Some(canonical) = PROXY_VARIABLES
+                    .iter()
+                    .copied()
+                    .find(|known| known.eq_ignore_ascii_case(name.trim()))
+                else {
                     continue;
                 };
-                values.entry(canonical).or_insert_with(|| (value.to_owned(), *source));
+                values
+                    .entry(canonical)
+                    .or_insert_with(|| (value.to_owned(), *source));
             }
         }
         Self { values }
@@ -68,14 +74,22 @@ impl ProxySettings {
 
     /// 是否配置了真正的代理（只有 NO_PROXY 不算）。
     pub fn proxy_in_use(&self) -> bool {
-        ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"].iter().any(|name| self.values.contains_key(name))
+        ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]
+            .iter()
+            .any(|name| self.values.contains_key(name))
     }
 
     /// 生效的来源（去重，按优先级），审计里写「来自哪里」。
     pub fn sources(&self) -> Vec<&'static str> {
         let mut seen: Vec<&'static str> = Vec::new();
-        for source in [ProxySource::ProcessEnvironment, ProxySource::UserEnvironment, ProxySource::SystemProxy] {
-            if self.values.values().any(|(_, from)| *from == source) && !seen.contains(&source.as_str()) {
+        for source in [
+            ProxySource::ProcessEnvironment,
+            ProxySource::UserEnvironment,
+            ProxySource::SystemProxy,
+        ] {
+            if self.values.values().any(|(_, from)| *from == source)
+                && !seen.contains(&source.as_str())
+            {
                 seen.push(source.as_str());
             }
         }
@@ -111,7 +125,11 @@ pub fn detect() -> ProxySettings {
 fn process_environment() -> Vec<(String, String)> {
     std::env::vars_os()
         .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
-        .filter(|(key, _)| PROXY_VARIABLES.iter().any(|known| known.eq_ignore_ascii_case(key)))
+        .filter(|(key, _)| {
+            PROXY_VARIABLES
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(key))
+        })
         .collect()
 }
 
@@ -119,7 +137,10 @@ fn process_environment() -> Vec<(String, String)> {
 fn user_environment() -> Vec<(String, String)> {
     PROXY_VARIABLES
         .iter()
-        .filter_map(|name| registry::read_string(registry::USER_ENVIRONMENT, name).map(|value| ((*name).to_owned(), value)))
+        .filter_map(|name| {
+            registry::read_string(registry::USER_ENVIRONMENT, name)
+                .map(|value| ((*name).to_owned(), value))
+        })
         .collect()
 }
 
@@ -130,14 +151,16 @@ fn user_environment() -> Vec<(String, String)> {
 
 #[cfg(windows)]
 fn system_proxy_environment() -> Vec<(String, String)> {
-    let enabled = registry::read_dword(registry::INTERNET_SETTINGS, "ProxyEnable").unwrap_or(0) != 0;
+    let enabled =
+        registry::read_dword(registry::INTERNET_SETTINGS, "ProxyEnable").unwrap_or(0) != 0;
     if !enabled {
         return Vec::new();
     }
     let Some(server) = registry::read_string(registry::INTERNET_SETTINGS, "ProxyServer") else {
         return Vec::new();
     };
-    let bypass = registry::read_string(registry::INTERNET_SETTINGS, "ProxyOverride").unwrap_or_default();
+    let bypass =
+        registry::read_string(registry::INTERNET_SETTINGS, "ProxyOverride").unwrap_or_default();
     wininet_environment(&server, &bypass)
 }
 
@@ -170,7 +193,9 @@ pub fn wininet_environment(server: &str, bypass: &str) -> Vec<(String, String)> 
     let mut entries = Vec::new();
     if server.contains('=') {
         for part in server.split(';') {
-            let Some((protocol, address)) = part.split_once('=') else { continue };
+            let Some((protocol, address)) = part.split_once('=') else {
+                continue;
+            };
             let address = address.trim();
             if address.is_empty() {
                 continue;
@@ -178,7 +203,9 @@ pub fn wininet_environment(server: &str, bypass: &str) -> Vec<(String, String)> 
             match protocol.trim().to_ascii_lowercase().as_str() {
                 "http" => entries.push(("HTTP_PROXY".to_owned(), with_scheme(address, "http"))),
                 "https" => entries.push(("HTTPS_PROXY".to_owned(), with_scheme(address, "http"))),
-                "socks" | "socks5" => entries.push(("ALL_PROXY".to_owned(), with_scheme(address, "socks5"))),
+                "socks" | "socks5" => {
+                    entries.push(("ALL_PROXY".to_owned(), with_scheme(address, "socks5")))
+                }
                 _ => {}
             }
         }
@@ -193,7 +220,11 @@ pub fn wininet_environment(server: &str, bypass: &str) -> Vec<(String, String)> 
         return entries;
     }
     let mut no_proxy: Vec<String> = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
-    for item in bypass.split(';').map(str::trim).filter(|item| !item.is_empty()) {
+    for item in bypass
+        .split(';')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
         let converted = if item.eq_ignore_ascii_case("<local>") {
             None
         } else if let Some(suffix) = item.strip_prefix("*.") {
@@ -206,7 +237,10 @@ pub fn wininet_environment(server: &str, bypass: &str) -> Vec<(String, String)> 
             Some(item.to_owned())
         };
         if let Some(value) = converted {
-            if !no_proxy.iter().any(|known| known.eq_ignore_ascii_case(&value)) {
+            if !no_proxy
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(&value))
+            {
                 no_proxy.push(value);
             }
         }
@@ -218,23 +252,36 @@ pub fn wininet_environment(server: &str, bypass: &str) -> Vec<(String, String)> 
 /// `10.*` → `10.0.0.0/8`，`192.168.*` → `192.168.0.0/16`，`172.16.1.*` → `172.16.1.0/24`。
 fn wildcard_ipv4_cidr(pattern: &str) -> Option<String> {
     let prefix = pattern.strip_suffix(".*")?;
-    let octets = prefix.split('.').map(|part| part.parse::<u8>().ok()).collect::<Option<Vec<_>>>()?;
+    let octets = prefix
+        .split('.')
+        .map(|part| part.parse::<u8>().ok())
+        .collect::<Option<Vec<_>>>()?;
     if octets.is_empty() || octets.len() > 3 {
         return None;
     }
     let mut full = octets.clone();
     full.resize(4, 0);
-    Some(format!("{}.{}.{}.{}/{}", full[0], full[1], full[2], full[3], octets.len() * 8))
+    Some(format!(
+        "{}.{}.{}.{}/{}",
+        full[0],
+        full[1],
+        full[2],
+        full[3],
+        octets.len() * 8
+    ))
 }
 
 #[cfg(windows)]
 mod registry {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::ERROR_SUCCESS;
-    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ};
+    use windows::Win32::System::Registry::{
+        RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
+    };
 
     pub const USER_ENVIRONMENT: &str = "Environment";
-    pub const INTERNET_SETTINGS: &str = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+    pub const INTERNET_SETTINGS: &str =
+        r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
 
     fn wide(text: &str) -> Vec<u16> {
         text.encode_utf16().chain(std::iter::once(0)).collect()
@@ -248,7 +295,15 @@ mod registry {
         let mut size: u32 = 0;
         // 先问长度，再读。
         let status = unsafe {
-            RegGetValueW(HKEY_CURRENT_USER, PCWSTR(subkey.as_ptr()), PCWSTR(value.as_ptr()), flags, None, None, Some(&mut size))
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                PCWSTR(subkey.as_ptr()),
+                PCWSTR(value.as_ptr()),
+                flags,
+                None,
+                None,
+                Some(&mut size),
+            )
         };
         if status != ERROR_SUCCESS || size == 0 {
             return None;
@@ -314,27 +369,63 @@ mod tests {
     use super::*;
 
     fn pairs(entries: &[(&str, &str)]) -> Vec<(String, String)> {
-        entries.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+        entries
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
     }
 
     #[test]
     fn earlier_sources_win_and_names_are_case_insensitive() {
         let settings = ProxySettings::merge(&[
-            (ProxySource::ProcessEnvironment, pairs(&[("https_proxy", "http://127.0.0.1:1"), ("PATH", "x")])),
-            (ProxySource::UserEnvironment, pairs(&[("HTTPS_PROXY", "http://127.0.0.1:2"), ("HTTP_PROXY", "http://127.0.0.1:2")])),
-            (ProxySource::SystemProxy, pairs(&[("HTTP_PROXY", "http://127.0.0.1:3"), ("NO_PROXY", "localhost")])),
+            (
+                ProxySource::ProcessEnvironment,
+                pairs(&[("https_proxy", "http://127.0.0.1:1"), ("PATH", "x")]),
+            ),
+            (
+                ProxySource::UserEnvironment,
+                pairs(&[
+                    ("HTTPS_PROXY", "http://127.0.0.1:2"),
+                    ("HTTP_PROXY", "http://127.0.0.1:2"),
+                ]),
+            ),
+            (
+                ProxySource::SystemProxy,
+                pairs(&[
+                    ("HTTP_PROXY", "http://127.0.0.1:3"),
+                    ("NO_PROXY", "localhost"),
+                ]),
+            ),
         ]);
-        assert_eq!(settings.get("HTTPS_PROXY"), Some("http://127.0.0.1:1"), "进程环境优先");
-        assert_eq!(settings.get("http_proxy"), Some("http://127.0.0.1:2"), "用户级环境补缺");
-        assert_eq!(settings.get("NO_PROXY"), Some("localhost"), "系统代理再补缺");
+        assert_eq!(
+            settings.get("HTTPS_PROXY"),
+            Some("http://127.0.0.1:1"),
+            "进程环境优先"
+        );
+        assert_eq!(
+            settings.get("http_proxy"),
+            Some("http://127.0.0.1:2"),
+            "用户级环境补缺"
+        );
+        assert_eq!(
+            settings.get("NO_PROXY"),
+            Some("localhost"),
+            "系统代理再补缺"
+        );
         assert!(settings.get("PATH").is_none(), "只认四个代理变量");
         assert!(settings.proxy_in_use());
-        assert_eq!(settings.sources(), vec!["process_env", "user_env", "wininet"]);
+        assert_eq!(
+            settings.sources(),
+            vec!["process_env", "user_env", "wininet"]
+        );
     }
 
     #[test]
     fn no_proxy_alone_is_not_a_proxy_and_blank_values_are_ignored() {
-        let settings = ProxySettings::merge(&[(ProxySource::ProcessEnvironment, pairs(&[("NO_PROXY", "localhost"), ("HTTP_PROXY", "  ")]))]);
+        let settings = ProxySettings::merge(&[(
+            ProxySource::ProcessEnvironment,
+            pairs(&[("NO_PROXY", "localhost"), ("HTTP_PROXY", "  ")]),
+        )]);
         assert!(!settings.proxy_in_use());
         assert!(settings.get("HTTP_PROXY").is_none());
         assert!(!ProxySettings::default().proxy_in_use());
@@ -342,7 +433,13 @@ mod tests {
 
     #[test]
     fn command_environment_passes_both_cases() {
-        let settings = ProxySettings::merge(&[(ProxySource::SystemProxy, pairs(&[("HTTP_PROXY", "http://127.0.0.1:7890"), ("NO_PROXY", "localhost")]))]);
+        let settings = ProxySettings::merge(&[(
+            ProxySource::SystemProxy,
+            pairs(&[
+                ("HTTP_PROXY", "http://127.0.0.1:7890"),
+                ("NO_PROXY", "localhost"),
+            ]),
+        )]);
         let env = settings.command_environment();
         assert!(env.contains(&("HTTP_PROXY".to_owned(), "http://127.0.0.1:7890".to_owned())));
         assert!(env.contains(&("NO_PROXY".to_owned(), "localhost".to_owned())));
@@ -358,8 +455,15 @@ mod tests {
 
     #[test]
     fn wininet_single_server_covers_http_and_https() {
-        let env = wininet_environment("127.0.0.1:7890", "localhost;127.*;10.*;192.168.*;*.corp.example;<local>;intranet;a*b");
-        let get = |name: &str| env.iter().find(|(key, _)| key == name).map(|(_, value)| value.clone());
+        let env = wininet_environment(
+            "127.0.0.1:7890",
+            "localhost;127.*;10.*;192.168.*;*.corp.example;<local>;intranet;a*b",
+        );
+        let get = |name: &str| {
+            env.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        };
         assert_eq!(get("HTTP_PROXY").as_deref(), Some("http://127.0.0.1:7890"));
         assert_eq!(get("HTTPS_PROXY").as_deref(), Some("http://127.0.0.1:7890"));
         assert!(get("ALL_PROXY").is_none());
@@ -371,28 +475,60 @@ mod tests {
 
     #[test]
     fn wininet_per_protocol_and_socks() {
-        let env = wininet_environment("http=127.0.0.1:8080;https=127.0.0.1:8443;socks=127.0.0.1:1080", "");
-        let get = |name: &str| env.iter().find(|(key, _)| key == name).map(|(_, value)| value.clone());
+        let env = wininet_environment(
+            "http=127.0.0.1:8080;https=127.0.0.1:8443;socks=127.0.0.1:1080",
+            "",
+        );
+        let get = |name: &str| {
+            env.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        };
         assert_eq!(get("HTTP_PROXY").as_deref(), Some("http://127.0.0.1:8080"));
         assert_eq!(get("HTTPS_PROXY").as_deref(), Some("http://127.0.0.1:8443"));
         assert_eq!(get("ALL_PROXY").as_deref(), Some("socks5://127.0.0.1:1080"));
         let socks_only = wininet_environment("socks=127.0.0.1:1080", "");
-        assert_eq!(socks_only.iter().filter(|(key, _)| key.ends_with("_PROXY") && key != "NO_PROXY").count(), 1);
-        assert!(wininet_environment("", "localhost").is_empty(), "没有代理地址时什么都不给");
-        assert_eq!(wininet_environment("http://proxy.corp:3128", "")[0].1, "http://proxy.corp:3128", "已带协议的保持原样");
+        assert_eq!(
+            socks_only
+                .iter()
+                .filter(|(key, _)| key.ends_with("_PROXY") && key != "NO_PROXY")
+                .count(),
+            1
+        );
+        assert!(
+            wininet_environment("", "localhost").is_empty(),
+            "没有代理地址时什么都不给"
+        );
+        assert_eq!(
+            wininet_environment("http://proxy.corp:3128", "")[0].1,
+            "http://proxy.corp:3128",
+            "已带协议的保持原样"
+        );
     }
 
     /// 13.38 B5-2：只有「自动」和「完全访问」把代理变量带进命令；「只读」「询问」不带，也不去检测。
     #[test]
     fn proxy_reaches_commands_only_in_auto_and_full_access() {
         use crate::runtime_host::approval_policy::AccessMode;
-        let settings = || ProxySettings::merge(&[(ProxySource::SystemProxy, pairs(&[("HTTPS_PROXY", "http://127.0.0.1:7890")]))]);
+        let settings = || {
+            ProxySettings::merge(&[(
+                ProxySource::SystemProxy,
+                pairs(&[("HTTPS_PROXY", "http://127.0.0.1:7890")]),
+            )])
+        };
         for mode in [AccessMode::Auto, AccessMode::FullAccess] {
             let entries = command_environment_for_mode(mode, settings);
-            assert!(entries.iter().any(|(name, value)| name == "HTTPS_PROXY" && value == "http://127.0.0.1:7890"), "{entries:?}");
+            assert!(
+                entries
+                    .iter()
+                    .any(|(name, value)| name == "HTTPS_PROXY" && value == "http://127.0.0.1:7890"),
+                "{entries:?}"
+            );
         }
         for mode in [AccessMode::ReadOnly, AccessMode::Ask] {
-            let entries = command_environment_for_mode(mode, || -> ProxySettings { panic!("只读 / 询问不检测代理") });
+            let entries = command_environment_for_mode(mode, || -> ProxySettings {
+                panic!("只读 / 询问不检测代理")
+            });
             assert!(entries.is_empty());
         }
     }

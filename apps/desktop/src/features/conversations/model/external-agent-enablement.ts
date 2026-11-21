@@ -31,5 +31,5 @@ export function useEnabledExternalAgents(): readonly AgentBackendId[] {
   useEffect(() => { void refreshAgentEnablement().catch(() => {}) }, [])
   return useSyncExternalStore(subscribe, readEnabledExternalAgents, () => EMPTY)
 }
-export const AGENT_DISABLED_NOTICE = '该 Agent 已停用，可在「设置 → 模型与 Agent」中启用'
+export const AGENT_DISABLED_NOTICE = '该 Agent 已停用，可在「设置 → Agent」中启用'
 export const AGENT_DISABLED_CODE = 'agent_backend_user_disabled'

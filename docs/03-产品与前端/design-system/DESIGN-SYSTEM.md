@@ -261,7 +261,21 @@
 
 ### 9.8 侧栏行与设置行
 
+侧栏只认三条竖线，令牌在 `globals.css` 的侧栏段：
+
+| 竖线 | 位置（距侧栏边） | 令牌 |
+|---|---|---|
+| 轨道 | 左右各 12px，所有行的底色铺满轨道 | `--fox-sidebar-gutter` |
+| 图标列 / 文字列 | 图标 20px，文字 44px | `--fox-sidebar-inset`、`--fox-sidebar-icon-box`、`--fox-sidebar-icon-gap` |
+| 动作列 | 「…」右缘 14px，「+」右缘 44px | `--fox-sidebar-action-inset`、`--fox-sidebar-action-size`、`--fox-sidebar-action-gap` |
+
 - 侧栏行高 32px，图标 16px；右侧动作只在悬停或聚焦时出现，并保留占位避免标题跳动。
+- 所有尾部按钮（模式行的搜索与通知、分组标题的 + / …、行内 …、页脚的主题与设置）都是 28px，右缘落在动作列；28px 按钮在 32px 行里四周各留 2px。
+- 分组标题和行同高（32px），分组之间只用 `--fox-sidebar-section-gap`（8px）拉开，不靠标题自身留白。
+- 伙伴页双行行使用 `--fox-sidebar-companion-row-height`（56px）和 `--fox-sidebar-companion-avatar-size`（40px）；头像左缘仍对齐图标列。
+- 置顶伙伴网格块使用 `--fox-sidebar-companion-tile-width` / `--fox-sidebar-companion-tile-height`（76 × 92px），头像使用 `--fox-sidebar-companion-tile-avatar-size`（56px）。网格在轨道内居中换行，不改变三条竖线。
+- 分组标题的动作组固定占「+ …」两格并靠左排；只有一个「+」的分组（Fox、本机），+ 仍和项目、对话的 + 同列。
+- 带头像的两行行（Fox）高 44px，头像 32px，左缘对齐图标列；悬停底色和项目、对话行一样用侧栏的移动高亮。
 - 设置页使用 `SettingsPageLayout` / `SettingsGroup` / `SettingsRow`：页宽 760px，行最小高 60px，左右两栏，标题 14/500，说明 12px，控件右对齐。
 - 设置页只用细线分隔，不用卡片套卡片。
 

@@ -116,13 +116,19 @@ fn aggregate_plugin_cards(
         let card_id = index
             .and_then(|index| cards.get(index).map(|card| card.id.clone()))
             .unwrap_or(canonical_id);
-        let origin = source
-            .map(|value| value.origin.clone())
-            .unwrap_or(if server.id == crate::office::SERVER_ID { PluginOrigin::Builtin } else { PluginOrigin::Local });
+        let origin = source.map(|value| value.origin.clone()).unwrap_or(
+            if server.id == crate::office::SERVER_ID {
+                PluginOrigin::Builtin
+            } else {
+                PluginOrigin::Local
+            },
+        );
         let install_status = installation_for(&installations, &aliases)
             .map(|value| value.install_status.clone())
             .unwrap_or(PluginInstallStatus::Installed);
-        let version = if server.id == crate::office::SERVER_ID { Some(crate::office::VERSION.to_owned()) } else {
+        let version = if server.id == crate::office::SERVER_ID {
+            Some(crate::office::VERSION.to_owned())
+        } else {
             installation_for(&installations, &aliases).map(|value| value.installed_version.clone())
         };
         let runtime_status = Some(mcp_runtime_status(&server.status));
@@ -130,11 +136,18 @@ fn aggregate_plugin_cards(
             id: card_id,
             kind: PluginKind::Mcp,
             origin,
-            category: if server.id == crate::office::SERVER_ID { "文件与办公" } else { "连接器" }.to_owned(),
+            category: if server.id == crate::office::SERVER_ID {
+                "文件与办公"
+            } else {
+                "连接器"
+            }
+            .to_owned(),
             name: server.name.clone(),
             description: if server.id == crate::office::SERVER_ID {
                 "创建、读取和编辑 Word、Excel、PowerPoint 文件。由 OfficeCLI 提供。".to_owned()
-            } else { format!("连接 {} 提供的外部工具和能力。", server.name) },
+            } else {
+                format!("连接 {} 提供的外部工具和能力。", server.name)
+            },
             icon: Some("cable".to_owned()),
             version,
             install_status,
@@ -180,7 +193,16 @@ fn aggregate_plugin_cards(
             kind: PluginKind::Skill,
             origin: index
                 .and_then(|index| cards.get(index).map(|card| card.origin.clone()))
-                .unwrap_or(if matches!(record.id.as_str(), "fox-office-word" | "fox-office-excel" | "fox-office-ppt") { PluginOrigin::Builtin } else { PluginOrigin::Local }),
+                .unwrap_or(
+                    if matches!(
+                        record.id.as_str(),
+                        "fox-office-word" | "fox-office-excel" | "fox-office-ppt"
+                    ) {
+                        PluginOrigin::Builtin
+                    } else {
+                        PluginOrigin::Local
+                    },
+                ),
             category: "技能".to_owned(),
             name: record.name,
             description: record.description,
@@ -231,15 +253,30 @@ fn aggregate_plugin_cards(
         merge_live_card(&mut cards, index, live);
     }
 
-    let selected = crate::search_service::load(database).map_err(PluginAdapterError::storage)?.provider;
+    let selected = crate::search_service::load(database)
+        .map_err(PluginAdapterError::storage)?
+        .provider;
     for (provider, id, name, description) in crate::search_service::SearchProvider::PLUGINS {
         cards.push(PluginCardView {
-            id: id.into(), kind: PluginKind::Tool, origin: PluginOrigin::Builtin,
-            category: "搜索服务".into(), name: name.into(), description: description.into(),
-            icon: Some("search".into()), version: None, install_status: PluginInstallStatus::Installed,
-            activation: PluginActivation::Global { enabled: selected == provider }, runtime_status: None,
-            permissions: vec![], compatible: true, last_error: None, incompatibility_reason: None,
-            installed_at: None, updated_at: None,
+            id: id.into(),
+            kind: PluginKind::Tool,
+            origin: PluginOrigin::Builtin,
+            category: "搜索服务".into(),
+            name: name.into(),
+            description: description.into(),
+            icon: Some("search".into()),
+            version: None,
+            install_status: PluginInstallStatus::Installed,
+            activation: PluginActivation::Global {
+                enabled: selected == provider,
+            },
+            runtime_status: None,
+            permissions: vec![],
+            compatible: true,
+            last_error: None,
+            incompatibility_reason: None,
+            installed_at: None,
+            updated_at: None,
         });
     }
     for card in &mut cards {
@@ -352,12 +389,18 @@ fn set_plugin_activation(
                 false,
             ));
         }
-        (PluginKind::Tool, PluginActivationUpdate::Global { enabled }) if card.category == "搜索服务" => {
-            let (provider, _, _, _) = crate::search_service::SearchProvider::PLUGINS.into_iter()
+        (PluginKind::Tool, PluginActivationUpdate::Global { enabled })
+            if card.category == "搜索服务" =>
+        {
+            let (provider, _, _, _) = crate::search_service::SearchProvider::PLUGINS
+                .into_iter()
                 .find(|(_, id, _, _)| *id == card.id)
-                .ok_or_else(|| PluginAdapterError::new("plugin.not_found", "搜索插件不存在", false))?;
-            crate::search_service::activate_plugin(database, provider, *enabled)
-                .map_err(|error| PluginAdapterError::new("plugin.search_configuration", error, false))?;
+                .ok_or_else(|| {
+                    PluginAdapterError::new("plugin.not_found", "搜索插件不存在", false)
+                })?;
+            crate::search_service::activate_plugin(database, provider, *enabled).map_err(
+                |error| PluginAdapterError::new("plugin.search_configuration", error, false),
+            )?;
         }
         (PluginKind::Tool, _) => {
             return Err(PluginAdapterError::new(
@@ -629,7 +672,8 @@ fn builtin_tool_category(tool: &str) -> &'static str {
         "child_agent_list" | "child_run_start" | "child_run_collect" | "child_run_cancel" => {
             "Agent 编排"
         }
-        "memory_search" | "memory_propose" | "memory_write" | "note_organize" | "note_search" | "note_read" | "skill_load" => "记忆与上下文",
+        "memory_search" | "memory_propose" | "memory_write" | "note_organize" | "note_search"
+        | "note_read" | "skill_load" => "记忆与上下文",
         "present_files" => "文件与办公",
         "list_knowledge_bases"
         | "search_knowledge"
@@ -784,16 +828,21 @@ mod tests {
                     .collect::<Vec<_>>()
             }
         );
-        assert!(tool_cards.iter().all(|card| {
-            card.description != "Fox 内建工具，由 Host 统一执行和授权。"
-                && card.description != "此工具尚未提供功能说明。"
-        }), "builtin tool missing description: {:?}",
+        assert!(
+            tool_cards.iter().all(|card| {
+                card.description != "Fox 内建工具，由 Host 统一执行和授权。"
+                    && card.description != "此工具尚未提供功能说明。"
+            }),
+            "builtin tool missing description: {:?}",
             tool_cards
                 .iter()
-                .filter(|card| card.description == "Fox 内建工具，由 Host 统一执行和授权。"
-                    || card.description == "此工具尚未提供功能说明。")
+                .filter(
+                    |card| card.description == "Fox 内建工具，由 Host 统一执行和授权。"
+                        || card.description == "此工具尚未提供功能说明。"
+                )
                 .map(|card| card.name.as_str())
-                .collect::<Vec<_>>());
+                .collect::<Vec<_>>()
+        );
         let _ = fs::remove_dir_all(skills);
         drop(database);
         let _ = fs::remove_file(database_path);

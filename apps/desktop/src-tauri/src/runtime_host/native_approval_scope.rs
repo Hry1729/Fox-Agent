@@ -11,7 +11,9 @@ pub(super) struct NativeApprovalRecoveryScope {
 }
 
 impl NativeApprovalRecoveryScope {
-    pub(super) fn host(&self) -> &RuntimeHost { &self.host }
+    pub(super) fn host(&self) -> &RuntimeHost {
+        &self.host
+    }
 }
 
 impl Drop for NativeApprovalRecoveryScope {
@@ -20,7 +22,9 @@ impl Drop for NativeApprovalRecoveryScope {
             if let Some(worker) = state.worker.as_mut() {
                 if worker.sessions.by_run(&self.run).is_some() {
                     worker.sessions.finish(&self.run);
-                    if self.remove_session { let _ = worker.sessions.remove(&self.conversation); }
+                    if self.remove_session {
+                        let _ = worker.sessions.remove(&self.conversation);
+                    }
                 }
             }
             state.cancellation.retire_run(&self.run);
@@ -31,94 +35,162 @@ impl Drop for NativeApprovalRecoveryScope {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::{sidecar_sessions, PendingApproval, QueuedRun, WorkerHandle};
+    use super::*;
     use crate::canonical_json::CanonicalJson;
-    use crate::database::{ApprovalDecision, ChildRunBudget, CreateChildRunInput, CreateDigitalColleagueInput, Database, OWNERSHIP_MISSING};
-    use fox_engine_protocol::{ExecutionAuthority, FrozenPermission, PermissionMode, ResourceExecutor, RunControlBinding, TimeBudgets};
+    use crate::database::{
+        ApprovalDecision, ChildRunBudget, CreateChildRunInput, CreateDigitalColleagueInput,
+        Database, OWNERSHIP_MISSING,
+    };
+    use fox_engine_protocol::{
+        ExecutionAuthority, FrozenPermission, PermissionMode, ResourceExecutor, RunControlBinding,
+        TimeBudgets,
+    };
     use rusqlite::params;
     use serde_json::{json, Value};
     use sha2::{Digest, Sha256};
-    use std::{collections::{HashMap, HashSet}, path::{Path, PathBuf}, process::{Command, Stdio}, sync::{Arc, Mutex}, time::{Duration, Instant}};
-    use tauri::Manager;
     #[cfg(windows)]
     use std::os::windows::process::CommandExt;
+    use std::{
+        collections::{HashMap, HashSet},
+        path::{Path, PathBuf},
+        process::{Command, Stdio},
+        sync::{Arc, Mutex},
+        time::{Duration, Instant},
+    };
+    use tauri::Manager;
 
     const CHILD: &str = "FOX_TEST_NATIVE_APPROVAL_SCOPE_CHILD";
 
     fn isolated(test: &str) -> bool {
-        if std::env::var(CHILD).as_deref() == Ok(test) { return false; }
-        let mut command=Command::new(std::env::current_exe().unwrap());
-        command.args([test,"--exact","--nocapture","--test-threads=1"])
-            .env(CHILD,test).env("FOX_KERNEL_MODE","authoritative")
-            .stdout(Stdio::piped()).stderr(Stdio::piped());
+        if std::env::var(CHILD).as_deref() == Ok(test) {
+            return false;
+        }
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([test, "--exact", "--nocapture", "--test-threads=1"])
+            .env(CHILD, test)
+            .env("FOX_KERNEL_MODE", "authoritative")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         #[cfg(windows)]
         command.creation_flags(0x0800_0000);
-        let mut child=command.spawn().unwrap();
-        let deadline=Instant::now()+Duration::from_secs(60);
+        let mut child = command.spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
         while child.try_wait().unwrap().is_none() {
-            if Instant::now()>=deadline { let _=child.kill();let _=child.wait();panic!("native approval fixture exceeded 60 seconds: {test}"); }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("native approval fixture exceeded 60 seconds: {test}");
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
-        let output=child.wait_with_output().unwrap();
-        assert!(output.status.success(),"child stdout: {}\nchild stderr: {}",
-            String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "child stdout: {}\nchild stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         true
     }
 
     fn app() -> tauri::App {
-        let mut context=tauri::generate_context!();
-        for window in &mut context.config_mut().app.windows { window.create=false; }
-        tauri::Builder::default().any_thread().build(context).unwrap()
+        let mut context = tauri::generate_context!();
+        for window in &mut context.config_mut().app.windows {
+            window.create = false;
+        }
+        tauri::Builder::default()
+            .any_thread()
+            .build(context)
+            .unwrap()
     }
 
-    struct Fixture { host: RuntimeHost, root: PathBuf }
+    struct Fixture {
+        host: RuntimeHost,
+        root: PathBuf,
+    }
 
     impl Fixture {
         fn new(app: &tauri::App, database: Database) -> Self {
-            let parent=std::env::var_os("FOX_TEST_NATIVE_HOST_FIXTURE_ROOT").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-            let root=parent.join(format!("fox-native-approval-scope-{}",uuid::Uuid::new_v4()));
+            let parent = std::env::var_os("FOX_TEST_NATIVE_HOST_FIXTURE_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir);
+            let root = parent.join(format!(
+                "fox-native-approval-scope-{}",
+                uuid::Uuid::new_v4()
+            ));
             Self::with_root(app, database, root)
         }
 
         fn with_root(app: &tauri::App, database: Database, root: PathBuf) -> Self {
-            for name in ["sessions","attachments","skills","project"] { std::fs::create_dir_all(root.join(name)).unwrap(); }
-            let host=RuntimeHost::new(app.handle().clone(),database,root.join("sessions"),root.join("attachments"),
-                root.join("skills"),crate::yuxi::YuxiClient::new().unwrap());
-            let mut command=Command::new("node");
-            command.args(["-e","process.stdin.resume()"])
-                .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+            for name in ["sessions", "attachments", "skills", "project"] {
+                std::fs::create_dir_all(root.join(name)).unwrap();
+            }
+            let host = RuntimeHost::new(
+                app.handle().clone(),
+                database,
+                root.join("sessions"),
+                root.join("attachments"),
+                root.join("skills"),
+                crate::yuxi::YuxiClient::new().unwrap(),
+            );
+            let mut command = Command::new("node");
+            command
+                .args(["-e", "process.stdin.resume()"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
             #[cfg(windows)]
             command.creation_flags(0x0800_0000);
-            let mut child=command.spawn().expect("start the inert stdin-only worker");
-            let stdin=Arc::new(Mutex::new(child.stdin.take().unwrap()));
+            let mut child = command.spawn().expect("start the inert stdin-only worker");
+            let stdin = Arc::new(Mutex::new(child.stdin.take().unwrap()));
             {
-                let mut state=host.state.lock().unwrap();
-                state.state="ready".into();
+                let mut state = host.state.lock().unwrap();
+                state.state = "ready".into();
                 let tools=["edit_file","task_repair_escalate_start"].map(|name| {
                     let (category,execution,approval)=fox_engine_protocol::canonical_runtime_tool_contract(name).unwrap();
                     json!({"name":name,"category":category,"execution":execution,"approval":approval})
                 });
-                state.capabilities=json!({"manifestVersion":fox_engine_protocol::CAPABILITY_MANIFEST_VERSION,
+                state.capabilities = json!({"manifestVersion":fox_engine_protocol::CAPABILITY_MANIFEST_VERSION,
                     "streamingText":true,"cancellation":true,"reasoning":false,"sessionResume":true,"toolApproval":true,
                     "imageInput":false,"steering":false,"contextCompaction":true,"dynamicModelSwitch":false,"workLoop":true,"tools":tools});
-                state.worker=Some(WorkerHandle { child:Arc::new(Mutex::new(child)),stdin,
-                    pending:Arc::new(Mutex::new(HashMap::new())),sessions:sidecar_sessions::Sessions::default(),session_leases:HashMap::new(), _job:crate::runtime_host::process_job::ProcessJob::none() });
+                state.worker = Some(WorkerHandle {
+                    child: Arc::new(Mutex::new(child)),
+                    stdin,
+                    pending: Arc::new(Mutex::new(HashMap::new())),
+                    sessions: sidecar_sessions::Sessions::default(),
+                    session_leases: HashMap::new(),
+                    _job: crate::runtime_host::process_job::ProcessJob::none(),
+                });
             }
-            Self {host,root}
+            Self { host, root }
         }
 
-        fn database(&self) -> &Database { &self.host.database }
+        fn database(&self) -> &Database {
+            &self.host.database
+        }
 
         fn manage(&self, app: &tauri::App) {
-            let database=self.database();
-            let client=self.host.yuxi_client.clone();
-            app.manage(crate::app_state::AppState::new(database.clone(),self.host.clone(),client.clone(),
-                crate::yuxi::runtime::YuxiRuntimeHost::new(app.handle().clone(),database.clone(),client),
+            let database = self.database();
+            let client = self.host.yuxi_client.clone();
+            app.manage(crate::app_state::AppState::new(
+                database.clone(),
+                self.host.clone(),
+                client.clone(),
+                crate::yuxi::runtime::YuxiRuntimeHost::new(
+                    app.handle().clone(),
+                    database.clone(),
+                    client,
+                ),
                 crate::model_service::ModelServiceClient::new().unwrap(),
                 crate::local_knowledge::LocalKnowledgeStore::open_for_startup_root(
-                    &crate::local_knowledge_storage::resolve_startup_root(&self.root,None),None),
-                self.root.clone(),self.root.join("skills")));
+                    &crate::local_knowledge_storage::resolve_startup_root(&self.root, None),
+                    None,
+                ),
+                self.root.clone(),
+                self.root.join("skills"),
+            ));
         }
 
         fn edit_input(&self, run: &str, call: &str) -> Value {
@@ -129,57 +201,107 @@ mod tests {
             observed_edit_input(self.database(), run, call, root)
         }
 
-        fn wait(&self, complete: impl Fn()->bool) {
-            let deadline=Instant::now()+Duration::from_secs(15);
+        fn wait(&self, complete: impl Fn() -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(15);
             while !complete() {
-                assert!(Instant::now()<deadline,"native approval recovery did not finish; fixture: {}",self.root.display());
+                assert!(
+                    Instant::now() < deadline,
+                    "native approval recovery did not finish; fixture: {}",
+                    self.root.display()
+                );
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
     }
 
     fn observed_edit_input(database: &Database, run: &str, call: &str, root: &Path) -> Value {
-        let path=format!("{call}.txt");
-        let before=format!("before-{call}");
-        std::fs::write(root.join(&path),&before).unwrap();
-        let binding=database.run_control_binding(run).unwrap().unwrap();
-        let cancellation=crate::kernel::CancellationRegistry::default();
+        let path = format!("{call}.txt");
+        let before = format!("before-{call}");
+        std::fs::write(root.join(&path), &before).unwrap();
+        let binding = database.run_control_binding(run).unwrap().unwrap();
+        let cancellation = crate::kernel::CancellationRegistry::default();
         cancellation.register_run(run).unwrap();
-        let token=cancellation.tool_token(run,&format!("observe-{call}")).unwrap();
-        super::super::managed_files::execute_observed_reader(database,&binding,"read",&json!({"path":path}),
-            &format!("observe-{call}"),&token,Duration::from_secs(5)).unwrap();
+        let token = cancellation
+            .tool_token(run, &format!("observe-{call}"))
+            .unwrap();
+        super::super::managed_files::execute_observed_reader(
+            database,
+            &binding,
+            "read",
+            &json!({"path":path}),
+            &format!("observe-{call}"),
+            &token,
+            Duration::from_secs(5),
+        )
+        .unwrap();
         json!({"path":path,"oldText":before,"newText":format!("after-{call}"),
             "expectedVersion":crate::tool_host::file_version(before.as_bytes())})
     }
 
     impl Drop for Fixture {
         fn drop(&mut self) {
-            let worker={let mut state=self.host.state.lock().unwrap();state.shutting_down=true;
-                state.queue_changed.1.notify_all();state.worker.take()};
-            if let Some(worker)=worker { let mut child=worker.child.lock().unwrap();let _=child.kill();let _=child.wait(); }
+            let worker = {
+                let mut state = self.host.state.lock().unwrap();
+                state.shutting_down = true;
+                state.queue_changed.1.notify_all();
+                state.worker.take()
+            };
+            if let Some(worker) = worker {
+                let mut child = worker.child.lock().unwrap();
+                let _ = child.kill();
+                let _ = child.wait();
+            }
         }
     }
 
-    fn make_native(database: &Database, run: &str, conversation: &str, root: Option<&Path>, profile: &str) -> String {
-        database.freeze_run_execution_profile(run,profile).unwrap();
-        let project_root=match root {
+    fn make_native(
+        database: &Database,
+        run: &str,
+        conversation: &str,
+        root: Option<&Path>,
+        profile: &str,
+    ) -> String {
+        database.freeze_run_execution_profile(run, profile).unwrap();
+        let project_root = match root {
             Some(path) => {
-                let (authorized,_)=database.conversation_project_access(conversation).unwrap()
-                    .unwrap_or_else(|| panic!("conversation {conversation} has no authorized project folder"));
-                let provided=std::fs::canonicalize(path).unwrap_or_else(|error| panic!("canonicalize provided root {path:?}: {error}"));
-                let stored=std::fs::canonicalize(&authorized).unwrap_or_else(|error| panic!("canonicalize authorized root {authorized}: {error}"));
+                let (authorized, _) = database
+                    .conversation_project_access(conversation)
+                    .unwrap()
+                    .unwrap_or_else(|| {
+                        panic!("conversation {conversation} has no authorized project folder")
+                    });
+                let provided = std::fs::canonicalize(path)
+                    .unwrap_or_else(|error| panic!("canonicalize provided root {path:?}: {error}"));
+                let stored = std::fs::canonicalize(&authorized).unwrap_or_else(|error| {
+                    panic!("canonicalize authorized root {authorized}: {error}")
+                });
                 assert_eq!(provided, stored, "fixture root must be the authorized project folder: provided={path:?} authorized={authorized}");
                 Some(authorized)
             }
             None => None,
         };
-        let permission=FrozenPermission {mode:PermissionMode::Ask,project_root,
-            grants:Vec::new(),approval_epoch:None};
-        database.freeze_run_control(&RunControlBinding {schema_version:fox_engine_protocol::CONTROL_SCHEMA_VERSION,
-            run_id:run.into(),conversation_id:conversation.into(),engine_id:"pi".into(),execution_profile_id:profile.into(),
-            authority:ExecutionAuthority::Authoritative,executor_route:Some(ExecutorRoute::PiNative),read_only_executor:ResourceExecutor::Rust,
-            permission_snapshot_id:Database::run_control_permission_hash(&permission).unwrap(),permission,budgets:TimeBudgets::default()}).unwrap();
-        let session=format!("approval-scope-{}",uuid::Uuid::new_v4());
+        let permission = FrozenPermission {
+            mode: PermissionMode::Ask,
+            project_root,
+            grants: Vec::new(),
+            approval_epoch: None,
+        };
+        database
+            .freeze_run_control(&RunControlBinding {
+                schema_version: fox_engine_protocol::CONTROL_SCHEMA_VERSION,
+                run_id: run.into(),
+                conversation_id: conversation.into(),
+                engine_id: "pi".into(),
+                execution_profile_id: profile.into(),
+                authority: ExecutionAuthority::Authoritative,
+                executor_route: Some(ExecutorRoute::PiNative),
+                read_only_executor: ResourceExecutor::Rust,
+                permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(),
+                permission,
+                budgets: TimeBudgets::default(),
+            })
+            .unwrap();
+        let session = format!("approval-scope-{}", uuid::Uuid::new_v4());
         database.with_connection(|connection| {
             connection.execute("INSERT INTO runtime_sessions(id,conversation_id,runtime_type,runtime_session_id,status,created_at,updated_at,
                                 format_version,context_generation,native_session_path) VALUES(?1,?2,'pi',?1,'ready',1,1,2,1,?3)",
@@ -191,9 +313,18 @@ mod tests {
         session
     }
 
-    fn approval(database: &Database, run: &str, call: &str, tool: &str, input: &Value, category: &str, status: &str, claimed: bool) -> String {
-        let body=input.canonical_string();
-        let batch=format!("approval-batch-{call}");
+    fn approval(
+        database: &Database,
+        run: &str,
+        call: &str,
+        tool: &str,
+        input: &Value,
+        category: &str,
+        status: &str,
+        claimed: bool,
+    ) -> String {
+        let body = input.canonical_string();
+        let batch = format!("approval-batch-{call}");
         database.with_connection(|connection| {
             connection.execute("INSERT INTO kernel_tool_batches(batch_id,run_id,ordered_tool_call_ids_json,created_at) VALUES(?1,?2,?3,1)",
                 params![batch,run,json!([call]).canonical_string()])?;
@@ -202,29 +333,75 @@ mod tests {
                 params![run,call,batch,tool,body,format!("sha256:{:x}",Sha256::digest(body.as_bytes()))])?;
             Ok(())
         }).unwrap();
-        let host=database.create_host_tool_call(run,call,tool,input,"pending",true).unwrap();
-        let record=if category=="tool_execution" {
-            let (root,_)=database.conversation_project_access(&host.conversation_id).unwrap().unwrap();
-            let target=crate::tool_host::canonical_file_identity(Path::new(&root),input["path"].as_str().unwrap()).unwrap();
-            let declared=input["expectedVersion"].as_str();
-            let observed=database.host_observation_for_version(run,&target,declared).unwrap().unwrap();
-            let baseline=crate::tool_host::write_baseline(Path::new(&target),declared,Some(&observed.version)).unwrap();
-            let prepared=crate::tool_host::prepare_admitted_file_with_artifact_context(tool,input,&root,&baseline,
-                database,Path::new(""),&host.conversation_id).unwrap();
-            let hook=crate::lifecycle_hooks::before_tool(database,run,call,tool,input).unwrap();
+        let host = database
+            .create_host_tool_call(run, call, tool, input, "pending", true)
+            .unwrap();
+        let record = if category == "tool_execution" {
+            let (root, _) = database
+                .conversation_project_access(&host.conversation_id)
+                .unwrap()
+                .unwrap();
+            let target = crate::tool_host::canonical_file_identity(
+                Path::new(&root),
+                input["path"].as_str().unwrap(),
+            )
+            .unwrap();
+            let declared = input["expectedVersion"].as_str();
+            let observed = database
+                .host_observation_for_version(run, &target, declared)
+                .unwrap()
+                .unwrap();
+            let baseline = crate::tool_host::write_baseline(
+                Path::new(&target),
+                declared,
+                Some(&observed.version),
+            )
+            .unwrap();
+            let prepared = crate::tool_host::prepare_admitted_file_with_artifact_context(
+                tool,
+                input,
+                &root,
+                &baseline,
+                database,
+                Path::new(""),
+                &host.conversation_id,
+            )
+            .unwrap();
+            let hook =
+                crate::lifecycle_hooks::before_tool(database, run, call, tool, input).unwrap();
             assert!(hook.blocked.is_none());
             // A1: the request carries exactly what the Host path records — the
             // preview decorated by the approval engine (no conversation grant).
-            let policy=super::super::decide_tool_approval(database,&host.conversation_id,tool,input,prepared.preview(),
-                Some(Path::new(&target))).unwrap();
-            let mut request=serde_json::to_value(prepared.preview()).unwrap();
-            policy.decorate_request(&mut request,tool);
-            database.create_approval(&host.id,&prepared.preview().summary,&request).unwrap()
+            let policy = super::super::decide_tool_approval(
+                database,
+                &host.conversation_id,
+                tool,
+                input,
+                prepared.preview(),
+                Some(Path::new(&target)),
+            )
+            .unwrap();
+            let mut request = serde_json::to_value(prepared.preview()).unwrap();
+            policy.decorate_request(&mut request, tool);
+            database
+                .create_approval(&host.id, &prepared.preview().summary, &request)
+                .unwrap()
         } else {
-            database.create_approval(&host.id,"native scope fixture",&json!({"input":input})).unwrap()
+            database
+                .create_approval(&host.id, "native scope fixture", &json!({"input":input}))
+                .unwrap()
         };
-        if status!="pending" {
-            database.resolve_approval(&record.id,if status=="approved" {ApprovalDecision::AllowOnce} else {ApprovalDecision::Deny}).unwrap();
+        if status != "pending" {
+            database
+                .resolve_approval(
+                    &record.id,
+                    if status == "approved" {
+                        ApprovalDecision::AllowOnce
+                    } else {
+                        ApprovalDecision::Deny
+                    },
+                )
+                .unwrap();
         }
         database.with_connection(|connection| {
             if category=="tool_execution" {
@@ -251,7 +428,10 @@ mod tests {
              JOIN kernel_tool_calls k ON k.run_id=t.run_id AND k.tool_call_id=t.runtime_tool_call_id WHERE a.id=?1",
             [&id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))).unwrap();
         assert_eq!(before, ("pending".into(), None, "pending".into(), true));
-        let approval = database.resolve_approval(&id, ApprovalDecision::AllowOnce).unwrap().unwrap();
+        let approval = database
+            .resolve_approval(&id, ApprovalDecision::AllowOnce)
+            .unwrap()
+            .unwrap();
         assert_eq!(approval.status, "approved");
         let after: (String, Option<i64>, String, bool) = database.with_connection(|connection| connection.query_row(
             "SELECT a.status,a.claimed_at,t.status,k.result_json IS NULL FROM approvals a
@@ -265,77 +445,139 @@ mod tests {
     #[test]
     fn startup_recovers_only_decided_unclaimed_native_host_approvals() {
         if isolated("runtime_host::native_approval_scope::tests::startup_recovers_only_decided_unclaimed_native_host_approvals") { return; }
-        let app=app();
-        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
-        println!("native startup approval fixture retained at {}",fixture.root.display());
-        let database=fixture.database();
+        let app = app();
+        let fixture = Fixture::new(&app, Database::open(":memory:".into()).unwrap());
+        println!(
+            "native startup approval fixture retained at {}",
+            fixture.root.display()
+        );
+        let database = fixture.database();
         fixture.manage(&app);
-        let project=fixture.root.join("project");
-        let conversation=database.create_conversation(database.default_agent_id(),Some("startup approvals"),project.to_str(),Some("ask")).unwrap().id;
-        let run=database.create_run(&conversation,"settle original native approvals",None).unwrap().run.id;
-        make_native(database,&run,&conversation,Some(&project),"durable_v2");
-        let mut selected=Vec::new();
-        let mut untouched=Vec::new();
-        for category in ["tool_execution","task_repair_budget_override"] {
-            let tool=if category=="tool_execution" {"edit_file"} else {"task_repair_escalate_start"};
-            for status in ["approved","denied"] {
-                let call=format!("{category}-{status}");
+        let project = fixture.root.join("project");
+        let conversation = database
+            .create_conversation(
+                database.default_agent_id(),
+                Some("startup approvals"),
+                project.to_str(),
+                Some("ask"),
+            )
+            .unwrap()
+            .id;
+        let run = database
+            .create_run(&conversation, "settle original native approvals", None)
+            .unwrap()
+            .run
+            .id;
+        make_native(database, &run, &conversation, Some(&project), "durable_v2");
+        let mut selected = Vec::new();
+        let mut untouched = Vec::new();
+        for category in ["tool_execution", "task_repair_budget_override"] {
+            let tool = if category == "tool_execution" {
+                "edit_file"
+            } else {
+                "task_repair_escalate_start"
+            };
+            for status in ["approved", "denied"] {
+                let call = format!("{category}-{status}");
                 // Invalid repair arguments exercise startup selection and the
                 // original handler's refusal without starting another Run.
-                let input=if category=="tool_execution" {fixture.edit_input(&run,&call)} else {json!({})};
-                let id=approval(database,&run,&call,tool,&input,category,status,false);
-                selected.push((call,id,category,status));
+                let input = if category == "tool_execution" {
+                    fixture.edit_input(&run, &call)
+                } else {
+                    json!({})
+                };
+                let id = approval(database, &run, &call, tool, &input, category, status, false);
+                selected.push((call, id, category, status));
             }
-            for (status,claimed) in [("pending",false),("approved",true)] {
-                let call=format!("{category}-skip-{status}");
-                let input=if category=="tool_execution" {fixture.edit_input(&run,&call)} else {json!({})};
-                let id=approval(database,&run,&call,tool,&input,category,status,claimed);
-                untouched.push((call,id,status,claimed));
+            for (status, claimed) in [("pending", false), ("approved", true)] {
+                let call = format!("{category}-skip-{status}");
+                let input = if category == "tool_execution" {
+                    fixture.edit_input(&run, &call)
+                } else {
+                    json!({})
+                };
+                let id = approval(
+                    database, &run, &call, tool, &input, category, status, claimed,
+                );
+                untouched.push((call, id, status, claimed));
             }
         }
         fixture.host.recover_native_approvals_detached().unwrap();
         fixture.wait(|| selected.iter().all(|(call,_,_,_)| database.with_connection(|connection|connection.query_row(
             "SELECT result_json IS NOT NULL FROM kernel_tool_calls WHERE run_id=?1 AND tool_call_id=?2",params![run,call],|row|row.get::<_,bool>(0))).unwrap())
             && fixture.host.state.lock().unwrap().worker.as_ref().unwrap().sessions.is_empty());
-        for (call,id,category,status) in selected {
+        for (call, id, category, status) in selected {
             let (body,claimed): (String,Option<i64>)=database.with_connection(|connection|connection.query_row(
                 "SELECT k.result_json,a.claimed_at FROM kernel_tool_calls k JOIN tool_calls t ON t.run_id=k.run_id AND t.runtime_tool_call_id=k.tool_call_id
                  JOIN approvals a ON a.tool_call_id=t.id WHERE a.id=?1",[&id],|row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
-            let result:Value=serde_json::from_str(&body).unwrap();
-            if status=="approved" && category=="tool_execution" {
-                assert_ne!(result["isError"],true,"{call}: {result}");
+            let result: Value = serde_json::from_str(&body).unwrap();
+            if status == "approved" && category == "tool_execution" {
+                assert_ne!(result["isError"], true, "{call}: {result}");
                 assert!(claimed.is_some());
-                let host=database.get_runtime_tool_call(&run,&call).unwrap().unwrap();
-                assert_eq!(host.status,"completed");
-                assert_eq!(host.execution_location,"host");
-                let owner:Option<String>=database.with_connection(|connection|connection.query_row(
-                    "SELECT claimed_by_run_id FROM approvals WHERE id=?1",[&id],|row|row.get(0))).unwrap();
-                assert_eq!(owner.as_deref(),Some(run.as_str()));
-                assert!(!database.claim_approved_tool_call(&run,&call).unwrap());
-                let target=project.join(format!("{call}.txt"));
-                let actual=std::fs::read_to_string(&target).unwrap();
-                assert_eq!(actual,format!("after-{call}"),
-                    "fixture={} target={} native={} host={host:?}",fixture.root.display(),target.display(),result);
+                let host = database
+                    .get_runtime_tool_call(&run, &call)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(host.status, "completed");
+                assert_eq!(host.execution_location, "host");
+                let owner: Option<String> = database
+                    .with_connection(|connection| {
+                        connection.query_row(
+                            "SELECT claimed_by_run_id FROM approvals WHERE id=?1",
+                            [&id],
+                            |row| row.get(0),
+                        )
+                    })
+                    .unwrap();
+                assert_eq!(owner.as_deref(), Some(run.as_str()));
+                assert!(!database.claim_approved_tool_call(&run, &call).unwrap());
+                let target = project.join(format!("{call}.txt"));
+                let actual = std::fs::read_to_string(&target).unwrap();
+                assert_eq!(
+                    actual,
+                    format!("after-{call}"),
+                    "fixture={} target={} native={} host={host:?}",
+                    fixture.root.display(),
+                    target.display(),
+                    result
+                );
             } else {
-                assert_eq!(result["isError"],true,"{call}");
-                assert!(claimed.is_none(),"{call} must not claim an execution");
-                if status=="denied" {
+                assert_eq!(result["isError"], true, "{call}");
+                assert!(claimed.is_none(), "{call} must not claim an execution");
+                if status == "denied" {
                     assert!(result["error"].as_str().unwrap().contains("denied"));
-                    assert_eq!(database.get_runtime_tool_call(&run,&call).unwrap().unwrap().status,"failed");
-                    if category=="tool_execution" {
-                        assert_eq!(std::fs::read_to_string(project.join(format!("{call}.txt"))).unwrap(),format!("before-{call}"));
+                    assert_eq!(
+                        database
+                            .get_runtime_tool_call(&run, &call)
+                            .unwrap()
+                            .unwrap()
+                            .status,
+                        "failed"
+                    );
+                    if category == "tool_execution" {
+                        assert_eq!(
+                            std::fs::read_to_string(project.join(format!("{call}.txt"))).unwrap(),
+                            format!("before-{call}")
+                        );
                     }
                 }
             }
         }
-        for (call,id,status,claimed) in untouched {
+        for (call, id, status, claimed) in untouched {
             let row:(String,Option<i64>,Option<String>,String)=database.with_connection(|connection|connection.query_row(
                 "SELECT a.status,a.claimed_at,k.result_json,t.status FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id
                  JOIN kernel_tool_calls k ON k.run_id=t.run_id AND k.tool_call_id=t.runtime_tool_call_id WHERE a.id=?1",
                 [&id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))).unwrap();
-            assert_eq!(row,(status.into(),claimed.then_some(1),None,"pending".into()),"{call}");
+            assert_eq!(
+                row,
+                (status.into(), claimed.then_some(1), None, "pending".into()),
+                "{call}"
+            );
             if call.starts_with("tool_execution-") {
-                assert_eq!(std::fs::read_to_string(project.join(format!("{call}.txt"))).unwrap(),format!("before-{call}"));
+                assert_eq!(
+                    std::fs::read_to_string(project.join(format!("{call}.txt"))).unwrap(),
+                    format!("before-{call}")
+                );
             }
         }
     }
@@ -343,60 +585,176 @@ mod tests {
     #[test]
     fn approval_recovery_preserves_failed_file_execution_and_never_replays_it() {
         if isolated("runtime_host::native_approval_scope::tests::approval_recovery_preserves_failed_file_execution_and_never_replays_it") { return; }
-        let app=app();
-        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
-        println!("native failed approval fixture retained at {}",fixture.root.display());
+        let app = app();
+        let fixture = Fixture::new(&app, Database::open(":memory:".into()).unwrap());
+        println!(
+            "native failed approval fixture retained at {}",
+            fixture.root.display()
+        );
         fixture.manage(&app);
-        let database=fixture.database();
-        let project=fixture.root.join("project");
-        let conversation=database.create_conversation(database.default_agent_id(),Some("failed approval recovery"),project.to_str(),Some("ask")).unwrap().id;
-        let run=database.create_run(&conversation,"perform only the original approved edit",None).unwrap().run.id;
-        make_native(database,&run,&conversation,Some(&project),"durable_v2");
-        let call="approved-edit-with-unavailable-backup";
-        let input=fixture.edit_input(&run,call);
-        let approval_id=approval(database,&run,call,"edit_file",&input,"tool_execution","approved",false);
-        let backup_root=fixture.host.managed_files_dir().to_path_buf();
-        std::fs::write(&backup_root,b"a file cannot serve as the managed backup directory").unwrap();
-        let stdin=fixture.host.state.lock().unwrap().worker.as_ref().unwrap().stdin.clone();
-        assert!(super::super::native_tool_batch::recover_native_approval(&fixture.host,&stdin,&approval_id).unwrap());
-        let body:String=database.with_connection(|connection|connection.query_row(
-            "SELECT result_json FROM kernel_tool_calls WHERE run_id=?1 AND tool_call_id=?2",params![run,call],|row|row.get(0))).unwrap();
-        let response:Value=serde_json::from_str(&body).unwrap();
-        let host=database.get_runtime_tool_call(&run,call).unwrap().unwrap();
-        let target=project.join(format!("{call}.txt"));
-        assert_eq!(std::fs::read_to_string(&target).unwrap(),format!("before-{call}"));
-        assert_eq!(response["isError"],true,"{response}");
-        assert_eq!(response["result"]["isError"],true,"{response}");
-        assert!(response["result"]["details"]["underlyingMessage"].as_str().unwrap()
-            .contains("cannot create managed-file backup directory"),"{response}");
-        assert_eq!(host.status,"failed");
-        assert!(host.error_message.as_deref().is_some_and(|message|!message.is_empty()));
-        assert_eq!(host.result.as_ref(),Some(&response["result"]));
-        let claimed:Option<String>=database.with_connection(|connection|connection.query_row(
-            "SELECT claimed_by_run_id FROM approvals WHERE id=?1",[&approval_id],|row|row.get(0))).unwrap();
-        assert_eq!(claimed.as_deref(),Some(run.as_str()));
-        let dispatch=fox_engine_protocol::encode_dispatch_id(&run,call).unwrap();
-        let receipt=database.execution_receipt(&run,&dispatch).unwrap().unwrap();
-        assert_eq!(receipt.execution_started,fox_engine_protocol::TriState::False);
-        assert_eq!(receipt.external_effect,fox_engine_protocol::SideEffectState::None);
-        assert_eq!(receipt.stage,fox_engine_protocol::ExecutionStage::FilePrepared);
+        let database = fixture.database();
+        let project = fixture.root.join("project");
+        let conversation = database
+            .create_conversation(
+                database.default_agent_id(),
+                Some("failed approval recovery"),
+                project.to_str(),
+                Some("ask"),
+            )
+            .unwrap()
+            .id;
+        let run = database
+            .create_run(
+                &conversation,
+                "perform only the original approved edit",
+                None,
+            )
+            .unwrap()
+            .run
+            .id;
+        make_native(database, &run, &conversation, Some(&project), "durable_v2");
+        let call = "approved-edit-with-unavailable-backup";
+        let input = fixture.edit_input(&run, call);
+        let approval_id = approval(
+            database,
+            &run,
+            call,
+            "edit_file",
+            &input,
+            "tool_execution",
+            "approved",
+            false,
+        );
+        let backup_root = fixture.host.managed_files_dir().to_path_buf();
+        std::fs::write(
+            &backup_root,
+            b"a file cannot serve as the managed backup directory",
+        )
+        .unwrap();
+        let stdin = fixture
+            .host
+            .state
+            .lock()
+            .unwrap()
+            .worker
+            .as_ref()
+            .unwrap()
+            .stdin
+            .clone();
+        assert!(super::super::native_tool_batch::recover_native_approval(
+            &fixture.host,
+            &stdin,
+            &approval_id
+        )
+        .unwrap());
+        let body: String = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT result_json FROM kernel_tool_calls WHERE run_id=?1 AND tool_call_id=?2",
+                    params![run, call],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        let response: Value = serde_json::from_str(&body).unwrap();
+        let host = database.get_runtime_tool_call(&run, call).unwrap().unwrap();
+        let target = project.join(format!("{call}.txt"));
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            format!("before-{call}")
+        );
+        assert_eq!(response["isError"], true, "{response}");
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        assert!(
+            response["result"]["details"]["underlyingMessage"]
+                .as_str()
+                .unwrap()
+                .contains("cannot create managed-file backup directory"),
+            "{response}"
+        );
+        assert_eq!(host.status, "failed");
+        assert!(host
+            .error_message
+            .as_deref()
+            .is_some_and(|message| !message.is_empty()));
+        assert_eq!(host.result.as_ref(), Some(&response["result"]));
+        let claimed: Option<String> = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT claimed_by_run_id FROM approvals WHERE id=?1",
+                    [&approval_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(claimed.as_deref(), Some(run.as_str()));
+        let dispatch = fox_engine_protocol::encode_dispatch_id(&run, call).unwrap();
+        let receipt = database
+            .execution_receipt(&run, &dispatch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            receipt.execution_started,
+            fox_engine_protocol::TriState::False
+        );
+        assert_eq!(
+            receipt.external_effect,
+            fox_engine_protocol::SideEffectState::None
+        );
+        assert_eq!(
+            receipt.stage,
+            fox_engine_protocol::ExecutionStage::FilePrepared
+        );
         assert!(receipt.reason_code.is_some());
-        let receipt_json=serde_json::to_value(&receipt).unwrap();
-        assert_eq!(response["result"]["details"]["executionReceipt"],receipt_json);
-        let before=crate::canonical_json::to_string(&host).unwrap();
+        let receipt_json = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(
+            response["result"]["details"]["executionReceipt"],
+            receipt_json
+        );
+        let before = crate::canonical_json::to_string(&host).unwrap();
 
         // Make a replay capable of changing the target, then prove both the
         // direct recovery and the startup selector retain the original failure.
         std::fs::remove_file(&backup_root).unwrap();
-        assert!(super::super::native_tool_batch::recover_native_approval(&fixture.host,&stdin,&approval_id).is_err());
+        assert!(super::super::native_tool_batch::recover_native_approval(
+            &fixture.host,
+            &stdin,
+            &approval_id
+        )
+        .is_err());
         fixture.host.recover_native_approvals_detached().unwrap();
-        assert_eq!(std::fs::read_to_string(&target).unwrap(),format!("before-{call}"));
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            format!("before-{call}")
+        );
         assert!(!backup_root.exists());
-        assert_eq!(crate::canonical_json::to_string(&database.get_runtime_tool_call(&run,call).unwrap().unwrap()).unwrap(),before);
-        let retained:String=database.with_connection(|connection|connection.query_row(
-            "SELECT result_json FROM kernel_tool_calls WHERE run_id=?1 AND tool_call_id=?2",params![run,call],|row|row.get(0))).unwrap();
-        assert_eq!(retained,body);
-        assert_eq!(serde_json::to_value(database.execution_receipt(&run,&dispatch).unwrap().unwrap()).unwrap(),receipt_json);
+        assert_eq!(
+            crate::canonical_json::to_string(
+                &database.get_runtime_tool_call(&run, call).unwrap().unwrap()
+            )
+            .unwrap(),
+            before
+        );
+        let retained: String = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT result_json FROM kernel_tool_calls WHERE run_id=?1 AND tool_call_id=?2",
+                    params![run, call],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(retained, body);
+        assert_eq!(
+            serde_json::to_value(
+                database
+                    .execution_receipt(&run, &dispatch)
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap(),
+            receipt_json
+        );
     }
 
     fn scoped_agents(database: &Database) {
@@ -410,65 +768,192 @@ mod tests {
         }).unwrap();
     }
 
-    fn set(values: &[&str]) -> Option<HashSet<String>> { Some(values.iter().map(|value|(*value).into()).collect()) }
+    fn set(values: &[&str]) -> Option<HashSet<String>> {
+        Some(values.iter().map(|value| (*value).into()).collect())
+    }
 
     #[test]
     fn approval_recovery_rebuilds_child_and_digital_tool_and_mcp_scopes() {
         if isolated("runtime_host::native_approval_scope::tests::approval_recovery_rebuilds_child_and_digital_tool_and_mcp_scopes") { return; }
-        let app=app();
-        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
-        let database=fixture.database();
+        let app = app();
+        let fixture = Fixture::new(&app, Database::open(":memory:".into()).unwrap());
+        let database = fixture.database();
         scoped_agents(database);
-        let parent=database.create_conversation(database.default_agent_id(),Some("scoped parent"),None,Some("ask")).unwrap().id;
-        database.bind_conversation_expert(&parent,"fox-debugger","native_scope_fixture").unwrap();
-        let parent_run=database.create_run(&parent,"delegate a bounded read",None).unwrap().run.id;
-        let allowed=vec!["read".into(),"ls".into(),"write_file".into(),"call_mcp_tool".into()];
-        let budget=ChildRunBudget {max_duration_ms:60_000,max_total_tokens:4_096,max_output_tokens:1_024,max_tool_calls:8};
-        let (started,_,_)=database.create_child_run(CreateChildRunInput {parent_run_id:&parent_run,tool_call_id:"delegate",
-            worker_agent_id:database.default_agent_id(),objective:"read with the parent's limits",context:"scope fixture",budget:&budget,
-            team_run_id:None,team_member_id:None,allowed_tools:Some(&allowed)}).unwrap();
-        make_native(database,&started.run.id,&started.run.conversation_id,None,"legacy");
+        let parent = database
+            .create_conversation(
+                database.default_agent_id(),
+                Some("scoped parent"),
+                None,
+                Some("ask"),
+            )
+            .unwrap()
+            .id;
+        database
+            .bind_conversation_expert(&parent, "fox-debugger", "native_scope_fixture")
+            .unwrap();
+        let parent_run = database
+            .create_run(&parent, "delegate a bounded read", None)
+            .unwrap()
+            .run
+            .id;
+        let allowed = vec![
+            "read".into(),
+            "ls".into(),
+            "write_file".into(),
+            "call_mcp_tool".into(),
+        ];
+        let budget = ChildRunBudget {
+            max_duration_ms: 60_000,
+            max_total_tokens: 4_096,
+            max_output_tokens: 1_024,
+            max_tool_calls: 8,
+        };
+        let (started, _, _) = database
+            .create_child_run(CreateChildRunInput {
+                parent_run_id: &parent_run,
+                tool_call_id: "delegate",
+                worker_agent_id: database.default_agent_id(),
+                objective: "read with the parent's limits",
+                context: "scope fixture",
+                budget: &budget,
+                team_run_id: None,
+                team_member_id: None,
+                allowed_tools: Some(&allowed),
+            })
+            .unwrap();
+        make_native(
+            database,
+            &started.run.id,
+            &started.run.conversation_id,
+            None,
+            "legacy",
+        );
         {
-            let scope=fixture.host.prepare_native_approval_recovery(&started.run.id).unwrap();
-            assert_eq!(scope.host().tool_allowlist_override,set(&["read","call_mcp_tool"]));
-            assert_eq!(scope.host().mcp_server_scope_override,set(&["mcp-shared"]));
+            let scope = fixture
+                .host
+                .prepare_native_approval_recovery(&started.run.id)
+                .unwrap();
+            assert_eq!(
+                scope.host().tool_allowlist_override,
+                set(&["read", "call_mcp_tool"])
+            );
+            assert_eq!(scope.host().mcp_server_scope_override, set(&["mcp-shared"]));
             assert!(scope.host().ensure_delegated_tool_allowed("read").is_ok());
-            for denied in ["ls","grep","write_file"] { assert!(scope.host().ensure_delegated_tool_allowed(denied).is_err(),"{denied}"); }
+            for denied in ["ls", "grep", "write_file"] {
+                assert!(
+                    scope.host().ensure_delegated_tool_allowed(denied).is_err(),
+                    "{denied}"
+                );
+            }
             assert!(fixture.host.tool_allowlist_override.is_none());
             assert!(fixture.host.mcp_server_scope_override.is_none());
         }
-        assert!(fixture.host.state.lock().unwrap().worker.as_ref().unwrap().sessions.is_empty());
-        assert!(KernelRunLock::acquire(&fixture.host.sessions_dir,&started.run.id).is_ok());
+        assert!(fixture
+            .host
+            .state
+            .lock()
+            .unwrap()
+            .worker
+            .as_ref()
+            .unwrap()
+            .sessions
+            .is_empty());
+        assert!(KernelRunLock::acquire(&fixture.host.sessions_dir, &started.run.id).is_ok());
 
-        let owner_root=std::env::temp_dir().join(format!("fox-native-scope-owner-{}",uuid::Uuid::new_v4()));
+        let owner_root =
+            std::env::temp_dir().join(format!("fox-native-scope-owner-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&owner_root).unwrap();
-        let owner=database.add_companion(&owner_root,"fox-debugger").unwrap();
-        let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {name:"Scoped recovery".into(),expert_id:String::new(),
-            objective:"read within the bound MCP scope".into(),project_id:None,project_root:None,knowledge_references:Vec::new(),
-            max_runs_per_day:2,max_tokens_per_day:10_000,max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,companion_id:Some(owner.profile.id)}).unwrap();
-        database.update_conversation_permission_mode(&colleague.conversation_id,"ask").unwrap();
-        let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,"native-scope-test",&json!({}),None,"test").unwrap();
-        let started=accepted.prepared.expect("digital colleague trigger is admitted").started;
-        make_native(database,&started.run.id,&started.run.conversation_id,None,"legacy");
-        let scope=fixture.host.prepare_native_approval_recovery(&started.run.id).unwrap();
-        assert_eq!(scope.host().tool_allowlist_override,set(&["read","grep","call_mcp_tool"]));
-        assert_eq!(scope.host().mcp_server_scope_override,set(&["mcp-shared"]));
+        let owner = database.add_companion(&owner_root, "fox-debugger").unwrap();
+        let colleague = database
+            .create_digital_colleague(&CreateDigitalColleagueInput {
+                name: "Scoped recovery".into(),
+                expert_id: String::new(),
+                objective: "read within the bound MCP scope".into(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: Vec::new(),
+                max_runs_per_day: 2,
+                max_tokens_per_day: 10_000,
+                max_duration_ms: 60_000,
+                max_output_tokens: 1_024,
+                max_tool_calls: 8,
+                companion_id: Some(owner.profile.id),
+            })
+            .unwrap();
+        database
+            .update_conversation_permission_mode(&colleague.conversation_id, "ask")
+            .unwrap();
+        let accepted = database
+            .accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "native-scope-test",
+                &json!({}),
+                None,
+                "test",
+            )
+            .unwrap();
+        let started = accepted
+            .prepared
+            .expect("digital colleague trigger is admitted")
+            .started;
+        make_native(
+            database,
+            &started.run.id,
+            &started.run.conversation_id,
+            None,
+            "legacy",
+        );
+        let scope = fixture
+            .host
+            .prepare_native_approval_recovery(&started.run.id)
+            .unwrap();
+        assert_eq!(
+            scope.host().tool_allowlist_override,
+            set(&["read", "grep", "call_mcp_tool"])
+        );
+        assert_eq!(scope.host().mcp_server_scope_override, set(&["mcp-shared"]));
         assert!(scope.host().ensure_delegated_tool_allowed("grep").is_ok());
         assert!(scope.host().ensure_delegated_tool_allowed("ls").is_err());
-        assert!(scope.host().ensure_delegated_tool_allowed("write_file").is_err());
+        assert!(scope
+            .host()
+            .ensure_delegated_tool_allowed("write_file")
+            .is_err());
     }
 
     #[test]
     fn startup_retires_native_kernel_commands_but_keeps_the_approval_pending() {
         if isolated("runtime_host::native_approval_scope::tests::startup_retires_native_kernel_commands_but_keeps_the_approval_pending") { return; }
-        let app=app();
-        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        let app = app();
+        let fixture = Fixture::new(&app, Database::open(":memory:".into()).unwrap());
         fixture.manage(&app);
-        let database=fixture.database();
-        let conversation=database.create_conversation(database.default_agent_id(),Some("retire stale commands"),None,Some("ask")).unwrap().id;
-        let run=database.create_run(&conversation,"retire the old Kernel command",None).unwrap().run.id;
-        make_native(database,&run,&conversation,None,"legacy");
-        let approval_id=approval(database,&run,"native-retire","task_repair_escalate_start",&json!({}),"task_repair_budget_override","pending",false);
+        let database = fixture.database();
+        let conversation = database
+            .create_conversation(
+                database.default_agent_id(),
+                Some("retire stale commands"),
+                None,
+                Some("ask"),
+            )
+            .unwrap()
+            .id;
+        let run = database
+            .create_run(&conversation, "retire the old Kernel command", None)
+            .unwrap()
+            .run
+            .id;
+        make_native(database, &run, &conversation, None, "legacy");
+        let approval_id = approval(
+            database,
+            &run,
+            "native-retire",
+            "task_repair_escalate_start",
+            &json!({}),
+            "task_repair_budget_override",
+            "pending",
+            false,
+        );
         let runtime_call:String=database.with_connection(|connection|connection.query_row(
             "SELECT t.runtime_tool_call_id FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id WHERE a.id=?1",
             [&approval_id],|row|row.get(0))).unwrap();
@@ -476,20 +961,37 @@ mod tests {
             "INSERT INTO kernel_host_commands(run_id,command_key,kind,tool_call_id,decision,status,created_at,policy_version)
              VALUES(?1,'stale-native-approval','approval',?2,'denied','pending',1,NULL)",
             params![&run,&runtime_call])).unwrap();
-        assert_eq!(fixture.host.retire_native_approval_commands().unwrap(),1);
+        assert_eq!(fixture.host.retire_native_approval_commands().unwrap(), 1);
         let (command_status,reason,approval_status):(String,Option<String>,String)=database.with_connection(|connection|connection.query_row(
             "SELECT c.status,c.resolution_reason,a.status FROM kernel_host_commands c
              JOIN approvals a ON a.tool_call_id=(SELECT id FROM tool_calls WHERE run_id=c.run_id AND runtime_tool_call_id=c.tool_call_id)
              WHERE c.run_id=?1",
             [&run],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))).unwrap();
-        assert_eq!(command_status,"superseded");
+        assert_eq!(command_status, "superseded");
         assert!(reason.unwrap().contains("pi_native"));
-        assert_eq!(approval_status,"pending","the decision still belongs to the user");
-        assert_eq!(fixture.host.retire_native_approval_commands().unwrap(),0,"idempotent");
-        assert!(fixture.host.resolve_approval(&approval_id,ApprovalDecision::Deny).unwrap());
-        let denied:String=database.with_connection(|connection|connection.query_row(
-            "SELECT status FROM approvals WHERE id=?1",[&approval_id],|row|row.get(0))).unwrap();
-        assert_eq!(denied,"denied");
+        assert_eq!(
+            approval_status, "pending",
+            "the decision still belongs to the user"
+        );
+        assert_eq!(
+            fixture.host.retire_native_approval_commands().unwrap(),
+            0,
+            "idempotent"
+        );
+        assert!(fixture
+            .host
+            .resolve_approval(&approval_id, ApprovalDecision::Deny)
+            .unwrap());
+        let denied: String = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT status FROM approvals WHERE id=?1",
+                    [&approval_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(denied, "denied");
     }
 
     #[test]
@@ -501,61 +1003,107 @@ mod tests {
         let ordinary_workspace = root.join("ordinary");
         std::fs::create_dir_all(companion_workspace).unwrap();
         std::fs::create_dir_all(&ordinary_workspace).unwrap();
-        let ordinary = database.create_conversation(
-            database.default_agent_id(), None, ordinary_workspace.to_str(), Some("ask"),
-        ).unwrap();
+        let ordinary = database
+            .create_conversation(
+                database.default_agent_id(),
+                None,
+                ordinary_workspace.to_str(),
+                Some("ask"),
+            )
+            .unwrap();
 
         let mut children = Vec::new();
         for (conversation, workspace) in [
-            (&contact.conversation_id, companion_workspace), (&ordinary.id, ordinary_workspace.as_path()),
+            (&contact.conversation_id, companion_workspace),
+            (&ordinary.id, ordinary_workspace.as_path()),
         ] {
-            let parent = database.create_run(conversation, "Delegate an investigation", None).unwrap();
-            let (_, child, _) = database.create_child_run(CreateChildRunInput {
-                parent_run_id: &parent.run.id,
-                tool_call_id: "restart-delegation",
-                worker_agent_id: "fox-general",
-                objective: "Gather evidence",
-                context: "",
-                budget: &ChildRunBudget {
-                    max_duration_ms: 30_000,
-                    max_total_tokens: 4_000,
-                    max_output_tokens: 1_000,
-                    max_tool_calls: 4,
-                },
-                team_run_id: None,
-                team_member_id: None,
-                allowed_tools: None,
-            }).unwrap();
+            let parent = database
+                .create_run(conversation, "Delegate an investigation", None)
+                .unwrap();
+            let (_, child, _) = database
+                .create_child_run(CreateChildRunInput {
+                    parent_run_id: &parent.run.id,
+                    tool_call_id: "restart-delegation",
+                    worker_agent_id: "fox-general",
+                    objective: "Gather evidence",
+                    context: "",
+                    budget: &ChildRunBudget {
+                        max_duration_ms: 30_000,
+                        max_total_tokens: 4_000,
+                        max_output_tokens: 1_000,
+                        max_tool_calls: 4,
+                    },
+                    team_run_id: None,
+                    team_member_id: None,
+                    allowed_tools: None,
+                })
+                .unwrap();
             if conversation == &contact.conversation_id {
-                database.freeze_run_companion_catalog(
-                    &parent.run.id, &[], &["read".into(), "write_file".into()],
-                ).unwrap();
-                database.freeze_child_companion_tools(&child.child_run_id, &parent.run.id).unwrap();
+                database
+                    .freeze_run_companion_catalog(
+                        &parent.run.id,
+                        &[],
+                        &["read".into(), "write_file".into()],
+                    )
+                    .unwrap();
+                database
+                    .freeze_child_companion_tools(&child.child_run_id, &parent.run.id)
+                    .unwrap();
             }
-            make_native(&database, &child.child_run_id, &child.child_conversation_id, Some(workspace), "legacy");
-            let observed = observed_edit_input(&database, &child.child_run_id, "restart-child", workspace);
+            make_native(
+                &database,
+                &child.child_run_id,
+                &child.child_conversation_id,
+                Some(workspace),
+                "legacy",
+            );
+            let observed =
+                observed_edit_input(&database, &child.child_run_id, "restart-child", workspace);
             let call_id = format!("restart-child-approval-{}", child.child_run_id);
             let approval_id = approval(
-                &database, &child.child_run_id, &call_id, "write_file",
+                &database,
+                &child.child_run_id,
+                &call_id,
+                "write_file",
                 &json!({"path":observed["path"],"content":observed["newText"],"expectedVersion":observed["expectedVersion"]}),
-                "tool_execution", "pending", false,
+                "tool_execution",
+                "pending",
+                false,
             );
-            assert!(database.native_run_waiting_approval(&child.child_run_id).unwrap());
+            assert!(database
+                .native_run_waiting_approval(&child.child_run_id)
+                .unwrap());
             children.push((child.child_run_id, approval_id));
         }
 
         database.repair_interrupted_runs().unwrap();
         let (companion_run, companion_approval) = &children[0];
-        assert_eq!(run_terminal(&database, companion_run), (
-            "interrupted".into(), Some("runtime.application_restarted".into()),
-        ));
-        assert_eq!(database.child_run(companion_run).unwrap().unwrap().status, "interrupted");
-        assert_eq!(database.approval_record(companion_approval).unwrap().status, "expired");
-        assert!(database.companion_active_run_ids(&contact.profile.id).unwrap().is_empty());
+        assert_eq!(
+            run_terminal(&database, companion_run),
+            (
+                "interrupted".into(),
+                Some("runtime.application_restarted".into()),
+            )
+        );
+        assert_eq!(
+            database.child_run(companion_run).unwrap().unwrap().status,
+            "interrupted"
+        );
+        assert_eq!(
+            database.approval_record(companion_approval).unwrap().status,
+            "expired"
+        );
+        assert!(database
+            .companion_active_run_ids(&contact.profile.id)
+            .unwrap()
+            .is_empty());
 
         let (ordinary_run, ordinary_approval) = &children[1];
         assert_eq!(run_terminal(&database, ordinary_run).0, "running");
-        assert_eq!(database.approval_record(ordinary_approval).unwrap().status, "pending");
+        assert_eq!(
+            database.approval_record(ordinary_approval).unwrap().status,
+            "pending"
+        );
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -563,14 +1111,35 @@ mod tests {
     #[test]
     fn full_startup_keeps_a_valid_waiting_native_approval_pending_and_redecidable() {
         if isolated("runtime_host::native_approval_scope::tests::full_startup_keeps_a_valid_waiting_native_approval_pending_and_redecidable") { return; }
-        let app=app();
-        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        let app = app();
+        let fixture = Fixture::new(&app, Database::open(":memory:".into()).unwrap());
         fixture.manage(&app);
-        let database=fixture.database();
-        let conversation=database.create_conversation(database.default_agent_id(),Some("full startup native approval"),None,Some("ask")).unwrap().id;
-        let run=database.create_run(&conversation,"wait for a native approval",None).unwrap().run.id;
-        make_native(database,&run,&conversation,None,"legacy");
-        let approval_id=approval(database,&run,"full-startup-approval","task_repair_escalate_start",&json!({}),"task_repair_budget_override","pending",false);
+        let database = fixture.database();
+        let conversation = database
+            .create_conversation(
+                database.default_agent_id(),
+                Some("full startup native approval"),
+                None,
+                Some("ask"),
+            )
+            .unwrap()
+            .id;
+        let run = database
+            .create_run(&conversation, "wait for a native approval", None)
+            .unwrap()
+            .run
+            .id;
+        make_native(database, &run, &conversation, None, "legacy");
+        let approval_id = approval(
+            database,
+            &run,
+            "full-startup-approval",
+            "task_repair_escalate_start",
+            &json!({}),
+            "task_repair_budget_override",
+            "pending",
+            false,
+        );
         let runtime_call:String=database.with_connection(|connection|connection.query_row(
             "SELECT t.runtime_tool_call_id FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id WHERE a.id=?1",
             [&approval_id],|row|row.get(0))).unwrap();
@@ -580,98 +1149,247 @@ mod tests {
             params![&run,&runtime_call])).unwrap();
         // Full startup order: generic repair/protection, F5 retirement, detached native recovery.
         database.repair_interrupted_runs().unwrap();
-        assert_eq!(fixture.host.retire_native_approval_commands().unwrap(),1);
+        assert_eq!(fixture.host.retire_native_approval_commands().unwrap(), 1);
         fixture.host.recover_native_approvals_detached().unwrap();
         let state: (String,String,String,String) = database.with_connection(|connection| connection.query_row(
             "SELECT c.status,a.status,t.status,r.status FROM kernel_host_commands c
              JOIN approvals a ON a.id=?2 JOIN tool_calls t ON t.id=a.tool_call_id JOIN runs r ON r.id=c.run_id
              WHERE c.run_id=?1",
             params![&run,&approval_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))).unwrap();
-        assert_eq!(state,("superseded".into(),"pending".into(),"pending".into(),"running".into()));
+        assert_eq!(
+            state,
+            (
+                "superseded".into(),
+                "pending".into(),
+                "pending".into(),
+                "running".into()
+            )
+        );
         // A second startup must be idempotent.
         database.repair_interrupted_runs().unwrap();
-        assert_eq!(fixture.host.retire_native_approval_commands().unwrap(),0);
+        assert_eq!(fixture.host.retire_native_approval_commands().unwrap(), 0);
         fixture.host.recover_native_approvals_detached().unwrap();
         let state: (String,String,String,String) = database.with_connection(|connection| connection.query_row(
             "SELECT c.status,a.status,t.status,r.status FROM kernel_host_commands c
              JOIN approvals a ON a.id=?2 JOIN tool_calls t ON t.id=a.tool_call_id JOIN runs r ON r.id=c.run_id
              WHERE c.run_id=?1",
             params![&run,&approval_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))).unwrap();
-        assert_eq!(state,("superseded".into(),"pending".into(),"pending".into(),"running".into()));
-        assert!(fixture.host.resolve_approval(&approval_id,ApprovalDecision::Deny).unwrap());
+        assert_eq!(
+            state,
+            (
+                "superseded".into(),
+                "pending".into(),
+                "pending".into(),
+                "running".into()
+            )
+        );
+        assert!(fixture
+            .host
+            .resolve_approval(&approval_id, ApprovalDecision::Deny)
+            .unwrap());
         let denied: (String,String) = database.with_connection(|connection| connection.query_row(
             "SELECT a.status,t.status FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id WHERE a.id=?1",
             [&approval_id], |row| Ok((row.get(0)?,row.get(1)?)))).unwrap();
-        assert_eq!(denied,(String::from("denied"),String::from("failed")));
+        assert_eq!(denied, (String::from("denied"), String::from("failed")));
     }
 
     #[test]
     fn host_resolve_native_approval_with_waiter_never_enters_the_kernel_queue() {
         if isolated("runtime_host::native_approval_scope::tests::host_resolve_native_approval_with_waiter_never_enters_the_kernel_queue") { return; }
-        let app=app();
-        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        let app = app();
+        let fixture = Fixture::new(&app, Database::open(":memory:".into()).unwrap());
         fixture.manage(&app);
-        let database=fixture.database();
-        let conversation=database.create_conversation(database.default_agent_id(),Some("native approval route"),None,Some("ask")).unwrap().id;
-        let run=database.create_run(&conversation,"resolve the native approval through the Host",None).unwrap().run.id;
-        make_native(database,&run,&conversation,None,"legacy");
-        let approval_id=approval(database,&run,"native-waiter","task_repair_escalate_start",&json!({}),"task_repair_budget_override","pending",false);
-        let (sender,receiver)=std::sync::mpsc::channel();
-        fixture.host.state.lock().unwrap().pending_approvals.lock().unwrap().insert(
-            approval_id.clone(),PendingApproval{run_id:run.clone(),sender});
-        assert!(fixture.host.resolve_approval(&approval_id,ApprovalDecision::Deny).unwrap());
-        assert_eq!(receiver.recv_timeout(Duration::from_secs(2)).unwrap(),false);
-        let (status,decision):(String,Option<String>)=database.with_connection(|connection|connection.query_row(
-            "SELECT status,decision_json FROM approvals WHERE id=?1",[&approval_id],|row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
-        assert_eq!(status,"denied");
+        let database = fixture.database();
+        let conversation = database
+            .create_conversation(
+                database.default_agent_id(),
+                Some("native approval route"),
+                None,
+                Some("ask"),
+            )
+            .unwrap()
+            .id;
+        let run = database
+            .create_run(
+                &conversation,
+                "resolve the native approval through the Host",
+                None,
+            )
+            .unwrap()
+            .run
+            .id;
+        make_native(database, &run, &conversation, None, "legacy");
+        let approval_id = approval(
+            database,
+            &run,
+            "native-waiter",
+            "task_repair_escalate_start",
+            &json!({}),
+            "task_repair_budget_override",
+            "pending",
+            false,
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        fixture
+            .host
+            .state
+            .lock()
+            .unwrap()
+            .pending_approvals
+            .lock()
+            .unwrap()
+            .insert(
+                approval_id.clone(),
+                PendingApproval {
+                    run_id: run.clone(),
+                    sender,
+                },
+            );
+        assert!(fixture
+            .host
+            .resolve_approval(&approval_id, ApprovalDecision::Deny)
+            .unwrap());
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+            false
+        );
+        let (status, decision): (String, Option<String>) = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT status,decision_json FROM approvals WHERE id=?1",
+                    [&approval_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(status, "denied");
         assert!(decision.unwrap().contains("\"approved\":false"));
-        let queued:i64=database.with_connection(|connection|connection.query_row(
-            "SELECT COUNT(*) FROM kernel_host_commands",[],|row|row.get(0))).unwrap();
-        assert_eq!(queued,0,"a native approval must not enter the Kernel command queue");
+        let queued: i64 = database
+            .with_connection(|connection| {
+                connection.query_row("SELECT COUNT(*) FROM kernel_host_commands", [], |row| {
+                    row.get(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            queued, 0,
+            "a native approval must not enter the Kernel command queue"
+        );
     }
 
     #[test]
     fn host_resolve_native_approval_without_waiter_recovers_once() {
         if isolated("runtime_host::native_approval_scope::tests::host_resolve_native_approval_without_waiter_recovers_once") { return; }
-        let app=app();
-        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        let app = app();
+        let fixture = Fixture::new(&app, Database::open(":memory:".into()).unwrap());
         fixture.manage(&app);
-        let database=fixture.database();
-        let conversation=database.create_conversation(database.default_agent_id(),Some("native approval recovery"),None,Some("ask")).unwrap().id;
-        let run=database.create_run(&conversation,"recover the native approval exactly once",None).unwrap().run.id;
-        make_native(database,&run,&conversation,None,"legacy");
-        let approval_id=approval(database,&run,"native-no-waiter","task_repair_escalate_start",&json!({}),"task_repair_budget_override","pending",false);
-        assert!(fixture.host.resolve_approval(&approval_id,ApprovalDecision::Deny).unwrap());
-        let status:String=database.with_connection(|connection|connection.query_row(
-            "SELECT status FROM approvals WHERE id=?1",[&approval_id],|row|row.get(0))).unwrap();
-        assert_eq!(status,"denied");
-        let command_count:i64=database.with_connection(|connection|connection.query_row(
-            "SELECT COUNT(*) FROM kernel_host_commands",[],|row|row.get(0))).unwrap();
-        assert_eq!(command_count,0);
+        let database = fixture.database();
+        let conversation = database
+            .create_conversation(
+                database.default_agent_id(),
+                Some("native approval recovery"),
+                None,
+                Some("ask"),
+            )
+            .unwrap()
+            .id;
+        let run = database
+            .create_run(
+                &conversation,
+                "recover the native approval exactly once",
+                None,
+            )
+            .unwrap()
+            .run
+            .id;
+        make_native(database, &run, &conversation, None, "legacy");
+        let approval_id = approval(
+            database,
+            &run,
+            "native-no-waiter",
+            "task_repair_escalate_start",
+            &json!({}),
+            "task_repair_budget_override",
+            "pending",
+            false,
+        );
+        assert!(fixture
+            .host
+            .resolve_approval(&approval_id, ApprovalDecision::Deny)
+            .unwrap());
+        let status: String = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT status FROM approvals WHERE id=?1",
+                    [&approval_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(status, "denied");
+        let command_count: i64 = database
+            .with_connection(|connection| {
+                connection.query_row("SELECT COUNT(*) FROM kernel_host_commands", [], |row| {
+                    row.get(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(command_count, 0);
     }
 
     #[test]
     fn approval_recovery_refuses_terminal_runs_and_retired_native_sessions() {
         if isolated("runtime_host::native_approval_scope::tests::approval_recovery_refuses_terminal_runs_and_retired_native_sessions") { return; }
-        let app=app();
-        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
-        let database=fixture.database();
-        let conversation=database.create_conversation(database.default_agent_id(),Some("recovery identity"),None,Some("ask")).unwrap().id;
-        let run=database.create_run(&conversation,"recover only the original live generation",None).unwrap().run.id;
-        make_native(database,&run,&conversation,None,"legacy");
-        for status in ["completed","failed","cancelled","interrupted"] {
-            database.with_connection(|connection|connection.execute("UPDATE runs SET status=?2 WHERE id=?1",params![run,status])).unwrap();
-            let error=fixture.host.prepare_native_approval_recovery(&run).err().expect("terminal Run must be refused");
-            assert!(error.contains("terminal Run"),"{status}: {error}");
+        let app = app();
+        let fixture = Fixture::new(&app, Database::open(":memory:".into()).unwrap());
+        let database = fixture.database();
+        let conversation = database
+            .create_conversation(
+                database.default_agent_id(),
+                Some("recovery identity"),
+                None,
+                Some("ask"),
+            )
+            .unwrap()
+            .id;
+        let run = database
+            .create_run(
+                &conversation,
+                "recover only the original live generation",
+                None,
+            )
+            .unwrap()
+            .run
+            .id;
+        make_native(database, &run, &conversation, None, "legacy");
+        for status in ["completed", "failed", "cancelled", "interrupted"] {
+            database
+                .with_connection(|connection| {
+                    connection.execute(
+                        "UPDATE runs SET status=?2 WHERE id=?1",
+                        params![run, status],
+                    )
+                })
+                .unwrap();
+            let error = fixture
+                .host
+                .prepare_native_approval_recovery(&run)
+                .err()
+                .expect("terminal Run must be refused");
+            assert!(error.contains("terminal Run"), "{status}: {error}");
         }
         database.with_connection(|connection| {
             connection.execute("UPDATE runs SET status='running' WHERE id=?1",[&run])?;
             connection.execute("UPDATE runtime_sessions SET runtime_session_id=runtime_session_id || '-replacement',context_generation=2 WHERE conversation_id=?1",[&conversation])?;
             Ok(())
         }).unwrap();
-        let error=fixture.host.prepare_native_approval_recovery(&run).err().expect("retired native identity must be refused");
-        assert!(error.contains("retired session"),"{error}");
-        let state=fixture.host.state.lock().unwrap();
+        let error = fixture
+            .host
+            .prepare_native_approval_recovery(&run)
+            .err()
+            .expect("retired native identity must be refused");
+        assert!(error.contains("retired session"), "{error}");
+        let state = fixture.host.state.lock().unwrap();
         assert!(state.worker.as_ref().unwrap().sessions.is_empty());
         assert!(state.cancellation.run_token(&run).is_err());
     }
@@ -683,103 +1401,251 @@ mod tests {
     #[test]
     fn recovered_background_approval_queues_behind_the_contact_foreground_run() {
         if isolated("runtime_host::native_approval_scope::tests::recovered_background_approval_queues_behind_the_contact_foreground_run") { return; }
-        let app=app();
-        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        let app = app();
+        let fixture = Fixture::new(&app, Database::open(":memory:".into()).unwrap());
         fixture.manage(&app);
-        let database=fixture.database();
-        for (decision,expert) in [("approved","fox-debugger"),("denied","fox-reviewer")] {
-            let contact=database.add_companion(&fixture.root,expert).expect("add contact");
-            let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {
-                name:format!("Background {decision}"),expert_id:expert.into(),
-                objective:"report the release evidence".into(),project_id:None,project_root:None,
-                knowledge_references:Vec::new(),max_runs_per_day:2,max_tokens_per_day:10_000,
-                max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,
-                companion_id:Some(contact.profile.id.clone())}).unwrap();
-            let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,
-                &format!("k2-queue-{decision}"),&json!({}),None,"test").unwrap();
-            let background=accepted.prepared.expect("a bound task is admitted").started.run.id;
-            assert_eq!(database.run_companion_slot(&background).unwrap(),
-                Some((contact.profile.id.clone(),true)));
-            let workspace=crate::companion_workspace::repair(database,&fixture.root,&contact.profile.id)
-                .expect("provision the contact workspace");
-            make_native(database,&background,&colleague.conversation_id,Some(&workspace),"legacy");
-            let frozen=database.run_control_binding(&background).unwrap().unwrap();
-            let (access,_)=database.conversation_project_access(&colleague.conversation_id).unwrap().unwrap();
-            assert_eq!(frozen.permission.project_root.as_deref(), Some(access.as_str()),
-                "background frozen root must match conversation_project_access");
-            let call=format!("background-{decision}");
-            let input=fixture.edit_input_in(&background,&call,&workspace);
-            let approval_id=approval(database,&background,&call,"edit_file",&input,"tool_execution",decision,false);
+        let database = fixture.database();
+        for (decision, expert) in [("approved", "fox-debugger"), ("denied", "fox-reviewer")] {
+            let contact = database
+                .add_companion(&fixture.root, expert)
+                .expect("add contact");
+            let colleague = database
+                .create_digital_colleague(&CreateDigitalColleagueInput {
+                    name: format!("Background {decision}"),
+                    expert_id: expert.into(),
+                    objective: "report the release evidence".into(),
+                    project_id: None,
+                    project_root: None,
+                    knowledge_references: Vec::new(),
+                    max_runs_per_day: 2,
+                    max_tokens_per_day: 10_000,
+                    max_duration_ms: 60_000,
+                    max_output_tokens: 1_024,
+                    max_tool_calls: 8,
+                    companion_id: Some(contact.profile.id.clone()),
+                })
+                .unwrap();
+            let accepted = database
+                .accept_digital_colleague_trigger(
+                    &colleague.id,
+                    "manual",
+                    None,
+                    &format!("k2-queue-{decision}"),
+                    &json!({}),
+                    None,
+                    "test",
+                )
+                .unwrap();
+            let background = accepted
+                .prepared
+                .expect("a bound task is admitted")
+                .started
+                .run
+                .id;
+            assert_eq!(
+                database.run_companion_slot(&background).unwrap(),
+                Some((contact.profile.id.clone(), true))
+            );
+            let workspace =
+                crate::companion_workspace::repair(database, &fixture.root, &contact.profile.id)
+                    .expect("provision the contact workspace");
+            make_native(
+                database,
+                &background,
+                &colleague.conversation_id,
+                Some(&workspace),
+                "legacy",
+            );
+            let frozen = database.run_control_binding(&background).unwrap().unwrap();
+            let (access, _) = database
+                .conversation_project_access(&colleague.conversation_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                frozen.permission.project_root.as_deref(),
+                Some(access.as_str()),
+                "background frozen root must match conversation_project_access"
+            );
+            let call = format!("background-{decision}");
+            let input = fixture.edit_input_in(&background, &call, &workspace);
+            let approval_id = approval(
+                database,
+                &background,
+                &call,
+                "edit_file",
+                &input,
+                "tool_execution",
+                decision,
+                false,
+            );
 
-            let foreground=database.create_run(&contact.conversation_id,"前台正在执行",None).unwrap().run.id;
-            let session=make_native(database,&foreground,&contact.conversation_id,Some(&workspace),"legacy");
+            let foreground = database
+                .create_run(&contact.conversation_id, "前台正在执行", None)
+                .unwrap()
+                .run
+                .id;
+            let session = make_native(
+                database,
+                &foreground,
+                &contact.conversation_id,
+                Some(&workspace),
+                "legacy",
+            );
             {
-                let mut state=fixture.host.state.lock().unwrap();
-                state.worker.as_mut().unwrap().sessions.start(&contact.conversation_id,&session,1,
-                    &foreground,Some((contact.profile.id.as_str(),false))).unwrap();
+                let mut state = fixture.host.state.lock().unwrap();
+                state
+                    .worker
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .start(
+                        &contact.conversation_id,
+                        &session,
+                        1,
+                        &foreground,
+                        Some((contact.profile.id.as_str(), false)),
+                    )
+                    .unwrap();
             }
 
             fixture.host.recover_native_approvals_detached().unwrap();
-            fixture.wait(||fixture.host.state.lock().unwrap().worker.as_ref().unwrap()
-                .sessions.by_run(&background).is_some());
-            let settled=|run:&str,call:&str|database.with_connection(|connection|connection.query_row(
+            fixture.wait(|| {
+                fixture
+                    .host
+                    .state
+                    .lock()
+                    .unwrap()
+                    .worker
+                    .as_ref()
+                    .unwrap()
+                    .sessions
+                    .by_run(&background)
+                    .is_some()
+            });
+            let settled = |run: &str, call: &str| {
+                database.with_connection(|connection|connection.query_row(
                 "SELECT result_json IS NOT NULL FROM kernel_tool_calls WHERE run_id=?1 AND tool_call_id=?2",
-                params![run,call],|row|row.get::<_,bool>(0))).unwrap();
+                params![run,call],|row|row.get::<_,bool>(0))).unwrap()
+            };
             {
-                let state=fixture.host.state.lock().unwrap();
-                let worker=state.worker.as_ref().unwrap();
-                let waiting=worker.sessions.by_run(&background).expect("recovered identity");
-                assert!(waiting.waiting,"the background Run yields its position while it queues");
-                assert_eq!(waiting.companion_id.as_deref(),Some(contact.profile.id.as_str()));
+                let state = fixture.host.state.lock().unwrap();
+                let worker = state.worker.as_ref().unwrap();
+                let waiting = worker
+                    .sessions
+                    .by_run(&background)
+                    .expect("recovered identity");
+                assert!(
+                    waiting.waiting,
+                    "the background Run yields its position while it queues"
+                );
+                assert_eq!(
+                    waiting.companion_id.as_deref(),
+                    Some(contact.profile.id.as_str())
+                );
                 assert!(waiting.companion_background);
-                assert!(worker.sessions.holds_companion(&contact.profile.id),
-                    "the private chat keeps the contact position");
-                assert!(!worker.sessions.can_admit(&colleague.conversation_id,Some(&contact.profile.id)));
+                assert!(
+                    worker.sessions.holds_companion(&contact.profile.id),
+                    "the private chat keeps the contact position"
+                );
+                assert!(!worker
+                    .sessions
+                    .can_admit(&colleague.conversation_id, Some(&contact.profile.id)));
             }
-            assert!(!settled(&background,&call));
+            assert!(!settled(&background, &call));
             std::thread::sleep(Duration::from_millis(200));
-            assert!(!settled(&background,&call),
-                "a recovered background approval must not execute beside the chat Run");
+            assert!(
+                !settled(&background, &call),
+                "a recovered background approval must not execute beside the chat Run"
+            );
 
-            database.apply_runtime_event(&foreground,1,&json!({"type":"run.completed"})).unwrap();
+            database
+                .apply_runtime_event(&foreground, 1, &json!({"type":"run.completed"}))
+                .unwrap();
             {
-                let mut state=fixture.host.state.lock().unwrap();
+                let mut state = fixture.host.state.lock().unwrap();
                 state.worker.as_mut().unwrap().sessions.finish(&foreground);
                 state.queue_changed.1.notify_all();
             }
-            fixture.wait(||{
-                if !settled(&background,&call) { return false; }
+            fixture.wait(|| {
+                if !settled(&background, &call) {
+                    return false;
+                }
                 // Recovery commits the result and then settles the Run in a
                 // second transaction; wait for both before asserting.
-                let status:String=database.with_connection(|connection|connection.query_row(
-                    "SELECT status FROM runs WHERE id=?1",[&background],|row|row.get(0))).unwrap();
-                status!="running"
+                let status: String = database
+                    .with_connection(|connection| {
+                        connection.query_row(
+                            "SELECT status FROM runs WHERE id=?1",
+                            [&background],
+                            |row| row.get(0),
+                        )
+                    })
+                    .unwrap();
+                status != "running"
             });
             let (body,run_status,run_code):(String,String,Option<String>)=database.with_connection(|connection|connection.query_row(
                 "SELECT k.result_json,r.status,r.error_code FROM kernel_tool_calls k JOIN runs r ON r.id=k.run_id
                  WHERE k.run_id=?1 AND k.tool_call_id=?2",params![background,call],
                 |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))).unwrap();
-            let result:Value=serde_json::from_str(&body).unwrap();
+            let result: Value = serde_json::from_str(&body).unwrap();
             // Recovery settles the call without resuming the model loop, so both
             // decisions end the same way: a denial fails the tool call, not the Run.
-            assert_eq!(run_status,"interrupted","{decision}");
-            assert_eq!(run_code.as_deref(),Some("runtime.native_approval_recovered"),"{decision}");
-            let target=workspace.join(format!("{call}.txt"));
-            if decision=="denied" {
-                assert_eq!(result["isError"],true,"{result}");
-                assert!(result["error"].as_str().unwrap().contains("denied"),"{result}");
-                assert_eq!(database.get_runtime_tool_call(&background,&call).unwrap().unwrap().status,"failed");
-                assert_eq!(std::fs::read_to_string(&target).unwrap(),format!("before-{call}"),
-                    "a denial fails only the tool call");
+            assert_eq!(run_status, "interrupted", "{decision}");
+            assert_eq!(
+                run_code.as_deref(),
+                Some("runtime.native_approval_recovered"),
+                "{decision}"
+            );
+            let target = workspace.join(format!("{call}.txt"));
+            if decision == "denied" {
+                assert_eq!(result["isError"], true, "{result}");
+                assert!(
+                    result["error"].as_str().unwrap().contains("denied"),
+                    "{result}"
+                );
+                assert_eq!(
+                    database
+                        .get_runtime_tool_call(&background, &call)
+                        .unwrap()
+                        .unwrap()
+                        .status,
+                    "failed"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(&target).unwrap(),
+                    format!("before-{call}"),
+                    "a denial fails only the tool call"
+                );
             } else {
-                assert_ne!(result["isError"],true,"{result}");
-                assert_eq!(std::fs::read_to_string(&target).unwrap(),format!("after-{call}"),
-                    "the background Run executes once the contact position is free");
-                let owner:Option<String>=database.with_connection(|connection|connection.query_row(
-                    "SELECT claimed_by_run_id FROM approvals WHERE id=?1",[&approval_id],|row|row.get(0))).unwrap();
-                assert_eq!(owner.as_deref(),Some(background.as_str()));
+                assert_ne!(result["isError"], true, "{result}");
+                assert_eq!(
+                    std::fs::read_to_string(&target).unwrap(),
+                    format!("after-{call}"),
+                    "the background Run executes once the contact position is free"
+                );
+                let owner: Option<String> = database
+                    .with_connection(|connection| {
+                        connection.query_row(
+                            "SELECT claimed_by_run_id FROM approvals WHERE id=?1",
+                            [&approval_id],
+                            |row| row.get(0),
+                        )
+                    })
+                    .unwrap();
+                assert_eq!(owner.as_deref(), Some(background.as_str()));
             }
-            fixture.wait(||fixture.host.state.lock().unwrap().worker.as_ref().unwrap().sessions.is_empty());
+            fixture.wait(|| {
+                fixture
+                    .host
+                    .state
+                    .lock()
+                    .unwrap()
+                    .worker
+                    .as_ref()
+                    .unwrap()
+                    .sessions
+                    .is_empty()
+            });
         }
     }
 
@@ -790,78 +1656,205 @@ mod tests {
     #[test]
     fn answered_background_approval_waits_for_the_contact_position() {
         if isolated("runtime_host::native_approval_scope::tests::answered_background_approval_waits_for_the_contact_position") { return; }
-        let app=app();
-        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        let app = app();
+        let fixture = Fixture::new(&app, Database::open(":memory:".into()).unwrap());
         fixture.manage(&app);
-        let database=fixture.database();
-        for (approved,expert) in [(true,"fox-debugger"),(false,"fox-reviewer")] {
-            let contact=database.add_companion(&fixture.root,expert).expect("add contact");
-            let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {
-                name:format!("Live {approved}"),expert_id:expert.into(),
-                objective:"report the release evidence".into(),project_id:None,project_root:None,
-                knowledge_references:Vec::new(),max_runs_per_day:2,max_tokens_per_day:10_000,
-                max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,
-                companion_id:Some(contact.profile.id.clone())}).unwrap();
-            let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,
-                &format!("k2-live-{approved}"),&json!({}),None,"test").unwrap();
-            let background=accepted.prepared.expect("a bound task is admitted").started.run.id;
-            let workspace=crate::companion_workspace::repair(database,&fixture.root,&contact.profile.id)
-                .expect("provision the contact workspace");
-            let background_session=make_native(database,&background,&colleague.conversation_id,Some(&workspace),"legacy");
-            let call=format!("live-{approved}");
-            let input=fixture.edit_input_in(&background,&call,&workspace);
-            let approval_id=approval(database,&background,&call,"edit_file",&input,"tool_execution","pending",false);
-            let foreground=database.create_run(&contact.conversation_id,"前台正在执行",None).unwrap().run.id;
-            let foreground_session=make_native(database,&foreground,&contact.conversation_id,Some(&workspace),"legacy");
-            fixture.host.state.lock().unwrap().worker.as_mut().unwrap().sessions.start(
-                &colleague.conversation_id,&background_session,1,&background,
-                Some((contact.profile.id.as_str(),true))).unwrap();
+        let database = fixture.database();
+        for (approved, expert) in [(true, "fox-debugger"), (false, "fox-reviewer")] {
+            let contact = database
+                .add_companion(&fixture.root, expert)
+                .expect("add contact");
+            let colleague = database
+                .create_digital_colleague(&CreateDigitalColleagueInput {
+                    name: format!("Live {approved}"),
+                    expert_id: expert.into(),
+                    objective: "report the release evidence".into(),
+                    project_id: None,
+                    project_root: None,
+                    knowledge_references: Vec::new(),
+                    max_runs_per_day: 2,
+                    max_tokens_per_day: 10_000,
+                    max_duration_ms: 60_000,
+                    max_output_tokens: 1_024,
+                    max_tool_calls: 8,
+                    companion_id: Some(contact.profile.id.clone()),
+                })
+                .unwrap();
+            let accepted = database
+                .accept_digital_colleague_trigger(
+                    &colleague.id,
+                    "manual",
+                    None,
+                    &format!("k2-live-{approved}"),
+                    &json!({}),
+                    None,
+                    "test",
+                )
+                .unwrap();
+            let background = accepted
+                .prepared
+                .expect("a bound task is admitted")
+                .started
+                .run
+                .id;
+            let workspace =
+                crate::companion_workspace::repair(database, &fixture.root, &contact.profile.id)
+                    .expect("provision the contact workspace");
+            let background_session = make_native(
+                database,
+                &background,
+                &colleague.conversation_id,
+                Some(&workspace),
+                "legacy",
+            );
+            let call = format!("live-{approved}");
+            let input = fixture.edit_input_in(&background, &call, &workspace);
+            let approval_id = approval(
+                database,
+                &background,
+                &call,
+                "edit_file",
+                &input,
+                "tool_execution",
+                "pending",
+                false,
+            );
+            let foreground = database
+                .create_run(&contact.conversation_id, "前台正在执行", None)
+                .unwrap()
+                .run
+                .id;
+            let foreground_session = make_native(
+                database,
+                &foreground,
+                &contact.conversation_id,
+                Some(&workspace),
+                "legacy",
+            );
+            fixture
+                .host
+                .state
+                .lock()
+                .unwrap()
+                .worker
+                .as_mut()
+                .unwrap()
+                .sessions
+                .start(
+                    &colleague.conversation_id,
+                    &background_session,
+                    1,
+                    &background,
+                    Some((contact.profile.id.as_str(), true)),
+                )
+                .unwrap();
 
-            let (sender,receiver)=std::sync::mpsc::channel();
-            let (done,answer)=std::sync::mpsc::channel();
-            let waiter={
-                let state=fixture.host.state.clone();
-                let database=database.clone();
-                let run=background.clone();
-                let approval=approval_id.clone();
-                std::thread::spawn(move||{
-                    let _=done.send(super::super::receive_sidecar_run_approval(&database,&state,&run,&approval,&receiver));
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let (done, answer) = std::sync::mpsc::channel();
+            let waiter = {
+                let state = fixture.host.state.clone();
+                let database = database.clone();
+                let run = background.clone();
+                let approval = approval_id.clone();
+                std::thread::spawn(move || {
+                    let _ = done.send(super::super::receive_sidecar_run_approval(
+                        &database, &state, &run, &approval, &receiver,
+                    ));
                 })
             };
-            fixture.wait(||fixture.host.state.lock().unwrap().worker.as_ref().unwrap()
-                .sessions.by_run(&background).map(|session|session.waiting).unwrap_or(false));
+            fixture.wait(|| {
+                fixture
+                    .host
+                    .state
+                    .lock()
+                    .unwrap()
+                    .worker
+                    .as_ref()
+                    .unwrap()
+                    .sessions
+                    .by_run(&background)
+                    .map(|session| session.waiting)
+                    .unwrap_or(false)
+            });
             {
-                let state=fixture.host.state.lock().unwrap();
-                let worker=state.worker.as_ref().unwrap();
-                assert!(!worker.sessions.holds_companion(&contact.profile.id),
-                    "asking for approval yields the contact position");
-                assert_eq!(worker.sessions.occupied(),0);
+                let state = fixture.host.state.lock().unwrap();
+                let worker = state.worker.as_ref().unwrap();
+                assert!(
+                    !worker.sessions.holds_companion(&contact.profile.id),
+                    "asking for approval yields the contact position"
+                );
+                assert_eq!(worker.sessions.occupied(), 0);
             }
-            fixture.host.state.lock().unwrap().worker.as_mut().unwrap().sessions.start(
-                &contact.conversation_id,&foreground_session,1,&foreground,
-                Some((contact.profile.id.as_str(),false))).unwrap();
+            fixture
+                .host
+                .state
+                .lock()
+                .unwrap()
+                .worker
+                .as_mut()
+                .unwrap()
+                .sessions
+                .start(
+                    &contact.conversation_id,
+                    &foreground_session,
+                    1,
+                    &foreground,
+                    Some((contact.profile.id.as_str(), false)),
+                )
+                .unwrap();
             sender.send(approved).unwrap();
             std::thread::sleep(Duration::from_millis(200));
-            assert!(matches!(answer.try_recv(),Err(std::sync::mpsc::TryRecvError::Empty)),
-                "an answered background approval must queue behind the chat Run ({approved})");
-            assert!(fixture.host.state.lock().unwrap().worker.as_ref().unwrap()
-                .sessions.by_run(&background).unwrap().waiting);
+            assert!(
+                matches!(answer.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+                "an answered background approval must queue behind the chat Run ({approved})"
+            );
+            assert!(
+                fixture
+                    .host
+                    .state
+                    .lock()
+                    .unwrap()
+                    .worker
+                    .as_ref()
+                    .unwrap()
+                    .sessions
+                    .by_run(&background)
+                    .unwrap()
+                    .waiting
+            );
 
-            database.apply_runtime_event(&foreground,1,&json!({"type":"run.completed"})).unwrap();
+            database
+                .apply_runtime_event(&foreground, 1, &json!({"type":"run.completed"}))
+                .unwrap();
             {
-                let mut state=fixture.host.state.lock().unwrap();
+                let mut state = fixture.host.state.lock().unwrap();
                 state.worker.as_mut().unwrap().sessions.finish(&foreground);
                 state.queue_changed.1.notify_all();
             }
-            assert_eq!(answer.recv_timeout(Duration::from_secs(5)).unwrap().unwrap(),approved,
-                "the decision survives the wait");
+            assert_eq!(
+                answer
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap()
+                    .unwrap(),
+                approved,
+                "the decision survives the wait"
+            );
             {
-                let state=fixture.host.state.lock().unwrap();
-                let worker=state.worker.as_ref().unwrap();
+                let state = fixture.host.state.lock().unwrap();
+                let worker = state.worker.as_ref().unwrap();
                 assert!(!worker.sessions.by_run(&background).unwrap().waiting);
                 assert!(worker.sessions.holds_companion(&contact.profile.id));
             }
-            fixture.host.state.lock().unwrap().worker.as_mut().unwrap().sessions.finish(&background);
+            fixture
+                .host
+                .state
+                .lock()
+                .unwrap()
+                .worker
+                .as_mut()
+                .unwrap()
+                .sessions
+                .finish(&background);
             waiter.join().unwrap();
         }
     }
@@ -872,58 +1865,139 @@ mod tests {
     #[test]
     fn background_approval_events_mirror_into_the_report_chat() {
         use tauri::Listener;
-        let app=app();
-        let database=Database::open(":memory:".into()).unwrap();
-        let root=std::env::temp_dir().join(format!("fox-k2-mirror-{}",uuid::Uuid::new_v4()));
+        let app = app();
+        let database = Database::open(":memory:".into()).unwrap();
+        let root = std::env::temp_dir().join(format!("fox-k2-mirror-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let contact=database.add_companion(&root,"fox-debugger").unwrap();
-        let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {
-            name:"Mirror background".into(),expert_id:"fox-debugger".into(),
-            objective:"report the release evidence".into(),project_id:None,project_root:None,
-            knowledge_references:Vec::new(),max_runs_per_day:2,max_tokens_per_day:10_000,
-            max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,
-            companion_id:Some(contact.profile.id.clone())}).unwrap();
-        let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,
-            "k2-mirror",&json!({}),None,"test").unwrap();
-        let background=accepted.prepared.expect("a bound task is admitted").started.run.id;
-        database.apply_runtime_event(&background,1,&json!({"type":"run.started"})).unwrap();
-        let tool=database.create_host_tool_call(&background,"mirror-call","memory_search",
-            &json!({"query":"mirror"}),"pending",true).unwrap();
-        let approval=database.create_approval(&tool.id,"mirror approval",&json!({"query":"mirror"})).unwrap();
+        let contact = database.add_companion(&root, "fox-debugger").unwrap();
+        let colleague = database
+            .create_digital_colleague(&CreateDigitalColleagueInput {
+                name: "Mirror background".into(),
+                expert_id: "fox-debugger".into(),
+                objective: "report the release evidence".into(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: Vec::new(),
+                max_runs_per_day: 2,
+                max_tokens_per_day: 10_000,
+                max_duration_ms: 60_000,
+                max_output_tokens: 1_024,
+                max_tool_calls: 8,
+                companion_id: Some(contact.profile.id.clone()),
+            })
+            .unwrap();
+        let accepted = database
+            .accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "k2-mirror",
+                &json!({}),
+                None,
+                "test",
+            )
+            .unwrap();
+        let background = accepted
+            .prepared
+            .expect("a bound task is admitted")
+            .started
+            .run
+            .id;
+        database
+            .apply_runtime_event(&background, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        let tool = database
+            .create_host_tool_call(
+                &background,
+                "mirror-call",
+                "memory_search",
+                &json!({"query":"mirror"}),
+                "pending",
+                true,
+            )
+            .unwrap();
+        let approval = database
+            .create_approval(&tool.id, "mirror approval", &json!({"query":"mirror"}))
+            .unwrap();
 
-        let mirror=super::super::report_chat_approval_mirror(&database,&approval)
+        let mirror = super::super::report_chat_approval_mirror(&database, &approval)
             .expect("a background approval mirrors into the report chat");
-        assert_eq!(mirror.id,approval.id,"the mirror keeps the original approval id");
-        assert_eq!(mirror.run_id,background,"the mirror keeps the original Run");
-        assert_eq!(mirror.tool_call_id,approval.tool_call_id,"the mirror keeps the original tool_call");
-        assert_eq!(mirror.conversation_id,contact.conversation_id);
+        assert_eq!(
+            mirror.id, approval.id,
+            "the mirror keeps the original approval id"
+        );
+        assert_eq!(
+            mirror.run_id, background,
+            "the mirror keeps the original Run"
+        );
+        assert_eq!(
+            mirror.tool_call_id, approval.tool_call_id,
+            "the mirror keeps the original tool_call"
+        );
+        assert_eq!(mirror.conversation_id, contact.conversation_id);
 
-        let received=Arc::new(Mutex::new(Vec::<String>::new()));
-        let sink=received.clone();
-        app.listen("fox://approval-requested",move|event|{
+        let received = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = received.clone();
+        app.listen("fox://approval-requested", move |event| {
             sink.lock().unwrap().push(event.payload().to_owned());
         });
-        super::super::emit_approval_event(app.handle(),&database,"fox://approval-requested",&approval).unwrap();
-        let events:Vec<Value>=received.lock().unwrap().iter()
-            .map(|payload|serde_json::from_str(payload).unwrap()).collect();
-        assert_eq!(events.len(),2,"the execution conversation and the report chat both receive the card");
+        super::super::emit_approval_event(
+            app.handle(),
+            &database,
+            "fox://approval-requested",
+            &approval,
+        )
+        .unwrap();
+        let events: Vec<Value> = received
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|payload| serde_json::from_str(payload).unwrap())
+            .collect();
+        assert_eq!(
+            events.len(),
+            2,
+            "the execution conversation and the report chat both receive the card"
+        );
         for event in &events {
-            assert_eq!(event["id"].as_str().unwrap(),approval.id);
-            assert_eq!(event["runId"].as_str().unwrap(),background);
-            assert_eq!(event["toolCallId"].as_str().unwrap(),approval.tool_call_id);
+            assert_eq!(event["id"].as_str().unwrap(), approval.id);
+            assert_eq!(event["runId"].as_str().unwrap(), background);
+            assert_eq!(event["toolCallId"].as_str().unwrap(), approval.tool_call_id);
         }
-        assert!(events.iter().any(|event|event["conversationId"]==json!(colleague.conversation_id)));
-        assert!(events.iter().any(|event|event["conversationId"]==json!(contact.conversation_id)));
+        assert!(events
+            .iter()
+            .any(|event| event["conversationId"] == json!(colleague.conversation_id)));
+        assert!(events
+            .iter()
+            .any(|event| event["conversationId"] == json!(contact.conversation_id)));
 
         // The fixed private chat's own approvals are not mirrored anywhere.
-        let foreground=database.create_run(&contact.conversation_id,"前台审批",None).unwrap().run.id;
-        database.apply_runtime_event(&foreground,1,&json!({"type":"run.started"})).unwrap();
-        let foreground_tool=database.create_host_tool_call(&foreground,"mirror-fg","memory_search",
-            &json!({"query":"fg"}),"pending",true).unwrap();
-        let foreground_approval=database.create_approval(&foreground_tool.id,"foreground",&json!({})).unwrap();
-        assert!(super::super::report_chat_approval_mirror(&database,&foreground_approval).is_none());
+        let foreground = database
+            .create_run(&contact.conversation_id, "前台审批", None)
+            .unwrap()
+            .run
+            .id;
+        database
+            .apply_runtime_event(&foreground, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        let foreground_tool = database
+            .create_host_tool_call(
+                &foreground,
+                "mirror-fg",
+                "memory_search",
+                &json!({"query":"fg"}),
+                "pending",
+                true,
+            )
+            .unwrap();
+        let foreground_approval = database
+            .create_approval(&foreground_tool.id, "foreground", &json!({}))
+            .unwrap();
+        assert!(
+            super::super::report_chat_approval_mirror(&database, &foreground_approval).is_none()
+        );
 
-        let _=std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// K2/P2: an answered background approval must not preempt a Run that
@@ -933,93 +2007,256 @@ mod tests {
     #[test]
     fn answered_background_approval_cannot_preempt_a_dispatch_reservation() {
         if isolated("runtime_host::native_approval_scope::tests::answered_background_approval_cannot_preempt_a_dispatch_reservation") { return; }
-        let app=app();
-        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        let app = app();
+        let fixture = Fixture::new(&app, Database::open(":memory:".into()).unwrap());
         fixture.manage(&app);
-        let database=fixture.database();
-        let contact=database.add_companion(&fixture.root,"fox-debugger").expect("add contact");
-        let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {
-            name:"Waiting background".into(),expert_id:"fox-debugger".into(),
-            objective:"report the release evidence".into(),project_id:None,project_root:None,
-            knowledge_references:Vec::new(),max_runs_per_day:2,max_tokens_per_day:10_000,
-            max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,
-            companion_id:Some(contact.profile.id.clone())}).unwrap();
-        let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,
-            "k2-dispatch-window",&json!({}),None,"test").unwrap();
-        let background=accepted.prepared.expect("a bound task is admitted").started.run.id;
-        let workspace=crate::companion_workspace::repair(database,&fixture.root,&contact.profile.id)
-            .expect("provision the contact workspace");
-        let background_session=make_native(database,&background,&colleague.conversation_id,Some(&workspace),"legacy");
-        let input=fixture.edit_input_in(&background,"window",&workspace);
-        let approval_id=approval(database,&background,"window","edit_file",&input,"tool_execution","pending",false);
-        fixture.host.state.lock().unwrap().worker.as_mut().unwrap().sessions.start(
-            &colleague.conversation_id,&background_session,1,&background,
-            Some((contact.profile.id.as_str(),true))).unwrap();
+        let database = fixture.database();
+        let contact = database
+            .add_companion(&fixture.root, "fox-debugger")
+            .expect("add contact");
+        let colleague = database
+            .create_digital_colleague(&CreateDigitalColleagueInput {
+                name: "Waiting background".into(),
+                expert_id: "fox-debugger".into(),
+                objective: "report the release evidence".into(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: Vec::new(),
+                max_runs_per_day: 2,
+                max_tokens_per_day: 10_000,
+                max_duration_ms: 60_000,
+                max_output_tokens: 1_024,
+                max_tool_calls: 8,
+                companion_id: Some(contact.profile.id.clone()),
+            })
+            .unwrap();
+        let accepted = database
+            .accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "k2-dispatch-window",
+                &json!({}),
+                None,
+                "test",
+            )
+            .unwrap();
+        let background = accepted
+            .prepared
+            .expect("a bound task is admitted")
+            .started
+            .run
+            .id;
+        let workspace =
+            crate::companion_workspace::repair(database, &fixture.root, &contact.profile.id)
+                .expect("provision the contact workspace");
+        let background_session = make_native(
+            database,
+            &background,
+            &colleague.conversation_id,
+            Some(&workspace),
+            "legacy",
+        );
+        let input = fixture.edit_input_in(&background, "window", &workspace);
+        let approval_id = approval(
+            database,
+            &background,
+            "window",
+            "edit_file",
+            &input,
+            "tool_execution",
+            "pending",
+            false,
+        );
+        fixture
+            .host
+            .state
+            .lock()
+            .unwrap()
+            .worker
+            .as_mut()
+            .unwrap()
+            .sessions
+            .start(
+                &colleague.conversation_id,
+                &background_session,
+                1,
+                &background,
+                Some((contact.profile.id.as_str(), true)),
+            )
+            .unwrap();
 
         // A second task of the same contact wins dispatch but has not started.
-        let granted_colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {
-            name:"Granted background".into(),expert_id:"fox-debugger".into(),
-            objective:"report the release evidence".into(),project_id:None,project_root:None,
-            knowledge_references:Vec::new(),max_runs_per_day:2,max_tokens_per_day:10_000,
-            max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,
-            companion_id:Some(contact.profile.id.clone())}).unwrap();
-        let granted=database.create_run(&granted_colleague.conversation_id,"已派发未启动",None).unwrap().run.id;
-        let granted_session=make_native(database,&granted,&granted_colleague.conversation_id,Some(&workspace),"legacy");
+        let granted_colleague = database
+            .create_digital_colleague(&CreateDigitalColleagueInput {
+                name: "Granted background".into(),
+                expert_id: "fox-debugger".into(),
+                objective: "report the release evidence".into(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: Vec::new(),
+                max_runs_per_day: 2,
+                max_tokens_per_day: 10_000,
+                max_duration_ms: 60_000,
+                max_output_tokens: 1_024,
+                max_tool_calls: 8,
+                companion_id: Some(contact.profile.id.clone()),
+            })
+            .unwrap();
+        let granted = database
+            .create_run(&granted_colleague.conversation_id, "已派发未启动", None)
+            .unwrap()
+            .run
+            .id;
+        let granted_session = make_native(
+            database,
+            &granted,
+            &granted_colleague.conversation_id,
+            Some(&workspace),
+            "legacy",
+        );
         {
-            let mut state=fixture.host.state.lock().unwrap();
-            state.dispatching_runs.insert(granted.clone(),super::super::DispatchReservation {
-                conversation_id:granted_colleague.conversation_id.clone(),
-                companion_id:Some(contact.profile.id.clone()),
-            });
+            let mut state = fixture.host.state.lock().unwrap();
+            state.dispatching_runs.insert(
+                granted.clone(),
+                super::super::DispatchReservation {
+                    conversation_id: granted_colleague.conversation_id.clone(),
+                    companion_id: Some(contact.profile.id.clone()),
+                },
+            );
         }
 
-        let (sender,receiver)=std::sync::mpsc::channel();
-        let (done,answer)=std::sync::mpsc::channel();
-        let waiter={
-            let state=fixture.host.state.clone();
-            let database=database.clone();
-            let run=background.clone();
-            let approval=approval_id.clone();
-            std::thread::spawn(move||{
-                let _=done.send(super::super::receive_sidecar_run_approval(&database,&state,&run,&approval,&receiver));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (done, answer) = std::sync::mpsc::channel();
+        let waiter = {
+            let state = fixture.host.state.clone();
+            let database = database.clone();
+            let run = background.clone();
+            let approval = approval_id.clone();
+            std::thread::spawn(move || {
+                let _ = done.send(super::super::receive_sidecar_run_approval(
+                    &database, &state, &run, &approval, &receiver,
+                ));
             })
         };
-        fixture.wait(||fixture.host.state.lock().unwrap().worker.as_ref().unwrap()
-            .sessions.by_run(&background).map(|session|session.waiting).unwrap_or(false));
+        fixture.wait(|| {
+            fixture
+                .host
+                .state
+                .lock()
+                .unwrap()
+                .worker
+                .as_ref()
+                .unwrap()
+                .sessions
+                .by_run(&background)
+                .map(|session| session.waiting)
+                .unwrap_or(false)
+        });
         sender.send(true).unwrap();
         std::thread::sleep(Duration::from_millis(200));
-        assert!(matches!(answer.try_recv(),Err(std::sync::mpsc::TryRecvError::Empty)),
-            "the answer must wait for the dispatch reservation");
-        assert!(fixture.host.state.lock().unwrap().worker.as_ref().unwrap()
-            .sessions.by_run(&background).unwrap().waiting);
+        assert!(
+            matches!(answer.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+            "the answer must wait for the dispatch reservation"
+        );
+        assert!(
+            fixture
+                .host
+                .state
+                .lock()
+                .unwrap()
+                .worker
+                .as_ref()
+                .unwrap()
+                .sessions
+                .by_run(&background)
+                .unwrap()
+                .waiting
+        );
 
         // The granted Run starts without a start failure while the answer waits.
-        fixture.host.state.lock().unwrap().worker.as_mut().unwrap().sessions.start(
-            &granted_colleague.conversation_id,&granted_session,1,&granted,
-            Some((contact.profile.id.as_str(),true)))
+        fixture
+            .host
+            .state
+            .lock()
+            .unwrap()
+            .worker
+            .as_mut()
+            .unwrap()
+            .sessions
+            .start(
+                &granted_colleague.conversation_id,
+                &granted_session,
+                1,
+                &granted,
+                Some((contact.profile.id.as_str(), true)),
+            )
             .expect("the dispatch reservation keeps its start admissible");
         {
-            let mut state=fixture.host.state.lock().unwrap();
+            let mut state = fixture.host.state.lock().unwrap();
             state.dispatching_runs.remove(&granted);
             state.queue_changed.1.notify_all();
         }
         std::thread::sleep(Duration::from_millis(200));
-        assert!(matches!(answer.try_recv(),Err(std::sync::mpsc::TryRecvError::Empty)),
-            "the started contact Run keeps the position");
-        assert!(fixture.host.state.lock().unwrap().worker.as_ref().unwrap()
-            .sessions.by_run(&background).unwrap().waiting);
+        assert!(
+            matches!(answer.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+            "the started contact Run keeps the position"
+        );
+        assert!(
+            fixture
+                .host
+                .state
+                .lock()
+                .unwrap()
+                .worker
+                .as_ref()
+                .unwrap()
+                .sessions
+                .by_run(&background)
+                .unwrap()
+                .waiting
+        );
 
-        database.apply_runtime_event(&granted,1,&json!({"type":"run.completed"})).unwrap();
+        database
+            .apply_runtime_event(&granted, 1, &json!({"type":"run.completed"}))
+            .unwrap();
         {
-            let mut state=fixture.host.state.lock().unwrap();
+            let mut state = fixture.host.state.lock().unwrap();
             state.worker.as_mut().unwrap().sessions.finish(&granted);
             state.queue_changed.1.notify_all();
         }
-        assert_eq!(answer.recv_timeout(Duration::from_secs(5)).unwrap().unwrap(),true,
-            "the decision survives the wait");
-        fixture.wait(||fixture.host.state.lock().unwrap().worker.as_ref().unwrap()
-            .sessions.by_run(&background).map(|session|!session.waiting).unwrap_or(false));
-        fixture.host.state.lock().unwrap().worker.as_mut().unwrap().sessions.finish(&background);
+        assert_eq!(
+            answer
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap(),
+            true,
+            "the decision survives the wait"
+        );
+        fixture.wait(|| {
+            fixture
+                .host
+                .state
+                .lock()
+                .unwrap()
+                .worker
+                .as_ref()
+                .unwrap()
+                .sessions
+                .by_run(&background)
+                .map(|session| !session.waiting)
+                .unwrap_or(false)
+        });
+        fixture
+            .host
+            .state
+            .lock()
+            .unwrap()
+            .worker
+            .as_mut()
+            .unwrap()
+            .sessions
+            .finish(&background);
         waiter.join().unwrap();
     }
 
@@ -1030,53 +2267,122 @@ mod tests {
     #[test]
     fn archiving_a_contact_stops_its_queued_background_task() {
         if isolated("runtime_host::native_approval_scope::tests::archiving_a_contact_stops_its_queued_background_task") { return; }
-        let app=app();
-        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        let app = app();
+        let fixture = Fixture::new(&app, Database::open(":memory:".into()).unwrap());
         fixture.manage(&app);
-        let database=fixture.database();
-        let contact=database.add_companion(&fixture.root,"fox-debugger").unwrap();
-        let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {
-            name:"Queued background".into(),expert_id:"fox-debugger".into(),
-            objective:"report the release evidence".into(),project_id:None,project_root:None,
-            knowledge_references:Vec::new(),max_runs_per_day:4,max_tokens_per_day:10_000,
-            max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,
-            companion_id:Some(contact.profile.id.clone())}).unwrap();
-        let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,
-            "k2-archive",&json!({}),None,"test").unwrap();
-        let started=accepted.prepared.expect("a bound task is admitted").started;
-        let background=started.run.id.clone();
+        let database = fixture.database();
+        let contact = database
+            .add_companion(&fixture.root, "fox-debugger")
+            .unwrap();
+        let colleague = database
+            .create_digital_colleague(&CreateDigitalColleagueInput {
+                name: "Queued background".into(),
+                expert_id: "fox-debugger".into(),
+                objective: "report the release evidence".into(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: Vec::new(),
+                max_runs_per_day: 4,
+                max_tokens_per_day: 10_000,
+                max_duration_ms: 60_000,
+                max_output_tokens: 1_024,
+                max_tool_calls: 8,
+                companion_id: Some(contact.profile.id.clone()),
+            })
+            .unwrap();
+        let accepted = database
+            .accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "k2-archive",
+                &json!({}),
+                None,
+                "test",
+            )
+            .unwrap();
+        let started = accepted.prepared.expect("a bound task is admitted").started;
+        let background = started.run.id.clone();
         {
-            let mut state=fixture.host.state.lock().unwrap();
-            state.queued_runs.push_back(QueuedRun {started:started.clone(),text:"请处理".into(),
-                attachments:Vec::new(),companion:Some((contact.profile.id.clone(),true))});
+            let mut state = fixture.host.state.lock().unwrap();
+            state.queued_runs.push_back(QueuedRun {
+                started: started.clone(),
+                text: "请处理".into(),
+                attachments: Vec::new(),
+                companion: Some((contact.profile.id.clone(), true)),
+            });
         }
 
-        fixture.host.begin_companion_stop(&contact.profile.id).unwrap();
+        fixture
+            .host
+            .begin_companion_stop(&contact.profile.id)
+            .unwrap();
         fixture.host.dispatch_next_queued_run();
         {
-            let state=fixture.host.state.lock().unwrap();
-            assert!(state.queued_runs.iter().any(|queued|queued.started.run.id==background),
-                "the sweep refuses new dispatch for this contact");
+            let state = fixture.host.state.lock().unwrap();
+            assert!(
+                state
+                    .queued_runs
+                    .iter()
+                    .any(|queued| queued.started.run.id == background),
+                "the sweep refuses new dispatch for this contact"
+            );
             assert!(state.dispatching_runs.is_empty());
             assert!(state.worker.as_ref().unwrap().sessions.is_empty());
         }
         fixture.host.end_companion_stop(&contact.profile.id);
 
-        let archived=fixture.host.archive_companion(&contact.profile.id).expect("archive once every Run is terminal");
+        let archived = fixture
+            .host
+            .archive_companion(&contact.profile.id)
+            .expect("archive once every Run is terminal");
         assert!(archived.profile.archived_at.is_some());
         assert!(fixture.host.state.lock().unwrap().queued_runs.is_empty());
-        assert!(fixture.host.state.lock().unwrap().stopping_companions.is_empty());
-        let status:String=database.with_connection(|connection|connection.query_row(
-            "SELECT status FROM runs WHERE id=?1",[&background],|row|row.get(0))).unwrap();
-        assert_eq!(status,"cancelled");
-        let report:(String,String)=database.with_connection(|connection|connection.query_row(
-            "SELECT outcome,message_id FROM companion_task_reports WHERE run_id=?1",[&background],
-            |row|Ok((row.get(0)?,row.get(1)?)))).expect("the stopped task still reports into the private chat");
-        assert_eq!(report,(String::from("cancelled"),format!("dc-report-{background}")));
-        assert!(database.ensure_companion_executable(&contact.profile.id).is_err());
-        let rejected=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,
-            "k2-after-archive",&json!({}),None,"test").unwrap_err();
-        assert_eq!(rejected,OWNERSHIP_MISSING);
+        assert!(fixture
+            .host
+            .state
+            .lock()
+            .unwrap()
+            .stopping_companions
+            .is_empty());
+        let status: String = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT status FROM runs WHERE id=?1",
+                    [&background],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(status, "cancelled");
+        let report: (String, String) = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT outcome,message_id FROM companion_task_reports WHERE run_id=?1",
+                    [&background],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .expect("the stopped task still reports into the private chat");
+        assert_eq!(
+            report,
+            (String::from("cancelled"), format!("dc-report-{background}"))
+        );
+        assert!(database
+            .ensure_companion_executable(&contact.profile.id)
+            .is_err());
+        let rejected = database
+            .accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "k2-after-archive",
+                &json!({}),
+                None,
+                "test",
+            )
+            .unwrap_err();
+        assert_eq!(rejected, OWNERSHIP_MISSING);
     }
 
     /// K2: a previous process leaves a background Run parked on a pending
@@ -1086,48 +2392,135 @@ mod tests {
     #[test]
     fn archiving_a_contact_settles_an_orphaned_background_approval() {
         if isolated("runtime_host::native_approval_scope::tests::archiving_a_contact_settles_an_orphaned_background_approval") { return; }
-        let app=app();
-        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        let app = app();
+        let fixture = Fixture::new(&app, Database::open(":memory:".into()).unwrap());
         fixture.manage(&app);
-        let database=fixture.database();
-        let contact=database.add_companion(&fixture.root,"fox-debugger").unwrap();
-        let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {
-            name:"Orphaned background".into(),expert_id:"fox-debugger".into(),
-            objective:"report the release evidence".into(),project_id:None,project_root:None,
-            knowledge_references:Vec::new(),max_runs_per_day:4,max_tokens_per_day:10_000,
-            max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,
-            companion_id:Some(contact.profile.id.clone())}).unwrap();
-        let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,
-            "k2-orphan",&json!({}),None,"test").unwrap();
-        let background=accepted.prepared.expect("a bound task is admitted").started.run.id;
-        let workspace=crate::companion_workspace::repair(database,&fixture.root,&contact.profile.id).unwrap();
-        make_native(database,&background,&colleague.conversation_id,Some(&workspace),"legacy");
-        let input=fixture.edit_input_in(&background,"orphan",&workspace);
-        let approval_id=approval(database,&background,"orphan","edit_file",&input,"tool_execution","pending",false);
-        assert!(fixture.host.state.lock().unwrap().worker.as_ref().unwrap().sessions.is_empty(),
-            "the Run is exactly what a restart leaves behind: no live owner");
-        assert_eq!(database.companion_active_run_ids(&contact.profile.id).unwrap(),
-            vec![background.clone()]);
+        let database = fixture.database();
+        let contact = database
+            .add_companion(&fixture.root, "fox-debugger")
+            .unwrap();
+        let colleague = database
+            .create_digital_colleague(&CreateDigitalColleagueInput {
+                name: "Orphaned background".into(),
+                expert_id: "fox-debugger".into(),
+                objective: "report the release evidence".into(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: Vec::new(),
+                max_runs_per_day: 4,
+                max_tokens_per_day: 10_000,
+                max_duration_ms: 60_000,
+                max_output_tokens: 1_024,
+                max_tool_calls: 8,
+                companion_id: Some(contact.profile.id.clone()),
+            })
+            .unwrap();
+        let accepted = database
+            .accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "k2-orphan",
+                &json!({}),
+                None,
+                "test",
+            )
+            .unwrap();
+        let background = accepted
+            .prepared
+            .expect("a bound task is admitted")
+            .started
+            .run
+            .id;
+        let workspace =
+            crate::companion_workspace::repair(database, &fixture.root, &contact.profile.id)
+                .unwrap();
+        make_native(
+            database,
+            &background,
+            &colleague.conversation_id,
+            Some(&workspace),
+            "legacy",
+        );
+        let input = fixture.edit_input_in(&background, "orphan", &workspace);
+        let approval_id = approval(
+            database,
+            &background,
+            "orphan",
+            "edit_file",
+            &input,
+            "tool_execution",
+            "pending",
+            false,
+        );
+        assert!(
+            fixture
+                .host
+                .state
+                .lock()
+                .unwrap()
+                .worker
+                .as_ref()
+                .unwrap()
+                .sessions
+                .is_empty(),
+            "the Run is exactly what a restart leaves behind: no live owner"
+        );
+        assert_eq!(
+            database
+                .companion_active_run_ids(&contact.profile.id)
+                .unwrap(),
+            vec![background.clone()]
+        );
 
-        let archived=fixture.host.archive_companion(&contact.profile.id)
+        let archived = fixture
+            .host
+            .archive_companion(&contact.profile.id)
             .expect("the sweep settles a Run no process owns");
         assert!(archived.profile.archived_at.is_some());
-        let (status,code):(String,Option<String>)=database.with_connection(|connection|connection.query_row(
-            "SELECT status,error_code FROM runs WHERE id=?1",[&background],
-            |row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
-        assert_eq!(status,"interrupted");
-        assert_eq!(code.as_deref(),Some("companion.stopping"));
-        let pending:i64=database.with_connection(|connection|connection.query_row(
-            "SELECT COUNT(*) FROM approvals WHERE id=?1 AND status='pending'",[&approval_id],
-            |row|row.get(0))).unwrap();
-        assert_eq!(pending,0,"the waiting approval settles with its Run");
-        let report:(String,String)=database.with_connection(|connection|connection.query_row(
-            "SELECT outcome,message_id FROM companion_task_reports WHERE run_id=?1",[&background],
-            |row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
+        let (status, code): (String, Option<String>) = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT status,error_code FROM runs WHERE id=?1",
+                    [&background],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(status, "interrupted");
+        assert_eq!(code.as_deref(), Some("companion.stopping"));
+        let pending: i64 = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT COUNT(*) FROM approvals WHERE id=?1 AND status='pending'",
+                    [&approval_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(pending, 0, "the waiting approval settles with its Run");
+        let report: (String, String) = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT outcome,message_id FROM companion_task_reports WHERE run_id=?1",
+                    [&background],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
         // An interrupted task is a failed occurrence, the same outcome the
         // trigger ledger records for it.
-        assert_eq!(report,(String::from("failed"),format!("dc-report-{background}")));
-        assert!(fixture.host.state.lock().unwrap().stopping_companions.is_empty());
+        assert_eq!(
+            report,
+            (String::from("failed"), format!("dc-report-{background}"))
+        );
+        assert!(fixture
+            .host
+            .state
+            .lock()
+            .unwrap()
+            .stopping_companions
+            .is_empty());
     }
 
     /// D3: a Run can be DB-terminal (completed) while its PiNative session still
@@ -1139,61 +2532,159 @@ mod tests {
     #[test]
     fn drain_waits_for_a_db_terminal_run_until_the_session_owner_releases() {
         if isolated("runtime_host::native_approval_scope::tests::drain_waits_for_a_db_terminal_run_until_the_session_owner_releases") { return; }
-        let app=app();
-        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        let app = app();
+        let fixture = Fixture::new(&app, Database::open(":memory:".into()).unwrap());
         fixture.manage(&app);
-        let database=fixture.database();
-        let contact=database.add_companion(&fixture.root,"fox-debugger").unwrap();
-        let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {
-            name:"Terminal but owned".into(),expert_id:"fox-debugger".into(),
-            objective:"report the release evidence".into(),project_id:None,project_root:None,
-            knowledge_references:Vec::new(),max_runs_per_day:4,max_tokens_per_day:10_000,
-            max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,
-            companion_id:Some(contact.profile.id.clone())}).unwrap();
-        let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,
-            "d3-terminal",&json!({}),None,"test").unwrap();
-        let background=accepted.prepared.expect("a bound task is admitted").started.run.id;
-        let workspace=crate::companion_workspace::repair(database,&fixture.root,&contact.profile.id).unwrap();
-        let session_id=make_native(database,&background,&colleague.conversation_id,Some(&workspace),"legacy");
+        let database = fixture.database();
+        let contact = database
+            .add_companion(&fixture.root, "fox-debugger")
+            .unwrap();
+        let colleague = database
+            .create_digital_colleague(&CreateDigitalColleagueInput {
+                name: "Terminal but owned".into(),
+                expert_id: "fox-debugger".into(),
+                objective: "report the release evidence".into(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: Vec::new(),
+                max_runs_per_day: 4,
+                max_tokens_per_day: 10_000,
+                max_duration_ms: 60_000,
+                max_output_tokens: 1_024,
+                max_tool_calls: 8,
+                companion_id: Some(contact.profile.id.clone()),
+            })
+            .unwrap();
+        let accepted = database
+            .accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "d3-terminal",
+                &json!({}),
+                None,
+                "test",
+            )
+            .unwrap();
+        let background = accepted
+            .prepared
+            .expect("a bound task is admitted")
+            .started
+            .run
+            .id;
+        let workspace =
+            crate::companion_workspace::repair(database, &fixture.root, &contact.profile.id)
+                .unwrap();
+        let session_id = make_native(
+            database,
+            &background,
+            &colleague.conversation_id,
+            Some(&workspace),
+            "legacy",
+        );
         // The session owns the Run, exactly as a live sidecar would before run_released.
-        fixture.host.state.lock().unwrap().worker.as_mut().unwrap().sessions.start(
-            &colleague.conversation_id,&session_id,1,&background,
-            Some((contact.profile.id.as_str(),true))).unwrap();
+        fixture
+            .host
+            .state
+            .lock()
+            .unwrap()
+            .worker
+            .as_mut()
+            .unwrap()
+            .sessions
+            .start(
+                &colleague.conversation_id,
+                &session_id,
+                1,
+                &background,
+                Some((contact.profile.id.as_str(), true)),
+            )
+            .unwrap();
         // DB reaches a terminal state; the active list is empty even though the
         // in-memory owner has not been released yet.
-        database.apply_runtime_event(&background,1,&json!({"type":"run.completed"})).unwrap();
-        assert!(database.companion_active_run_ids(&contact.profile.id).unwrap().is_empty());
-        assert!(fixture.host.companion_session_owner_present(&contact.profile.id).unwrap());
+        database
+            .apply_runtime_event(&background, 1, &json!({"type":"run.completed"}))
+            .unwrap();
+        assert!(database
+            .companion_active_run_ids(&contact.profile.id)
+            .unwrap()
+            .is_empty());
+        assert!(fixture
+            .host
+            .companion_session_owner_present(&contact.profile.id)
+            .unwrap());
 
-        let (done,answer)=std::sync::mpsc::channel();
-        let host=fixture.host.clone();
-        let companion=contact.profile.id.clone();
-        let drainer=std::thread::spawn(move||{ let _=done.send(host.drain_companion_runs(&companion)); });
+        let (done, answer) = std::sync::mpsc::channel();
+        let host = fixture.host.clone();
+        let companion = contact.profile.id.clone();
+        let drainer = std::thread::spawn(move || {
+            let _ = done.send(host.drain_companion_runs(&companion));
+        });
         // With the owner still present the drain waits; it neither returns on the
         // empty active list nor cancels the completed Run.
         std::thread::sleep(Duration::from_millis(300));
-        assert!(matches!(answer.try_recv(),Err(std::sync::mpsc::TryRecvError::Empty)),
-            "drain must wait for the session owner even when the DB Run is terminal");
-        let status:String=database.with_connection(|c|c.query_row(
-            "SELECT status FROM runs WHERE id=?1",[&background],|r|r.get(0))).unwrap();
-        assert_eq!(status,"completed","drain must not cancel an already-completed Run");
+        assert!(
+            matches!(answer.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+            "drain must wait for the session owner even when the DB Run is terminal"
+        );
+        let status: String = database
+            .with_connection(|c| {
+                c.query_row("SELECT status FROM runs WHERE id=?1", [&background], |r| {
+                    r.get(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            status, "completed",
+            "drain must not cancel an already-completed Run"
+        );
 
         // run_released lands: the owner is released and the drain completes.
-        fixture.host.state.lock().unwrap().worker.as_mut().unwrap().sessions.finish(&background);
+        fixture
+            .host
+            .state
+            .lock()
+            .unwrap()
+            .worker
+            .as_mut()
+            .unwrap()
+            .sessions
+            .finish(&background);
         assert!(answer.recv_timeout(Duration::from_secs(5)).unwrap().is_ok());
-        assert!(!fixture.host.companion_session_owner_present(&contact.profile.id).unwrap());
+        assert!(!fixture
+            .host
+            .companion_session_owner_present(&contact.profile.id)
+            .unwrap());
         drainer.join().unwrap();
     }
 
-    fn approval_row(database: &Database, approval_id: &str) -> (String, Option<i64>, Option<Value>) {
-        database.with_connection(|connection| connection.query_row(
-            "SELECT status, claimed_at, decision_json FROM approvals WHERE id=?1", [approval_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?,
-                row.get::<_, Option<String>>(2)?.map(|text| serde_json::from_str::<Value>(&text).unwrap()))),
-        )).unwrap()
+    fn approval_row(
+        database: &Database,
+        approval_id: &str,
+    ) -> (String, Option<i64>, Option<Value>) {
+        database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT status, claimed_at, decision_json FROM approvals WHERE id=?1",
+                    [approval_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, Option<String>>(2)?
+                                .map(|text| serde_json::from_str::<Value>(&text).unwrap()),
+                        ))
+                    },
+                )
+            })
+            .unwrap()
     }
 
-    fn call_facts(database: &Database, run: &str, call: &str) -> (String, Option<Value>, String, Option<Value>) {
+    fn call_facts(
+        database: &Database,
+        run: &str,
+        call: &str,
+    ) -> (String, Option<Value>, String, Option<Value>) {
         database.with_connection(|connection| {
             let host = connection.query_row(
                 "SELECT status, result_json FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id=?2",
@@ -1212,10 +2703,15 @@ mod tests {
     }
 
     fn run_terminal(database: &Database, run: &str) -> (String, Option<String>) {
-        database.with_connection(|connection| connection.query_row(
-            "SELECT status, error_code FROM runs WHERE id=?1", [run],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )).unwrap()
+        database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT status, error_code FROM runs WHERE id=?1",
+                    [run],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap()
     }
 
     /// P1: the public `run_cancel` chain (`cancel_kernel_owned_run` with the
@@ -1227,71 +2723,170 @@ mod tests {
     #[test]
     fn run_cancel_user_stop_settles_an_unowned_restored_approval_run() {
         if isolated("runtime_host::native_approval_scope::tests::run_cancel_user_stop_settles_an_unowned_restored_approval_run") { return; }
-        let app=app();
-        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        let app = app();
+        let fixture = Fixture::new(&app, Database::open(":memory:".into()).unwrap());
         fixture.manage(&app);
-        let database=fixture.database();
-        let contact=database.add_companion(&fixture.root,"fox-debugger").unwrap();
-        let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {
-            name:"Unowned user stop".into(),expert_id:"fox-debugger".into(),
-            objective:"report the release evidence".into(),project_id:None,project_root:None,
-            knowledge_references:Vec::new(),max_runs_per_day:4,max_tokens_per_day:10_000,
-            max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,
-            companion_id:Some(contact.profile.id.clone())}).unwrap();
-        let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,
-            "p1-user-stop",&json!({}),None,"test").unwrap();
-        let background=accepted.prepared.expect("a bound task is admitted").started.run.id;
-        let workspace=crate::companion_workspace::repair(database,&fixture.root,&contact.profile.id).unwrap();
-        make_native(database,&background,&colleague.conversation_id,Some(&workspace),"legacy");
-        let approved_input=fixture.edit_input_in(&background,"orphan-approved",&workspace);
-        let approved_id=approval(database,&background,"orphan-approved","edit_file",&approved_input,"tool_execution","approved",false);
-        let pending_input=fixture.edit_input_in(&background,"orphan-pending",&workspace);
-        let pending_id=approval(database,&background,"orphan-pending","edit_file",&pending_input,"tool_execution","pending",false);
-        assert!(fixture.host.state.lock().unwrap().worker.as_ref().unwrap().sessions.is_empty(),
-            "the Run is exactly what a restart leaves behind: no live owner");
+        let database = fixture.database();
+        let contact = database
+            .add_companion(&fixture.root, "fox-debugger")
+            .unwrap();
+        let colleague = database
+            .create_digital_colleague(&CreateDigitalColleagueInput {
+                name: "Unowned user stop".into(),
+                expert_id: "fox-debugger".into(),
+                objective: "report the release evidence".into(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: Vec::new(),
+                max_runs_per_day: 4,
+                max_tokens_per_day: 10_000,
+                max_duration_ms: 60_000,
+                max_output_tokens: 1_024,
+                max_tool_calls: 8,
+                companion_id: Some(contact.profile.id.clone()),
+            })
+            .unwrap();
+        let accepted = database
+            .accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "p1-user-stop",
+                &json!({}),
+                None,
+                "test",
+            )
+            .unwrap();
+        let background = accepted
+            .prepared
+            .expect("a bound task is admitted")
+            .started
+            .run
+            .id;
+        let workspace =
+            crate::companion_workspace::repair(database, &fixture.root, &contact.profile.id)
+                .unwrap();
+        make_native(
+            database,
+            &background,
+            &colleague.conversation_id,
+            Some(&workspace),
+            "legacy",
+        );
+        let approved_input = fixture.edit_input_in(&background, "orphan-approved", &workspace);
+        let approved_id = approval(
+            database,
+            &background,
+            "orphan-approved",
+            "edit_file",
+            &approved_input,
+            "tool_execution",
+            "approved",
+            false,
+        );
+        let pending_input = fixture.edit_input_in(&background, "orphan-pending", &workspace);
+        let pending_id = approval(
+            database,
+            &background,
+            "orphan-pending",
+            "edit_file",
+            &pending_input,
+            "tool_execution",
+            "pending",
+            false,
+        );
+        assert!(
+            fixture
+                .host
+                .state
+                .lock()
+                .unwrap()
+                .worker
+                .as_ref()
+                .unwrap()
+                .sessions
+                .is_empty(),
+            "the Run is exactly what a restart leaves behind: no live owner"
+        );
 
         // The archive-sweep entry keeps its own contract: no user-stop settle.
         assert!(!fixture.host.cancel_managed_run(&background).unwrap());
-        assert_eq!(run_terminal(database,&background).0,"running");
-        assert!(approval_row(database,&approved_id).1.is_none());
+        assert_eq!(run_terminal(database, &background).0, "running");
+        assert!(approval_row(database, &approved_id).1.is_none());
 
         // The exact chain the public command selects after the backend gate.
-        let stopped=crate::commands::cancel_kernel_owned_run(database,&background,
-            ||fixture.host.cancel_managed_run_by_user(&background)).unwrap();
-        assert_eq!(stopped,Some(true),"用户停止必须真正收尾无主恢复 Run");
-        assert_eq!(run_terminal(database,&background),(String::from("interrupted"),Some(String::from("runtime.user_cancelled"))));
+        let stopped = crate::commands::cancel_kernel_owned_run(database, &background, || {
+            fixture.host.cancel_managed_run_by_user(&background)
+        })
+        .unwrap();
+        assert_eq!(stopped, Some(true), "用户停止必须真正收尾无主恢复 Run");
+        assert_eq!(
+            run_terminal(database, &background),
+            (
+                String::from("interrupted"),
+                Some(String::from("runtime.user_cancelled"))
+            )
+        );
 
-        let (status,claimed,decision)=approval_row(database,&approved_id);
-        assert_eq!(status,"approved","approved 保留原决策");
-        assert!(claimed.is_some(),"批准被消费");
-        assert_eq!(decision.as_ref().unwrap()["scope"],json!("once"));
-        assert_eq!(crate::database::approval_invalidation(decision.as_ref()).unwrap().0,"runtime.user_cancelled");
-        let (status,claimed,decision)=approval_row(database,&pending_id);
-        assert_eq!(status,"cancelled","pending 批准读作用户取消，不是超时");
+        let (status, claimed, decision) = approval_row(database, &approved_id);
+        assert_eq!(status, "approved", "approved 保留原决策");
+        assert!(claimed.is_some(), "批准被消费");
+        assert_eq!(decision.as_ref().unwrap()["scope"], json!("once"));
+        assert_eq!(
+            crate::database::approval_invalidation(decision.as_ref())
+                .unwrap()
+                .0,
+            "runtime.user_cancelled"
+        );
+        let (status, claimed, decision) = approval_row(database, &pending_id);
+        assert_eq!(status, "cancelled", "pending 批准读作用户取消，不是超时");
         assert!(claimed.is_some());
-        assert_eq!(crate::database::approval_invalidation(decision.as_ref()).unwrap().0,"runtime.user_cancelled");
+        assert_eq!(
+            crate::database::approval_invalidation(decision.as_ref())
+                .unwrap()
+                .0,
+            "runtime.user_cancelled"
+        );
 
-        for call in ["orphan-approved","orphan-pending"] {
-            let (host_status,host_result,native_status,native_result)=call_facts(database,&background,call);
-            assert_eq!(host_status,"failed");
-            assert_eq!(native_status,"failed");
-            assert_eq!(host_result,native_result,"Host 与 native 持有同一份标准错误收据");
-            assert_eq!(native_result.unwrap()["isError"],json!(true));
+        for call in ["orphan-approved", "orphan-pending"] {
+            let (host_status, host_result, native_status, native_result) =
+                call_facts(database, &background, call);
+            assert_eq!(host_status, "failed");
+            assert_eq!(native_status, "failed");
+            assert_eq!(
+                host_result, native_result,
+                "Host 与 native 持有同一份标准错误收据"
+            );
+            assert_eq!(native_result.unwrap()["isError"], json!(true));
         }
-        assert!(fixture.host.state.lock().unwrap().worker.as_ref().unwrap().sessions.is_empty(),
-            "取消不泄漏执行位置");
+        assert!(
+            fixture
+                .host
+                .state
+                .lock()
+                .unwrap()
+                .worker
+                .as_ref()
+                .unwrap()
+                .sessions
+                .is_empty(),
+            "取消不泄漏执行位置"
+        );
 
         // A second user stop is idempotent and never rewrites the outcome.
-        let before=run_terminal(database,&background);
-        let again=crate::commands::cancel_kernel_owned_run(database,&background,
-            ||fixture.host.cancel_managed_run_by_user(&background)).unwrap();
-        assert_eq!(again,Some(false));
-        assert_eq!(run_terminal(database,&background),before);
+        let before = run_terminal(database, &background);
+        let again = crate::commands::cancel_kernel_owned_run(database, &background, || {
+            fixture.host.cancel_managed_run_by_user(&background)
+        })
+        .unwrap();
+        assert_eq!(again, Some(false));
+        assert_eq!(run_terminal(database, &background), before);
     }
 
-    fn unowned_approval_run_facts(database: &Database, run: &str)
-        -> std::collections::BTreeMap<&'static str, Vec<Vec<rusqlite::types::Value>>>
-    {
+    fn unowned_approval_run_facts(
+        database: &Database,
+        run: &str,
+    ) -> std::collections::BTreeMap<&'static str, Vec<Vec<rusqlite::types::Value>>> {
         database.with_connection(|connection| {
             let mut facts = std::collections::BTreeMap::new();
             for (table, sql) in [
@@ -1322,40 +2917,98 @@ mod tests {
             let workspace = Path::new(restart["workspace"].as_str().unwrap());
             let database = Database::open(root.join("fox.db")).unwrap();
             let before = unowned_approval_run_facts(&database, run);
-            assert_eq!(format!("{before:?}"), restart["before"].as_str().unwrap(),
-                "reopening the same database preserves every fact");
+            assert_eq!(
+                format!("{before:?}"),
+                restart["before"].as_str().unwrap(),
+                "reopening the same database preserves every fact"
+            );
             database.repair_interrupted_runs().unwrap();
-            assert_eq!(unowned_approval_run_facts(&database, run), before,
-                "startup repair must not settle an unverifiable approval");
+            assert_eq!(
+                unowned_approval_run_facts(&database, run),
+                before,
+                "startup repair must not settle an unverifiable approval"
+            );
             let app = app();
             let fixture = Fixture::with_root(&app, database, root);
             assert_unowned_user_stop_fails_without_changes(&fixture, run, workspace, &before);
             return;
         }
-        let root = std::env::temp_dir().join(format!("fox-cancel-identity-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("fox-cancel-identity-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("fox.db");
         let (run, workspace, before) = {
             let app = app();
-            let fixture = Fixture::with_root(&app, Database::open(path.clone()).unwrap(), root.clone());
+            let fixture =
+                Fixture::with_root(&app, Database::open(path.clone()).unwrap(), root.clone());
             let database = fixture.database();
-            let contact = database.add_companion(&fixture.root, "fox-debugger").unwrap();
-            let colleague = database.create_digital_colleague(&CreateDigitalColleagueInput {
-                name: "Unverifiable user stop".into(), expert_id: "fox-debugger".into(),
-                objective: "report the release evidence".into(), project_id: None, project_root: None,
-                knowledge_references: Vec::new(), max_runs_per_day: 4, max_tokens_per_day: 10_000,
-                max_duration_ms: 60_000, max_output_tokens: 1_024, max_tool_calls: 8,
-                companion_id: Some(contact.profile.id.clone()),
-            }).unwrap();
-            let accepted = database.accept_digital_colleague_trigger(&colleague.id, "manual", None,
-                "unverifiable-user-stop", &json!({}), None, "test").unwrap();
-            let run = accepted.prepared.expect("a bound task is admitted").started.run.id;
-            let workspace = crate::companion_workspace::repair(database, &root, &contact.profile.id).unwrap();
-            let session = make_native(database, &run, &colleague.conversation_id, Some(&workspace), "legacy");
+            let contact = database
+                .add_companion(&fixture.root, "fox-debugger")
+                .unwrap();
+            let colleague = database
+                .create_digital_colleague(&CreateDigitalColleagueInput {
+                    name: "Unverifiable user stop".into(),
+                    expert_id: "fox-debugger".into(),
+                    objective: "report the release evidence".into(),
+                    project_id: None,
+                    project_root: None,
+                    knowledge_references: Vec::new(),
+                    max_runs_per_day: 4,
+                    max_tokens_per_day: 10_000,
+                    max_duration_ms: 60_000,
+                    max_output_tokens: 1_024,
+                    max_tool_calls: 8,
+                    companion_id: Some(contact.profile.id.clone()),
+                })
+                .unwrap();
+            let accepted = database
+                .accept_digital_colleague_trigger(
+                    &colleague.id,
+                    "manual",
+                    None,
+                    "unverifiable-user-stop",
+                    &json!({}),
+                    None,
+                    "test",
+                )
+                .unwrap();
+            let run = accepted
+                .prepared
+                .expect("a bound task is admitted")
+                .started
+                .run
+                .id;
+            let workspace =
+                crate::companion_workspace::repair(database, &root, &contact.profile.id).unwrap();
+            let session = make_native(
+                database,
+                &run,
+                &colleague.conversation_id,
+                Some(&workspace),
+                "legacy",
+            );
             let input = fixture.edit_input_in(&run, "a-settleable", &workspace);
-            let settleable = approval(database, &run, "a-settleable", "edit_file", &input, "tool_execution", "pending", false);
+            let settleable = approval(
+                database,
+                &run,
+                "a-settleable",
+                "edit_file",
+                &input,
+                "tool_execution",
+                "pending",
+                false,
+            );
             let input = fixture.edit_input_in(&run, "z-mismatch", &workspace);
-            let mismatch = approval(database, &run, "z-mismatch", "edit_file", &input, "tool_execution", mismatch_status, false);
+            let mismatch = approval(
+                database,
+                &run,
+                "z-mismatch",
+                "edit_file",
+                &input,
+                "tool_execution",
+                mismatch_status,
+                false,
+            );
             let invalidation = json!({"code": "companion.tool_not_available", "message": "联系人已撤销该工具", "at": 123456});
             database.with_connection(|connection| {
                 let decision: Option<String> = connection.query_row(
@@ -1368,7 +3021,10 @@ mod tests {
                 Ok(())
             }).unwrap();
             assert_eq!(run_terminal(database, &run), ("running".into(), None));
-            assert_eq!(approval_row(database, &settleable), ("pending".into(), None, None));
+            assert_eq!(
+                approval_row(database, &settleable),
+                ("pending".into(), None, None)
+            );
             let (status, claimed, decision) = approval_row(database, &mismatch);
             assert_eq!(status, mismatch_status);
             assert!(claimed.is_none());
@@ -1379,12 +3035,18 @@ mod tests {
                 assert_eq!(decision["scope"], "once");
                 assert_eq!(decision["category"], "tool_execution");
             }
-            let mapping = database.get_runtime_session(&colleague.conversation_id).unwrap().unwrap();
+            let mapping = database
+                .get_runtime_session(&colleague.conversation_id)
+                .unwrap()
+                .unwrap();
             assert!(mapping.is_native());
             assert_eq!(mapping.runtime_session_id, session);
             assert_eq!(mapping.context_generation, 1);
             for (call, generation) in [("a-settleable", 1), ("z-mismatch", 2)] {
-                assert_eq!(call_facts(database, &run, call), ("pending".into(), None, "running".into(), None));
+                assert_eq!(
+                    call_facts(database, &run, call),
+                    ("pending".into(), None, "running".into(), None)
+                );
                 let native: (i64, Option<i64>) = database.with_connection(|connection| connection.query_row(
                     "SELECT context_generation,claimed_at FROM kernel_tool_calls WHERE run_id=?1 AND tool_call_id=?2",
                     params![run, call], |row| Ok((row.get(0)?, row.get(1)?)))).unwrap();
@@ -1401,11 +3063,20 @@ mod tests {
         let test = std::env::var(CHILD).unwrap();
         let output = Command::new(std::env::current_exe().unwrap())
             .args([test.as_str(), "--exact", "--nocapture", "--test-threads=1"])
-            .env(REOPEN, json!({"root": root, "run": run, "workspace": workspace,
-                "before": format!("{before:?}")}).canonical_string())
-            .output().unwrap();
-        assert!(output.status.success(), "restart stdout: {}\nrestart stderr: {}",
-            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            .env(
+                REOPEN,
+                json!({"root": root, "run": run, "workspace": workspace,
+                "before": format!("{before:?}")})
+                .canonical_string(),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "restart stdout: {}\nrestart stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1424,18 +3095,37 @@ mod tests {
             assert!(state.pending_approvals.lock().unwrap().is_empty());
         }
         assert!(fixture.host.child_hosts.lock().unwrap().is_empty());
-        assert!(fixture.host.native_batches.recovering_approval_ids().unwrap().is_empty());
-        let error = crate::commands::cancel_kernel_owned_run(fixture.database(), run,
-            || fixture.host.cancel_managed_run_by_user(run)).unwrap_err();
-        for message in ["runtime.cancel_unverifiable_approval", "结算条件", "本次停止未生效", "已保留原运行和批准状态"] {
+        assert!(fixture
+            .host
+            .native_batches
+            .recovering_approval_ids()
+            .unwrap()
+            .is_empty());
+        let error = crate::commands::cancel_kernel_owned_run(fixture.database(), run, || {
+            fixture.host.cancel_managed_run_by_user(run)
+        })
+        .unwrap_err();
+        for message in [
+            "runtime.cancel_unverifiable_approval",
+            "结算条件",
+            "本次停止未生效",
+            "已保留原运行和批准状态",
+        ] {
             assert!(error.contains(message), "{error}");
         }
-        assert_eq!(&unowned_approval_run_facts(fixture.database(), run), before,
-            "all rows, including original decision_json bytes and timestamps, must be unchanged");
+        assert_eq!(
+            &unowned_approval_run_facts(fixture.database(), run),
+            before,
+            "all rows, including original decision_json bytes and timestamps, must be unchanged"
+        );
         for call in ["a-settleable", "z-mismatch"] {
-            assert_eq!(std::fs::read_to_string(workspace.join(format!("{call}.txt"))).unwrap(), format!("before-{call}"));
+            assert_eq!(
+                std::fs::read_to_string(workspace.join(format!("{call}.txt"))).unwrap(),
+                format!("before-{call}")
+            );
         }
-        let lease = KernelRunLock::acquire(&fixture.host.sessions_dir, run).expect("failed cancellation releases its Run lease");
+        let lease = KernelRunLock::acquire(&fixture.host.sessions_dir, run)
+            .expect("failed cancellation releases its Run lease");
         drop(lease);
     }
 
@@ -1457,57 +3147,130 @@ mod tests {
     #[test]
     fn run_cancel_user_stop_does_not_preempt_the_recovery_run_lease() {
         if isolated("runtime_host::native_approval_scope::tests::run_cancel_user_stop_does_not_preempt_the_recovery_run_lease") { return; }
-        let app=app();
-        let fixture=Fixture::new(&app,Database::open(":memory:".into()).unwrap());
+        let app = app();
+        let fixture = Fixture::new(&app, Database::open(":memory:".into()).unwrap());
         fixture.manage(&app);
-        let database=fixture.database();
-        let contact=database.add_companion(&fixture.root,"fox-debugger").unwrap();
-        let colleague=database.create_digital_colleague(&CreateDigitalColleagueInput {
-            name:"Lease fenced stop".into(),expert_id:"fox-debugger".into(),
-            objective:"report the release evidence".into(),project_id:None,project_root:None,
-            knowledge_references:Vec::new(),max_runs_per_day:4,max_tokens_per_day:10_000,
-            max_duration_ms:60_000,max_output_tokens:1_024,max_tool_calls:8,
-            companion_id:Some(contact.profile.id.clone())}).unwrap();
-        let accepted=database.accept_digital_colleague_trigger(&colleague.id,"manual",None,
-            "p1-lease",&json!({}),None,"test").unwrap();
-        let background=accepted.prepared.expect("a bound task is admitted").started.run.id;
-        let workspace=crate::companion_workspace::repair(database,&fixture.root,&contact.profile.id).unwrap();
-        make_native(database,&background,&colleague.conversation_id,Some(&workspace),"legacy");
-        let input=fixture.edit_input_in(&background,"fenced",&workspace);
-        let approval_id=approval(database,&background,"fenced","edit_file",&input,"tool_execution","approved",false);
+        let database = fixture.database();
+        let contact = database
+            .add_companion(&fixture.root, "fox-debugger")
+            .unwrap();
+        let colleague = database
+            .create_digital_colleague(&CreateDigitalColleagueInput {
+                name: "Lease fenced stop".into(),
+                expert_id: "fox-debugger".into(),
+                objective: "report the release evidence".into(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: Vec::new(),
+                max_runs_per_day: 4,
+                max_tokens_per_day: 10_000,
+                max_duration_ms: 60_000,
+                max_output_tokens: 1_024,
+                max_tool_calls: 8,
+                companion_id: Some(contact.profile.id.clone()),
+            })
+            .unwrap();
+        let accepted = database
+            .accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "p1-lease",
+                &json!({}),
+                None,
+                "test",
+            )
+            .unwrap();
+        let background = accepted
+            .prepared
+            .expect("a bound task is admitted")
+            .started
+            .run
+            .id;
+        let workspace =
+            crate::companion_workspace::repair(database, &fixture.root, &contact.profile.id)
+                .unwrap();
+        make_native(
+            database,
+            &background,
+            &colleague.conversation_id,
+            Some(&workspace),
+            "legacy",
+        );
+        let input = fixture.edit_input_in(&background, "fenced", &workspace);
+        let approval_id = approval(
+            database,
+            &background,
+            "fenced",
+            "edit_file",
+            &input,
+            "tool_execution",
+            "approved",
+            false,
+        );
 
         // The same lease recovery acquires, held by another owner.
-        let lease=KernelRunLock::acquire(&fixture.host.sessions_dir,&background).unwrap();
-        let stopped=crate::commands::cancel_kernel_owned_run(database,&background,
-            ||fixture.host.cancel_managed_run_by_user(&background)).unwrap();
-        assert_eq!(stopped,Some(false),"租约仍被持有时不得抢占取消");
-        assert_eq!(run_terminal(database,&background).0,"running");
-        let (status,claimed,_)=approval_row(database,&approval_id);
-        assert_eq!(status,"approved");
+        let lease = KernelRunLock::acquire(&fixture.host.sessions_dir, &background).unwrap();
+        let stopped = crate::commands::cancel_kernel_owned_run(database, &background, || {
+            fixture.host.cancel_managed_run_by_user(&background)
+        })
+        .unwrap();
+        assert_eq!(stopped, Some(false), "租约仍被持有时不得抢占取消");
+        assert_eq!(run_terminal(database, &background).0, "running");
+        let (status, claimed, _) = approval_row(database, &approval_id);
+        assert_eq!(status, "approved");
         assert!(claimed.is_none());
-        let (host_status,_,native_status,native_result)=call_facts(database,&background,"fenced");
-        assert_eq!(host_status,"pending");
-        assert_eq!(native_status,"running");
-        assert!(native_result.is_none(),"租约冲突不写任何终态事实");
+        let (host_status, _, native_status, native_result) =
+            call_facts(database, &background, "fenced");
+        assert_eq!(host_status, "pending");
+        assert_eq!(native_status, "running");
+        assert!(native_result.is_none(), "租约冲突不写任何终态事实");
 
         drop(lease);
-        let stopped=crate::commands::cancel_kernel_owned_run(database,&background,
-            ||fixture.host.cancel_managed_run_by_user(&background)).unwrap();
-        assert_eq!(stopped,Some(true),"租约释放后用户停止收尾");
-        assert_eq!(run_terminal(database,&background),(String::from("interrupted"),Some(String::from("runtime.user_cancelled"))));
+        let stopped = crate::commands::cancel_kernel_owned_run(database, &background, || {
+            fixture.host.cancel_managed_run_by_user(&background)
+        })
+        .unwrap();
+        assert_eq!(stopped, Some(true), "租约释放后用户停止收尾");
+        assert_eq!(
+            run_terminal(database, &background),
+            (
+                String::from("interrupted"),
+                Some(String::from("runtime.user_cancelled"))
+            )
+        );
     }
 }
 
 impl RuntimeHost {
-    pub(super) fn prepare_native_approval_recovery(&self, run: &str) -> Result<NativeApprovalRecoveryScope, String> {
-        let binding = self.database.run_control_binding(run)?.ok_or("native recovery has no frozen Run")?;
-        if binding.executor_route != Some(ExecutorRoute::PiNative) { return Err("approval belongs to another executor".into()); }
-        let mapping = self.database.get_runtime_session(&binding.conversation_id)?.ok_or("native recovery session is missing")?;
-        let (status, recorded): (String, Option<String>) = self.database.with_connection(|connection| connection.query_row(
-            "SELECT status,runtime_session_id FROM runs WHERE id=?1", [run], |row| Ok((row.get(0)?,row.get(1)?)),
-        ))?;
-        if status != "running" || !mapping.is_native() || mapping.context_generation < 1
-            || recorded.as_deref() != Some(mapping.runtime_session_id.as_str()) {
+    pub(super) fn prepare_native_approval_recovery(
+        &self,
+        run: &str,
+    ) -> Result<NativeApprovalRecoveryScope, String> {
+        let binding = self
+            .database
+            .run_control_binding(run)?
+            .ok_or("native recovery has no frozen Run")?;
+        if binding.executor_route != Some(ExecutorRoute::PiNative) {
+            return Err("approval belongs to another executor".into());
+        }
+        let mapping = self
+            .database
+            .get_runtime_session(&binding.conversation_id)?
+            .ok_or("native recovery session is missing")?;
+        let (status, recorded): (String, Option<String>) =
+            self.database.with_connection(|connection| {
+                connection.query_row(
+                    "SELECT status,runtime_session_id FROM runs WHERE id=?1",
+                    [run],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })?;
+        if status != "running"
+            || !mapping.is_native()
+            || mapping.context_generation < 1
+            || recorded.as_deref() != Some(mapping.runtime_session_id.as_str())
+        {
             return Err("native recovery cannot adopt a terminal Run or a retired session".into());
         }
         // K2: a restart-recovered approval re-enters the same contact queue.
@@ -1516,13 +3279,27 @@ impl RuntimeHost {
         let companion_slot = self.database.run_companion_slot(run)?;
         let mut scoped_host = self.clone();
         if let Some(child) = self.database.child_run(run)? {
-            let parent_conversation = self.database.authoritative_run_conversation_id(&child.parent_run_id).map_err(|error| error.to_string())?;
-            let (tools, mcp) = super::effective_conversation_delegation_scope(&self.database, &parent_conversation)?;
-            scoped_host.tool_allowlist_override = super::intersect_optional_scopes(tools,
-                child.allowed_tools.as_ref().map(|tools| tools.iter().cloned().collect()));
+            let parent_conversation = self
+                .database
+                .authoritative_run_conversation_id(&child.parent_run_id)
+                .map_err(|error| error.to_string())?;
+            let (tools, mcp) = super::effective_conversation_delegation_scope(
+                &self.database,
+                &parent_conversation,
+            )?;
+            scoped_host.tool_allowlist_override = super::intersect_optional_scopes(
+                tools,
+                child
+                    .allowed_tools
+                    .as_ref()
+                    .map(|tools| tools.iter().cloned().collect()),
+            );
             scoped_host.mcp_server_scope_override = mcp;
         } else if self.database.is_digital_colleague_run(run)? {
-            let (tools, mcp) = super::effective_conversation_delegation_scope(&self.database, &binding.conversation_id)?;
+            let (tools, mcp) = super::effective_conversation_delegation_scope(
+                &self.database,
+                &binding.conversation_id,
+            )?;
             scoped_host.tool_allowlist_override = tools;
             scoped_host.mcp_server_scope_override = mcp;
         }
@@ -1530,48 +3307,95 @@ impl RuntimeHost {
         // D1-4: re-read Run status and session/generation AFTER taking the Run
         // lease. A cancel that landed between the pre-lease read (:1060) and the
         // lease must not be adopted with the stale pre-cancel values.
-        let mapping = self.database.get_runtime_session(&binding.conversation_id)?.ok_or("native recovery session is missing")?;
-        let (status, recorded): (String, Option<String>) = self.database.with_connection(|connection| connection.query_row(
-            "SELECT status,runtime_session_id FROM runs WHERE id=?1", [run], |row| Ok((row.get(0)?,row.get(1)?)),
-        ))?;
-        if status != "running" || !mapping.is_native() || mapping.context_generation < 1
-            || recorded.as_deref() != Some(mapping.runtime_session_id.as_str()) {
+        let mapping = self
+            .database
+            .get_runtime_session(&binding.conversation_id)?
+            .ok_or("native recovery session is missing")?;
+        let (status, recorded): (String, Option<String>) =
+            self.database.with_connection(|connection| {
+                connection.query_row(
+                    "SELECT status,runtime_session_id FROM runs WHERE id=?1",
+                    [run],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })?;
+        if status != "running"
+            || !mapping.is_native()
+            || mapping.context_generation < 1
+            || recorded.as_deref() != Some(mapping.runtime_session_id.as_str())
+        {
             return Err("native recovery cannot adopt a terminal Run or a retired session".into());
         }
         let (remove_session, session_lease) = {
-            let mut state = self.state.lock().map_err(|_| "runtime state lock is poisoned")?;
-            if state.shutting_down || state.native_run_leases.contains_key(run)
-                || state.pending_approvals.lock().map_err(|_| "approval map is poisoned")?.values().any(|pending| pending.run_id == run) {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "runtime state lock is poisoned")?;
+            if state.shutting_down
+                || state.native_run_leases.contains_key(run)
+                || state
+                    .pending_approvals
+                    .lock()
+                    .map_err(|_| "approval map is poisoned")?
+                    .values()
+                    .any(|pending| pending.run_id == run)
+            {
                 return Err("native recovery cannot replace a live approval owner".into());
             }
-            let worker = state.worker.as_mut().ok_or("native recovery worker is unavailable")?;
-            let remove_session = worker.sessions.by_conversation(&binding.conversation_id).is_none();
-            let session_lease = if worker.session_leases.contains_key(&binding.conversation_id) { None } else {
-                Some(KernelRunLock::acquire(&self.sessions_dir, &format!("native-session:{}", binding.conversation_id))?)
+            let worker = state
+                .worker
+                .as_mut()
+                .ok_or("native recovery worker is unavailable")?;
+            let remove_session = worker
+                .sessions
+                .by_conversation(&binding.conversation_id)
+                .is_none();
+            let session_lease = if worker.session_leases.contains_key(&binding.conversation_id) {
+                None
+            } else {
+                Some(KernelRunLock::acquire(
+                    &self.sessions_dir,
+                    &format!("native-session:{}", binding.conversation_id),
+                )?)
             };
             worker.sessions.reserve_waiting(
                 &binding.conversation_id,
                 &mapping.runtime_session_id,
                 mapping.context_generation,
                 run,
-                companion_slot.as_ref().map(|(id, background)| (id.as_str(), *background)),
+                companion_slot
+                    .as_ref()
+                    .map(|(id, background)| (id.as_str(), *background)),
             )?;
             if let Err(error) = state.cancellation.register_run(run) {
                 let worker = state.worker.as_mut().unwrap();
                 worker.sessions.finish(run);
-                if remove_session { let _ = worker.sessions.remove(&binding.conversation_id); }
+                if remove_session {
+                    let _ = worker.sessions.remove(&binding.conversation_id);
+                }
                 return Err(error);
             }
             (remove_session, session_lease)
         };
-        let scope = NativeApprovalRecoveryScope { host:scoped_host,run:run.to_owned(),conversation:binding.conversation_id,
-            remove_session,_run_lease:run_lease,_session_lease:session_lease };
-        SidecarExecutionWait { state:self.state.clone(),run_id:run.to_owned() }.resume()?;
+        let scope = NativeApprovalRecoveryScope {
+            host: scoped_host,
+            run: run.to_owned(),
+            conversation: binding.conversation_id,
+            remove_session,
+            _run_lease: run_lease,
+            _session_lease: session_lease,
+        };
+        SidecarExecutionWait {
+            state: self.state.clone(),
+            run_id: run.to_owned(),
+        }
+        .resume()?;
         Ok(scope)
     }
 
     pub(crate) fn retire_native_approval_commands(&self) -> Result<usize, String> {
-        self.database.supersede_pending_native_approval_commands(crate::database::now_ms())
+        self.database
+            .supersede_pending_native_approval_commands(crate::database::now_ms())
     }
 
     pub(crate) fn recover_native_approvals_detached(&self) -> Result<(), String> {
@@ -1586,18 +3410,29 @@ impl RuntimeHost {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(rows)
         })?;
-        if approvals.is_empty() { return Ok(()); }
+        if approvals.is_empty() {
+            return Ok(());
+        }
         let host = self.clone();
         std::thread::spawn(move || {
             for (approval, conversation) in approvals {
                 let result = (|| -> Result<(), String> {
                     host.ensure_worker(&conversation)?;
-                    let stdin = host.state.lock().map_err(|_| "runtime state lock is poisoned")?
-                        .worker.as_ref().ok_or("native recovery worker is missing")?.stdin.clone();
+                    let stdin = host
+                        .state
+                        .lock()
+                        .map_err(|_| "runtime state lock is poisoned")?
+                        .worker
+                        .as_ref()
+                        .ok_or("native recovery worker is missing")?
+                        .stdin
+                        .clone();
                     super::native_tool_batch::recover_native_approval(&host, &stdin, &approval)?;
                     Ok(())
                 })();
-                if let Err(error) = result { eprintln!("native approval recovery failed for {approval}: {error}"); }
+                if let Err(error) = result {
+                    eprintln!("native approval recovery failed for {approval}: {error}");
+                }
             }
         });
         Ok(())

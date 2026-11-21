@@ -146,7 +146,11 @@ pub(crate) fn inspect(
     state: &AppState,
     request: &ArtifactRequest,
 ) -> Result<ArtifactInspectResponse, ArtifactGatewayError> {
-    let record = load_record(&state.database, &request.conversation_id, &request.artifact_id)?;
+    let record = load_record(
+        &state.database,
+        &request.conversation_id,
+        &request.artifact_id,
+    )?;
     let roots = authorized_roots(&state.database, &state.data_dir, &request.conversation_id)?;
     let path = validate_record(&record, &roots)?;
     Ok(inspect_record(&record, &path))
@@ -182,7 +186,11 @@ pub(crate) fn action(
         ));
     }
 
-    let record = load_record(&state.database, &request.conversation_id, &request.artifact_id)?;
+    let record = load_record(
+        &state.database,
+        &request.conversation_id,
+        &request.artifact_id,
+    )?;
     let roots = authorized_roots(&state.database, &state.data_dir, &request.conversation_id)?;
     let path = validate_record(&record, &roots)?;
     let inspected = inspect_record(&record, &path);
@@ -355,8 +363,14 @@ fn authorized_roots(
         }
     }
 
-    if let Some(root)=crate::runtime_host::attachment_compute::authorized_artifact_root(&data_dir.join("runtime-sessions"),conversation_id)
-        .map_err(|e|ArtifactGatewayError::new("artifact.path_denied",e,false))? { roots.push(root); }
+    if let Some(root) = crate::runtime_host::attachment_compute::authorized_artifact_root(
+        &data_dir.join("runtime-sessions"),
+        conversation_id,
+    )
+    .map_err(|e| ArtifactGatewayError::new("artifact.path_denied", e, false))?
+    {
+        roots.push(root);
+    }
     // Host-private rendered previews. They are opened through the result's own
     // preview entry rather than listed as deliverables, so the gateway must be
     // able to resolve them — but only inside this conversation's own preview
@@ -900,17 +914,19 @@ fn open_with_application(application_id: &str, path: &Path) -> Result<(), Artifa
                 false,
             )
         })?;
-    fox_agent_backend::console::HideConsole::hide_console(&mut Command::new(&application.executable))
-        .arg(path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| {
-            ArtifactGatewayError::new(
-                "artifact.open_with_failed",
-                format!("无法使用 {} 打开文件：{error}", application.label),
-                true,
-            )
-        })
+    fox_agent_backend::console::HideConsole::hide_console(&mut Command::new(
+        &application.executable,
+    ))
+    .arg(path)
+    .spawn()
+    .map(|_| ())
+    .map_err(|error| {
+        ArtifactGatewayError::new(
+            "artifact.open_with_failed",
+            format!("无法使用 {} 打开文件：{error}", application.label),
+            true,
+        )
+    })
 }
 
 #[cfg(not(windows))]
@@ -924,18 +940,19 @@ fn open_with_application(_application_id: &str, _path: &Path) -> Result<(), Arti
 
 #[cfg(windows)]
 fn copy_path_to_clipboard(path: &Path) -> Result<(), ArtifactGatewayError> {
-    let mut child = fox_agent_backend::console::HideConsole::hide_console(&mut Command::new("clip.exe"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            ArtifactGatewayError::new(
-                "artifact.copy_path_failed",
-                format!("无法调用系统剪贴板：{error}"),
-                true,
-            )
-        })?;
+    let mut child =
+        fox_agent_backend::console::HideConsole::hide_console(&mut Command::new("clip.exe"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| {
+                ArtifactGatewayError::new(
+                    "artifact.copy_path_failed",
+                    format!("无法调用系统剪贴板：{error}"),
+                    true,
+                )
+            })?;
     let mut stdin = child.stdin.take().ok_or_else(|| {
         ArtifactGatewayError::new("artifact.copy_path_failed", "无法写入系统剪贴板", true)
     })?;

@@ -130,7 +130,6 @@ pub(crate) struct KernelHostCommand {
 }
 
 impl Database {
-
     /// Kernel already owns the execution clock (approval waits do not consume
     /// that clock). Keep the managed cumulative quotas at final resource admission.
     ///
@@ -290,7 +289,10 @@ impl Database {
     /// F5: a native approval never belongs in the Kernel queue. Retire any
     /// command written by an older build, but leave the approval itself
     /// pending so the user can decide it again through the native route.
-    pub(crate) fn supersede_pending_native_approval_commands(&self, now: i64) -> Result<usize, String> {
+    pub(crate) fn supersede_pending_native_approval_commands(
+        &self,
+        now: i64,
+    ) -> Result<usize, String> {
         self.with_connection(|connection| connection.execute(
             "UPDATE kernel_host_commands
              SET status='superseded',completed_at=?1,
@@ -366,7 +368,6 @@ impl Database {
             rows
         })
     }
-
 }
 
 pub(super) fn freeze_host_scope_in_tx(
@@ -433,8 +434,8 @@ mod resource_admission_tests {
             "structured_data",
             "git_read",
             "memory_search",
-        "note_search",
-        "note_read",
+            "note_search",
+            "note_read",
             "list_knowledge_bases",
             "search_knowledge",
             "read_knowledge_document",

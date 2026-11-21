@@ -144,8 +144,8 @@ export function AgentBackendSettingsSection({ client, onOpenModelSettings }: { c
   const effective = isAgentBackendId(preferences?.effectiveBackend) ? preferences.effectiveBackend : 'fox'
   const unavailableReasons = rows.filter((row) => row.disabled && row.reason)
   return (
-    <SettingsGroup title="Agent 驱动" className="fox-agent-backend-settings" aside={<span>模型服务、登录配置和启用开关在「模型与 Agent」中管理</span>}>
-      {onOpenModelSettings && <SettingsRow title="模型与 Agent" description="选择服务、导入登录配置或验证 Agent。"><Button variant="ghost" onClick={onOpenModelSettings}>前往配置</Button></SettingsRow>}
+    <SettingsGroup title="新对话" className="fox-agent-backend-settings" aside={<span>模型服务在「模型」页管理，外部 Agent 在下方配置</span>}>
+      {onOpenModelSettings && <SettingsRow title="模型服务" description="添加模型、选择默认模型或检查模型连接。"><Button variant="ghost" onClick={onOpenModelSettings}>前往模型设置</Button></SettingsRow>}
       <SettingsRow title="新会话使用的 Agent" description="默认 Fox；启用的外部 Agent 也可以选。会话创建后不能更换 Agent。">
         <Select
           value={selected}

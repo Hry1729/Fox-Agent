@@ -41,7 +41,11 @@ pub(crate) struct ChartSpec {
     title: String,
     labels: Vec<String>,
     series: Vec<Series>,
-    #[serde(default, rename = "shareBasis", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "shareBasis",
+        skip_serializing_if = "Option::is_none"
+    )]
     share_basis: Option<ShareBasis>,
 }
 #[derive(Clone, Deserialize, Serialize)]
@@ -151,32 +155,59 @@ fn chart_validate(chart: &ChartSpec) -> Result<(), String> {
                 "pie charts need one series, up to 12 labels and nonnegative values",
             ));
         }
-        let overall_remainder=chart.share_basis.as_ref().is_some_and(|basis|basis.scope=="overall" && basis.total.is_some_and(|total|total.is_finite() && total>0.0));
+        let overall_remainder = chart.share_basis.as_ref().is_some_and(|basis| {
+            basis.scope == "overall"
+                && basis
+                    .total
+                    .is_some_and(|total| total.is_finite() && total > 0.0)
+        });
         if chart.series[0].values.iter().sum::<f64>() <= 0.0 && !overall_remainder {
             return Err(invalid("pie total must be positive"));
         }
     }
     if let Some(basis) = &chart.share_basis {
         if chart.kind != "pie" || !matches!(basis.scope.as_str(), "subset" | "overall") {
-            return Err(invalid("shareBasis is supported only for pie charts with subset or overall scope"));
+            return Err(invalid(
+                "shareBasis is supported only for pie charts with subset or overall scope",
+            ));
         }
-        if let Some(label) = &basis.other_label { text_bound(label, 96)?; if label.trim().is_empty() { return Err(invalid("otherLabel must not be empty")); } }
+        if let Some(label) = &basis.other_label {
+            text_bound(label, 96)?;
+            if label.trim().is_empty() {
+                return Err(invalid("otherLabel must not be empty"));
+            }
+        }
         if let Some(source) = &basis.source {
             for value in [&source.input_id, &source.sheet, &source.total_column] {
                 text_bound(value, 256)?;
-                if value.trim().is_empty() { return Err(invalid("shareBasis source identifiers must not be empty")); }
+                if value.trim().is_empty() {
+                    return Err(invalid("shareBasis source identifiers must not be empty"));
+                }
             }
-            if let Some(label) = &source.label_column { text_bound(label, 256)?; if label.trim().is_empty() {return Err(invalid("source labelColumn must not be empty"));} }
+            if let Some(label) = &source.label_column {
+                text_bound(label, 256)?;
+                if label.trim().is_empty() {
+                    return Err(invalid("source labelColumn must not be empty"));
+                }
+            }
         }
         let subtotal = chart.series[0].values.iter().sum::<f64>();
-        if !subtotal.is_finite() {return Err(invalid("pie sum is not finite"));}
+        if !subtotal.is_finite() {
+            return Err(invalid("pie sum is not finite"));
+        }
         if let Some(total) = basis.total {
-            if !total.is_finite() || total <= 0.0 {return Err(invalid("shareBasis total must be finite and positive"));}
+            if !total.is_finite() || total <= 0.0 {
+                return Err(invalid("shareBasis total must be finite and positive"));
+            }
             let tolerance = total.abs() * (32.0 * f64::EPSILON);
-            if subtotal > total + tolerance || basis.scope == "subset" && (subtotal - total).abs() > tolerance {
+            if subtotal > total + tolerance
+                || basis.scope == "subset" && (subtotal - total).abs() > tolerance
+            {
                 return Err(invalid("shareBasis total differs from its declared scope"));
             }
-        } else if basis.scope == "overall" {return Err(invalid("overall shareBasis requires an explicit total"));}
+        } else if basis.scope == "overall" {
+            return Err(invalid("overall shareBasis requires an explicit total"));
+        }
     }
     Ok(())
 }
@@ -185,34 +216,55 @@ fn chart_validate(chart: &ChartSpec) -> Result<(), String> {
 fn prepare_chart(mut chart: ChartSpec) -> Result<(ChartSpec, Value), String> {
     chart_validate(&chart)?;
     let original = chart.clone();
-    let subtotal = chart.series.first().map(|series|series.values.iter().sum::<f64>()).unwrap_or(0.0);
+    let subtotal = chart
+        .series
+        .first()
+        .map(|series| series.values.iter().sum::<f64>())
+        .unwrap_or(0.0);
     if let Some(basis) = &chart.share_basis {
         if basis.scope == "overall" {
-            let total = basis.total.ok_or_else(||invalid("overall shareBasis requires total"))?;
+            let total = basis
+                .total
+                .ok_or_else(|| invalid("overall shareBasis requires total"))?;
             let remaining = total - subtotal;
-            let tolerance=total.abs() * (32.0 * f64::EPSILON);
-            if remaining > tolerance || subtotal==0.0 && remaining>0.0 {
-                if chart.labels.len() >= 12 {return Err(invalid("overall pie needs room for its other category within 12 labels"));}
-                let other = basis.other_label.clone().unwrap_or_else(||"其他".into());
-                if chart.labels.iter().any(|label|label==&other) {return Err(invalid("otherLabel conflicts with an existing label"));}
+            let tolerance = total.abs() * (32.0 * f64::EPSILON);
+            if remaining > tolerance || subtotal == 0.0 && remaining > 0.0 {
+                if chart.labels.len() >= 12 {
+                    return Err(invalid(
+                        "overall pie needs room for its other category within 12 labels",
+                    ));
+                }
+                let other = basis.other_label.clone().unwrap_or_else(|| "其他".into());
+                if chart.labels.iter().any(|label| label == &other) {
+                    return Err(invalid("otherLabel conflicts with an existing label"));
+                }
                 chart.labels.push(other);
                 chart.series[0].values.push(remaining);
             }
         }
     }
     chart_validate(&chart)?;
-    if chart.kind=="pie" && (!chart.series[0].values.iter().sum::<f64>().is_finite() || chart.series[0].values.iter().sum::<f64>()<=0.0) {
+    if chart.kind == "pie"
+        && (!chart.series[0].values.iter().sum::<f64>().is_finite()
+            || chart.series[0].values.iter().sum::<f64>() <= 0.0)
+    {
         return Err(invalid("prepared pie needs a finite positive rendered sum"));
     }
-    let share = original.share_basis.as_ref().map(|basis|json!(basis)).or_else(||(chart.kind=="pie").then(||json!({"scope":"subset","total":subtotal})));
+    let share = original
+        .share_basis
+        .as_ref()
+        .map(|basis| json!(basis))
+        .or_else(|| (chart.kind == "pie").then(|| json!({"scope":"subset","total":subtotal})));
     let mut contract = json!({"type":original.kind,"title":original.title,"labels":original.labels,
         "series":original.series,"shareBasis":share,"sourceVerified":false});
     if chart.labels != original.labels {
-        contract["renderedLabels"]=json!(chart.labels);
-        contract["renderedSeries"]=json!(chart.series);
+        contract["renderedLabels"] = json!(chart.labels);
+        contract["renderedSeries"] = json!(chart.series);
     }
-    if chart.kind=="pie" {contract["renderedTotal"]=json!(chart.series[0].values.iter().sum::<f64>());}
-    Ok((chart,contract))
+    if chart.kind == "pie" {
+        contract["renderedTotal"] = json!(chart.series[0].values.iter().sum::<f64>());
+    }
+    Ok((chart, contract))
 }
 
 struct SystemFont {
@@ -220,8 +272,16 @@ struct SystemFont {
     name: String,
     digest: String,
 }
-fn embedding_allowed(permissions: Option<ttf_parser::Permissions>, subset: bool, outline: bool) -> bool {
-    matches!(permissions, Some(ttf_parser::Permissions::Installable | ttf_parser::Permissions::Editable)) && subset && outline
+fn embedding_allowed(
+    permissions: Option<ttf_parser::Permissions>,
+    subset: bool,
+    outline: bool,
+) -> bool {
+    matches!(
+        permissions,
+        Some(ttf_parser::Permissions::Installable | ttf_parser::Permissions::Editable)
+    ) && subset
+        && outline
 }
 fn system_font() -> Result<SystemFont, String> {
     // Fixed OS candidates only. No model-provided path and no redistribution.
@@ -264,8 +324,11 @@ fn system_font() -> Result<SystemFont, String> {
         let Ok(face) = ttf_parser::Face::parse(&bytes, 0) else {
             continue;
         };
-        if !embedding_allowed(face.permissions(), face.is_subsetting_allowed(), face.is_outline_embedding_allowed())
-            || face.glyph_index('中').is_none()
+        if !embedding_allowed(
+            face.permissions(),
+            face.is_subsetting_allowed(),
+            face.is_outline_embedding_allowed(),
+        ) || face.glyph_index('中').is_none()
         {
             continue;
         }
@@ -518,17 +581,20 @@ fn xml(text: &str) -> String {
 fn svg_color(color: [u8; 3]) -> String {
     format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2])
 }
-pub(crate) struct ChartOutput { pub bytes: Vec<u8>, pub data_contract: Value }
+pub(crate) struct ChartOutput {
+    pub bytes: Vec<u8>,
+    pub data_contract: Value,
+}
 #[cfg(test)]
 pub(crate) fn render_chart(value: &Value) -> Result<Vec<u8>, String> {
-    render_chart_output(value).map(|output|output.bytes)
+    render_chart_output(value).map(|output| output.bytes)
 }
 pub(crate) fn render_chart_output(value: &Value) -> Result<ChartOutput, String> {
     if crate::canonical_json::to_vec(value).map_err(invalid)?.len() > MAX_SPEC_BYTES {
         return Err(invalid("chart specification exceeds 512 KiB"));
     }
     let chart: ChartSpec = serde_json::from_value(value.clone()).map_err(invalid)?;
-    let (chart,contract)=prepare_chart(chart)?;
+    let (chart, contract) = prepare_chart(chart)?;
     let mut svg=String::from("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"800\" height=\"480\" viewBox=\"0 0 800 480\"><rect width=\"800\" height=\"480\" fill=\"white\"/>");
     for draw in chart_draws(&chart, 20.0, 10.0, 760.0, 450.0) {
         match draw {
@@ -539,7 +605,10 @@ pub(crate) fn render_chart_output(value: &Value) -> Result<ChartOutput, String> 
         }
     }
     svg.push_str("</svg>");
-    Ok(ChartOutput {bytes:svg.into_bytes(),data_contract:json!({"schemaVersion":1,"kind":"chart","sourceVerified":false,"charts":[contract]})})
+    Ok(ChartOutput {
+        bytes: svg.into_bytes(),
+        data_contract: json!({"schemaVersion":1,"kind":"chart","sourceVerified":false,"charts":[contract]}),
+    })
 }
 
 struct Layout<'a> {
@@ -727,7 +796,7 @@ pub(crate) fn render_pdf(
                 layout.y += 12.0;
             }
             Block::Chart { chart } => {
-                let (chart,contract)=prepare_chart(chart)?;
+                let (chart, contract) = prepare_chart(chart)?;
                 chart_contracts.push(contract);
                 chart_count += 1;
                 chart_values += chart.labels.len() * chart.series.len();
@@ -857,47 +926,77 @@ mod tests {
     // These cases are written for follow-up verification and are not run here.
     #[test]
     fn r3b_overall_pie_renders_remainder_and_keeps_source_unverified() {
-        let chart=json!({"type":"pie","title":"合成份额","labels":["A","B"],"series":[{"name":"count","values":[20,30]}],
+        let chart = json!({"type":"pie","title":"合成份额","labels":["A","B"],"series":[{"name":"count","values":[20,30]}],
             "shareBasis":{"scope":"overall","total":100,"otherLabel":"其余","source":{"inputId":"a","sheet":"Data","totalColumn":"Count","labelColumn":"Name"}}});
-        let output=render_chart_output(&chart).unwrap();let svg=String::from_utf8(output.bytes).unwrap();
+        let output = render_chart_output(&chart).unwrap();
+        let svg = String::from_utf8(output.bytes).unwrap();
         assert!(svg.contains("20.0%") && svg.contains("30.0%") && svg.contains("50.0%"));
-        assert_eq!(output.data_contract["charts"][0]["renderedLabels"],json!(["A","B","其余"]));
-        assert_eq!(output.data_contract["sourceVerified"],false);
-        assert_eq!(output.data_contract["charts"][0]["shareBasis"]["source"]["inputId"],"a");
+        assert_eq!(
+            output.data_contract["charts"][0]["renderedLabels"],
+            json!(["A", "B", "其余"])
+        );
+        assert_eq!(output.data_contract["sourceVerified"], false);
+        assert_eq!(
+            output.data_contract["charts"][0]["shareBasis"]["source"]["inputId"],
+            "a"
+        );
     }
     #[test]
     fn r3b_default_subset_is_compatible_and_invalid_totals_are_rejected() {
-        let chart=json!({"type":"pie","title":"subset","labels":["A","B"],"series":[{"name":"count","values":[20,30]}]});
-        let svg=String::from_utf8(render_chart(&chart).unwrap()).unwrap();
+        let chart = json!({"type":"pie","title":"subset","labels":["A","B"],"series":[{"name":"count","values":[20,30]}]});
+        let svg = String::from_utf8(render_chart(&chart).unwrap()).unwrap();
         assert!(svg.contains("40.0%") && svg.contains("60.0%"));
-        for basis in [json!({"scope":"overall"}),json!({"scope":"overall","total":40}),json!({"scope":"overall","total":-1}),json!({"scope":"subset","total":100})] {
-            let mut invalid=chart.clone();invalid["shareBasis"]=basis;assert!(render_chart(&invalid).is_err());
+        for basis in [
+            json!({"scope":"overall"}),
+            json!({"scope":"overall","total":40}),
+            json!({"scope":"overall","total":-1}),
+            json!({"scope":"subset","total":100}),
+        ] {
+            let mut invalid = chart.clone();
+            invalid["shareBasis"] = basis;
+            assert!(render_chart(&invalid).is_err());
         }
     }
     #[test]
     fn r3b_zero_subset_can_render_an_explicit_overall_remainder() {
-        let chart=json!({"type":"pie","title":"zero","labels":["A"],"series":[{"name":"count","values":[0]}],"shareBasis":{"scope":"overall","total":100}});
-        let output=render_chart_output(&chart).unwrap();
-        assert_eq!(output.data_contract["charts"][0]["renderedSeries"][0]["values"],json!([0.0,100.0]));
-        for value in [0.0,5e-11] {
-            let small=json!({"type":"pie","title":"small","labels":["A"],"series":[{"name":"count","values":[value]}],"shareBasis":{"scope":"overall","total":1e-10}});
-            let output=render_chart_output(&small).unwrap();
-            assert_eq!(output.data_contract["charts"][0]["renderedLabels"],json!(["A","其他"]));
-            assert!(output.data_contract["charts"][0]["renderedTotal"].as_f64().unwrap()>0.0);
-            let svg=String::from_utf8(output.bytes).unwrap();assert!(!svg.contains("NaN"));
-            if value>0.0 {assert!(svg.contains("50.0%"));}
+        let chart = json!({"type":"pie","title":"zero","labels":["A"],"series":[{"name":"count","values":[0]}],"shareBasis":{"scope":"overall","total":100}});
+        let output = render_chart_output(&chart).unwrap();
+        assert_eq!(
+            output.data_contract["charts"][0]["renderedSeries"][0]["values"],
+            json!([0.0, 100.0])
+        );
+        for value in [0.0, 5e-11] {
+            let small = json!({"type":"pie","title":"small","labels":["A"],"series":[{"name":"count","values":[value]}],"shareBasis":{"scope":"overall","total":1e-10}});
+            let output = render_chart_output(&small).unwrap();
+            assert_eq!(
+                output.data_contract["charts"][0]["renderedLabels"],
+                json!(["A", "其他"])
+            );
+            assert!(
+                output.data_contract["charts"][0]["renderedTotal"]
+                    .as_f64()
+                    .unwrap()
+                    > 0.0
+            );
+            let svg = String::from_utf8(output.bytes).unwrap();
+            assert!(!svg.contains("NaN"));
+            if value > 0.0 {
+                assert!(svg.contains("50.0%"));
+            }
         }
-        let exceeds=json!({"type":"pie","title":"small","labels":["A"],"series":[{"name":"count","values":[1.5e-10]}],"shareBasis":{"scope":"overall","total":1e-10}});
+        let exceeds = json!({"type":"pie","title":"small","labels":["A"],"series":[{"name":"count","values":[1.5e-10]}],"shareBasis":{"scope":"overall","total":1e-10}});
         assert!(render_chart(&exceeds).is_err());
     }
     #[test]
     fn system_font_embedding_refuses_unknown_restricted_preview_bitmap_and_no_subset() {
         use ttf_parser::Permissions::*;
-        for permission in [None,Some(Restricted),Some(PreviewAndPrint)] {assert!(!embedding_allowed(permission,true,true));}
-        for permission in [Some(Editable),Some(Installable)] {
-            assert!(embedding_allowed(permission,true,true));
-            assert!(!embedding_allowed(permission,false,true));
-            assert!(!embedding_allowed(permission,true,false));
+        for permission in [None, Some(Restricted), Some(PreviewAndPrint)] {
+            assert!(!embedding_allowed(permission, true, true));
+        }
+        for permission in [Some(Editable), Some(Installable)] {
+            assert!(embedding_allowed(permission, true, true));
+            assert!(!embedding_allowed(permission, false, true));
+            assert!(!embedding_allowed(permission, true, false));
         }
     }
     #[test]

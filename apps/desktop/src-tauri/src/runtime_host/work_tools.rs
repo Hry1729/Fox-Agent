@@ -353,7 +353,8 @@ fn execute_with_optional_host_tool_call_id(
                     json!({ "tool": tool }),
                 )
             })?;
-            let request = parse_graph_node_start_request(input).map_err(WorkToolError::into_rejected)?;
+            let request =
+                parse_graph_node_start_request(input).map_err(WorkToolError::into_rejected)?;
             let started = database
                 .start_ready_read_only_graph_node(StartReadyReadOnlyGraphNodeInput {
                     goal_id: request.goal_id,
@@ -393,7 +394,8 @@ fn execute_with_optional_host_tool_call_id(
                     json!({ "tool": tool }),
                 )
             })?;
-            let request = parse_graph_node_finish_request(input).map_err(WorkToolError::into_rejected)?;
+            let request =
+                parse_graph_node_finish_request(input).map_err(WorkToolError::into_rejected)?;
             let finished = database
                 .finish_read_only_graph_node(FinishReadOnlyGraphNodeInput {
                     goal_id: request.goal_id,
@@ -445,7 +447,8 @@ fn execute_with_optional_host_tool_call_id(
                     json!({ "tool": tool }),
                 )
             })?;
-            let request = parse_graph_node_cancel_request(input).map_err(WorkToolError::into_rejected)?;
+            let request =
+                parse_graph_node_cancel_request(input).map_err(WorkToolError::into_rejected)?;
             let cancellation = database
                 .create_graph_node_cancel_intent(
                     crate::database::CreateGraphNodeCancelIntentInput {
@@ -488,7 +491,8 @@ fn execute_with_optional_host_tool_call_id(
                     json!({ "tool": tool }),
                 )
             })?;
-            let request = parse_graph_node_review_request(input).map_err(WorkToolError::into_rejected)?;
+            let request =
+                parse_graph_node_review_request(input).map_err(WorkToolError::into_rejected)?;
             let review = database
                 .create_graph_node_review_request(CreateGraphNodeReviewRequestInput {
                     goal_id: request.goal_id,
@@ -528,7 +532,8 @@ fn execute_with_optional_host_tool_call_id(
                     json!({ "tool": tool }),
                 )
             })?;
-            let request = parse_graph_acceptance_request(input).map_err(WorkToolError::into_rejected)?;
+            let request =
+                parse_graph_acceptance_request(input).map_err(WorkToolError::into_rejected)?;
             let acceptance = database
                 .create_read_only_graph_acceptance(CreateReadOnlyGraphAcceptanceInput {
                     goal_id: request.goal_id,
@@ -730,14 +735,17 @@ fn execute_with_optional_host_tool_call_id(
             let goal_id = required_string(input, "goalId")?;
             let goal = require_goal(database, conversation_id, &goal_id)?;
             if goal.status != GoalStatus::Active {
-                return Err(rejected_text("tasks can only be added after Fox Host activates the goal"));
+                return Err(rejected_text(
+                    "tasks can only be added after Fox Host activates the goal",
+                ));
             }
             require_no_pending_plan(database, conversation_id, &goal_id)?;
             let submitted_tasks = input
                 .get("tasks")
                 .and_then(Value::as_array)
                 .filter(|tasks| !tasks.is_empty())
-                .ok_or_else(|| "tasks must be a non-empty array".to_owned()).map_err(rejected_text)?;
+                .ok_or_else(|| "tasks must be a non-empty array".to_owned())
+                .map_err(rejected_text)?;
             if submitted_tasks.len() > 64 {
                 return Err(rejected_text("tasks cannot contain more than 64 items"));
             }
@@ -762,9 +770,8 @@ fn execute_with_optional_host_tool_call_id(
                             .get("ordinal")
                             .and_then(Value::as_i64)
                             .filter(|ordinal| *ordinal >= 0)
-                            .ok_or_else(|| {
-                                "task ordinal must be a non-negative integer".to_owned()
-                            }).map_err(rejected_text)?,
+                            .ok_or_else(|| "task ordinal must be a non-negative integer".to_owned())
+                            .map_err(rejected_text)?,
                         title: required_string(task, "title")?,
                         detail: optional_string(task, "detail")?,
                     })
@@ -798,14 +805,17 @@ fn execute_with_optional_host_tool_call_id(
             let (task, goal_id) = require_task(database, conversation_id, &task_id)?;
             let goal = require_goal(database, conversation_id, &goal_id)?;
             if goal.status != GoalStatus::Active {
-                return Err(rejected_text("the goal is paused; resume it before updating tasks"));
+                return Err(rejected_text(
+                    "the goal is paused; resume it before updating tasks",
+                ));
             }
             require_no_pending_plan(database, conversation_id, &goal_id)?;
             let status = parse_task_status(
                 input
                     .get("status")
                     .and_then(Value::as_str)
-                    .ok_or_else(|| "status is required".to_owned()).map_err(rejected_text)?,
+                    .ok_or_else(|| "status is required".to_owned())
+                    .map_err(rejected_text)?,
             )?;
             let policy = database
                 .task_validation_policy(&task.id)
@@ -857,7 +867,9 @@ fn execute_with_optional_host_tool_call_id(
             let (_, goal_id) = require_task(database, conversation_id, &task_id)?;
             let goal = require_goal(database, conversation_id, &goal_id)?;
             if goal.status != GoalStatus::Active {
-                return Err(rejected_text("the goal is paused; resume it before starting an Attempt"));
+                return Err(rejected_text(
+                    "the goal is paused; resume it before starting an Attempt",
+                ));
             }
             require_no_pending_plan(database, conversation_id, &goal_id)?;
             let result = database
@@ -891,7 +903,9 @@ fn execute_with_optional_host_tool_call_id(
             let (_, goal_id) = require_task(database, conversation_id, &task_id)?;
             let goal = require_goal(database, conversation_id, &goal_id)?;
             if goal.status != GoalStatus::Active {
-                return Err(rejected_text("the goal is paused; resume it before starting a repair"));
+                return Err(rejected_text(
+                    "the goal is paused; resume it before starting a repair",
+                ));
             }
             require_no_pending_plan(database, conversation_id, &goal_id)?;
             let finding_ids = required_string_array(input, "findingIds", 32)?;
@@ -951,7 +965,9 @@ fn execute_with_optional_host_tool_call_id(
             let (_, goal_id) = require_task(database, conversation_id, &task_id)?;
             let goal = require_goal(database, conversation_id, &goal_id)?;
             if goal.status != GoalStatus::Active {
-                return Err(rejected_text("the goal is paused; resume it before finishing an Attempt"));
+                return Err(rejected_text(
+                    "the goal is paused; resume it before finishing an Attempt",
+                ));
             }
             require_no_pending_plan(database, conversation_id, &goal_id)?;
             let attempt_status = parse_attempt_status(&required_string(input, "status")?)?;
@@ -965,7 +981,8 @@ fn execute_with_optional_host_tool_call_id(
                         .get("expectedAttemptVersion")
                         .and_then(Value::as_i64)
                         .filter(|version| *version >= 1)
-                        .ok_or_else(|| "expectedAttemptVersion must be at least 1".to_owned()).map_err(rejected_text)?,
+                        .ok_or_else(|| "expectedAttemptVersion must be at least 1".to_owned())
+                        .map_err(rejected_text)?,
                     status: attempt_status,
                     failure_reason: optional_string(input, "failureReason")?,
                 })
@@ -989,21 +1006,25 @@ fn execute_with_optional_host_tool_call_id(
             let (_, goal_id) = require_task(database, conversation_id, &task_id)?;
             let goal = require_goal(database, conversation_id, &goal_id)?;
             if goal.status != GoalStatus::Active {
-                return Err(rejected_text("the goal is paused; resume it before adding evidence"));
+                return Err(rejected_text(
+                    "the goal is paused; resume it before adding evidence",
+                ));
             }
             require_no_pending_plan(database, conversation_id, &goal_id)?;
             let evidence_type: EvidenceType = serde_json::from_value(
                 input
                     .get("evidenceType")
                     .cloned()
-                    .ok_or_else(|| "evidenceType is required".to_owned()).map_err(rejected_text)?,
+                    .ok_or_else(|| "evidenceType is required".to_owned())
+                    .map_err(rejected_text)?,
             )
             .map_err(|_| rejected_text("unsupported evidenceType"))?;
             let ref_kind: EvidenceReferenceKind = serde_json::from_value(
                 input
                     .get("refKind")
                     .cloned()
-                    .ok_or_else(|| "refKind is required".to_owned()).map_err(rejected_text)?,
+                    .ok_or_else(|| "refKind is required".to_owned())
+                    .map_err(rejected_text)?,
             )
             .map_err(|_| rejected_text("unsupported refKind"))?;
             let policy = database
@@ -1059,11 +1080,14 @@ fn execute_with_optional_host_tool_call_id(
                 .task_evidence()
                 .get(&evidence_id)
                 .map_err(|error| error.to_string())?
-                .ok_or_else(|| format!("task evidence '{evidence_id}' was not found")).map_err(rejected_text)?;
+                .ok_or_else(|| format!("task evidence '{evidence_id}' was not found"))
+                .map_err(rejected_text)?;
             let (_, goal_id) = require_task(database, conversation_id, &evidence.task_id)?;
             let goal = require_goal(database, conversation_id, &goal_id)?;
             if goal.status != GoalStatus::Active {
-                return Err(rejected_text("the goal is paused; resume it before validating evidence"));
+                return Err(rejected_text(
+                    "the goal is paused; resume it before validating evidence",
+                ));
             }
             require_no_pending_plan(database, conversation_id, &goal_id)?;
             let status = database
@@ -1225,7 +1249,8 @@ fn execute_with_optional_host_tool_call_id(
             let existing = findings
                 .iter()
                 .find(|finding| finding.id == finding_id)
-                .ok_or_else(|| "review finding was not found in this conversation".to_owned()).map_err(rejected_text)?;
+                .ok_or_else(|| "review finding was not found in this conversation".to_owned())
+                .map_err(rejected_text)?;
             if ["critical", "high", "medium"].contains(&existing.severity.as_str()) {
                 let affected_tasks = if let Some(task_id) = existing.task_id.as_deref() {
                     vec![require_task(database, conversation_id, task_id)?.0]
@@ -2902,7 +2927,9 @@ fn required_version(input: &Value) -> Result<i64, InputRejection> {
         .get("expectedVersion")
         .and_then(Value::as_i64)
         .filter(|version| *version >= 1)
-        .ok_or_else(|| InputRejection("expectedVersion must be an integer of at least 1".to_owned()))
+        .ok_or_else(|| {
+            InputRejection("expectedVersion must be an integer of at least 1".to_owned())
+        })
 }
 
 fn required_string_array(
@@ -2916,7 +2943,9 @@ fn required_string_array(
         .filter(|values| !values.is_empty())
         .ok_or_else(|| InputRejection(format!("{key} must be a non-empty array")))?;
     if values.len() > limit {
-        return Err(InputRejection(format!("{key} cannot contain more than {limit} values")));
+        return Err(InputRejection(format!(
+            "{key} cannot contain more than {limit} values"
+        )));
     }
     let mut unique = HashSet::new();
     values
@@ -2945,7 +2974,9 @@ fn parse_attempt_status(value: &str) -> Result<TaskAttemptStatus, InputRejection
         "failed" => Ok(TaskAttemptStatus::Failed),
         "blocked" => Ok(TaskAttemptStatus::Blocked),
         "cancelled" => Ok(TaskAttemptStatus::Cancelled),
-        _ => Err(InputRejection(format!("unsupported terminal Attempt status: {value}"))),
+        _ => Err(InputRejection(format!(
+            "unsupported terminal Attempt status: {value}"
+        ))),
     }
 }
 
@@ -3401,7 +3432,8 @@ fn task_event_type(status: &WorkTaskStatus) -> Option<&'static str> {
 }
 
 fn tool_result(details: Value) -> Value {
-    let text = crate::canonical_json::to_string_pretty(&details).unwrap_or_else(|_| details.canonical_string());
+    let text = crate::canonical_json::to_string_pretty(&details)
+        .unwrap_or_else(|_| details.canonical_string());
     json!({
         "content": [{ "type": "text", "text": text }],
         "details": details,
@@ -3810,7 +3842,8 @@ mod tests {
             activated.result["details"]["graph"]["nodes"][1]["readiness"],
             "waiting"
         );
-        crate::canonical_json::to_string(&activated.result).expect("Graph WorkTool result serializes");
+        crate::canonical_json::to_string(&activated.result)
+            .expect("Graph WorkTool result serializes");
 
         let root_task_id = activated.result["details"]["graph"]["nodes"][0]["taskId"]
             .as_str()
@@ -5508,7 +5541,10 @@ mod phase_tests {
     use super::*;
 
     fn database_error() -> RepositoryError {
-        RepositoryError::Database { message: "disk I/O error".to_owned(), busy: false }
+        RepositoryError::Database {
+            message: "disk I/O error".to_owned(),
+            busy: false,
+        }
     }
 
     #[test]
@@ -5519,7 +5555,10 @@ mod phase_tests {
         let text = rejected_text("goalId is required");
         assert!(text.is_rejected_before_execution());
         assert_eq!(text.code, "work_tool.failed", "legacy code is unchanged");
-        assert_eq!(text.message, "goalId is required", "legacy text is unchanged");
+        assert_eq!(
+            text.message, "goalId is required",
+            "legacy text is unchanged"
+        );
         let input: WorkToolError = required_string(&json!({}), "goalId").unwrap_err().into();
         assert!(input.is_rejected_before_execution());
         assert_eq!(input.message, "goalId is required");
@@ -5530,28 +5569,50 @@ mod phase_tests {
         for error in [
             RepositoryError::MissingReference("tool call 'x' was not found".to_owned()),
             RepositoryError::InvalidReference("cannot reference".to_owned()),
-            RepositoryError::OptimisticLockFailed { id: "t".to_owned(), expected_version: 1 },
-            RepositoryError::NotFound { entity: "work task", id: "t".to_owned() },
+            RepositoryError::OptimisticLockFailed {
+                id: "t".to_owned(),
+                expected_version: 1,
+            },
+            RepositoryError::NotFound {
+                entity: "work task",
+                id: "t".to_owned(),
+            },
             RepositoryError::DuplicateEvidence,
         ] {
-            assert_eq!(repository_refusal_phase(&error), WorkToolErrorPhase::Rejected, "{error}");
+            assert_eq!(
+                repository_refusal_phase(&error),
+                WorkToolErrorPhase::Rejected,
+                "{error}"
+            );
         }
         for error in [
             database_error(),
-            RepositoryError::Database { message: "database is locked".to_owned(), busy: true },
+            RepositoryError::Database {
+                message: "database is locked".to_owned(),
+                busy: true,
+            },
             RepositoryError::SqliteBusyExhausted { attempts: 5 },
             RepositoryError::InvalidValidationPolicy("corrupt snapshot".to_owned()),
-            RepositoryError::ProjectionHashMismatch { expected: "a".to_owned(), actual: "b".to_owned() },
+            RepositoryError::ProjectionHashMismatch {
+                expected: "a".to_owned(),
+                actual: "b".to_owned(),
+            },
         ] {
-            assert_eq!(repository_refusal_phase(&error), WorkToolErrorPhase::Uncertain, "{error}");
+            assert_eq!(
+                repository_refusal_phase(&error),
+                WorkToolErrorPhase::Uncertain,
+                "{error}"
+            );
             assert!(!text_repository_write_error(error).is_rejected_before_execution());
         }
         assert!(!typed_repository_write_error(database_error()).is_rejected_before_execution());
-        assert!(typed_repository_write_error(RepositoryError::OptimisticLockFailed {
-            id: "t".to_owned(),
-            expected_version: 1,
-        })
-        .is_rejected_before_execution());
+        assert!(
+            typed_repository_write_error(RepositoryError::OptimisticLockFailed {
+                id: "t".to_owned(),
+                expected_version: 1,
+            })
+            .is_rejected_before_execution()
+        );
     }
 
     #[test]
@@ -5565,8 +5626,11 @@ mod phase_tests {
         assert!(!graph_node_cancel_repository_error(invalid()).is_rejected_before_execution());
         assert!(!graph_node_review_repository_error(invalid()).is_rejected_before_execution());
         assert!(!graph_acceptance_repository_error(invalid()).is_rejected_before_execution());
-        assert!(!graph_repository_work_tool_error("activation", invalid()).is_rejected_before_execution());
-        assert!(!repository_work_tool_error(invalid()).is_rejected_before_execution(),
-            "the shared mapper itself never decides the phase");
+        assert!(!graph_repository_work_tool_error("activation", invalid())
+            .is_rejected_before_execution());
+        assert!(
+            !repository_work_tool_error(invalid()).is_rejected_before_execution(),
+            "the shared mapper itself never decides the phase"
+        );
     }
 }

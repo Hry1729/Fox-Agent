@@ -19,7 +19,9 @@ pub(crate) const OWNERSHIP_MISSING: &str = "companion.background_ownership_missi
 /// search, artifact source jump) skip it. The task stays discoverable through
 /// `digital_colleagues`, and an unbound legacy colleague keeps its own chat.
 pub(crate) const ORDINARY_CHAT_FILTER: &str = " AND NOT EXISTS (SELECT 1 FROM digital_colleagues dc
-                        WHERE dc.conversation_id = c.id AND dc.companion_bound = 1)";
+                        WHERE dc.conversation_id = c.id AND dc.companion_bound = 1)
+                      AND NOT EXISTS (SELECT 1 FROM companion_coordination_threads t
+                        WHERE t.conversation_id = c.id)";
 
 /// The effective companion identity of a conversation or Run.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -135,6 +137,28 @@ fn resolve_root_conversation_on(
             background: false,
             colleague_id: None,
             report_conversation_id: None,
+        }));
+    }
+    let coordinated: Option<(String, String)> = connection
+        .query_row(
+            "SELECT t.recipient_companion_id, c.id
+             FROM companion_coordination_threads t
+             JOIN conversations c ON c.companion_id = t.recipient_companion_id
+             WHERE t.conversation_id = ?1",
+            [conversation_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if let Some((companion_id, report_conversation_id)) = coordinated {
+        ensure_executable_on(connection, &companion_id)?;
+        return Ok(Some(CompanionScope {
+            companion_id,
+            conversation_id: conversation_id.to_owned(),
+            is_child: false,
+            background: false,
+            colleague_id: None,
+            report_conversation_id: Some(report_conversation_id),
         }));
     }
     let Some(link) = background_link(connection, conversation_id)? else {
@@ -292,6 +316,8 @@ const COMPANION_CONVERSATIONS: &str = "WITH RECURSIVE owned(id) AS (
     UNION
     SELECT conversation_id FROM digital_colleagues WHERE companion_id = ?1 AND companion_bound = 1
     UNION
+    SELECT conversation_id FROM companion_coordination_threads WHERE recipient_companion_id = ?1
+    UNION
     SELECT c.id FROM conversations c JOIN owned p ON c.parent_conversation_id = p.id
     WHERE c.conversation_kind = 'child'
     UNION
@@ -329,7 +355,8 @@ pub(crate) fn background_conversations_on(
     let mut statement = connection
         .prepare(
             "SELECT conversation_id FROM digital_colleagues
-             WHERE companion_id = ?1 AND companion_bound = 1",
+             WHERE companion_id = ?1 AND companion_bound = 1
+             UNION SELECT conversation_id FROM companion_coordination_threads WHERE recipient_companion_id = ?1",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
@@ -446,15 +473,22 @@ impl Database {
         })
     }
 
-    pub(crate) fn companion_active_run_ids(&self, companion_id: &str) -> Result<Vec<String>, String> {
+    pub(crate) fn companion_active_run_ids(
+        &self,
+        companion_id: &str,
+    ) -> Result<Vec<String>, String> {
         self.with_connection(|connection| {
-            active_run_ids_on(connection, companion_id).map_err(rusqlite::Error::InvalidParameterName)
+            active_run_ids_on(connection, companion_id)
+                .map_err(rusqlite::Error::InvalidParameterName)
         })
     }
 
     /// D3: every conversation whose in-memory session owner the archive drain
     /// must wait for, including descendant sessions.
-    pub(crate) fn companion_session_conversations(&self, companion_id: &str) -> Result<Vec<String>, String> {
+    pub(crate) fn companion_session_conversations(
+        &self,
+        companion_id: &str,
+    ) -> Result<Vec<String>, String> {
         self.with_connection(|connection| {
             let mut statement =
                 connection.prepare(&format!("{COMPANION_CONVERSATIONS} SELECT id FROM owned"))?;

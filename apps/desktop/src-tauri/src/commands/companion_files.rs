@@ -48,9 +48,16 @@ fn file_error(error: ArtifactGatewayError) -> ApiResponse<()> {
 /// Attachments live in the host-private per-conversation directory. The same
 /// symlink / regular-file / canonical-root rules as the artifact gateway apply;
 /// a missing file is an explicit state, never a silent success.
-fn attachment_path(data_dir: &Path, record: &AttachmentRecord) -> Result<PathBuf, ArtifactGatewayError> {
+fn attachment_path(
+    data_dir: &Path,
+    record: &AttachmentRecord,
+) -> Result<PathBuf, ArtifactGatewayError> {
     let missing = || {
-        ArtifactGatewayError::new("companion.file_missing", "文件已不存在，可能已被移动或删除", false)
+        ArtifactGatewayError::new(
+            "companion.file_missing",
+            "文件已不存在，可能已被移动或删除",
+            false,
+        )
     };
     let root = data_dir
         .join("attachments")
@@ -83,9 +90,13 @@ pub(crate) fn companion_files_list(
 ) -> ApiResponse<CompanionFiles> {
     match state.database.companion_files_list(&request.companion_id) {
         Ok(entries) => {
-            let (provided, generated): (Vec<_>, Vec<_>) =
-                entries.into_iter().partition(|entry| entry.kind == "attachment");
-            ApiResponse::success(CompanionFiles { provided, generated })
+            let (provided, generated): (Vec<_>, Vec<_>) = entries
+                .into_iter()
+                .partition(|entry| entry.kind == "attachment");
+            ApiResponse::success(CompanionFiles {
+                provided,
+                generated,
+            })
         }
         Err(error) => ApiResponse::failure("companion.file_list_failed", error, true),
     }
@@ -96,10 +107,11 @@ pub(crate) fn companion_file_open(
     state: State<'_, AppState>,
     request: CompanionFileRequest,
 ) -> ApiResponse<()> {
-    let file = match state
-        .database
-        .companion_file_resolve(&request.companion_id, &request.kind, &request.file_id)
-    {
+    let file = match state.database.companion_file_resolve(
+        &request.companion_id,
+        &request.kind,
+        &request.file_id,
+    ) {
         Ok(file) => file,
         Err(error) => return ApiResponse::failure("companion.file_not_found", error, false),
     };
@@ -139,44 +151,50 @@ pub(crate) async fn companion_file_save(
 ) -> Result<ApiResponse<Option<PathBuf>>, String> {
     let database = state.database.clone();
     let data_dir = state.data_dir.clone();
-    let result: Result<Option<PathBuf>, ArtifactGatewayError> = tokio::task::spawn_blocking(move || {
-        let file = database
-            .companion_file_resolve(&request.companion_id, &request.kind, &request.file_id)
-            .map_err(|error| ArtifactGatewayError::new("companion.file_not_found", error, false))?;
-        let resolve = |file: &CompanionFile| -> Result<PathBuf, ArtifactGatewayError> {
-            match file {
-                CompanionFile::Attachment(record) => attachment_path(&data_dir, record),
-                CompanionFile::Artifact(record) => artifact_gateway::validated_path(
-                    &database,
-                    &data_dir,
-                    &record.conversation_id,
-                    &record.id,
-                ),
-            }
-        };
-        let source = resolve(&file)?;
-        #[cfg(windows)]
-        let destination = crate::commands::pick_save_file_windows(file.name())
-            .map_err(|error| ArtifactGatewayError::new("companion.export_failed", error, true))?;
-        #[cfg(not(windows))]
-        let destination: Option<PathBuf> = {
-            let _ = source;
-            return Err(ArtifactGatewayError::new(
-                "companion.export_failed",
-                "此平台尚无系统保存对话框",
-                false,
-            ));
-        };
-        if let Some(destination) = &destination {
-            // Re-resolve after the dialog, like the workspace export does.
+    let result: Result<Option<PathBuf>, ArtifactGatewayError> =
+        tokio::task::spawn_blocking(move || {
+            let file = database
+                .companion_file_resolve(&request.companion_id, &request.kind, &request.file_id)
+                .map_err(|error| {
+                    ArtifactGatewayError::new("companion.file_not_found", error, false)
+                })?;
+            let resolve = |file: &CompanionFile| -> Result<PathBuf, ArtifactGatewayError> {
+                match file {
+                    CompanionFile::Attachment(record) => attachment_path(&data_dir, record),
+                    CompanionFile::Artifact(record) => artifact_gateway::validated_path(
+                        &database,
+                        &data_dir,
+                        &record.conversation_id,
+                        &record.id,
+                    ),
+                }
+            };
             let source = resolve(&file)?;
-            companion_workspace::export_copy(&source, destination)
-                .map_err(|error| ArtifactGatewayError::new("companion.export_failed", error, true))?;
-        }
-        Ok(destination)
-    })
-    .await
-    .map_err(|error| error.to_string())?;
+            #[cfg(windows)]
+            let destination =
+                crate::commands::pick_save_file_windows(file.name()).map_err(|error| {
+                    ArtifactGatewayError::new("companion.export_failed", error, true)
+                })?;
+            #[cfg(not(windows))]
+            let destination: Option<PathBuf> = {
+                let _ = source;
+                return Err(ArtifactGatewayError::new(
+                    "companion.export_failed",
+                    "此平台尚无系统保存对话框",
+                    false,
+                ));
+            };
+            if let Some(destination) = &destination {
+                // Re-resolve after the dialog, like the workspace export does.
+                let source = resolve(&file)?;
+                companion_workspace::export_copy(&source, destination).map_err(|error| {
+                    ArtifactGatewayError::new("companion.export_failed", error, true)
+                })?;
+            }
+            Ok(destination)
+        })
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(match result {
         Ok(path) => ApiResponse::success(path),
         Err(error) => ApiResponse::failure(error.code, error.message, error.retryable),
@@ -213,7 +231,10 @@ mod tests {
             status: "ready".into(),
             created_at: 1,
         };
-        assert_eq!(attachment_path(&root, &record).unwrap(), path.canonicalize().unwrap());
+        assert_eq!(
+            attachment_path(&root, &record).unwrap(),
+            path.canonicalize().unwrap()
+        );
 
         // Missing file: explicit state, not a panic or a silent ok.
         fs::remove_file(&path).unwrap();
@@ -228,7 +249,10 @@ mod tests {
         fs::write(&foreign, b"other").unwrap();
         let mut forged = record.clone();
         forged.storage_path = foreign.to_string_lossy().into_owned();
-        assert_eq!(attachment_path(&root, &forged).unwrap_err().code, "companion.file_not_found");
+        assert_eq!(
+            attachment_path(&root, &forged).unwrap_err().code,
+            "companion.file_not_found"
+        );
 
         // Symlinks are refused like the artifact gateway does.
         #[cfg(unix)]
@@ -237,7 +261,10 @@ mod tests {
             std::os::unix::fs::symlink(&foreign, &link).unwrap();
             let mut linked = record.clone();
             linked.storage_path = link.to_string_lossy().into_owned();
-            assert_eq!(attachment_path(&root, &linked).unwrap_err().code, "companion.file_missing");
+            assert_eq!(
+                attachment_path(&root, &linked).unwrap_err().code,
+                "companion.file_missing"
+            );
         }
         drop(db);
         let _ = fs::remove_dir_all(&root);

@@ -74,7 +74,10 @@ pub(crate) struct StartupRoot {
 /// The default root is used only when no custom path is configured. A
 /// configured path that cannot be resolved is returned as unusable (with the
 /// configured path), so the store starts degraded and the user sees why.
-pub(crate) fn resolve_startup_root(app_data_dir: &Path, configured_path: Option<&str>) -> StartupRoot {
+pub(crate) fn resolve_startup_root(
+    app_data_dir: &Path,
+    configured_path: Option<&str>,
+) -> StartupRoot {
     resolve_startup_root_with(app_data_dir, configured_path, |path| {
         normalize_storage_path(path, None).map(|_| ())
     })
@@ -85,7 +88,9 @@ pub(crate) fn resolve_startup_root_with(
     configured_path: Option<&str>,
     check: impl FnOnce(&Path) -> Result<(), StorageMigrationError>,
 ) -> StartupRoot {
-    let configured_path = configured_path.map(str::trim).filter(|value| !value.is_empty());
+    let configured_path = configured_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let Some(configured_path) = configured_path else {
         return StartupRoot {
             path: default_storage_root(app_data_dir),
@@ -776,13 +781,19 @@ mod tests {
         };
         assert_eq!(
             resolve_startup_root(&app_data, Some(configured)),
-            StartupRoot { path: PathBuf::from(configured), unusable: None }
+            StartupRoot {
+                path: PathBuf::from(configured),
+                unusable: None
+            }
         );
         // No custom path: the default root (the only allowed fallback).
         for none in [None, Some(""), Some("   ")] {
             assert_eq!(
                 resolve_startup_root(&app_data, none),
-                StartupRoot { path: default_storage_root(&app_data), unusable: None }
+                StartupRoot {
+                    path: default_storage_root(&app_data),
+                    unusable: None
+                }
             );
         }
         // An invalid configured path stays the configured path, unusable.
@@ -806,7 +817,10 @@ mod tests {
         });
         assert_eq!(root.path, configured);
         assert_ne!(root.path, default_storage_root(&app_data));
-        assert_eq!(root.unusable.as_deref(), Some("无法解析存储路径：拒绝访问。 (os error 5)"));
+        assert_eq!(
+            root.unusable.as_deref(),
+            Some("无法解析存储路径：拒绝访问。 (os error 5)")
+        );
     }
 
     #[cfg(unix)]

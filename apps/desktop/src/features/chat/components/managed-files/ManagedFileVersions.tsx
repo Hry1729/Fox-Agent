@@ -3,6 +3,7 @@
 // `files.tsx`) and the standalone time-grouped list above the project tree in
 // the right sidebar 文件 page (`ManagedFileVersions`). One restore rule lives
 // in the store; these components only view it.
+import { SideCard } from '@/components/fox-ui/side-section'
 import { Fragment } from 'react'
 import { AlertTriangle, ChevronDown, ChevronUp, LoaderCircle, RefreshCw, RotateCcw } from 'lucide-react'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -153,17 +154,17 @@ export function ManagedFileVersions({ controller }: { controller: ManagedFilesCo
     .map(([value, label]) => ({ value, label, items: groups.filter(group => libraryTimeGroup(managedFileGroupAt(group), now) === value) }))
     .filter(band => band.items.length > 0)
   return (
-    <div className="fox-file-versions">
+    <SideCard className="fox-file-versions">
       {bands.map(band => (
         <section className="fox-library-group" key={band.value} aria-label={band.label}>
           <h3>{band.label}</h3>
-          <div className="fox-library-card">
+          <div className="fox-version-band">
             {band.items.map(group => <ManagedFileRow key={group.storagePath} group={group} controller={controller} />)}
           </div>
         </section>
       ))}
       <ManagedFilesFootnote controller={controller} />
       <ManagedFilesStatus controller={controller} />
-    </div>
+    </SideCard>
   )
 }

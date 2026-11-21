@@ -11,12 +11,10 @@
 //! coordinator, because they need the coordinator's private scope and its real
 //! HTTP provider harness.
 
+use super::super::p2b_decision::{decide, DecisionFact, FactClass, FactOrigin};
+use super::*;
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::*;
-use super::super::p2b_decision::{
-    DecisionFact, FactClass, FactOrigin, decide,
-};
 use crate::runtime_host::delivery_checks_v2::{LimitKind, RecordLocator};
 
 // ---------------------------------------------------------------------------
@@ -163,7 +161,11 @@ fn p2b_consumer_the_class_vocabulary_round_trips_and_never_defaults() {
 fn p2b_consumer_maps_all_six_classes_to_their_dispositions() {
     // Refused: no repair, not passed, terminal through the existing failed outcome.
     let refused = verdict_for(
-        vec![DecisionFact::refused(candidate(), "non_regular", "not a regular file")],
+        vec![DecisionFact::refused(
+            candidate(),
+            "non_regular",
+            "not a regular file",
+        )],
         true,
     );
     assert_eq!(refused.class, DeliveryClass::Refused);
@@ -266,7 +268,12 @@ fn p2b_consumer_maps_all_six_classes_to_their_dispositions() {
         )],
         true,
     );
-    assert_eq!(confirmed.class, DeliveryClass::Confirmed, "facts: {:?}", confirmed.facts);
+    assert_eq!(
+        confirmed.class,
+        DeliveryClass::Confirmed,
+        "facts: {:?}",
+        confirmed.facts
+    );
     assert!(confirmed.is_passed());
     assert!(confirmed.is_final_class());
     let confirmed_verdict = DeliveryVerdict::from_items(vec![confirmed], true);
@@ -340,7 +347,11 @@ fn p2b_consumer_passing_item_cannot_cover_another_items_failure() {
     let refused = ItemDecision::from_results(
         "slot:json:3",
         &[decide(
-            &[DecisionFact::refused(candidate(), "path_denied", "outside root")],
+            &[DecisionFact::refused(
+                candidate(),
+                "path_denied",
+                "outside root",
+            )],
             true,
         )],
         true,
@@ -371,7 +382,10 @@ fn p2b_consumer_definite_failure_and_unconfirmed_both_survive_one_verdict() {
     // written through the terminal stage, where `passed = 0` becomes `failed`.
     assert_eq!(verdict.final_items().count(), 1);
     assert_eq!(verdict.pending_items().count(), 1);
-    assert_eq!(verdict.pending_items().next().unwrap().item_key, "slot:json:2");
+    assert_eq!(
+        verdict.pending_items().next().unwrap().item_key,
+        "slot:json:2"
+    );
 
     // The reverse order folds to the same class: priority is not order-dependent.
     let failed_again = ItemDecision::from_results(
@@ -460,11 +474,7 @@ fn p2b_consumer_durable_encoding_round_trips_every_retained_field() {
         Some(locator),
     )
     .with_check_identity(Some("content:table"), "table_width", 2)
-    .with_structured(
-        Some("3 fields"),
-        Some("2 fields"),
-        Some("optionalFinalLf"),
-    );
+    .with_structured(Some("3 fields"), Some("2 fields"), Some("optionalFinalLf"));
     let item = ItemDecision {
         item_key: "slot:table:1".to_owned(),
         class: DeliveryClass::DefiniteFailure,
@@ -546,7 +556,8 @@ fn p2b_consumer_durable_encoding_keeps_limit_and_limit_kind_separate() {
     assert!(!stored.terminal);
 }
 #[test]
-fn p2b_consumer_multi_source_bindings_are_not_merged() {    // Two sources checked by one concat rule: the encoding must keep both
+fn p2b_consumer_multi_source_bindings_are_not_merged() {
+    // Two sources checked by one concat rule: the encoding must keep both
     // bindings distinct rather than collapsing them into the first one.
     let item = ItemDecision {
         item_key: "slot:csv:1".to_owned(),
@@ -831,7 +842,10 @@ fn p2b_consumer_unconfirmed_item_is_encoded_for_the_pending_path_not_the_termina
         "slot:json:1"
     );
     assert_eq!(verdict.pending_items().count(), 1);
-    assert_eq!(verdict.pending_items().next().unwrap().item_key, "slot:json:2");
+    assert_eq!(
+        verdict.pending_items().next().unwrap().item_key,
+        "slot:json:2"
+    );
 
     // The unconfirmed row's encoded finding is still a well-formed v2 record that
     // reloads to the same non-passing class — the facts are retentive, not dropped.

@@ -63,7 +63,9 @@ fn file_target(item: &ReconciliationItem) -> Option<&str> {
 pub fn options(db: &Database, request: &ReconciliationRequest) -> Result<Value, String> {
     let item = db.kernel_reconciliation_target(request)?;
     if file_target(&item).is_some() {
-        if item.tool == "call_mcp_tool" { connection(db, request, &item)?; }
+        if item.tool == "call_mcp_tool" {
+            connection(db, request, &item)?;
+        }
         return Ok(
             json!({"kind":"file","tools":[],"message":"独立读取原目标文件的大小与摘要；一致不代表能确认写入者。"}),
         );
@@ -94,7 +96,9 @@ pub fn query(db: &Database, request: &ReconciliationRequest) -> Result<Reconcili
     let item = db.kernel_reconciliation_target(request)?;
     let observed = crate::database::now_ms();
     let evidence = if let Some(path) = file_target(&item) {
-        if item.tool == "call_mcp_tool" { connection(db, request, &item)?; }
+        if item.tool == "call_mcp_tool" {
+            connection(db, request, &item)?;
+        }
         let binding = db
             .run_control_binding(&request.run_id)?
             .ok_or("缺少冻结权限")?;
@@ -148,9 +152,14 @@ mod tests {
     use super::*;
     #[test]
     fn reconciliation_targets_committed_office_output_and_edit_path_only() {
-        let mut item = ReconciliationItem { effect_key: "e".into(), tool: "call_mcp_tool".into(),
+        let mut item = ReconciliationItem {
+            effect_key: "e".into(),
+            tool: "call_mcp_tool".into(),
             input: json!({"serverId":crate::office::SERVER_ID,"tool":"office_edit","arguments":{"file":"source.docx","output":"result.docx"}}),
-            evidence: None, decision: None, note: None };
+            evidence: None,
+            decision: None,
+            note: None,
+        };
         assert_eq!(file_target(&item), Some("result.docx"));
         item.input["tool"] = json!("office_read");
         assert_eq!(file_target(&item), Some("source.docx"));
@@ -160,6 +169,10 @@ mod tests {
         item.input = json!({"path":"edited.txt","newText":"replacement"});
         assert_eq!(file_target(&item), Some("edited.txt"));
         item.tool = "execute_command".into();
-        assert_eq!(file_target(&item), None, "arbitrary command output cannot be guessed from a path field");
+        assert_eq!(
+            file_target(&item),
+            None,
+            "arbitrary command output cannot be guessed from a path field"
+        );
     }
 }

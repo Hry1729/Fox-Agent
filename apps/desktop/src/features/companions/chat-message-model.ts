@@ -1,4 +1,4 @@
-import type { ContactBubbleRecord, RunEventRecord } from '@/features/conversations/model/types'
+import type { CompanionGuide, ContactBubbleRecord, RunEventRecord } from '@/features/conversations/model/types'
 import type { FoxThreadMessage } from '@/features/chat/thread/convert-detail'
 import { projectRuntimeGroups } from '@/features/chat/runtime-process-groups'
 import { splitAssistantContent } from '@/features/chat/timeline/fox-assistant-content'
@@ -9,24 +9,40 @@ export interface ContactReply {
   createdAt: number
 }
 
-export function visibleContactReplies(message: FoxThreadMessage, events: readonly RunEventRecord[], persisted: ContactBubbleRecord[] = [], previews: ContactReply[] = []): Array<ContactReply & { deliveryOrder?: number }> {
-  // 已提交气泡提供真实送达时间；流式预览沿用同一身份，避免提交时重挂载。
-  if (!message.isActiveRun && persisted.length) return persisted.map(bubble => ({ id: bubble.id, text: bubble.content, createdAt: bubble.deliveredAt, deliveryOrder: bubble.deliveryOrder }))
-  const byId = new Map(persisted.map(bubble => [bubble.id, bubble]))
-  return [
-    ...contactReplies(message, events).map(reply => {
-      const bubble = byId.get(reply.id)
-      return bubble ? { id: bubble.id, text: bubble.content, createdAt: bubble.deliveredAt, deliveryOrder: bubble.deliveryOrder } : reply
-    }),
-    ...(message.isActiveRun ? previews.filter(reply => !byId.has(reply.id)) : []),
-  ]
+export function contactBubbleGuide(bubble: ContactBubbleRecord): CompanionGuide | undefined {
+  const value = bubble.metadata?.companionGuide
+  if (!value || typeof value !== 'object' || typeof value.title !== 'string' || !Array.isArray(value.options)) return undefined
+  const options = value.options.filter(option => option && typeof option.label === 'string' && typeof option.message === 'string' && option.label.trim() && option.message.trim()).slice(0, 4)
+  return options.length ? { title: value.title, options } : undefined
+}
+
+export function visibleContactReplies(message: FoxThreadMessage, events: readonly RunEventRecord[], persisted: ContactBubbleRecord[] = [], previews: ContactReply[] = []): Array<ContactReply & { deliveryOrder?: number; guide?: CompanionGuide }> {
+  const project = (bubble: ContactBubbleRecord) => ({
+    id: bubble.id, text: bubble.content, createdAt: bubble.deliveredAt,
+    deliveryOrder: bubble.deliveryOrder, guide: contactBubbleGuide(bubble),
+  })
+  if (!message.isActiveRun && persisted.length) return persisted.map(project)
+  const replies = new Map<string, ContactReply & { deliveryOrder?: number; guide?: CompanionGuide }>()
+  for (const reply of contactReplies(message, events)) replies.set(reply.id, reply)
+  if (message.isActiveRun) {
+    for (const preview of previews) if (!replies.has(preview.id)) replies.set(preview.id, preview)
+  }
+  const sourceIds = new Set(replyMessages(message).map(reply => reply.id))
+  for (const bubble of persisted) {
+    // The committed bubble can reach the React context before assistant-ui
+    // finishes replacing its streaming message. Keep the same entry during that frame.
+    if (replies.has(bubble.id) || sourceIds.has(bubble.messageId)) replies.set(bubble.id, project(bubble))
+  }
+  return [...replies.values()]
+}
+
+function replyMessages(message: FoxThreadMessage) {
+  const source = message.source
+  return source ? source.replyMessages ?? source.kernelMessages ?? [source] : []
 }
 
 export function contactReplies(message: FoxThreadMessage, events: readonly RunEventRecord[]): ContactReply[] {
-  const source = message.source
-  if (!source) return []
-  const replies = source.replyMessages ?? source.kernelMessages ?? [source]
-  return replies.flatMap(reply => {
+  return replyMessages(message).flatMap(reply => {
     // Kernel previews are replaceable snapshots. Only committed replies become bubbles.
     if (reply.kernelPreview) return []
     if (reply.id === `assistant-${reply.runId}` && reply.runId) {

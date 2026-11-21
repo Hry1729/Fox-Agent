@@ -6,30 +6,65 @@
 //! match its content`. Now that Run alone is interrupted with
 //! `run_control.binding_integrity_failed` and every reader still refuses it.
 use super::*;
-use fox_engine_protocol::{ExecutionAuthority, ExecutorRoute, FrozenPermission, PermissionMode, ResourceExecutor, RunControlBinding, TimeBudgets};
+use fox_engine_protocol::{
+    ExecutionAuthority, ExecutorRoute, FrozenPermission, PermissionMode, ResourceExecutor,
+    RunControlBinding, TimeBudgets,
+};
 
-fn sha(text: &str) -> String { format!("sha256:{}", hex::encode(Sha256::digest(text.as_bytes()))) }
+fn sha(text: &str) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(text.as_bytes())))
+}
 
 /// One running PiNative Run in its own conversation (one active Run each).
 fn running_run(db: &Database) -> String {
-    let conversation = db.create_conversation("fox-general", Some("dbhash"), None, Some("ask")).unwrap().id;
-    let run = db.create_run(&conversation, "dbhash fixture", None).unwrap().run.id;
-    let permission = FrozenPermission { mode: PermissionMode::Ask, project_root: None, grants: Vec::new(), approval_epoch: None };
+    let conversation = db
+        .create_conversation("fox-general", Some("dbhash"), None, Some("ask"))
+        .unwrap()
+        .id;
+    let run = db
+        .create_run(&conversation, "dbhash fixture", None)
+        .unwrap()
+        .run
+        .id;
+    let permission = FrozenPermission {
+        mode: PermissionMode::Ask,
+        project_root: None,
+        grants: Vec::new(),
+        approval_epoch: None,
+    };
     db.freeze_run_control(&RunControlBinding {
-        schema_version: 1, run_id: run.clone(), conversation_id: conversation, engine_id: "pi".into(),
-        execution_profile_id: "legacy".into(), authority: ExecutionAuthority::Authoritative, read_only_executor: ResourceExecutor::Rust,
-        permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(), permission,
-        budgets: TimeBudgets::default(), executor_route: Some(ExecutorRoute::PiNative),
-    }).unwrap();
-    db.with_connection(|connection| connection.execute(
-        "UPDATE runs SET status='running',started_at=1 WHERE id=?1", [&run])).unwrap();
+        schema_version: 1,
+        run_id: run.clone(),
+        conversation_id: conversation,
+        engine_id: "pi".into(),
+        execution_profile_id: "legacy".into(),
+        authority: ExecutionAuthority::Authoritative,
+        read_only_executor: ResourceExecutor::Rust,
+        permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(),
+        permission,
+        budgets: TimeBudgets::default(),
+        executor_route: Some(ExecutorRoute::PiNative),
+    })
+    .unwrap();
+    db.with_connection(|connection| {
+        connection.execute(
+            "UPDATE runs SET status='running',started_at=1 WHERE id=?1",
+            [&run],
+        )
+    })
+    .unwrap();
     run
 }
 
 fn fact(db: &Database, run: &str) -> (String, Option<String>, Option<String>) {
-    db.with_connection(|connection| connection.query_row(
-        "SELECT status,error_code,error_message FROM runs WHERE id=?1", [run],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))).unwrap()
+    db.with_connection(|connection| {
+        connection.query_row(
+            "SELECT status,error_code,error_message FROM runs WHERE id=?1",
+            [run],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+    })
+    .unwrap()
 }
 
 /// The same steps `lib.rs` runs at startup, in order.
@@ -49,15 +84,28 @@ fn dbhash_a_bad_binding_interrupts_only_its_run_and_never_blocks_startup() {
         // frozen permission hash can catch it.
         let tampered = running_run(&db);
         db.with_connection(|connection| {
-            let json: String = connection.query_row("SELECT binding_json FROM run_control_bindings WHERE run_id=?1", [&tampered], |row| row.get(0))?;
+            let json: String = connection.query_row(
+                "SELECT binding_json FROM run_control_bindings WHERE run_id=?1",
+                [&tampered],
+                |row| row.get(0),
+            )?;
             let changed = json.replace(r#""mode":"ask""#, r#""mode":"allow""#);
             assert_ne!(changed, json);
-            connection.execute("UPDATE run_control_bindings SET binding_json=?2,binding_hash=?3 WHERE run_id=?1", params![tampered, changed, sha(&changed)])
-        }).unwrap();
+            connection.execute(
+                "UPDATE run_control_bindings SET binding_json=?2,binding_hash=?3 WHERE run_id=?1",
+                params![tampered, changed, sha(&changed)],
+            )
+        })
+        .unwrap();
         // Row hash itself broken.
         let corrupt_row = running_run(&db);
-        db.with_connection(|connection| connection.execute(
-            "UPDATE run_control_bindings SET binding_hash='corrupt' WHERE run_id=?1", [&corrupt_row])).unwrap();
+        db.with_connection(|connection| {
+            connection.execute(
+                "UPDATE run_control_bindings SET binding_hash='corrupt' WHERE run_id=?1",
+                [&corrupt_row],
+            )
+        })
+        .unwrap();
         (tampered, corrupt_row, running_run(&db))
     };
 
@@ -65,21 +113,47 @@ fn dbhash_a_bad_binding_interrupts_only_its_run_and_never_blocks_startup() {
     let db = startup(&path).expect("one bad binding must not block startup");
     for run in [&tampered, &corrupt_row] {
         // 2. Only that Run is interrupted, with the stable code and reason.
-        assert_eq!(fact(&db, run), ("interrupted".into(), Some("run_control.binding_integrity_failed".into()),
-            Some("运行控制绑定校验失败，此 Run 已中断，不能继续".into())), "{run}");
+        assert_eq!(
+            fact(&db, run),
+            (
+                "interrupted".into(),
+                Some("run_control.binding_integrity_failed".into()),
+                Some("运行控制绑定校验失败，此 Run 已中断，不能继续".into())
+            ),
+            "{run}"
+        );
         // 3. It can never continue: every reader and writer still refuses it.
-        assert!(db.run_control_binding(run).unwrap_err().contains("run_control.binding_integrity_failed"), "{run}");
-        assert!(db.apply_runtime_event(run, 99, &json!({"type":"run.completed"})).is_err(), "{run}");
-        assert!(db.create_host_tool_call(run, "late", "read", &json!({"path":"x"}), "running", false).is_err(), "{run}");
+        assert!(
+            db.run_control_binding(run)
+                .unwrap_err()
+                .contains("run_control.binding_integrity_failed"),
+            "{run}"
+        );
+        assert!(
+            db.apply_runtime_event(run, 99, &json!({"type":"run.completed"}))
+                .is_err(),
+            "{run}"
+        );
+        assert!(
+            db.create_host_tool_call(run, "late", "read", &json!({"path":"x"}), "running", false)
+                .is_err(),
+            "{run}"
+        );
         assert!(db.mark_run_failed(run, "test", "late").is_err(), "{run}");
     }
     // A healthy Run beside them takes the ordinary restart path.
-    assert_eq!(fact(&db, &healthy).1.as_deref(), Some("runtime.application_restarted"));
+    assert_eq!(
+        fact(&db, &healthy).1.as_deref(),
+        Some("runtime.application_restarted")
+    );
     assert!(db.run_control_binding(&healthy).unwrap().is_some());
     drop(db);
     // A second start is a no-op and still succeeds.
     let db = startup(&path).expect("restart");
-    assert_eq!(fact(&db, &tampered).1.as_deref(), Some("run_control.binding_integrity_failed"));
+    assert_eq!(
+        fact(&db, &tampered).1.as_deref(),
+        Some("run_control.binding_integrity_failed")
+    );
     drop(db);
     let _ = std::fs::remove_file(&path);
 }
@@ -137,8 +211,14 @@ fn binding_integrity_failure_settles_open_rows_only_when_the_run_is_interrupted(
     };
 
     let db = startup(&path).expect("one bad binding must not block startup");
-    assert_eq!(fact(&db, &active), ("interrupted".into(), Some("run_control.binding_integrity_failed".into()),
-        Some("运行控制绑定校验失败，此 Run 已中断，不能继续".into())));
+    assert_eq!(
+        fact(&db, &active),
+        (
+            "interrupted".into(),
+            Some("run_control.binding_integrity_failed".into()),
+            Some("运行控制绑定校验失败，此 Run 已中断，不能继续".into())
+        )
+    );
     let messages: Vec<(String, String, i64)> = db.with_connection(|connection| {
         let mut query = connection.prepare(
             "SELECT id,status,updated_at FROM messages
@@ -149,35 +229,64 @@ fn binding_integrity_failure_settles_open_rows_only_when_the_run_is_interrupted(
         drop(query);
         Ok(rows)
     }).unwrap();
-    assert_eq!(messages.iter().map(|(id, status, _)| (id.as_str(), status.as_str())).collect::<Vec<_>>(), vec![
-        ("binding-active-streaming", "interrupted"),
-        ("binding-active-failed", "interrupted"),
-        ("binding-active-error", "interrupted"),
-        ("binding-active-pending", "interrupted"),
-        ("binding-active-user", "failed"),
-    ]);
+    assert_eq!(
+        messages
+            .iter()
+            .map(|(id, status, _)| (id.as_str(), status.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("binding-active-streaming", "interrupted"),
+            ("binding-active-failed", "interrupted"),
+            ("binding-active-error", "interrupted"),
+            ("binding-active-pending", "interrupted"),
+            ("binding-active-user", "failed"),
+        ]
+    );
     assert!(messages.iter().take(4).all(|(_, _, updated)| *updated > 1));
     assert_eq!(messages[4].2, 1);
-    let tool: (String, Option<String>, Option<i64>) = db.with_connection(|connection| connection.query_row(
+    let tool: (String, Option<String>, Option<i64>) = db
+        .with_connection(|connection| {
+            connection.query_row(
         "SELECT status,error_message,completed_at FROM tool_calls WHERE id='binding-active-tool'",
-        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))).unwrap();
+        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        })
+        .unwrap();
     assert_eq!(tool.0, "interrupted");
-    assert_eq!(tool.1.as_deref(), Some("运行控制绑定校验失败，此 Run 已中断，不能继续"));
+    assert_eq!(
+        tool.1.as_deref(),
+        Some("运行控制绑定校验失败，此 Run 已中断，不能继续")
+    );
     assert!(tool.2.is_some_and(|at| at > 1));
-    let approval: (String, String, Option<i64>) = db.with_connection(|connection| connection.query_row(
+    let approval: (String, String, Option<i64>) = db
+        .with_connection(|connection| {
+            connection.query_row(
         "SELECT status,decision_json,resolved_at FROM approvals WHERE id='binding-active-approval'",
-        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))).unwrap();
+        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        })
+        .unwrap();
     assert_eq!(approval.0, "expired");
     assert_eq!(approval.1, r#"{"reason":"run_interrupted"}"#);
     assert!(approval.2.is_some_and(|at| at > 1));
 
-    let settled_fact: (String, Option<String>, Option<String>, i64) = db.with_connection(|connection| connection.query_row(
-        "SELECT status,error_code,error_message,finished_at FROM runs WHERE id=?1", [&settled],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))).unwrap();
+    let settled_fact: (String, Option<String>, Option<String>, i64) = db
+        .with_connection(|connection| {
+            connection.query_row(
+                "SELECT status,error_code,error_message,finished_at FROM runs WHERE id=?1",
+                [&settled],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+        })
+        .unwrap();
     assert_eq!(settled_fact, ("completed".into(), None, None, 1));
-    let settled_message: (String, i64) = db.with_connection(|connection| connection.query_row(
-        "SELECT status,updated_at FROM messages WHERE id='binding-settled-assistant'",
-        [], |row| Ok((row.get(0)?, row.get(1)?)))).unwrap();
+    let settled_message: (String, i64) = db
+        .with_connection(|connection| {
+            connection.query_row(
+                "SELECT status,updated_at FROM messages WHERE id='binding-settled-assistant'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
     assert_eq!(settled_message, ("failed".into(), 1));
     drop(db);
     let _ = std::fs::remove_file(&path);

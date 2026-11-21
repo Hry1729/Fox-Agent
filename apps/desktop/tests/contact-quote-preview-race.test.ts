@@ -8,7 +8,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import type { QuotePreview } from '../src/features/companions/api'
 
-const workbench = readFileSync(new URL('../src/features/chat/workbench.tsx', import.meta.url), 'utf8')
+const workbench = readFileSync(new URL('../src/features/chat/workbench.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 const quoteSource = workbench.slice(workbench.indexOf('  const getSelectedConversationId ='), workbench.indexOf('  const clearContactQuote ='))
 const resetSource = workbench.slice(workbench.indexOf('  useEffect(() => {\n    setContactLocateRequest(null)'), workbench.indexOf('  const contactsContext ='))
 

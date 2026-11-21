@@ -376,7 +376,8 @@ pub(super) fn project_runtime_span(
                 "UPDATE trace_spans SET attributes_json = ?2 WHERE id = ?1",
                 params![
                     root_span_id,
-                    crate::canonical_json::to_string(&attributes).unwrap_or_else(|_| "{}".to_owned())
+                    crate::canonical_json::to_string(&attributes)
+                        .unwrap_or_else(|_| "{}".to_owned())
                 ],
             )?;
             current_phase_span(transaction, run_id)?.unwrap_or_else(|| root_span_id.clone())
@@ -427,16 +428,25 @@ impl Database {
         stage: &str,
         observed_at: i64,
     ) -> Result<(), String> {
-        if attempt_id.is_empty() || attempt_id.len() > 128
-            || !attempt_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        if attempt_id.is_empty()
+            || attempt_id.len() > 128
+            || !attempt_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         {
             return Err("invalid host stage attempt".to_owned());
         }
-        if !matches!(stage,
-            "queued" | "dispatch_granted" | "context_prepare_started"
-            | "context_prepare_finished" | "worker_handoff"
-            | "first_valid_worker_event" | "model_slot_queued" | "model_slot_granted")
-        {
+        if !matches!(
+            stage,
+            "queued"
+                | "dispatch_granted"
+                | "context_prepare_started"
+                | "context_prepare_finished"
+                | "worker_handoff"
+                | "first_valid_worker_event"
+                | "model_slot_queued"
+                | "model_slot_granted"
+        ) {
             return Err("unsupported host stage".to_owned());
         }
         self.with_connection(|connection| {
@@ -501,8 +511,9 @@ impl Database {
                 |row| row.get::<_, bool>(0),
             )?;
             if !exists {
-                let attributes = crate::canonical_json::to_string(&json!({ "fox.ui.metric": metric }))
-                    .unwrap_or_else(|_| "{}".to_owned());
+                let attributes =
+                    crate::canonical_json::to_string(&json!({ "fox.ui.metric": metric }))
+                        .unwrap_or_else(|_| "{}".to_owned());
                 transaction.execute(
                     "INSERT INTO trace_spans(
                         id, trace_id, parent_span_id, run_id, conversation_id, name, operation,
@@ -535,7 +546,8 @@ impl Database {
         report: &Value,
         duration_ms: i64,
     ) -> Result<EvaluationRunSummary, String> {
-        let serialized = crate::canonical_json::to_string(report).map_err(|error| error.to_string())?;
+        let serialized =
+            crate::canonical_json::to_string(report).map_err(|error| error.to_string())?;
         if serialized.len() > MAX_EVALUATION_REPORT_BYTES {
             return Err("evaluation report is too large".to_owned());
         }
@@ -871,41 +883,83 @@ mod tests {
     fn host_stage_points_keep_actual_boundaries_and_distinct_attempts() {
         let (database, run) = setup();
         let run_id = &run.run.id;
-        database.record_host_stage_point(run_id, "attempt-one", "worker_handoff", 1_000).unwrap();
-        database.record_host_stage_point(run_id, "attempt-one", "first_valid_worker_event", 1_075).unwrap();
-        database.record_host_stage_point(run_id, "attempt-one", "worker_handoff", 9_999).unwrap();
-        database.record_host_stage_point(run_id, "attempt-two", "worker_handoff", 2_000).unwrap();
-        let points = database.with_connection(|connection| {
-            let mut statement = connection.prepare(
-                "SELECT entity_id, started_at, ended_at, duration_ms FROM trace_spans
+        database
+            .record_host_stage_point(run_id, "attempt-one", "worker_handoff", 1_000)
+            .unwrap();
+        database
+            .record_host_stage_point(run_id, "attempt-one", "first_valid_worker_event", 1_075)
+            .unwrap();
+        database
+            .record_host_stage_point(run_id, "attempt-one", "worker_handoff", 9_999)
+            .unwrap();
+        database
+            .record_host_stage_point(run_id, "attempt-two", "worker_handoff", 2_000)
+            .unwrap();
+        let points = database
+            .with_connection(|connection| {
+                let mut statement = connection.prepare(
+                    "SELECT entity_id, started_at, ended_at, duration_ms FROM trace_spans
                  WHERE run_id = ?1 AND operation = 'host_stage_point' ORDER BY started_at",
-            )?;
-            let rows = statement.query_map([run_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?, row.get::<_, i64>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows)
-        }).unwrap();
-        assert_eq!(points, vec![
-            ("attempt-one:worker_handoff".into(), 1_000, 1_000, 0),
-            ("attempt-one:first_valid_worker_event".into(), 1_075, 1_075, 0),
-            ("attempt-two:worker_handoff".into(), 2_000, 2_000, 0),
-        ]);
+                )?;
+                let rows = statement
+                    .query_map([run_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .unwrap();
+        assert_eq!(
+            points,
+            vec![
+                ("attempt-one:worker_handoff".into(), 1_000, 1_000, 0),
+                (
+                    "attempt-one:first_valid_worker_event".into(),
+                    1_075,
+                    1_075,
+                    0
+                ),
+                ("attempt-two:worker_handoff".into(), 2_000, 2_000, 0),
+            ]
+        );
         assert_eq!(points[1].1 - points[0].1, 75);
         let metrics = database.observability_statistics().unwrap().latency_metrics;
-        let worker = metrics.iter().find(|metric| metric.operation == "host.worker_to_first_event").unwrap();
+        let worker = metrics
+            .iter()
+            .find(|metric| metric.operation == "host.worker_to_first_event")
+            .unwrap();
         assert_eq!((worker.sample_count, worker.average_ms), (1, 75));
-        assert!(!metrics.iter().any(|metric| metric.operation == "host.context_prepare"));
-        assert!(database.record_host_stage_point(run_id, "attempt-one", "http_sent", 3_000).is_err());
+        assert!(!metrics
+            .iter()
+            .any(|metric| metric.operation == "host.context_prepare"));
+        assert!(database
+            .record_host_stage_point(run_id, "attempt-one", "http_sent", 3_000)
+            .is_err());
     }
 
     #[test]
     fn model_capacity_wait_uses_only_the_same_request_attempt() {
         let (database, run) = setup();
         let run_id = &run.run.id;
-        database.record_host_stage_point(run_id, "model-one", "model_slot_queued", 1_000).unwrap();
-        database.record_host_stage_point(run_id, "model-one", "model_slot_granted", 1_080).unwrap();
-        database.record_host_stage_point(run_id, "model-two", "model_slot_queued", 1_090).unwrap();
+        database
+            .record_host_stage_point(run_id, "model-one", "model_slot_queued", 1_000)
+            .unwrap();
+        database
+            .record_host_stage_point(run_id, "model-one", "model_slot_granted", 1_080)
+            .unwrap();
+        database
+            .record_host_stage_point(run_id, "model-two", "model_slot_queued", 1_090)
+            .unwrap();
         let metrics = database.observability_statistics().unwrap().latency_metrics;
-        let wait = metrics.iter().find(|metric| metric.operation == "host.model_slot_wait").unwrap();
+        let wait = metrics
+            .iter()
+            .find(|metric| metric.operation == "host.model_slot_wait")
+            .unwrap();
         assert_eq!((wait.sample_count, wait.average_ms), (1, 80));
     }
 
@@ -914,14 +968,23 @@ mod tests {
         let (database, run) = setup();
         let run_id = &run.run.id;
         let start = crate::database::now_ms();
-        database.record_host_stage_point(run_id, "delayed-attempt", "context_prepare_started", start).unwrap();
+        database
+            .record_host_stage_point(run_id, "delayed-attempt", "context_prepare_started", start)
+            .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(45));
         let end = crate::database::now_ms();
-        database.record_host_stage_point(run_id, "delayed-attempt", "context_prepare_finished", end).unwrap();
+        database
+            .record_host_stage_point(run_id, "delayed-attempt", "context_prepare_finished", end)
+            .unwrap();
         let metrics = database.observability_statistics().unwrap().latency_metrics;
-        let preparation = metrics.iter().find(|metric| metric.operation == "host.context_prepare").unwrap();
+        let preparation = metrics
+            .iter()
+            .find(|metric| metric.operation == "host.context_prepare")
+            .unwrap();
         assert!(preparation.average_ms >= 40);
-        assert!(!metrics.iter().any(|metric| metric.operation == "host.worker_to_first_event"));
+        assert!(!metrics
+            .iter()
+            .any(|metric| metric.operation == "host.worker_to_first_event"));
     }
 
     #[test]

@@ -1,24 +1,36 @@
 //! Host execution helpers shared by the PiNative path: execution receipts,
 //! settled outcomes, resource-failure results and the per-Run OS lock. The
 //! Kernel execution loop that used to live here was removed in B1.
+use super::kernel_run_lock::KernelRunLock;
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::kernel_run_lock::KernelRunLock;
 use crate::database::Database;
 use serde_json::{json, Value};
 use std::path::Path;
 
-pub(super) fn with_execution_receipt(database: &Database, run_id: &str, dispatch_id: &str, mut value: Value) -> Result<Value, String> {
+pub(super) fn with_execution_receipt(
+    database: &Database,
+    run_id: &str,
+    dispatch_id: &str,
+    mut value: Value,
+) -> Result<Value, String> {
     if let Some(receipt) = database.execution_receipt(run_id, dispatch_id)? {
-        if !value["details"].is_object() { value["details"] = serde_json::json!({}); }
-        value["details"]["executionReceipt"] = serde_json::to_value(receipt).map_err(|e| e.to_string())?;
+        if !value["details"].is_object() {
+            value["details"] = serde_json::json!({});
+        }
+        value["details"]["executionReceipt"] =
+            serde_json::to_value(receipt).map_err(|e| e.to_string())?;
     }
     Ok(value)
 }
 
 pub(super) fn settle_execution_outcome(
-    database: &Database, run_id: &str, dispatch_id: &str, result: &Result<Value, String>,
-    evidence: fox_engine_protocol::ExecutionEvidence, outcome: &fox_engine_protocol::CallOutcome,
+    database: &Database,
+    run_id: &str,
+    dispatch_id: &str,
+    result: &Result<Value, String>,
+    evidence: fox_engine_protocol::ExecutionEvidence,
+    outcome: &fox_engine_protocol::CallOutcome,
 ) -> Result<(), String> {
     use fox_engine_protocol::{CallOutcome, ExecutionEvidence};
     if evidence == ExecutionEvidence::Started {
@@ -26,13 +38,22 @@ pub(super) fn settle_execution_outcome(
     }
     match (&evidence, &outcome) {
         (ExecutionEvidence::Unknown, _) => database.record_attempt_failure(
-            run_id, dispatch_id, &refusal_code_from_result(result))?,
+            run_id,
+            dispatch_id,
+            &refusal_code_from_result(result),
+        )?,
         (_, CallOutcome::Completed) => database.record_attempt_completed(
-            run_id, dispatch_id, evidence == ExecutionEvidence::Started)?,
-        (ExecutionEvidence::Started, CallOutcome::Failed { code } | CallOutcome::Refused { code }) =>
-            database.record_attempt_failure(run_id, dispatch_id, code)?,
-        (_, CallOutcome::Failed { code } | CallOutcome::Refused { code }) =>
-            database.record_attempt_refusal(run_id, dispatch_id, code)?,
+            run_id,
+            dispatch_id,
+            evidence == ExecutionEvidence::Started,
+        )?,
+        (
+            ExecutionEvidence::Started,
+            CallOutcome::Failed { code } | CallOutcome::Refused { code },
+        ) => database.record_attempt_failure(run_id, dispatch_id, code)?,
+        (_, CallOutcome::Failed { code } | CallOutcome::Refused { code }) => {
+            database.record_attempt_refusal(run_id, dispatch_id, code)?
+        }
     }
     Ok(())
 }
@@ -41,7 +62,9 @@ pub(super) fn call_outcome(result: &Result<Value, String>) -> fox_engine_protoco
     if matches!(result, Ok(value) if value.get("isError").and_then(Value::as_bool) != Some(true)) {
         fox_engine_protocol::CallOutcome::Completed
     } else {
-        fox_engine_protocol::CallOutcome::Failed { code: refusal_code_from_result(result) }
+        fox_engine_protocol::CallOutcome::Failed {
+            code: refusal_code_from_result(result),
+        }
     }
 }
 
@@ -54,7 +77,12 @@ fn refusal_code_from_result(result: &Result<Value, String>) -> String {
             if let Some(code) = value
                 .get("details")
                 .and_then(|details| details.get("errorCode"))
-                .or_else(|| value.get("details").and_then(|details| details.get("error")).and_then(|error| error.get("code")))
+                .or_else(|| {
+                    value
+                        .get("details")
+                        .and_then(|details| details.get("error"))
+                        .and_then(|error| error.get("code"))
+                })
                 .and_then(serde_json::Value::as_str)
             {
                 return code.to_owned();
@@ -99,13 +127,27 @@ pub(super) fn execution_receipt_result(
             &fallback_code.unwrap_or_else(|| "kernel.uncertain_execution".to_owned()),
         ));
     };
-    let existing = database.read_execution_attempt(run_id, dispatch_id)?
-        .is_some_and(|row| matches!(row.state, fox_engine_protocol::AttemptState::Completed | fox_engine_protocol::AttemptState::Launched));
+    let existing = database
+        .read_execution_attempt(run_id, dispatch_id)?
+        .is_some_and(|row| {
+            matches!(
+                row.state,
+                fox_engine_protocol::AttemptState::Completed
+                    | fox_engine_protocol::AttemptState::Launched
+            )
+        });
     let code = receipt
         .reason_code
         .clone()
         .or(receipt.code_alias.clone())
-        .unwrap_or_else(|| if existing { "kernel.existing_execution" } else { "kernel.uncertain_execution" }.to_owned());
+        .unwrap_or_else(|| {
+            if existing {
+                "kernel.existing_execution"
+            } else {
+                "kernel.uncertain_execution"
+            }
+            .to_owned()
+        });
     let details = serde_json::json!({
         "source": "fox_kernel_host",
         // The interface words this Host-composed result from the same structured
@@ -136,12 +178,17 @@ pub(super) fn execution_receipt_result(
         "allowReplay": receipt.allow_replay,
         "recovery": "This dispatch attempt is finished; a new logical attempt needs a new tool call and full re-admission."
     });
-    with_execution_receipt(database, run_id, dispatch_id, serde_json::json!({
-        "isError": !existing,
-        "diagnosticSource": "host",
-        "content": [{"type": "text", "text": format!("[tool.{code}] {tool} was not re-executed")}],
-        "details": details,
-    }))
+    with_execution_receipt(
+        database,
+        run_id,
+        dispatch_id,
+        serde_json::json!({
+            "isError": !existing,
+            "diagnosticSource": "host",
+            "content": [{"type": "text", "text": format!("[tool.{code}] {tool} was not re-executed")}],
+            "details": details,
+        }),
+    )
 }
 
 /// Missing durable evidence must never be projected as a confirmed refusal.
@@ -241,37 +288,83 @@ pub(crate) fn resource_failure_result_with_input(
             } else {
                 "office_read"
             };
-            return with_resource_diagnostic(result, tool, input, error, true, Some(operation_kind));
+            return with_resource_diagnostic(
+                result,
+                tool,
+                input,
+                error,
+                true,
+                Some(operation_kind),
+            );
         }
         // MCP bodies are untrusted and can include credentials or documents.
         // Preserve operation/target, but forward only Host-classified failures.
         // A remote body can forge a [tool.*] prefix; text classification is
         // never provenance. Only the separately selected managed Office path
         // above is Host-local.
-        return with_resource_diagnostic(generic_resource_failure(tool), tool, input, error, false, None);
+        return with_resource_diagnostic(
+            generic_resource_failure(tool),
+            tool,
+            input,
+            error,
+            false,
+            None,
+        );
     }
     // `present_files` resolves local paths only, so its failure text is authored
     // by this Host and stays trustworthy: the model must see which check failed
     // (missing, not a file, outside the project) instead of a withheld body.
-    let local=crate::resource_gateway::is_reader(tool) || matches!(tool,
-        "attachment_compute"|"read_attachment"|"read_tool_result"|"structured_data"|"tabular_data"|"run_command"|"write_file"|"edit_file"|"git_read"|"sqlite_read"|"system_info"|"present_files");
-    with_resource_diagnostic(resource_failure_result(tool, error), tool, input, error, local, None)
+    let local = crate::resource_gateway::is_reader(tool)
+        || matches!(
+            tool,
+            "attachment_compute"
+                | "read_attachment"
+                | "read_tool_result"
+                | "structured_data"
+                | "tabular_data"
+                | "run_command"
+                | "write_file"
+                | "edit_file"
+                | "git_read"
+                | "sqlite_read"
+                | "system_info"
+                | "present_files"
+        );
+    with_resource_diagnostic(
+        resource_failure_result(tool, error),
+        tool,
+        input,
+        error,
+        local,
+        None,
+    )
 }
 
-fn with_resource_diagnostic(mut result: Value, tool: &str, input: Option<&Value>, error: &str, trusted: bool, operation_kind: Option<&str>) -> Value {
+fn with_resource_diagnostic(
+    mut result: Value,
+    tool: &str,
+    input: Option<&Value>,
+    error: &str,
+    trusted: bool,
+    operation_kind: Option<&str>,
+) -> Value {
     let details = &mut result["details"];
     // Only the Host names an operation class, and only where it established the
     // operation's identity itself (the built-in Office branch above).
     if let Some(kind) = operation_kind {
         details["operationKind"] = json!(kind);
     }
-    details["operation"] = serde_json::json!(input.and_then(|v| v.get("tool").and_then(Value::as_str)).unwrap_or(tool));
+    details["operation"] = serde_json::json!(input
+        .and_then(|v| v.get("tool").and_then(Value::as_str))
+        .unwrap_or(tool));
     // Necessary identifiers only. Never copy command/code, remote arguments,
     // cell values or authentication data into a diagnostic target.
     if let Some(input) = input {
         let fields = if tool == "call_mcp_tool" {
             input.get("arguments").unwrap_or(input)
-        } else { input };
+        } else {
+            input
+        };
         for key in ["path", "file", "attachmentId", "reference", "artifactId"] {
             if let Some(target) = fields.get(key).and_then(Value::as_str) {
                 details["target"] = json!(super::redact_execution_diagnostic(target, 256));
@@ -280,29 +373,60 @@ fn with_resource_diagnostic(mut result: Value, tool: &str, input: Option<&Value>
         }
         if details.get("target").is_none() && tool == "attachment_compute" {
             for key in ["attachmentIds", "artifactIds", "projectPaths"] {
-                if let Some(target) = fields.get(key).and_then(Value::as_array).and_then(|items| items.first()).and_then(Value::as_str) {
+                if let Some(target) = fields
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .and_then(|items| items.first())
+                    .and_then(Value::as_str)
+                {
                     details["target"] = json!(super::redact_execution_diagnostic(target, 256));
                     break;
                 }
             }
         }
-        if let Some(id) = input.get("serverId").and_then(Value::as_str) { details["serverId"] = json!(super::redact_execution_diagnostic(id, 128)); }
+        if let Some(id) = input.get("serverId").and_then(Value::as_str) {
+            details["serverId"] = json!(super::redact_execution_diagnostic(id, 128));
+        }
     }
     if trusted {
         let code = crate::tool_host::ToolErrorCode::classify(error)
-            .map(|code| code.as_str()).or_else(||(tool=="attachment_compute").then(||compute_host_error_code(error)).flatten()).unwrap_or("tool.resource_failed");
-        if details.get("errorCode").is_none() { details["errorCode"] = json!(code); }
+            .map(|code| code.as_str())
+            .or_else(|| {
+                (tool == "attachment_compute")
+                    .then(|| compute_host_error_code(error))
+                    .flatten()
+            })
+            .unwrap_or("tool.resource_failed");
+        if details.get("errorCode").is_none() {
+            details["errorCode"] = json!(code);
+        }
         details["underlyingCode"] = json!(code);
         details["underlyingMessage"] = json!(super::redact_execution_diagnostic(error, 600));
     } else {
-        let (code,message)=if tool=="call_mcp_tool" {
+        let (code, message) = if tool == "call_mcp_tool" {
             match error {
-                "MCP tool budget exceeded" => ("mcp.timed_out","MCP tool execution budget expired."),
-                "frozen MCP connection is unavailable" => ("mcp.connection_unavailable","The frozen MCP connection is unavailable."),
-                "MCP definition changed since Run creation" => ("mcp.configuration_changed","MCP configuration changed; a fresh Run must discover its catalog."),
-                _ => ("mcp.remote_failure","Remote MCP request failed; its untrusted response body was withheld."),
+                "MCP tool budget exceeded" => {
+                    ("mcp.timed_out", "MCP tool execution budget expired.")
+                }
+                "frozen MCP connection is unavailable" => (
+                    "mcp.connection_unavailable",
+                    "The frozen MCP connection is unavailable.",
+                ),
+                "MCP definition changed since Run creation" => (
+                    "mcp.configuration_changed",
+                    "MCP configuration changed; a fresh Run must discover its catalog.",
+                ),
+                _ => (
+                    "mcp.remote_failure",
+                    "Remote MCP request failed; its untrusted response body was withheld.",
+                ),
             }
-        } else {("tool.resource_failed","The external resource request failed; its untrusted response body was withheld.")};
+        } else {
+            (
+                "tool.resource_failed",
+                "The external resource request failed; its untrusted response body was withheld.",
+            )
+        };
         details["errorCode"] = json!(code);
         details["underlyingCode"] = json!(code);
         details["underlyingMessage"] = json!(message);
@@ -322,8 +446,15 @@ fn with_resource_diagnostic(mut result: Value, tool: &str, input: Option<&Value>
 /// throw is always wrapped in tool.computation_runtime first and cannot forge
 /// an outer adapter classification.
 fn compute_host_error_code(error: &str) -> Option<&'static str> {
-    ["tool.path_denied","tool.pdf_font_unavailable","tool.pdf_missing_glyph","tool.pdf_generation_failed","tool.pdf_font_invalid"]
-        .into_iter().find(|code|error.starts_with(&format!("[{code}]")))
+    [
+        "tool.path_denied",
+        "tool.pdf_font_unavailable",
+        "tool.pdf_missing_glyph",
+        "tool.pdf_generation_failed",
+        "tool.pdf_font_invalid",
+    ]
+    .into_iter()
+    .find(|code| error.starts_with(&format!("[{code}]")))
 }
 
 pub(crate) fn resource_failure_result(tool: &str, error: &str) -> Value {
@@ -339,23 +470,40 @@ pub(crate) fn resource_failure_result(tool: &str, error: &str) -> Value {
     // bounded and credential-redacted before it travels.
     //
     // Other executors may return remote bodies or credentials; do not forward.
-    if tool=="attachment_compute" {
-        if let Some(code)=compute_host_error_code(error) {
-            let family=if code=="tool.path_denied" {"tool.permission_denied"} else {"tool.computation_failed"};
+    if tool == "attachment_compute" {
+        if let Some(code) = compute_host_error_code(error) {
+            let family = if code == "tool.path_denied" {
+                "tool.permission_denied"
+            } else {
+                "tool.computation_failed"
+            };
             return json!({"isError":true,"content":[{"type":"text","text":super::redact_execution_diagnostic(error,2000)}],
                 "details":{"code":family,"errorCode":code,"tool":tool,"operation":tool,"retryable":false}});
         }
     }
-    let computation = crate::tool_host::ToolErrorCode::classify(error).filter(|code| matches!(code,
-        crate::tool_host::ToolErrorCode::ComputationFailed | crate::tool_host::ToolErrorCode::ComputationSyntax
-        | crate::tool_host::ToolErrorCode::ComputationRuntime | crate::tool_host::ToolErrorCode::ComputationTimedOut));
+    let computation = crate::tool_host::ToolErrorCode::classify(error).filter(|code| {
+        matches!(
+            code,
+            crate::tool_host::ToolErrorCode::ComputationFailed
+                | crate::tool_host::ToolErrorCode::ComputationSyntax
+                | crate::tool_host::ToolErrorCode::ComputationRuntime
+                | crate::tool_host::ToolErrorCode::ComputationTimedOut
+        )
+    });
     if tool == "attachment_compute" && computation.is_some() {
         let code = computation.unwrap().as_str();
         return json!({"isError":true,"content":[{"type":"text","text":super::redact_execution_diagnostic(error,2000)}],
             "details":{"code":code,"errorCode":code,"tool":tool,"operation":tool,"retryable":false}});
     }
-    let (label, limit) = if crate::resource_gateway::is_reader(tool) || matches!(tool, "attachment_compute" | "read_attachment" | "read_tool_result" | "structured_data" | "tabular_data")
-    {
+    let (label, limit) = if crate::resource_gateway::is_reader(tool)
+        || matches!(
+            tool,
+            "attachment_compute"
+                | "read_attachment"
+                | "read_tool_result"
+                | "structured_data"
+                | "tabular_data"
+        ) {
         ("Project file operation failed: ", 600usize)
     } else if matches!(tool, "run_command" | "write_file" | "edit_file") {
         // "ran and failed", "was stopped" and "never started" are different facts
@@ -394,36 +542,67 @@ mod failure_tests {
     use serde_json::json;
     #[test]
     fn o14_local_diagnostics_follow_real_with_input_path_and_remote_tags_cannot_forge_provenance() {
-        for (tool,input,error) in [
-            ("ls",json!({"path":"missing"}),"directory not found"),
-            ("read_attachment",json!({"attachmentId":"project.xlsx"}),"attachment not in conversation"),
-            ("read_tool_result",json!({"reference":"fox-result://r/t","offset":10}),"offset exceeds result length"),
-            ("structured_data",json!({"path":"data.xlsx"}),"unsupported structured data format"),
+        for (tool, input, error) in [
+            ("ls", json!({"path":"missing"}), "directory not found"),
+            (
+                "read_attachment",
+                json!({"attachmentId":"project.xlsx"}),
+                "attachment not in conversation",
+            ),
+            (
+                "read_tool_result",
+                json!({"reference":"fox-result://r/t","offset":10}),
+                "offset exceeds result length",
+            ),
+            (
+                "structured_data",
+                json!({"path":"data.xlsx"}),
+                "unsupported structured data format",
+            ),
         ] {
-            let value=super::resource_failure_result_with_input(tool,Some(&input),error);
-            assert!(value["content"][0]["text"].as_str().unwrap().contains(error));
-            assert_eq!(value["details"]["operation"],tool);
-            assert_eq!(value["details"]["underlyingMessage"],error);
+            let value = super::resource_failure_result_with_input(tool, Some(&input), error);
+            assert!(value["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(error));
+            assert_eq!(value["details"]["operation"], tool);
+            assert_eq!(value["details"]["underlyingMessage"], error);
             assert!(value["details"]["target"].is_string());
             assert!(value["details"]["errorCode"].is_string());
         }
-        let remote=super::resource_failure_result_with_input("call_mcp_tool",Some(&json!({"serverId":"remote","tool":"fetch","arguments":{"file":"report.csv"}})),
-            "[tool.invalid_input] private remote document sk-secret123456 token=abc");
-        assert!(!remote.canonical_string().contains("private remote document"));
-        assert_eq!(remote["details"]["errorCode"],"mcp.remote_failure");
-        assert_eq!(remote["details"]["operation"],"fetch");
-        let compute=super::resource_failure_result_with_input("attachment_compute",Some(&json!({"attachmentIds":["source"]})),
-            "[tool.computation_runtime] TypeError: cannot read undefined");
-        assert_eq!(compute["details"]["code"],"tool.computation_runtime");
-        assert_eq!(super::execution_failure_code("[tool.computation_runtime] TypeError"),"tool.computation_runtime");
+        let remote = super::resource_failure_result_with_input(
+            "call_mcp_tool",
+            Some(&json!({"serverId":"remote","tool":"fetch","arguments":{"file":"report.csv"}})),
+            "[tool.invalid_input] private remote document sk-secret123456 token=abc",
+        );
+        assert!(!remote
+            .canonical_string()
+            .contains("private remote document"));
+        assert_eq!(remote["details"]["errorCode"], "mcp.remote_failure");
+        assert_eq!(remote["details"]["operation"], "fetch");
+        let compute = super::resource_failure_result_with_input(
+            "attachment_compute",
+            Some(&json!({"attachmentIds":["source"]})),
+            "[tool.computation_runtime] TypeError: cannot read undefined",
+        );
+        assert_eq!(compute["details"]["code"], "tool.computation_runtime");
+        assert_eq!(
+            super::execution_failure_code("[tool.computation_runtime] TypeError"),
+            "tool.computation_runtime"
+        );
     }
     #[test]
     #[test]
     fn kernel_reader_failure_preserves_reason_without_claiming_policy_denial() {
-        let result = super::resource_failure_result("ls", "tool path cannot be resolved: file not found");
-        assert!(result["content"][0]["text"].as_str().unwrap().contains("file not found"));
+        let result =
+            super::resource_failure_result("ls", "tool path cannot be resolved: file not found");
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("file not found"));
         assert!(!result.canonical_string().contains("frozen policy"));
-        let remote = super::resource_failure_result("http_request", "response includes private token");
+        let remote =
+            super::resource_failure_result("http_request", "response includes private token");
         assert!(!remote.canonical_string().contains("private token"));
     }
 
@@ -437,7 +616,10 @@ mod failure_tests {
         );
         let text = result["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("error[E0308]: mismatched types"), "{text}");
-        assert!(!text.contains("No successful result is available"), "{text}");
+        assert!(
+            !text.contains("No successful result is available"),
+            "{text}"
+        );
         assert_eq!(result["details"]["errorCode"], "tool.nonzero_exit");
         assert_eq!(result["details"]["code"], "kernel.resource_failed");
     }
@@ -452,7 +634,10 @@ mod failure_tests {
         );
         let text = result["content"][0]["text"].as_str().unwrap();
         assert!(text.starts_with("Local operation did not run: "), "{text}");
-        assert!(text.contains("escapes the authorized project root"), "{text}");
+        assert!(
+            text.contains("escapes the authorized project root"),
+            "{text}"
+        );
         assert_eq!(result["details"]["errorCode"], "tool.permission_denied");
     }
 
@@ -481,7 +666,10 @@ mod failure_tests {
         // No tag, no invented classification.
         let local = super::resource_failure_result("run_command", "the child died oddly");
         assert!(local["details"].get("errorCode").is_none());
-        assert!(local["content"][0]["text"].as_str().unwrap().contains("the child died oddly"));
+        assert!(local["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("the child died oddly"));
     }
 
     /// Regression, 2026-10-01 review (R07): the built-in Office connector's own
@@ -497,7 +685,10 @@ mod failure_tests {
         );
         let text = result["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("office.target_exists"), "{text}");
-        assert!(text.contains("另一个文件名"), "the next step must be actionable: {text}");
+        assert!(
+            text.contains("另一个文件名"),
+            "the next step must be actionable: {text}"
+        );
         assert_eq!(result["details"]["errorCode"], "office.target_exists");
         assert_eq!(result["details"]["officeTool"], "office_create");
         assert_eq!(result["details"]["retryable"], false);
@@ -528,8 +719,8 @@ mod failure_tests {
             .as_str()
             .unwrap()
             .contains("No successful result is available"));
-        assert_eq!(result["details"]["errorCode"],"mcp.remote_failure");
-        assert_eq!(result["details"]["underlyingCode"],"mcp.remote_failure");
+        assert_eq!(result["details"]["errorCode"], "mcp.remote_failure");
+        assert_eq!(result["details"]["underlyingCode"], "mcp.remote_failure");
 
         let builtin_unknown = serde_json::json!({"serverId": crate::office::SERVER_ID,
             "tool": "office_future", "arguments": {}});
@@ -554,9 +745,19 @@ mod failure_tests {
         );
         let result = super::resource_failure_result("run_command", &noisy);
         let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(!text.contains("super-secret-value"), "credentials must not travel");
-        assert!(text.contains("[REDACTED]"), "redaction must be visible: {text}");
-        assert!(text.chars().count() < 4_600, "{} chars is over the bound", text.chars().count());
+        assert!(
+            !text.contains("super-secret-value"),
+            "credentials must not travel"
+        );
+        assert!(
+            text.contains("[REDACTED]"),
+            "redaction must be visible: {text}"
+        );
+        assert!(
+            text.chars().count() < 4_600,
+            "{} chars is over the bound",
+            text.chars().count()
+        );
         assert!(
             text.contains("截断"),
             "a bounded diagnostic has to say it was bounded, not look complete: {text}"
@@ -608,7 +809,10 @@ mod result_provenance_tests {
         // Both ordinary write paths, each at `arguments`.
         for (tool, arguments) in [
             ("office_create", json!({"output": "a.docx"})),
-            ("office_edit", json!({"output": "a.docx", "overwrite": true})),
+            (
+                "office_edit",
+                json!({"output": "a.docx", "overwrite": true}),
+            ),
             ("office_import_data", json!({"name": "b.xlsx"})),
             // A render always writes a Host-side output, with no target argument.
             ("office_render", json!({"mode": "html"})),
@@ -623,7 +827,10 @@ mod result_provenance_tests {
 
         // A read-only Office call is never worded as a write.
         let office_read = office_call("office_read", json!({}));
-        assert_eq!(office_read["details"]["operationKind"], "office_read", "{office_read}");
+        assert_eq!(
+            office_read["details"]["operationKind"], "office_read",
+            "{office_read}"
+        );
 
         // A same-named tool on an ordinary connector never gets an Office class,
         // so the interface cannot read it as a write.
@@ -635,7 +842,11 @@ mod result_provenance_tests {
             })),
             "remote failure",
         );
-        assert_eq!(connector["details"].get("operationKind"), None, "{connector}");
+        assert_eq!(
+            connector["details"].get("operationKind"),
+            None,
+            "{connector}"
+        );
         assert_eq!(connector["details"]["operation"], "office_create");
         assert_eq!(connector["details"]["diagnosticSource"], "host");
     }

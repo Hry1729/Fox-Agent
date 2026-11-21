@@ -21,7 +21,7 @@ import { createServer } from 'vite'
 if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register()
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 const React = await import('react')
-const { cleanup, fireEvent, render, screen, waitFor } = await import('@testing-library/react')
+const { cleanup, fireEvent, render: renderDom, screen, waitFor } = await import('@testing-library/react')
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const server = await createServer({
   root, configFile: false, appType: 'custom', cacheDir: path.join(root, 'dist', '.vite-panel-test-cache'),
@@ -29,6 +29,9 @@ const server = await createServer({
   resolve: { alias: { '@': path.join(root, 'src') } }, esbuild: { jsx: 'automatic' },
 })
 const { RightPanel } = await server.ssrLoadModule('/src/features/chat/workbench.tsx')
+const { TooltipProvider } = await server.ssrLoadModule('/src/components/ui/tooltip.tsx')
+const render = (node) => renderDom(React.createElement(TooltipProvider, null, node))
+
 afterEach(cleanup)
 after(async () => { await server.close() })
 
@@ -37,7 +40,7 @@ const panelProps = (overrides = {}) => ({
   fileTabs: [], activeFileTabId: null, activeChildAgent: null,
   onMode: () => {}, onCloseMode: () => {}, onOpenFile: () => {}, onActivateFile: () => {},
   onCloseFile: () => {}, onOpenChildAgent: () => {}, onBackChildAgent: () => {},
-  onToggleMaximized: () => {}, onCollapse: () => {},
+  onToggleMaximized: () => {}, onCollapse: () => {}, onSummary: () => {},
   ...overrides,
 })
 
@@ -95,7 +98,7 @@ function FilesHarness({ initialTabs = [], onCloseFile }) {
 
 test('the ＋ menu still offers 文件 and selecting it opens the files page', async () => {
   const modes = []
-  const view = render(React.createElement(RightPanel, panelProps({ onMode: (mode) => modes.push(mode) })))
+  const view = render(React.createElement(RightPanel, panelProps({ mode: 'files', tabs: ['files'], onMode: (mode) => modes.push(mode) })))
   const trigger = view.getByRole('button', { name: '打开页面' })
   assert.ok(trigger)
   fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false })
@@ -126,9 +129,8 @@ test('opening a file adds its own tab, and closing the last one leaves no stale 
   fireEvent.click(tab.querySelector('.fox-context-tab-close'))
   assert.deepEqual(closed, ['src/明细/a.ts'])
   await waitFor(() => assert.equal(view.container.querySelector('.fox-context-tab.is-file-tab'), null))
-  // Nothing is left pinning the files page, so the panel falls back instead of
-  // showing an empty file view, and the ＋ menu is still there to reopen it.
-  assert.ok(view.getByRole('button', { name: '打开页面' }))
+  assert.equal(view.queryByRole('button', { name: '打开页面' }), null)
   assert.equal(view.container.querySelector('.fox-file-panel'), null)
-  assert.ok(view.container.querySelector('.fox-context-home'))
+  assert.equal(view.container.querySelector('.fox-summary-page'), null)
+  assert.ok(view.getByRole('navigation', { name: '侧栏页面' }))
 })

@@ -19,6 +19,7 @@ import { StoppedRun } from '@/components/assistant-ui/elements/error-state'
 import { ErrorPrompt } from '../demo/fox-demo-prompts'
 import { formatDateTime } from '@/lib/time-format'
 import { ContactAssistantMessage } from '@/features/companions/chat-message'
+import { CompanionCommunicationBefore } from '@/features/companions/assignment-timeline'
 
 const FOX_PART_COMPONENTS = {
   Text: FoxTextPart,
@@ -62,7 +63,8 @@ function FoxFeedbackDialog({ open, onOpenChange, messageId, onSaved }: { open: b
  */
 export function FoxAssistantMessage() {
   const companion = useContacts()
-  return companion?.privateChat ? <ContactAssistantMessage /> : <FoxStandardAssistantMessage />
+  const messageId = useAuiState(state => state.message.id)
+  return companion?.privateChat ? <ContactAssistantMessage /> : <><CompanionCommunicationBefore messageId={messageId} /><FoxStandardAssistantMessage /></>
 }
 
 function FoxStandardAssistantMessage() {

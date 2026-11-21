@@ -31,10 +31,14 @@ mod tests {
         );
         // ...and the canonical functions are immune to it.
         let value = json!({"schemaVersion": 1, "id": "durable_v2", "nested": {"z": [ {"y": 1, "x": 2} ], "a": null}});
-        let expected = r#"{"id":"durable_v2","nested":{"a":null,"z":[{"x":2,"y":1}]},"schemaVersion":1}"#;
+        let expected =
+            r#"{"id":"durable_v2","nested":{"a":null,"z":[{"x":2,"y":1}]},"schemaVersion":1}"#;
         assert_eq!(to_string(&value).unwrap(), expected);
         assert_eq!(value.canonical_string(), expected);
-        assert_eq!(String::from_utf8(to_vec(&value).unwrap()).unwrap(), expected);
+        assert_eq!(
+            String::from_utf8(to_vec(&value).unwrap()).unwrap(),
+            expected
+        );
     }
 
     /// No raw serde_json serializer may come back into the Host source: every
@@ -62,7 +66,9 @@ mod tests {
                     }
                     continue;
                 }
-                if path.extension().is_none_or(|ext| ext != "rs") || path.ends_with("canonical_json.rs") {
+                if path.extension().is_none_or(|ext| ext != "rs")
+                    || path.ends_with("canonical_json.rs")
+                {
                     continue;
                 }
                 let text = std::fs::read_to_string(&path).unwrap();
@@ -77,6 +83,9 @@ mod tests {
                 }
             }
         }
-        assert!(offenders.is_empty(), "use crate::canonical_json instead of serde_json serializers: {offenders:?}");
+        assert!(
+            offenders.is_empty(),
+            "use crate::canonical_json instead of serde_json serializers: {offenders:?}"
+        );
     }
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ArrowLeft, Cable, ChevronRight, LoaderCircle, MoreHorizontal, Pencil, Plus, Puzzle, RotateCcw, ShieldCheck, Trash2, Wrench, Zap } from 'lucide-react'
+import { ArrowLeft, Cable, ChevronRight, LoaderCircle, MoreHorizontal, Pencil, Plus, Puzzle, RotateCcw, Trash2, Wrench, Zap } from 'lucide-react'
 import { notify as toast } from '@/features/notifications'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
@@ -17,10 +17,9 @@ import type { SettingsSectionAnchor } from '@/features/workspace/management-navi
 import type { McpServerRecord, SkillRecord } from '@/features/conversations/model/types'
 import { useSkills } from './use-skills'
 import { useMcpServers, type SaveMcpServerInput } from './use-mcp-servers'
-import { useLifecycleHooks } from './use-lifecycle-hooks'
-import { LifecycleHooksSection } from './lifecycle-hooks-section'
 import { SettingsGroup, SettingsPageLayout, SettingsRow, settingsSectionId, useScrollToSettingsSection } from './settings-layout'
 import { clearPluginReturn, readPluginReturn, type PluginReturnTarget } from './settings-shared'
+import { SearchServiceSettings } from './search-service-page'
 
 interface McpFormState {
   id?: string
@@ -107,18 +106,17 @@ export function ExtensionsSettingsPage({ sidebarCollapsed, onSidebar, navigate, 
   useScrollToSettingsSection(section)
   const skills = useSkills()
   const mcp = useMcpServers()
-  const hooks = useLifecycleHooks()
   const [returnTarget] = useState<PluginReturnTarget | null>(() => readPluginReturn())
   useEffect(() => { clearPluginReturn() }, [])
   const [skillId, setSkillId] = useState<string | null>(null)
   const [skillBusy, setSkillBusy] = useState<string | null>(null)
   const [form, setForm] = useState<McpFormState | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
-  const [hooksOpen, setHooksOpen] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
+  useEffect(() => { if (section === 'search') setSearchOpen(true) }, [section])
   const openSkill = skillId ? skills.items.find((item) => item.id === skillId) ?? null : null
   const editingServer = form?.id ? mcp.items.find((item) => item.id === form.id) ?? null : null
   const isBuiltin = form?.id === BUILTIN_CONNECTOR_ID
-  useEffect(() => { if (!hooksOpen) void hooks.refresh() }, [hooksOpen]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggleSkill = async (skill: SkillRecord, enabled: boolean) => {
     setSkillBusy(skill.id)
@@ -152,15 +150,18 @@ export function ExtensionsSettingsPage({ sidebarCollapsed, onSidebar, navigate, 
   }
   const enabledSkills = skills.items.filter((item) => item.enabled).length
   const enabledConnectors = mcp.items.filter((item) => item.enabled).length
-  const enabledHooks = hooks.items.filter((item) => item.enabled).length
   const formInvalid = !form?.name.trim() || (form.transport === 'stdio' && !form.command.trim()) || (form.transport === 'streamable_http' && !form.endpointUrl.trim()) || (form.transport === 'openapi' && !form.definition.trim())
   const test = form?.id ? mcp.tests[form.id] : undefined
 
-  return <WorkspacePage title="插件" subtitle="技能、连接器与策略" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
-    <SettingsPageLayout title="插件" description="管理技能、连接器和工具调用策略；所有调用仍经过 Fox 审批和审计。" actions={<>
+  return <WorkspacePage title="插件" subtitle="内置工具、技能与连接器" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
+    <SettingsPageLayout title="插件" description="配置内置工具，管理技能和连接器；所有工具调用仍经过 Fox 审批和审计。" actions={<>
       {returnTarget && <Button type="button" variant="outline" onClick={goBack}><ArrowLeft />返回 {returnTarget.label}</Button>}
       <Button type="button" onClick={() => openConnector()}><Plus />添加连接器</Button>
     </>}>
+      <SettingsGroup id={settingsSectionId('search')} title="内置工具">
+        <SearchServiceSettings open={searchOpen} onOpenChange={setSearchOpen} />
+      </SettingsGroup>
+
       <SettingsGroup id={settingsSectionId('skills')} title="技能" aside={<>{skills.items.length > 0 && <span>{skills.items.length} 个，{enabledSkills} 个已启用</span>}<Button type="button" variant="ghost" size="sm" disabled={skills.loading} onClick={() => void skills.refresh()}>{skills.loading ? <LoaderCircle className="animate-spin" /> : <RotateCcw />}重新扫描</Button></>}>
         {skills.error && <p className="fox-settings-error" role="alert">暂时无法读取技能列表：{skills.error}</p>}
         {!skills.loading && !skills.error && skills.items.length === 0 && <p className="fox-settings-empty">还没有技能。在 Fox 数据目录的 skills 子目录中放入包含 SKILL.md 的文件夹后点「重新扫描」。</p>}
@@ -204,11 +205,8 @@ export function ExtensionsSettingsPage({ sidebarCollapsed, onSidebar, navigate, 
         </div>
       </SettingsGroup>
 
-      <SettingsGroup title="策略">
-        <SettingsRow title="生命周期 Hook" description={hooks.items.length ? `${hooks.items.length} 条，${enabledHooks} 条启用。按工具名匹配并阻止、要求审批或附加说明，不执行脚本` : '按工具名匹配并阻止、要求审批或附加说明；Hook 不执行脚本，每次命中都写入审计'}>
-          <Button type="button" variant="outline" size="sm" onClick={() => setHooksOpen(true)}><ShieldCheck />管理</Button>
-        </SettingsRow>
-        <SettingsRow title="工具插件" description="内置工具和已安装工具插件的状态与兼容性">
+      <SettingsGroup title="工具插件">
+        <SettingsRow title="已安装工具" description="查看内置工具和工具插件的状态与兼容性；全局调用规则位于「权限与安全」">
           <Button type="button" variant="ghost" size="sm" onClick={() => navigate('plugins', 'tool')}><Wrench />插件中心<ChevronRight /></Button>
         </SettingsRow>
       </SettingsGroup>
@@ -258,16 +256,6 @@ export function ExtensionsSettingsPage({ sidebarCollapsed, onSidebar, navigate, 
             {!isBuiltin && <Button type="button" disabled={formInvalid || mcp.busyId != null} onClick={() => void saveConnector()}>{mcp.busyId === (form.id ?? 'new') && <LoaderCircle className="animate-spin" />}{form.id ? '保存' : '添加'}</Button>}
           </div>
         </>}
-      </SheetContent>
-    </Sheet>
-
-    <Sheet open={hooksOpen} onOpenChange={setHooksOpen}>
-      <SheetContent side="right" className="fox-settings-sheet fox-settings-hooks-sheet">
-        <SheetHeader className="fox-settings-sheet-head">
-          <span className="fox-settings-provider-mark is-large"><ShieldCheck /></span>
-          <div className="fox-settings-sheet-title"><SheetTitle><span>生命周期 Hook</span></SheetTitle><SheetDescription>匹配器支持精确名称、逗号分组和前后缀通配符，例如 call_*。</SheetDescription></div>
-        </SheetHeader>
-        <div className="fox-settings-sheet-body"><LifecycleHooksSection showHeader={false} /></div>
       </SheetContent>
     </Sheet>
   </WorkspacePage>

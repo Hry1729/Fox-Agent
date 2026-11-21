@@ -36,7 +36,7 @@ class FakeObserver {
 const bubble = (deliveryOrder: number): ContactBubbleRecord => ({
   id: `b${deliveryOrder}`, conversationId: 'chat', runId: null, messageId: `m${deliveryOrder}`,
   sourceOrdinal: deliveryOrder / 1000, author: 'companion', projection: 'message', segmentStart: null,
-  segmentEnd: null, deliveryOrder, deliveredAt: deliveryOrder, content: 'x', fingerprint: 'f',
+  segmentEnd: null, deliveryOrder, deliveredAt: deliveryOrder, content: 'x', fingerprint: 'f', metadata: {},
 })
 
 const contact = (patch: Partial<Companion> = {}): Companion => ({

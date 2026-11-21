@@ -7,7 +7,7 @@
   /* 对话行只有一个「…」。 */
   --fox-sidebar-row-action-width: var(--fox-sidebar-action-size);
   /* 项目行是「+」和「…」，中间留动作间距。 */
-  --fox-sidebar-project-actions-width: calc(var(--fox-sidebar-action-size) + var(--fox-sidebar-action-gap) + var(--fox-sidebar-action-size));
+  --fox-sidebar-project-actions-width: var(--fox-sidebar-actions-pair-width);
   /* 「等你处理」四字，加上左右内边距和一档余量，避免字贴圆角。 */
   --fox-sidebar-badge-width: calc(var(--fox-type-caption) * 4 + var(--fox-space-s) + var(--fox-space-s) + var(--fox-space-xs));
   --fox-sidebar-pin-width: var(--fox-icon-size-compact);
@@ -73,7 +73,7 @@
   position: absolute;
   z-index: 2;
   inset-block: 0;
-  inset-inline-end: var(--fox-sidebar-inset);
+  inset-inline-end: var(--fox-sidebar-action-inset);
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -101,12 +101,12 @@
   transition-duration: var(--fox-duration-fast);
 }
 
-/* 对话标题右缘收到内容盒右缘（行右缘 − inset），不再给时间和动作留行内槽。 */
+/* 状态点和悬浮菜单共用右侧动作列，标题不进入该区域。 */
 .fox-sidebar .fox-project-children .fox-sidebar-tree-row > .fox-sidebar-tree-main,
 .fox-sidebar .fox-conversation-list .fox-sidebar-tree-row > .fox-sidebar-tree-main {
   width: 100%;
   min-width: 0;
-  padding-inline-end: 0;
+  padding-inline-end: calc(var(--fox-sidebar-action-size) + var(--fox-sidebar-action-inset) + var(--fox-space-xs));
 }
 
 /* 徽标常态贴行尾，和动作同一锚点；悬停时左移一个动作宽，不重排。 */
@@ -181,10 +181,15 @@
 
 /* ---------- 分组标题：去掉暗色色带，只保留按钮自己的悬停 ---------- */
 
-.fox-sidebar .fox-sidebar-group-scroll .fox-sidebar-group-head {
-  background: transparent !important;
-  background-color: transparent !important;
-  box-shadow: none;
+/* 每个侧栏模式（对话、资料、通知）的分组标题：标签在图标列，动作组右缘在动作列。
+   动作组总占「+ …」两格并靠左排，只有一个「+」的分组，+ 也和别的分组同一列。 */
+.fox-sidebar .fox-section-head {
+  padding-inline: var(--fox-sidebar-inset) var(--fox-sidebar-action-inset);
+}
+
+.fox-sidebar .fox-section-head > span:last-child:not(:first-child) {
+  justify-content: flex-start;
+  min-width: var(--fox-sidebar-actions-pair-width);
 }
 
 /* ---------- 日期分组：纯文字小标题，左缘对齐对话标题 ---------- */

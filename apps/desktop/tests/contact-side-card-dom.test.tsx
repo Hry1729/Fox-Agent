@@ -90,7 +90,7 @@ mock.module('@tauri-apps/api/core', () => ({
 }))
 
 // 导入的成功提示与失败上报都走 notify；接管它才能断言反馈没被吞掉。
-const actualNotifications = await import('../src/features/notifications')
+const actualNotifications = { ...await import('../src/features/notifications') }
 const toasts: Array<{ type: string; message: string }> = []
 mock.module('../src/features/notifications', () => ({
   ...actualNotifications,
@@ -136,10 +136,10 @@ function host() {
     if (command === 'project_folder_open') return ok(true)
     // 资料卡挂载时会订阅共享的文件版本仓库（与右侧边栏同一 store）。
     if (command === 'managed_file_versions_list') return ok([])
-    if (command === 'project_files_list') return ok([
+    if (command === 'project_files_list') return ok({ entries: [
       { path: 'notes/报价.md', name: '报价.md', isDirectory: false },
       { path: 'notes', name: 'notes', isDirectory: true },
-    ])
+    ], truncated: false })
     if (command === 'companion_export_file') return ok('C:/Downloads/报价.md')
     if (command === 'companion_import_files') return ok(['a.pdf', 'b.pdf', 'c.pdf'])
     if (command === 'companion_workspace_repair') return ok('C:/fox/contact')
@@ -661,6 +661,9 @@ describe('旧资料页的功能仍然可达（缺口 E）', () => {
     const view = renderCard()
     await waitFor(() => expect(view.getByText('1 个任务 · 1 个待处理')).toBeDefined())
     expect(view.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['详情', '资料库', '工作目录'])
+    const scheduleCard = view.getByRole('button', { name: /^定时任务/ }).closest('.fox-contact-list-card')
+    expect(scheduleCard).not.toBeNull()
+    expect(scheduleCard?.classList.contains('fox-library-card')).toBe(false)
     fireEvent.click(view.getByRole('button', { name: /^定时任务/ }))
     await waitFor(() => expect(view.getByRole('heading', { level: 2 }).textContent).toBe('定时任务'))
     expect(view.queryByRole('tab')).toBeNull()

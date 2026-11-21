@@ -1,10 +1,9 @@
-import { Fragment, useMemo } from 'react'
+import { useMemo } from 'react'
 import { MessagePrimitive, useAuiState } from '@assistant-ui/react'
 import type { FoxThreadMessage } from '@/features/chat/thread/convert-detail'
 import { useFoxThread } from '@/features/chat/thread/fox-thread-context'
 import { RuntimeArtifacts } from '@/features/chat/runtime-artifacts'
 import { resolveFinalArtifactReference } from '@/features/chat/final-artifact-references'
-import { ErrorPrompt } from '@/features/chat/demo/fox-demo-prompts'
 import { notify as toast } from '@/features/notifications'
 import { ContactWriteCards } from './chat-cards'
 import { ContactDecisionCards } from './chat-decisions'
@@ -12,6 +11,7 @@ import { visibleContactReplies } from './chat-message-model'
 import { ContactTimeDivider } from './chat-time'
 import { ContactReplyBubble } from './marks'
 import { useContacts } from './context'
+import { CompanionCommunicationBefore } from './assignment-timeline'
 import './contact-chat.css'
 
 export function ContactAssistantMessage() {
@@ -45,13 +45,15 @@ export function ContactAssistantMessage() {
     }}>
       {/* SPEC item 9：不再渲染每条回复旁的模型头像——顶部胶囊已经有头像。 */}
       <div className="fox-contact-run-body">
-        {replies.map(reply => <Fragment key={reply.id}><ContactTimeDivider messageId={reply.id} /><ContactReplyBubble contact={contact} reply={reply}
-          initialMark={fox.contactBubbleMarks?.get(reply.id)} /></Fragment>)}
+        <ContactDecisionCards runId={lastInRun ? message.runId : null} replies={replies.map(reply => ({
+          id: reply.id,
+          time: reply.createdAt,
+          content: <><CompanionCommunicationBefore messageId={reply.id} /><ContactTimeDivider messageId={reply.id} /><ContactReplyBubble contact={contact} reply={reply}
+            initialMark={fox.contactBubbleMarks?.get(reply.id)} /></>,
+        }))} />
       {lastInRun && <>
         <RuntimeArtifacts artifacts={artifacts.filter(artifact => artifact.declaredAt != null)} onOpenArtifact={fox.onOpenArtifact} />
-        {message.runId && <ContactDecisionCards runId={message.runId} />}
         <ContactWriteCards runId={message.runId} />
-        {message.failure && <ErrorPrompt failure={message.failure} />}
         {message.cancelled && <p className="fox-contact-ended" role="status">已停止，发出的消息已保留</p>}
       </>}
       </div>

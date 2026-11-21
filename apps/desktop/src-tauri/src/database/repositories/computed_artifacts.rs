@@ -107,12 +107,22 @@ mod tests {
     /// cap applies to the result summary, not to outer `files` artifacts.
     #[test]
     fn persist_maps_details_files_to_full_size_compute_artifacts() {
-        let db_path = std::env::temp_dir().join(format!("fox-computed-artifacts-{}.db", Uuid::new_v4()));
+        let db_path =
+            std::env::temp_dir().join(format!("fox-computed-artifacts-{}.db", Uuid::new_v4()));
         let database = Database::open(db_path).unwrap();
         let conversation = database
-            .create_conversation(database.default_agent_id(), Some("computed files"), None, None)
+            .create_conversation(
+                database.default_agent_id(),
+                Some("computed files"),
+                None,
+                None,
+            )
             .unwrap();
-        let run = database.create_run(&conversation.id, "computed files", None).unwrap().run.id;
+        let run = database
+            .create_run(&conversation.id, "computed files", None)
+            .unwrap()
+            .run
+            .id;
         database
             .with_connection(|c| {
                 c.execute(
@@ -164,17 +174,26 @@ mod tests {
                     )
                 })
                 .unwrap();
-        assert_eq!(registered_bytes, bytes, "the full (>64 KiB) file size is registered, not a truncated summary");
+        assert_eq!(
+            registered_bytes, bytes,
+            "the full (>64 KiB) file size is registered, not a truncated summary"
+        );
         assert!(registered_bytes > 65_536);
         assert_eq!(registered_sha, sha);
         assert_eq!(status, "ready");
         assert_eq!(name, "agv.csv");
         // Resolvable through the same ownership-scoped lookup the Office path uses.
-        assert!(database.artifact_for_conversation(&conversation.id, &id).unwrap().is_some());
+        assert!(database
+            .artifact_for_conversation(&conversation.id, &id)
+            .unwrap()
+            .is_some());
         // A foreign conversation cannot resolve it.
         let other = database
             .create_conversation(database.default_agent_id(), Some("other"), None, None)
             .unwrap();
-        assert!(database.artifact_for_conversation(&other.id, &id).unwrap().is_none());
+        assert!(database
+            .artifact_for_conversation(&other.id, &id)
+            .unwrap()
+            .is_none());
     }
 }

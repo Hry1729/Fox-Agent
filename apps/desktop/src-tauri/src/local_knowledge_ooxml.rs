@@ -150,7 +150,9 @@ pub(super) fn xlsx_text(archive: &SafeZipArchive<'_>) -> Result<String, ImportEr
     xlsx_text_with_outline(archive).map(|(text, _, _)| text)
 }
 
-pub(super) fn xlsx_text_with_outline(archive: &SafeZipArchive<'_>) -> Result<(String, Vec<super::AttachmentSheetOutline>, usize), ImportError> {
+pub(super) fn xlsx_text_with_outline(
+    archive: &SafeZipArchive<'_>,
+) -> Result<(String, Vec<super::AttachmentSheetOutline>, usize), ImportError> {
     let shared = archive
         .read_entry("xl/sharedStrings.xml")?
         .map(|xml| items(&xml, b"si"))

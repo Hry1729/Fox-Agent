@@ -1,12 +1,15 @@
+use super::*;
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::*;
 
 impl Database {
     /// Avatar decoration is independent of immutable expert prompt snapshots.
     /// Apply this user's selected set once; preserve subsequent manual choices.
     pub(crate) fn seed_expert_avatars(&self) -> Result<(), String> {
-        let avatars: Vec<Value> = serde_json::from_str(include_str!("../../../../public/avatars/experts/assignments.json")).map_err(|e|e.to_string())?;
+        let avatars: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../../public/avatars/experts/assignments.json"
+        ))
+        .map_err(|e| e.to_string())?;
         self.with_connection(|connection| {
             let tx=connection.transaction()?;
             for avatar in &avatars {
@@ -130,31 +133,45 @@ impl Database {
     }
 }
 
-
-fn refresh_compute_bindings(tx: &rusqlite::Transaction<'_>, expert_id: &str, version: &str, now: i64) -> rusqlite::Result<()> {
-    let Some(current)=query_agent_record(tx,expert_id)? else {return Ok(());};
-    if current.package_version!=version || current.package_manifest["bundledLibrary"]!="agency-zh-fox-v1"
-        || !current.package_manifest["allowedTools"].as_array().is_some_and(|tools|tools.iter().any(|tool|tool=="attachment_compute")) { return Ok(()); }
-                // Upgrade idle conversations to the newly installed bundled capability.
-                // Keep historical binding snapshots and all in-flight runs immutable.
-                let mut query=tx.prepare("SELECT b.id FROM conversation_expert_bindings b WHERE b.expert_id=?1 AND b.state='active'
-                    AND b.expert_version IN ('1.0.0','1.1.0','1.2.0') AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.conversation_id=b.conversation_id
+fn refresh_compute_bindings(
+    tx: &rusqlite::Transaction<'_>,
+    expert_id: &str,
+    version: &str,
+    now: i64,
+) -> rusqlite::Result<()> {
+    let Some(current) = query_agent_record(tx, expert_id)? else {
+        return Ok(());
+    };
+    if current.package_version != version
+        || current.package_manifest["bundledLibrary"] != "agency-zh-fox-v1"
+        || !current.package_manifest["allowedTools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool == "attachment_compute"))
+    {
+        return Ok(());
+    }
+    // Upgrade idle conversations to the newly installed bundled version.
+    // Keep historical binding snapshots and all in-flight runs immutable.
+    let mut query=tx.prepare("SELECT b.id FROM conversation_expert_bindings b WHERE b.expert_id=?1 AND b.state='active'
+                    AND b.expert_version IN ('1.0.0','1.1.0','1.2.0','1.3.0') AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.conversation_id=b.conversation_id
                     AND r.status IN ('queued','running','waiting_approval'))")?;
-                let bindings=query.query_map([expert_id],|row|row.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
-                drop(query);
-                if !bindings.is_empty() {
-                    let expert=query_agent_record(&tx,expert_id)?.ok_or(rusqlite::Error::InvalidQuery)?;
-                    let snapshot=agent_package_snapshot(&expert);
-                    let hash=package_snapshot_hash(&snapshot);
-                    for old in bindings {
-                        tx.execute("UPDATE conversation_expert_bindings SET state='replaced',deactivated_at=?2 WHERE id=?1",params![old,now])?;
-                        tx.execute("INSERT INTO conversation_expert_bindings(id,conversation_id,expert_id,state,activation_source,expert_version,
+    let bindings = query
+        .query_map([expert_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(query);
+    if !bindings.is_empty() {
+        let expert = query_agent_record(&tx, expert_id)?.ok_or(rusqlite::Error::InvalidQuery)?;
+        let snapshot = agent_package_snapshot(&expert);
+        let hash = package_snapshot_hash(&snapshot);
+        for old in bindings {
+            tx.execute("UPDATE conversation_expert_bindings SET state='replaced',deactivated_at=?2 WHERE id=?1",params![old,now])?;
+            tx.execute("INSERT INTO conversation_expert_bindings(id,conversation_id,expert_id,state,activation_source,expert_version,
                             package_hash,package_snapshot_json,display_snapshot_json,activated_at,deactivated_at)
                             SELECT ?1,conversation_id,expert_id,'active','bundled-capability-upgrade',?2,?3,?4,
                             json_set(display_snapshot_json,'$.packageVersion',?2),?5,NULL FROM conversation_expert_bindings WHERE id=?6",
                             params![Uuid::new_v4().to_string(),version,hash,snapshot.canonical_string(),now,old])?;
-                    }
-                }
+        }
+    }
     Ok(())
 }
 
@@ -180,10 +197,21 @@ mod tests {
             20
         );
         let reviewer = db.get_agent("fox-reviewer").unwrap().unwrap();
-        assert_eq!(reviewer.icon.as_deref(),Some("/avatars/experts/Fox_CodeReviewer.png"));
-        db.execute_raw_sql("UPDATE agents SET icon='/custom-reviewer.png' WHERE id='fox-reviewer'").unwrap();
+        assert_eq!(
+            reviewer.icon.as_deref(),
+            Some("/avatars/experts/Fox_CodeReviewer.png")
+        );
+        db.execute_raw_sql("UPDATE agents SET icon='/custom-reviewer.png' WHERE id='fox-reviewer'")
+            .unwrap();
         db.seed_expert_avatars().unwrap();
-        assert_eq!(db.get_agent("fox-reviewer").unwrap().unwrap().icon.as_deref(),Some("/custom-reviewer.png"));
+        assert_eq!(
+            db.get_agent("fox-reviewer")
+                .unwrap()
+                .unwrap()
+                .icon
+                .as_deref(),
+            Some("/custom-reviewer.png")
+        );
         assert!(!reviewer.package_manifest["allowedTools"]
             .as_array()
             .unwrap()
@@ -230,36 +258,100 @@ mod compute_upgrade_tests {
     use super::*;
     #[test]
     fn compute_upgrade_refreshes_idle_binding_preserves_active_run_and_user_choices() {
-        let root=std::env::temp_dir().join(format!("fox-compute-upgrade-{}",Uuid::new_v4()));
+        assert_bundled_binding_upgrade("1.1.0");
+    }
+
+    #[test]
+    fn prompt_upgrade_refreshes_idle_binding_preserves_active_run_and_user_choices() {
+        assert_bundled_binding_upgrade("1.3.0");
+    }
+
+    fn assert_bundled_binding_upgrade(previous_version: &str) {
+        let previous_prompt = "使用 XLSX 时重新读取关键单元格并复算样例；不支持的函数或外部引用应明确指出。";
+        let root = std::env::temp_dir().join(format!("fox-compute-upgrade-{}", Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
-        let db=Database::open(root.join("test.db")).unwrap();
-        let agent=db.get_agent("fox-data-analyst").unwrap().unwrap();
-        let installed_version=agent.package_version.clone();
-        let mut old=agent.package_manifest;
-        old["allowedTools"].as_array_mut().unwrap().retain(|tool|tool!="attachment_compute");
+        let db = Database::open(root.join("test.db")).unwrap();
+        let agent = db.get_agent("fox-data-analyst").unwrap().unwrap();
+        let installed_version = agent.package_version.clone();
+        let mut old = agent.package_manifest;
+        if previous_version == "1.1.0" {
+            old["allowedTools"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|tool| tool != "attachment_compute");
+        }
         db.with_connection(|c| {
-            c.execute("UPDATE agents SET package_version='1.1.0',package_manifest_json=?1,icon='custom-avatar.png' WHERE id='fox-data-analyst'",[old.canonical_string()])?;
-            c.execute("UPDATE expert_package_versions SET version='1.1.0' WHERE expert_id='fox-data-analyst' AND version=?1",[&installed_version])?;
+            c.execute("UPDATE agents SET package_version=?1,package_manifest_json=?2,system_prompt=?3,icon='custom-avatar.png' WHERE id='fox-data-analyst'",params![previous_version,old.canonical_string(),previous_prompt])?;
+            c.execute("UPDATE expert_package_versions SET version=?1 WHERE expert_id='fox-data-analyst' AND version=?2",params![previous_version,installed_version])?;
             c.execute("UPDATE agent_runtime_config SET value_json='[\"custom-skill\"]',source='user' WHERE agent_id='fox-data-analyst' AND config_key='skills.enabled'",[])?;
             Ok(())
         }).unwrap();
-        let idle=db.create_conversation(db.default_agent_id(),None,None,Some("read_only")).unwrap();
-        let running=db.create_conversation(db.default_agent_id(),None,None,Some("read_only")).unwrap();
-        let idle_before=db.bind_conversation_expert(&idle.id,"fox-data-analyst","test").unwrap();
-        let active_before=db.bind_conversation_expert(&running.id,"fox-data-analyst","test").unwrap();
-        db.create_run(&running.id,"active test",None).unwrap();
+        let idle = db
+            .create_conversation(db.default_agent_id(), None, None, Some("read_only"))
+            .unwrap();
+        let running = db
+            .create_conversation(db.default_agent_id(), None, None, Some("read_only"))
+            .unwrap();
+        let idle_before = db
+            .bind_conversation_expert(&idle.id, "fox-data-analyst", "test")
+            .unwrap();
+        let active_before = db
+            .bind_conversation_expert(&running.id, "fox-data-analyst", "test")
+            .unwrap();
+        db.create_run(&running.id, "active test", None).unwrap();
         assert!(db.conversation_has_active_run(&running.id).unwrap());
         db.seed_bundled_experts().unwrap();
-        let idle_after=db.current_conversation_expert_binding(&idle.id).unwrap().unwrap();
-        assert_eq!(idle_after.expert_version,installed_version);
-        for name in ["compute_job_start","compute_job_status","compute_job_cancel","compute_job_result"] {
-            assert!(idle_after.package_snapshot["packageManifest"]["allowedTools"].as_array().unwrap().contains(&json!(name)));
+        let idle_after = db
+            .current_conversation_expert_binding(&idle.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(idle_after.expert_version, installed_version);
+        assert!(idle_after.package_snapshot["systemPrompt"]
+            .as_str()
+            .unwrap()
+            .contains("公式能算出值仍可能引用了错误的行"));
+        for name in [
+            "compute_job_start",
+            "compute_job_status",
+            "compute_job_cancel",
+            "compute_job_result",
+        ] {
+            assert!(
+                idle_after.package_snapshot["packageManifest"]["allowedTools"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(name))
+            );
         }
-        assert!(idle_after.package_snapshot["packageManifest"]["officeTools"].as_array().unwrap().contains(&json!("office_import_data")));
-        assert_ne!(idle_after.id,idle_before.id);
-        assert!(idle_after.package_snapshot["packageManifest"]["allowedTools"].as_array().unwrap().iter().any(|tool|tool=="attachment_compute"));
-        assert_eq!(db.current_conversation_expert_binding(&running.id).unwrap().unwrap().package_snapshot,active_before.package_snapshot);
-        assert_eq!(db.get_agent("fox-data-analyst").unwrap().unwrap().icon.as_deref(),Some("custom-avatar.png"));
+        assert!(
+            idle_after.package_snapshot["packageManifest"]["officeTools"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("office_import_data"))
+        );
+        assert_ne!(idle_after.id, idle_before.id);
+        assert!(
+            idle_after.package_snapshot["packageManifest"]["allowedTools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool == "attachment_compute")
+        );
+        assert_eq!(
+            db.current_conversation_expert_binding(&running.id)
+                .unwrap()
+                .unwrap()
+                .package_snapshot,
+            active_before.package_snapshot
+        );
+        assert_eq!(
+            db.get_agent("fox-data-analyst")
+                .unwrap()
+                .unwrap()
+                .icon
+                .as_deref(),
+            Some("custom-avatar.png")
+        );
         db.with_connection(|c| {
             let prior:String=c.query_row("SELECT package_snapshot_json FROM conversation_expert_bindings WHERE id=?1",[&idle_before.id],|r|r.get(0))?;
             assert_eq!(serde_json::from_str::<Value>(&prior).unwrap(),idle_before.package_snapshot);
@@ -268,7 +360,13 @@ mod compute_upgrade_tests {
             Ok(())
         }).unwrap();
         db.seed_bundled_experts().unwrap();
-        assert_eq!(db.current_conversation_expert_binding(&idle.id).unwrap().unwrap().id,idle_after.id);
+        assert_eq!(
+            db.current_conversation_expert_binding(&idle.id)
+                .unwrap()
+                .unwrap()
+                .id,
+            idle_after.id
+        );
     }
 }
 
@@ -332,20 +430,34 @@ mod missing_agent_row_tests {
         let root = temp_root("plain");
         let db = startup_open(&root).unwrap();
         let expert = create_local_expert(&db);
-        assert!(db.query_count_raw("SELECT COUNT(*) FROM agent_runtime_config WHERE agent_id=?1", &[&expert as &dyn rusqlite::ToSql]).unwrap() > 0);
+        assert!(
+            db.query_count_raw(
+                "SELECT COUNT(*) FROM agent_runtime_config WHERE agent_id=?1",
+                &[&expert as &dyn rusqlite::ToSql]
+            )
+            .unwrap()
+                > 0
+        );
         let agents_before = db.list_agents().unwrap().len();
         delete_agent_row_outside_fox(&db, &expert);
         drop(db);
 
         let db = startup_open(&root).expect("startup must not fail on a missing local expert row");
-        assert!(db.get_agent(&expert).unwrap().is_none(), "a deleted local expert is not resurrected");
+        assert!(
+            db.get_agent(&expert).unwrap().is_none(),
+            "a deleted local expert is not resurrected"
+        );
         assert_eq!(db.list_agents().unwrap().len(), agents_before - 1);
         assert_eq!(agent_fk_violations(&db), 0);
         assert!(db.get_agent(DEFAULT_AGENT_ID).unwrap().is_some());
         drop(db);
         // A second restart is a no-op.
         let db = startup_open(&root).unwrap();
-        assert!(db.repair_missing_agent_references().unwrap().missing_agent_ids.is_empty());
+        assert!(db
+            .repair_missing_agent_references()
+            .unwrap()
+            .missing_agent_ids
+            .is_empty());
         drop(db);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -366,33 +478,60 @@ mod missing_agent_row_tests {
             .map(|_| ())
         })
         .unwrap();
-        let direct = db.create_conversation(&assistant, Some("直接对话"), None, None).unwrap();
+        let direct = db
+            .create_conversation(&assistant, Some("直接对话"), None, None)
+            .unwrap();
         // … and a general-assistant conversation with the local expert bound.
-        let bound = db.create_conversation(DEFAULT_AGENT_ID, Some("绑定对话"), None, None).unwrap();
-        let binding = db.bind_conversation_expert(&bound.id, &expert, "test").unwrap();
+        let bound = db
+            .create_conversation(DEFAULT_AGENT_ID, Some("绑定对话"), None, None)
+            .unwrap();
+        let binding = db
+            .bind_conversation_expert(&bound.id, &expert, "test")
+            .unwrap();
         delete_agent_row_outside_fox(&db, &assistant);
         delete_agent_row_outside_fox(&db, &expert);
         drop(db);
 
-        let db = startup_open(&root).expect("startup must not fail when conversations still reference the expert");
-        let repaired_direct = db.load_conversation(&direct.id).expect("conversation that used the expert opens");
+        let db = startup_open(&root)
+            .expect("startup must not fail when conversations still reference the expert");
+        let repaired_direct = db
+            .load_conversation(&direct.id)
+            .expect("conversation that used the expert opens");
         assert_eq!(repaired_direct.conversation.agent_id, DEFAULT_AGENT_ID);
-        let repaired_bound = db.load_conversation(&bound.id).expect("bound conversation opens");
+        let repaired_bound = db
+            .load_conversation(&bound.id)
+            .expect("bound conversation opens");
         assert_eq!(repaired_bound.conversation.agent_id, DEFAULT_AGENT_ID);
-        assert!(db.current_conversation_expert_binding(&bound.id).unwrap().is_none(), "the dangling binding is no longer active");
+        assert!(
+            db.current_conversation_expert_binding(&bound.id)
+                .unwrap()
+                .is_none(),
+            "the dangling binding is no longer active"
+        );
         assert_eq!(
             db.query_count_raw("SELECT COUNT(*) FROM conversation_expert_bindings WHERE id=?1 AND state='removed' AND deactivated_at IS NOT NULL", &[&binding.id as &dyn rusqlite::ToSql]).unwrap(),
             1,
             "the binding row and its snapshot are kept as history"
         );
         let listed = db.list_conversations().unwrap();
-        assert!(listed.iter().any(|c| c.id == direct.id) && listed.iter().any(|c| c.id == bound.id), "both conversations stay in the sidebar");
+        assert!(
+            listed.iter().any(|c| c.id == direct.id) && listed.iter().any(|c| c.id == bound.id),
+            "both conversations stay in the sidebar"
+        );
         assert_eq!(agent_fk_violations(&db), 0);
         // The conversation can take a new expert again.
-        db.bind_conversation_expert(&bound.id, "fox-reviewer", "test").unwrap();
+        db.bind_conversation_expert(&bound.id, "fox-reviewer", "test")
+            .unwrap();
         drop(db);
         let db = startup_open(&root).unwrap();
-        assert_eq!(db.current_conversation_expert_binding(&bound.id).unwrap().unwrap().expert_id.as_deref(), Some("fox-reviewer"));
+        assert_eq!(
+            db.current_conversation_expert_binding(&bound.id)
+                .unwrap()
+                .unwrap()
+                .expert_id
+                .as_deref(),
+            Some("fox-reviewer")
+        );
         drop(db);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -402,24 +541,38 @@ mod missing_agent_row_tests {
         let root = temp_root("bundled");
         let db = startup_open(&root).unwrap();
         let before = db.get_agent("fox-reviewer").unwrap().unwrap();
-        let conversation = db.create_conversation(DEFAULT_AGENT_ID, None, None, None).unwrap();
-        db.bind_conversation_expert(&conversation.id, "fox-reviewer", "test").unwrap();
+        let conversation = db
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .unwrap();
+        db.bind_conversation_expert(&conversation.id, "fox-reviewer", "test")
+            .unwrap();
         delete_agent_row_outside_fox(&db, "fox-reviewer");
         // A built-in (is_builtin=1) agent too.
         delete_agent_row_outside_fox(&db, "fox-debugger");
         drop(db);
 
-        let db = startup_open(&root).expect("startup must re-seed missing built-in/bundled experts");
-        let after = db.get_agent("fox-reviewer").unwrap().expect("bundled expert re-seeded");
+        let db =
+            startup_open(&root).expect("startup must re-seed missing built-in/bundled experts");
+        let after = db
+            .get_agent("fox-reviewer")
+            .unwrap()
+            .expect("bundled expert re-seeded");
         assert_eq!(after.package_hash, before.package_hash);
         assert_eq!(after.package_version, before.package_version);
-        assert!(db.get_agent("fox-debugger").unwrap().is_some(), "built-in agent re-seeded");
+        assert!(
+            db.get_agent("fox-debugger").unwrap().is_some(),
+            "built-in agent re-seeded"
+        );
         assert_eq!(
             db.query_count_raw("SELECT COUNT(*) FROM expert_package_versions WHERE expert_id='fox-reviewer' AND status='active'", &[]).unwrap(),
             1
         );
         assert_eq!(
-            db.current_conversation_expert_binding(&conversation.id).unwrap().unwrap().expert_id.as_deref(),
+            db.current_conversation_expert_binding(&conversation.id)
+                .unwrap()
+                .unwrap()
+                .expert_id
+                .as_deref(),
             Some("fox-reviewer"),
             "a binding to a re-seeded expert stays active"
         );
@@ -450,9 +603,19 @@ mod missing_agent_row_tests {
         };
         assert!(!error.contains("Query is not read-only"), "{error}");
         assert!(error.contains("外键完整性检查失败"), "{error}");
-        assert!(error.contains("conversation_expert_bindings → conversations"), "{error}");
-        let message = crate::startup_failure::database_open_message(&root.join("fox.db"), &root.join("backups"), &error);
-        assert!(message.contains(&root.join("fox.db").display().to_string()), "{message}");
+        assert!(
+            error.contains("conversation_expert_bindings → conversations"),
+            "{error}"
+        );
+        let message = crate::startup_failure::database_open_message(
+            &root.join("fox.db"),
+            &root.join("backups"),
+            &error,
+        );
+        assert!(
+            message.contains(&root.join("fox.db").display().to_string()),
+            "{message}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

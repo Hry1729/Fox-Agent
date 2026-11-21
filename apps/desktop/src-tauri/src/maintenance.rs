@@ -518,7 +518,8 @@ fn write_archive(
 ) -> Result<(), String> {
     let mut writer = BufWriter::new(File::create(path).map_err(|error| error.to_string())?);
     writeln!(writer, "{BACKUP_MAGIC}").map_err(|error| error.to_string())?;
-    let manifest_bytes = crate::canonical_json::to_vec(manifest).map_err(|error| error.to_string())?;
+    let manifest_bytes =
+        crate::canonical_json::to_vec(manifest).map_err(|error| error.to_string())?;
     writeln!(writer, "{}", manifest_bytes.len()).map_err(|error| error.to_string())?;
     writer
         .write_all(&manifest_bytes)
@@ -723,188 +724,379 @@ struct RestoreSessionPath {
 }
 
 fn absolute_restore_path(value: &str) -> bool {
-    let value=value.replace('\\',"/");
-    value.starts_with('/') || matches!(value.as_bytes(), [drive,b':',b'/',..] if drive.is_ascii_alphabetic())
+    let value = value.replace('\\', "/");
+    value.starts_with('/')
+        || matches!(value.as_bytes(), [drive,b':',b'/',..] if drive.is_ascii_alphabetic())
 }
 
 fn restore_relative(root: &Path, named: &str) -> Result<Option<PathBuf>, String> {
-    if !absolute_restore_path(named) || named.contains('\0') || named.split(['/', '\\']).any(|part|part=="..") {
+    if !absolute_restore_path(named)
+        || named.contains('\0')
+        || named.split(['/', '\\']).any(|part| part == "..")
+    {
         return Err("备份会话路径必须是没有上级跳转的绝对路径".into());
     }
     // The shared path identity handles drive/UNC namespaces, case and segment
     // boundaries. Its API accepts descendants; the probe also admits root==cwd.
-    let probe=format!("{}/.fox-restore-boundary",named.trim_end_matches(['/', '\\']));
-    let Some(relative)=crate::runtime_host::delivery::project_relative_path_for_u1(&probe,root.to_str()) else {return Ok(None)};
-    let mut relative=PathBuf::from(relative);
+    let probe = format!(
+        "{}/.fox-restore-boundary",
+        named.trim_end_matches(['/', '\\'])
+    );
+    let Some(relative) =
+        crate::runtime_host::delivery::project_relative_path_for_u1(&probe, root.to_str())
+    else {
+        return Ok(None);
+    };
+    let mut relative = PathBuf::from(relative);
     relative.pop();
     Ok(Some(relative))
 }
 
 fn inferred_backup_root(named: &str, directory: &str) -> Option<PathBuf> {
-    let unified=named.replace('\\',"/");
-    let plain=match unified.strip_prefix("//?/").or_else(||unified.strip_prefix("//./")) {
-        Some(rest) if rest.get(..4).is_some_and(|prefix|prefix.eq_ignore_ascii_case("unc/"))=>format!("//{}",&rest[4..]),
-        Some(rest)=>rest.to_owned(),None=>unified,
+    let unified = named.replace('\\', "/");
+    let plain = match unified
+        .strip_prefix("//?/")
+        .or_else(|| unified.strip_prefix("//./"))
+    {
+        Some(rest)
+            if rest
+                .get(..4)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("unc/")) =>
+        {
+            format!("//{}", &rest[4..])
+        }
+        Some(rest) => rest.to_owned(),
+        None => unified,
     };
-    let parts:Vec<_>=plain.split('/').collect();
-    let at=parts.iter().rposition(|part|part.eq_ignore_ascii_case(directory))?;
-    if at==0 || at+1>=parts.len() {return None;}
-    let mut root=parts[..at].join("/");
-    if root.ends_with(':') {root.push('/');}
-    absolute_restore_path(&root).then(||PathBuf::from(root))
+    let parts: Vec<_> = plain.split('/').collect();
+    let at = parts
+        .iter()
+        .rposition(|part| part.eq_ignore_ascii_case(directory))?;
+    if at == 0 || at + 1 >= parts.len() {
+        return None;
+    }
+    let mut root = parts[..at].join("/");
+    if root.ends_with(':') {
+        root.push('/');
+    }
+    absolute_restore_path(&root).then(|| PathBuf::from(root))
 }
 
-fn restored_native_header(bytes: &[u8], native_ref: Option<&str>, old_root: &Path, new_root: &Path) -> Result<Option<Vec<u8>>,String> {
-    let end=bytes.iter().position(|byte|*byte==b'\n').unwrap_or(bytes.len());
-    let line_end=if end>0&&bytes[end-1]==b'\r' {end-1} else {end};
-    let mut header:Value=serde_json::from_slice(&bytes[..line_end]).map_err(|error|format!("备份 Pi 会话头损坏：{error}"))?;
-    if header["type"]!="session" || !matches!(header["version"].as_i64(),Some(1..=3))
-        || header["id"].as_str().is_none_or(str::is_empty) {
+fn restored_native_header(
+    bytes: &[u8],
+    native_ref: Option<&str>,
+    old_root: &Path,
+    new_root: &Path,
+) -> Result<Option<Vec<u8>>, String> {
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .unwrap_or(bytes.len());
+    let line_end = if end > 0 && bytes[end - 1] == b'\r' {
+        end - 1
+    } else {
+        end
+    };
+    let mut header: Value = serde_json::from_slice(&bytes[..line_end])
+        .map_err(|error| format!("备份 Pi 会话头损坏：{error}"))?;
+    if header["type"] != "session"
+        || !matches!(header["version"].as_i64(), Some(1..=3))
+        || header["id"].as_str().is_none_or(str::is_empty)
+    {
         return Err("备份 Pi 会话头类型或版本不受支持".into());
     }
-    if native_ref.filter(|id|!id.is_empty()).is_some_and(|id|header["id"].as_str()!=Some(id)) {
+    if native_ref
+        .filter(|id| !id.is_empty())
+        .is_some_and(|id| header["id"].as_str() != Some(id))
+    {
         return Err("备份 Pi 会话身份与冻结映射不一致".into());
     }
-    let Some(cwd)=header["cwd"].as_str() else {return Ok(None)};
-    if !absolute_restore_path(cwd) {return Ok(None);}
-    if restore_relative(new_root,cwd)?.is_some() {return Ok(None);}
-    let Some(relative)=restore_relative(old_root,cwd)? else {return Ok(None)};
-    let mapped=new_root.join(relative).to_string_lossy().into_owned();
-    if cwd==mapped {return Ok(None);}
-    header["cwd"]=json!(mapped);
-    let mut rewritten=crate::canonical_json::to_vec(&header).map_err(|error|error.to_string())?;
+    let Some(cwd) = header["cwd"].as_str() else {
+        return Ok(None);
+    };
+    if !absolute_restore_path(cwd) {
+        return Ok(None);
+    }
+    if restore_relative(new_root, cwd)?.is_some() {
+        return Ok(None);
+    }
+    let Some(relative) = restore_relative(old_root, cwd)? else {
+        return Ok(None);
+    };
+    let mapped = new_root.join(relative).to_string_lossy().into_owned();
+    if cwd == mapped {
+        return Ok(None);
+    }
+    header["cwd"] = json!(mapped);
+    let mut rewritten =
+        crate::canonical_json::to_vec(&header).map_err(|error| error.to_string())?;
     rewritten.extend_from_slice(&bytes[line_end..]);
     Ok(Some(rewritten))
 }
 
-fn restore_session_relative(old_root: &Path, new_root: &Path, named: &str) -> Result<PathBuf,String> {
-    let relative=restore_relative(&old_root.join("runtime-sessions"),named)?
-        .or(restore_relative(&new_root.join("runtime-sessions"),named)?);
-    relative.filter(|path|!path.as_os_str().is_empty()).ok_or_else(||"备份路径不在原数据根的会话目录内".into())
+fn restore_session_relative(
+    old_root: &Path,
+    new_root: &Path,
+    named: &str,
+) -> Result<PathBuf, String> {
+    let relative = restore_relative(&old_root.join("runtime-sessions"), named)?
+        .or(restore_relative(&new_root.join("runtime-sessions"), named)?);
+    relative
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| "备份路径不在原数据根的会话目录内".into())
 }
 
-fn verify_staged_session_parents(directory: &Path, relative: &Path) -> Result<(),String> {
-    let mut current=directory.to_path_buf();
-    for component in std::iter::once(None).chain(relative.parent().into_iter().flat_map(Path::components).map(Some)) {
-        match component {Some(Component::Normal(part))=>current.push(part),None=>{},_=>return Err("恢复会话路径包含非相对目录".into())}
+fn verify_staged_session_parents(directory: &Path, relative: &Path) -> Result<(), String> {
+    let mut current = directory.to_path_buf();
+    for component in std::iter::once(None).chain(
+        relative
+            .parent()
+            .into_iter()
+            .flat_map(Path::components)
+            .map(Some),
+    ) {
+        match component {
+            Some(Component::Normal(part)) => current.push(part),
+            None => {}
+            _ => return Err("恢复会话路径包含非相对目录".into()),
+        }
         match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir()=>return Err("恢复会话目录包含重定向或非目录路径".into()),
-            Ok(_)=>{},Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},
-            Err(error)=>return Err(error.to_string()),
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err("恢复会话目录包含重定向或非目录路径".into())
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
         }
     }
     Ok(())
 }
 
-fn rewrite_staged_session_header(path: &Path, expected: &[u8], header: &[u8]) -> Result<(),String> {
-    let temporary=path.with_file_name(format!(".fox-restore-{}.tmp",uuid::Uuid::new_v4()));
-    let result=(|| {
-        let mut source=BufReader::new(File::open(path).map_err(|error|error.to_string())?);
-        let mut old_header=Vec::new();
-        Read::by_ref(&mut source).take(1_048_577).read_until(b'\n',&mut old_header).map_err(|error|error.to_string())?;
-        if old_header.len()>1_048_576 {return Err("备份 Pi 会话头过大".into());}
-        if old_header!=expected {return Err("备份 Pi 会话在恢复校验后发生变化".into());}
-        let mut output=fs::OpenOptions::new().write(true).create_new(true).open(&temporary).map_err(|error|error.to_string())?;
-        output.write_all(header).map_err(|error|error.to_string())?;
-        std::io::copy(&mut source,&mut output).map_err(|error|error.to_string())?;
-        output.sync_all().map_err(|error|error.to_string())?;
-        drop(output);drop(source);
-        fs::rename(&temporary,path).map_err(|error|error.to_string())
+fn rewrite_staged_session_header(
+    path: &Path,
+    expected: &[u8],
+    header: &[u8],
+) -> Result<(), String> {
+    let temporary = path.with_file_name(format!(".fox-restore-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut source = BufReader::new(File::open(path).map_err(|error| error.to_string())?);
+        let mut old_header = Vec::new();
+        Read::by_ref(&mut source)
+            .take(1_048_577)
+            .read_until(b'\n', &mut old_header)
+            .map_err(|error| error.to_string())?;
+        if old_header.len() > 1_048_576 {
+            return Err("备份 Pi 会话头过大".into());
+        }
+        if old_header != expected {
+            return Err("备份 Pi 会话在恢复校验后发生变化".into());
+        }
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| error.to_string())?;
+        output
+            .write_all(header)
+            .map_err(|error| error.to_string())?;
+        std::io::copy(&mut source, &mut output).map_err(|error| error.to_string())?;
+        output.sync_all().map_err(|error| error.to_string())?;
+        drop(output);
+        drop(source);
+        fs::rename(&temporary, path).map_err(|error| error.to_string())
     })();
-    if result.is_err() {let _=fs::remove_file(&temporary);}
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
     result
 }
 
-fn rebase_internal_paths(database_path: &Path, data_dir: &Path, source_data_dir: Option<&str>) -> Result<(), String> {
-    restore_relative(data_dir,&data_dir.to_string_lossy())?;
+fn rebase_internal_paths(
+    database_path: &Path,
+    data_dir: &Path,
+    source_data_dir: Option<&str>,
+) -> Result<(), String> {
+    restore_relative(data_dir, &data_dir.to_string_lossy())?;
     let mut connection =
         rusqlite::Connection::open(database_path).map_err(|error| error.to_string())?;
-    let mut paths=Vec::new();
-    for table in ["runtime_sessions","runtime_session_generations"] {
-        let exists:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",[table],|row|row.get(0))
-            .map_err(|error|error.to_string())?;
-        if !exists {continue;}
-        let mut query=connection.prepare(&format!("PRAGMA table_info({table})")).map_err(|error|error.to_string())?;
-        let columns=query.query_map([],|row|row.get::<_,String>(1)).map_err(|error|error.to_string())?
-            .collect::<rusqlite::Result<Vec<_>>>().map_err(|error|error.to_string())?;
-        let column=|name:&str,fallback:&str|if columns.iter().any(|column|column==name) {name.to_owned()} else {fallback.to_owned()};
+    let mut paths = Vec::new();
+    for table in ["runtime_sessions", "runtime_session_generations"] {
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if !exists {
+            continue;
+        }
+        let mut query = connection
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(|error| error.to_string())?;
+        let columns = query
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|error| error.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| error.to_string())?;
+        let column = |name: &str, fallback: &str| {
+            if columns.iter().any(|column| column == name) {
+                name.to_owned()
+            } else {
+                fallback.to_owned()
+            }
+        };
         let sql=format!("SELECT rowid,session_path,{},{},{},runtime_session_id FROM {table} WHERE runtime_type='pi'",
             column("native_session_path","NULL"),column("native_session_ref","NULL"),column("format_version","1"));
-        let mut query=connection.prepare(&sql).map_err(|error|error.to_string())?;
-        let rows=query.query_map([],|row| {
-            let format:i64=row.get(4)?;
-            if !matches!(format,1|2) {return Err(rusqlite::Error::InvalidParameterName("不支持的备份会话格式".into()));}
-            Ok(RestoreSessionPath {table,rowid:row.get(0)?,snapshot:row.get(1)?,path:row.get(2)?,native_ref:row.get(3)?,native:format==2,session_id:row.get(5)?})
-        }).map_err(|error|error.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|error|error.to_string())?;
+        let mut query = connection
+            .prepare(&sql)
+            .map_err(|error| error.to_string())?;
+        let rows = query
+            .query_map([], |row| {
+                let format: i64 = row.get(4)?;
+                if !matches!(format, 1 | 2) {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "不支持的备份会话格式".into(),
+                    ));
+                }
+                Ok(RestoreSessionPath {
+                    table,
+                    rowid: row.get(0)?,
+                    snapshot: row.get(1)?,
+                    path: row.get(2)?,
+                    native_ref: row.get(3)?,
+                    native: format == 2,
+                    session_id: row.get(5)?,
+                })
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| error.to_string())?;
         paths.extend(rows);
     }
-    let mut inferred:Option<PathBuf>=None;
-    let mut candidates=paths.iter().flat_map(|row|row.snapshot.iter().chain(row.path.iter())).map(|path|(path.as_str(),"runtime-sessions")).collect::<Vec<_>>();
-    let mut query=connection.prepare("SELECT storage_path FROM attachments").map_err(|error|error.to_string())?;
-    let attachments=query.query_map([],|row|row.get::<_,String>(0)).map_err(|error|error.to_string())?
-        .collect::<rusqlite::Result<Vec<_>>>().map_err(|error|error.to_string())?;
+    let mut inferred: Option<PathBuf> = None;
+    let mut candidates = paths
+        .iter()
+        .flat_map(|row| row.snapshot.iter().chain(row.path.iter()))
+        .map(|path| (path.as_str(), "runtime-sessions"))
+        .collect::<Vec<_>>();
+    let mut query = connection
+        .prepare("SELECT storage_path FROM attachments")
+        .map_err(|error| error.to_string())?;
+    let attachments = query
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| error.to_string())?;
     drop(query);
-    candidates.extend(attachments.iter().map(|path|(path.as_str(),"attachments")));
+    candidates.extend(
+        attachments
+            .iter()
+            .map(|path| (path.as_str(), "attachments")),
+    );
     if source_data_dir.is_none() {
-        for (path,directory) in candidates {
-            let Some(root)=inferred_backup_root(path,directory) else {continue};
-            if let Some(existing)=&inferred {
-                if restore_relative(existing,&root.to_string_lossy())?!=Some(PathBuf::new()) {
+        for (path, directory) in candidates {
+            let Some(root) = inferred_backup_root(path, directory) else {
+                continue;
+            };
+            if let Some(existing) = &inferred {
+                if restore_relative(existing, &root.to_string_lossy())? != Some(PathBuf::new()) {
                     return Err("旧备份的数据根不唯一，已拒绝猜测会话归属".into());
                 }
-            } else {inferred=Some(root);}
+            } else {
+                inferred = Some(root);
+            }
         }
     }
-    let old_root=source_data_dir.map(PathBuf::from).or(inferred);
-    if let Some(root)=&old_root {restore_relative(root,&root.to_string_lossy())?;}
-    let staged_sessions=database_path.parent().ok_or("恢复数据库没有父目录")?.join("runtime-sessions");
-    let new_sessions=data_dir.join("runtime-sessions");
-    let mut mapped=Vec::new();
-    let mut rewrites=std::collections::BTreeMap::new();
+    let old_root = source_data_dir.map(PathBuf::from).or(inferred);
+    if let Some(root) = &old_root {
+        restore_relative(root, &root.to_string_lossy())?;
+    }
+    let staged_sessions = database_path
+        .parent()
+        .ok_or("恢复数据库没有父目录")?
+        .join("runtime-sessions");
+    let new_sessions = data_dir.join("runtime-sessions");
+    let mut mapped = Vec::new();
+    let mut rewrites = std::collections::BTreeMap::new();
     for row in paths {
         if !row.native {
-            let path=if row.table=="runtime_sessions" {
-                let name=format!("{}.json",row.session_id);
-                if name.split(['/', '\\']).count()!=1 || row.session_id.is_empty() || name.contains(':') {
+            let path = if row.table == "runtime_sessions" {
+                let name = format!("{}.json", row.session_id);
+                if name.split(['/', '\\']).count() != 1
+                    || row.session_id.is_empty()
+                    || name.contains(':')
+                {
                     return Err("旧快照的运行时身份不能用作会话文件名".into());
                 }
                 Some(new_sessions.join(name))
             } else {
-                row.snapshot.as_deref().map(|path| {
-                    let root=old_root.as_ref().ok_or("旧备份缺少会话数据根")?;
-                    let relative=restore_session_relative(root,data_dir,path)?;
-                    Ok::<_,String>(new_sessions.join(relative))
-                }).transpose()?
+                row.snapshot
+                    .as_deref()
+                    .map(|path| {
+                        let root = old_root.as_ref().ok_or("旧备份缺少会话数据根")?;
+                        let relative = restore_session_relative(root, data_dir, path)?;
+                        Ok::<_, String>(new_sessions.join(relative))
+                    })
+                    .transpose()?
             };
-            mapped.push((row.table,row.rowid,false,path));
+            mapped.push((row.table, row.rowid, false, path));
             continue;
         }
-        let Some(path)=row.path.as_deref().filter(|path|!path.trim().is_empty()) else {continue};
-        let root=old_root.as_ref().ok_or("旧备份缺少原生会话数据根")?;
-        let relative=restore_session_relative(root,data_dir,path)?;
-        verify_staged_session_parents(&staged_sessions,&relative)?;
-        let copied=staged_sessions.join(&relative);
+        let Some(path) = row.path.as_deref().filter(|path| !path.trim().is_empty()) else {
+            continue;
+        };
+        let root = old_root.as_ref().ok_or("旧备份缺少原生会话数据根")?;
+        let relative = restore_session_relative(root, data_dir, path)?;
+        verify_staged_session_parents(&staged_sessions, &relative)?;
+        let copied = staged_sessions.join(&relative);
         match fs::symlink_metadata(&copied) {
-            Ok(metadata)=> {
-                if !metadata.is_file() || metadata.file_type().is_symlink() {return Err("备份原生会话不是普通文件".into());}
-                let canonical=copied.canonicalize().map_err(|error|error.to_string())?;
-                let directory=staged_sessions.canonicalize().map_err(|error|error.to_string())?;
-                if !crate::runtime_host::artifact_store::is_inside(&directory,&canonical) {return Err("备份原生会话跳出了暂存目录".into());}
-                let reader=BufReader::new(File::open(&copied).map_err(|error|error.to_string())?);
-                let mut bytes=Vec::new();
-                reader.take(1_048_577).read_until(b'\n',&mut bytes).map_err(|error|error.to_string())?;
-                if bytes.len()>1_048_576 {return Err("备份 Pi 会话头过大".into());}
-                if let Some(rewritten)=restored_native_header(&bytes,row.native_ref.as_deref(),root,data_dir)? {
-                    if rewrites.get(&copied).is_some_and(|other:&(Vec<u8>,Vec<u8>)|other.1!=rewritten) {return Err("备份原生会话有冲突的归属".into());}
-                    rewrites.insert(copied,(bytes,rewritten));
+            Ok(metadata) => {
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    return Err("备份原生会话不是普通文件".into());
+                }
+                let canonical = copied.canonicalize().map_err(|error| error.to_string())?;
+                let directory = staged_sessions
+                    .canonicalize()
+                    .map_err(|error| error.to_string())?;
+                if !crate::runtime_host::artifact_store::is_inside(&directory, &canonical) {
+                    return Err("备份原生会话跳出了暂存目录".into());
+                }
+                let reader =
+                    BufReader::new(File::open(&copied).map_err(|error| error.to_string())?);
+                let mut bytes = Vec::new();
+                reader
+                    .take(1_048_577)
+                    .read_until(b'\n', &mut bytes)
+                    .map_err(|error| error.to_string())?;
+                if bytes.len() > 1_048_576 {
+                    return Err("备份 Pi 会话头过大".into());
+                }
+                if let Some(rewritten) =
+                    restored_native_header(&bytes, row.native_ref.as_deref(), root, data_dir)?
+                {
+                    if rewrites
+                        .get(&copied)
+                        .is_some_and(|other: &(Vec<u8>, Vec<u8>)| other.1 != rewritten)
+                    {
+                        return Err("备份原生会话有冲突的归属".into());
+                    }
+                    rewrites.insert(copied, (bytes, rewritten));
                 }
             }
-            Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},
-            Err(error)=>return Err(error.to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
         }
-        mapped.push((row.table,row.rowid,true,Some(new_sessions.join(relative))));
+        mapped.push((
+            row.table,
+            row.rowid,
+            true,
+            Some(new_sessions.join(relative)),
+        ));
     }
-    let transaction=connection.transaction().map_err(|error|error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
     let mut statement = transaction
         .prepare("SELECT id, storage_path FROM attachments")
         .map_err(|error| error.to_string())?;
@@ -931,13 +1123,23 @@ fn rebase_internal_paths(database_path: &Path, data_dir: &Path, source_data_dir:
             )
             .map_err(|error| error.to_string())?;
     }
-    for (table,rowid,native,path) in mapped {
-        let column=if native {"native_session_path"} else {"session_path"};
-        transaction.execute(&format!("UPDATE {table} SET {column}=?2 WHERE rowid=?1"),
-            rusqlite::params![rowid,path.map(|path|path.to_string_lossy().into_owned())]).map_err(|error|error.to_string())?;
+    for (table, rowid, native, path) in mapped {
+        let column = if native {
+            "native_session_path"
+        } else {
+            "session_path"
+        };
+        transaction
+            .execute(
+                &format!("UPDATE {table} SET {column}=?2 WHERE rowid=?1"),
+                rusqlite::params![rowid, path.map(|path| path.to_string_lossy().into_owned())],
+            )
+            .map_err(|error| error.to_string())?;
     }
-    for (path,(expected,bytes)) in rewrites {rewrite_staged_session_header(&path,&expected,&bytes)?;}
-    transaction.commit().map_err(|error|error.to_string())
+    for (path, (expected, bytes)) in rewrites {
+        rewrite_staged_session_header(&path, &expected, &bytes)?;
+    }
+    transaction.commit().map_err(|error| error.to_string())
 }
 
 fn redact(value: &str) -> String {
@@ -1076,10 +1278,16 @@ mod tests {
 
         // Use: cleanup and manual clear fail with the path in the error.
         let error = cleanup_knowledge_preview_cache_at(&database, &root).unwrap_err();
-        assert!(error.contains(&format!("{} 应为目录但是文件", preview.display())), "{error}");
+        assert!(
+            error.contains(&format!("{} 应为目录但是文件", preview.display())),
+            "{error}"
+        );
         let error = clear_unused_knowledge_preview_cache_at(&database, &root).unwrap_err();
         assert!(error.contains("预览缓存目录："), "{error}");
-        assert!(error.contains(&format!("{} 应为目录但是文件", preview.display())), "{error}");
+        assert!(
+            error.contains(&format!("{} 应为目录但是文件", preview.display())),
+            "{error}"
+        );
 
         // A healthy (or missing) cache directory recovers silently.
         fs::remove_file(&preview).unwrap();
@@ -1492,29 +1700,59 @@ mod tests {
 
     impl NativeRestoreFixture {
         fn new() -> Self {
-            let parent=std::env::var_os("FOX_TEST_NATIVE_HOST_FIXTURE_ROOT").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-            let root=parent.join(format!("fox-native-restore-{}",Uuid::new_v4()));
-            let old=root.join("old");let new=root.join("new");
+            let parent = std::env::var_os("FOX_TEST_NATIVE_HOST_FIXTURE_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir);
+            let root = parent.join(format!("fox-native-restore-{}", Uuid::new_v4()));
+            let old = root.join("old");
+            let new = root.join("new");
             fs::create_dir_all(old.join("runtime-sessions")).unwrap();
             fs::create_dir_all(&new).unwrap();
-            let database=crate::database::Database::open(old.join("fox.db")).unwrap();
-            let conversation=database.create_conversation("fox-general",Some("native restore"),None,None).unwrap().id;
-            let allocated=database.create_conversation("fox-general",Some("unwritten native restore"),None,None).unwrap().id;
-            let current=old.join("runtime-sessions/current.jsonl");
-            let retired=old.join("runtime-sessions/retired.jsonl");
+            let database = crate::database::Database::open(old.join("fox.db")).unwrap();
+            let conversation = database
+                .create_conversation("fox-general", Some("native restore"), None, None)
+                .unwrap()
+                .id;
+            let allocated = database
+                .create_conversation("fox-general", Some("unwritten native restore"), None, None)
+                .unwrap()
+                .id;
+            let current = old.join("runtime-sessions/current.jsonl");
+            let retired = old.join("runtime-sessions/retired.jsonl");
             let tail=b"{\"type\":\"compaction\",\"id\":\"summary-1\",\"summary\":\"keep context\"}\r\n{ \"type\": \"custom\", \"data\": \"history bytes stay exact\" }\n".to_vec();
-            for (path,id) in [(&current,"native-current"),(&retired,"native-retired")] {
-                let mut bytes=crate::canonical_json::to_vec(&json!({"type":"session","version":3,"id":id,
-                    "timestamp":"2026-10-28T00:00:00.000Z","cwd":old.join("runtime-sessions")})).unwrap();
-                bytes.extend_from_slice(b"\r\n");bytes.extend_from_slice(&tail);
-                fs::write(path,bytes).unwrap();
+            for (path, id) in [(&current, "native-current"), (&retired, "native-retired")] {
+                let mut bytes =
+                    crate::canonical_json::to_vec(&json!({"type":"session","version":3,"id":id,
+                    "timestamp":"2026-10-28T00:00:00.000Z","cwd":old.join("runtime-sessions")}))
+                    .unwrap();
+                bytes.extend_from_slice(b"\r\n");
+                bytes.extend_from_slice(&tail);
+                fs::write(path, bytes).unwrap();
             }
-            fs::write(old.join("runtime-sessions/legacy.json"),b"legacy snapshot").unwrap();
-            database.ensure_native_runtime_session(&conversation,"runtime-current",Some("fixture"),&current.to_string_lossy(),
-                Some("native-current"),3,crate::database::RuntimeSessionStatus::Ready).unwrap();
-            database.ensure_native_runtime_session(&allocated,"runtime-unwritten",Some("fixture"),
-                &old.join("runtime-sessions/unwritten.jsonl").to_string_lossy(),Some("native-unwritten"),1,
-                crate::database::RuntimeSessionStatus::Allocated).unwrap();
+            fs::write(old.join("runtime-sessions/legacy.json"), b"legacy snapshot").unwrap();
+            database
+                .ensure_native_runtime_session(
+                    &conversation,
+                    "runtime-current",
+                    Some("fixture"),
+                    &current.to_string_lossy(),
+                    Some("native-current"),
+                    3,
+                    crate::database::RuntimeSessionStatus::Ready,
+                )
+                .unwrap();
+            database
+                .ensure_native_runtime_session(
+                    &allocated,
+                    "runtime-unwritten",
+                    Some("fixture"),
+                    &old.join("runtime-sessions/unwritten.jsonl")
+                        .to_string_lossy(),
+                    Some("native-unwritten"),
+                    1,
+                    crate::database::RuntimeSessionStatus::Allocated,
+                )
+                .unwrap();
             database.with_connection(|connection| {
                 connection.execute("INSERT INTO runtime_session_generations(conversation_id,runtime_type,context_generation,runtime_session_id,
                     runtime_version,native_session_ref,native_session_path,format_version,status,retired_at)
@@ -1527,8 +1765,17 @@ mod tests {
                 Ok(())
             }).unwrap();
             drop(database);
-            println!("native restore fixture retained at {}",root.display());
-            Self {root,old,new,conversation,allocated,current,retired,tail}
+            println!("native restore fixture retained at {}", root.display());
+            Self {
+                root,
+                old,
+                new,
+                conversation,
+                allocated,
+                current,
+                retired,
+                tail,
+            }
         }
 
         fn archive(&self, include_root: bool) -> PathBuf {
@@ -1536,34 +1783,60 @@ mod tests {
         }
 
         fn archive_with_schema_version(&self, include_root: bool, schema_version: i64) -> PathBuf {
-            let sources=vec![(self.old.join("fox.db"),"fox.db".to_owned()),
-                (self.current.clone(),"runtime-sessions/current.jsonl".to_owned()),
-                (self.retired.clone(),"runtime-sessions/retired.jsonl".to_owned()),
-                (self.old.join("runtime-sessions/legacy.json"),"runtime-sessions/legacy.json".to_owned())];
-            let manifest=BackupManifest {format_version:1,created_at:1,fox_version:"fixture".into(),
-                schema_version,runtime_sessions_best_effort:true,
-                source_data_dir:include_root.then(||self.old.to_string_lossy().into_owned()),
-                entries:sources.iter().map(|(path,relative)|backup_entry(path,relative).unwrap()).collect()};
-            let archive=self.root.join("native.foxbackup");
-            write_archive(&archive,&manifest,&sources).unwrap();
+            let sources = vec![
+                (self.old.join("fox.db"), "fox.db".to_owned()),
+                (
+                    self.current.clone(),
+                    "runtime-sessions/current.jsonl".to_owned(),
+                ),
+                (
+                    self.retired.clone(),
+                    "runtime-sessions/retired.jsonl".to_owned(),
+                ),
+                (
+                    self.old.join("runtime-sessions/legacy.json"),
+                    "runtime-sessions/legacy.json".to_owned(),
+                ),
+            ];
+            let manifest = BackupManifest {
+                format_version: 1,
+                created_at: 1,
+                fox_version: "fixture".into(),
+                schema_version,
+                runtime_sessions_best_effort: true,
+                source_data_dir: include_root.then(|| self.old.to_string_lossy().into_owned()),
+                entries: sources
+                    .iter()
+                    .map(|(path, relative)| backup_entry(path, relative).unwrap())
+                    .collect(),
+            };
+            let archive = self.root.join("native.foxbackup");
+            write_archive(&archive, &manifest, &sources).unwrap();
             archive
         }
 
         fn header(&self, path: &Path, change: impl FnOnce(&mut Value)) {
-            let bytes=fs::read(path).unwrap();
-            let at=bytes.iter().position(|byte|*byte==b'\n').unwrap();
-            let mut header:Value=serde_json::from_slice(&bytes[..at]).unwrap();
+            let bytes = fs::read(path).unwrap();
+            let at = bytes.iter().position(|byte| *byte == b'\n').unwrap();
+            let mut header: Value = serde_json::from_slice(&bytes[..at]).unwrap();
             change(&mut header);
-            let mut updated=crate::canonical_json::to_vec(&header).unwrap();
-            updated.extend_from_slice(b"\r\n");updated.extend_from_slice(&bytes[at+1..]);
-            fs::write(path,updated).unwrap();
+            let mut updated = crate::canonical_json::to_vec(&header).unwrap();
+            updated.extend_from_slice(b"\r\n");
+            updated.extend_from_slice(&bytes[at + 1..]);
+            fs::write(path, updated).unwrap();
         }
     }
 
-    fn assert_schema_restore_refusal_preserves_live_data(fixture: &NativeRestoreFixture, archive: &Path, expected: &str) {
+    fn assert_schema_restore_refusal_preserves_live_data(
+        fixture: &NativeRestoreFixture,
+        archive: &Path,
+        expected: &str,
+    ) {
         let live_db = fixture.new.join("fox.db");
         let database = crate::database::Database::open(live_db.clone()).unwrap();
-        database.create_conversation("fox-general", Some("keep live conversation"), None, None).unwrap();
+        database
+            .create_conversation("fox-general", Some("keep live conversation"), None, None)
+            .unwrap();
         drop(database);
         fs::create_dir_all(fixture.new.join("runtime-sessions")).unwrap();
         fs::create_dir_all(fixture.new.join("attachments")).unwrap();
@@ -1580,16 +1853,36 @@ mod tests {
         let pending = fixture.new.join("restore-pending.foxbackup");
         for _ in 0..2 {
             let error = apply_pending_restore(&fixture.new).unwrap_err();
-            assert!(error.contains(expected), "{error}; fixture={}", fixture.root.display());
+            assert!(
+                error.contains(expected),
+                "{error}; fixture={}",
+                fixture.root.display()
+            );
             assert_eq!(fs::read(&live_db).unwrap(), before);
-            assert_eq!(fs::metadata(&live_db).unwrap().modified().unwrap(), modified);
-            assert_eq!(fs::read(&live_session).unwrap(), b"live session must stay exact");
-            assert_eq!(fs::read(&live_attachment).unwrap(), b"live attachment must stay exact");
-            assert_eq!(fs::read(&pending).unwrap(), archive_before, "the original pending archive must remain retryable");
+            assert_eq!(
+                fs::metadata(&live_db).unwrap().modified().unwrap(),
+                modified
+            );
+            assert_eq!(
+                fs::read(&live_session).unwrap(),
+                b"live session must stay exact"
+            );
+            assert_eq!(
+                fs::read(&live_attachment).unwrap(),
+                b"live attachment must stay exact"
+            );
+            assert_eq!(
+                fs::read(&pending).unwrap(),
+                archive_before,
+                "the original pending archive must remain retryable"
+            );
             assert_eq!(fs::read(archive).unwrap(), archive_before);
             assert_eq!(fs::read(fixture.old.join("fox.db")).unwrap(), source_before);
             assert_eq!(fs::read(&fixture.current).unwrap(), source_session_before);
-            assert!(!fixture.new.join("restore-rollback").exists(), "refusal must precede live replacement");
+            assert!(
+                !fixture.new.join("restore-rollback").exists(),
+                "refusal must precede live replacement"
+            );
             assert!(!fixture.new.join("fox.db-wal").exists());
             assert!(!fixture.new.join("fox.db-shm").exists());
         }
@@ -1599,155 +1892,256 @@ mod tests {
     fn queued_future_schema_restore_preserves_live_database_sessions_and_pending_archive() {
         let fixture = NativeRestoreFixture::new();
         let connection = rusqlite::Connection::open(fixture.old.join("fox.db")).unwrap();
-        connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES(?1, 1)",
-            [crate::database::DATABASE_SCHEMA_VERSION + 1]).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(?1, 1)",
+                [crate::database::DATABASE_SCHEMA_VERSION + 1],
+            )
+            .unwrap();
         drop(connection);
         // A supported manifest cannot hide a newer SQLite version.
         let archive = fixture.archive(true);
-        assert_schema_restore_refusal_preserves_live_data(&fixture, &archive, "database.schema_too_new");
+        assert_schema_restore_refusal_preserves_live_data(
+            &fixture,
+            &archive,
+            "database.schema_too_new",
+        );
     }
 
     #[test]
     fn queued_schema_manifest_mismatch_preserves_live_database_sessions_and_pending_archive() {
-        for declared in [crate::database::DATABASE_SCHEMA_VERSION - 1, crate::database::DATABASE_SCHEMA_VERSION + 1] {
+        for declared in [
+            crate::database::DATABASE_SCHEMA_VERSION - 1,
+            crate::database::DATABASE_SCHEMA_VERSION + 1,
+        ] {
             let fixture = NativeRestoreFixture::new();
-            validate_sqlite(&fixture.old.join("fox.db"), crate::database::DATABASE_SCHEMA_VERSION).unwrap();
+            validate_sqlite(
+                &fixture.old.join("fox.db"),
+                crate::database::DATABASE_SCHEMA_VERSION,
+            )
+            .unwrap();
             let archive = fixture.archive_with_schema_version(true, declared);
-            assert_schema_restore_refusal_preserves_live_data(&fixture, &archive, "与实际数据库版本");
+            assert_schema_restore_refusal_preserves_live_data(
+                &fixture,
+                &archive,
+                "与实际数据库版本",
+            );
         }
     }
 
     #[test]
     fn native_restore_keeps_live_retired_and_unwritten_generations_in_the_copy_and_is_repeatable() {
-        for include_root in [false,true] {
-            let fixture=NativeRestoreFixture::new();
-            let original_db=fs::read(fixture.old.join("fox.db")).unwrap();
-            let original_current=fs::read(&fixture.current).unwrap();
-            let original_retired=fs::read(&fixture.retired).unwrap();
-            let archive=fixture.archive(include_root);
-            let mut restored_bytes=None;
+        for include_root in [false, true] {
+            let fixture = NativeRestoreFixture::new();
+            let original_db = fs::read(fixture.old.join("fox.db")).unwrap();
+            let original_current = fs::read(&fixture.current).unwrap();
+            let original_retired = fs::read(&fixture.retired).unwrap();
+            let archive = fixture.archive(include_root);
+            let mut restored_bytes = None;
             for _ in 0..2 {
-                queue_restore(&fixture.new,&archive).unwrap();
+                queue_restore(&fixture.new, &archive).unwrap();
                 apply_pending_restore(&fixture.new).unwrap();
-                let database=crate::database::Database::open(fixture.new.join("fox.db")).unwrap();
-                let current=database.get_runtime_session(&fixture.conversation).unwrap().unwrap();
-                let selected=current.native_path().unwrap();
-                assert_eq!(selected,fixture.new.join("runtime-sessions/current.jsonl"));
-                assert_eq!(current.native_session_ref.as_deref(),Some("native-current"));
-                assert_eq!(current.runtime_session_id,"runtime-current");
-                assert_eq!(current.context_generation,3);
+                let database = crate::database::Database::open(fixture.new.join("fox.db")).unwrap();
+                let current = database
+                    .get_runtime_session(&fixture.conversation)
+                    .unwrap()
+                    .unwrap();
+                let selected = current.native_path().unwrap();
+                assert_eq!(selected, fixture.new.join("runtime-sessions/current.jsonl"));
+                assert_eq!(
+                    current.native_session_ref.as_deref(),
+                    Some("native-current")
+                );
+                assert_eq!(current.runtime_session_id, "runtime-current");
+                assert_eq!(current.context_generation, 3);
                 assert!(current.session_path.is_none());
-                let bytes=fs::read(&selected).unwrap();
-                let at=bytes.iter().position(|byte|*byte==b'\n').unwrap();
-                assert_eq!(&bytes[at-1..at+1],b"\r\n");
-                assert_eq!(&bytes[at+1..],fixture.tail.as_slice());
-                let header:Value=serde_json::from_slice(&bytes[..at]).unwrap();
-                assert_eq!(header["id"],"native-current");
-                assert_eq!(PathBuf::from(header["cwd"].as_str().unwrap()),fixture.new.join("runtime-sessions"));
-                if let Some(previous)=&restored_bytes {assert_eq!(&bytes,previous);} else {restored_bytes=Some(bytes);}
+                let bytes = fs::read(&selected).unwrap();
+                let at = bytes.iter().position(|byte| *byte == b'\n').unwrap();
+                assert_eq!(&bytes[at - 1..at + 1], b"\r\n");
+                assert_eq!(&bytes[at + 1..], fixture.tail.as_slice());
+                let header: Value = serde_json::from_slice(&bytes[..at]).unwrap();
+                assert_eq!(header["id"], "native-current");
+                assert_eq!(
+                    PathBuf::from(header["cwd"].as_str().unwrap()),
+                    fixture.new.join("runtime-sessions")
+                );
+                if let Some(previous) = &restored_bytes {
+                    assert_eq!(&bytes, previous);
+                } else {
+                    restored_bytes = Some(bytes);
+                }
                 let retired:(String,String)=database.with_connection(|connection|connection.query_row(
                     "SELECT native_session_path,native_session_ref FROM runtime_session_generations WHERE conversation_id=?1 AND context_generation=1",
                     [&fixture.conversation],|row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
-                assert_eq!(PathBuf::from(retired.0),fixture.new.join("runtime-sessions/retired.jsonl"));
-                assert_eq!(retired.1,"native-retired");
+                assert_eq!(
+                    PathBuf::from(retired.0),
+                    fixture.new.join("runtime-sessions/retired.jsonl")
+                );
+                assert_eq!(retired.1, "native-retired");
                 let legacy:String=database.with_connection(|connection|connection.query_row(
                     "SELECT session_path FROM runtime_session_generations WHERE conversation_id=?1 AND context_generation=2",
                     [&fixture.conversation],|row|row.get(0))).unwrap();
-                assert_eq!(PathBuf::from(legacy),fixture.new.join("runtime-sessions/legacy.json"));
-                let allocated=database.get_runtime_session(&fixture.allocated).unwrap().unwrap();
-                assert_eq!(allocated.status,"allocated");
-                assert_eq!(allocated.native_path(),Some(fixture.new.join("runtime-sessions/unwritten.jsonl")));
+                assert_eq!(
+                    PathBuf::from(legacy),
+                    fixture.new.join("runtime-sessions/legacy.json")
+                );
+                let allocated = database
+                    .get_runtime_session(&fixture.allocated)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(allocated.status, "allocated");
+                assert_eq!(
+                    allocated.native_path(),
+                    Some(fixture.new.join("runtime-sessions/unwritten.jsonl"))
+                );
                 assert!(!allocated.native_path().unwrap().exists());
                 drop(database);
-                assert_eq!(fs::read(fixture.old.join("fox.db")).unwrap(),original_db);
-                assert_eq!(fs::read(&fixture.current).unwrap(),original_current);
-                assert_eq!(fs::read(&fixture.retired).unwrap(),original_retired);
+                assert_eq!(fs::read(fixture.old.join("fox.db")).unwrap(), original_db);
+                assert_eq!(fs::read(&fixture.current).unwrap(), original_current);
+                assert_eq!(fs::read(&fixture.retired).unwrap(), original_retired);
             }
             // The path a resume will receive names only the copied file.
-            let copied=fixture.new.join("runtime-sessions/current.jsonl");
+            let copied = fixture.new.join("runtime-sessions/current.jsonl");
             fs::OpenOptions::new().append(true).open(copied).unwrap().write_all(b"{\"type\":\"custom\",\"id\":\"copy-only\",\"customType\":\"restore-test\",\"data\":\"append\"}\n").unwrap();
-            assert_eq!(fs::read(&fixture.current).unwrap(),original_current);
-            rebase_internal_paths(&fixture.new.join("fox.db"),&fixture.new,Some(&fixture.old.to_string_lossy())).unwrap();
-            assert_eq!(fs::read(&fixture.current).unwrap(),original_current);
+            assert_eq!(fs::read(&fixture.current).unwrap(), original_current);
+            rebase_internal_paths(
+                &fixture.new.join("fox.db"),
+                &fixture.new,
+                Some(&fixture.old.to_string_lossy()),
+            )
+            .unwrap();
+            assert_eq!(fs::read(&fixture.current).unwrap(), original_current);
         }
     }
 
     #[test]
     fn native_restore_preserves_an_external_project_cwd_and_all_its_file_bytes() {
-        let fixture=NativeRestoreFixture::new();
-        let external=fixture.root.join("external-project");
-        fixture.header(&fixture.current,|header|header["cwd"]=json!(external));
-        let original=fs::read(&fixture.current).unwrap();
-        let archive=fixture.archive(true);
-        queue_restore(&fixture.new,&archive).unwrap();
+        let fixture = NativeRestoreFixture::new();
+        let external = fixture.root.join("external-project");
+        fixture.header(&fixture.current, |header| header["cwd"] = json!(external));
+        let original = fs::read(&fixture.current).unwrap();
+        let archive = fixture.archive(true);
+        queue_restore(&fixture.new, &archive).unwrap();
         apply_pending_restore(&fixture.new).unwrap();
-        assert_eq!(fs::read(fixture.new.join("runtime-sessions/current.jsonl")).unwrap(),original);
-        assert_eq!(fs::read(&fixture.current).unwrap(),original);
+        assert_eq!(
+            fs::read(fixture.new.join("runtime-sessions/current.jsonl")).unwrap(),
+            original
+        );
+        assert_eq!(fs::read(&fixture.current).unwrap(), original);
     }
 
     #[test]
     fn native_restore_refuses_external_or_ambiguous_roots_before_replacing_live_data() {
-        for include_root in [false,true] {
-            let fixture=NativeRestoreFixture::new();
-            let connection=rusqlite::Connection::open(fixture.old.join("fox.db")).unwrap();
-            let outside=fixture.root.join("old-similar-prefix/runtime-sessions/current.jsonl");
-            connection.execute("UPDATE runtime_sessions SET native_session_path=?2 WHERE conversation_id=?1",
-                rusqlite::params![fixture.conversation,outside.to_string_lossy()]).unwrap();
+        for include_root in [false, true] {
+            let fixture = NativeRestoreFixture::new();
+            let connection = rusqlite::Connection::open(fixture.old.join("fox.db")).unwrap();
+            let outside = fixture
+                .root
+                .join("old-similar-prefix/runtime-sessions/current.jsonl");
+            connection
+                .execute(
+                    "UPDATE runtime_sessions SET native_session_path=?2 WHERE conversation_id=?1",
+                    rusqlite::params![fixture.conversation, outside.to_string_lossy()],
+                )
+                .unwrap();
             drop(connection);
-            let sentinel=fixture.new.join("fox.db");
-            fs::write(&sentinel,b"previous live database remains untouched").unwrap();
-            let original=fs::read(&fixture.current).unwrap();
-            let archive=fixture.archive(include_root);
-            queue_restore(&fixture.new,&archive).unwrap();
+            let sentinel = fixture.new.join("fox.db");
+            fs::write(&sentinel, b"previous live database remains untouched").unwrap();
+            let original = fs::read(&fixture.current).unwrap();
+            let archive = fixture.archive(include_root);
+            queue_restore(&fixture.new, &archive).unwrap();
             assert!(apply_pending_restore(&fixture.new).is_err());
-            assert_eq!(fs::read(&sentinel).unwrap(),b"previous live database remains untouched");
-            assert_eq!(fs::read(&fixture.current).unwrap(),original);
+            assert_eq!(
+                fs::read(&sentinel).unwrap(),
+                b"previous live database remains untouched"
+            );
+            assert_eq!(fs::read(&fixture.current).unwrap(), original);
         }
     }
 
     #[test]
     fn native_restore_refuses_wrong_identity_and_unknown_session_versions() {
-        for defect in ["identity","header-version","mapping-version"] {
-            let fixture=NativeRestoreFixture::new();
-            if defect=="mapping-version" {
-                let connection=rusqlite::Connection::open(fixture.old.join("fox.db")).unwrap();
-                connection.execute("UPDATE runtime_sessions SET format_version=999 WHERE conversation_id=?1",[&fixture.conversation]).unwrap();
+        for defect in ["identity", "header-version", "mapping-version"] {
+            let fixture = NativeRestoreFixture::new();
+            if defect == "mapping-version" {
+                let connection = rusqlite::Connection::open(fixture.old.join("fox.db")).unwrap();
+                connection
+                    .execute(
+                        "UPDATE runtime_sessions SET format_version=999 WHERE conversation_id=?1",
+                        [&fixture.conversation],
+                    )
+                    .unwrap();
             } else {
-                fixture.header(&fixture.current,|header|if defect=="identity" {header["id"]=json!("a-different-native-session");}
-                    else {header["version"]=json!(999);});
+                fixture.header(&fixture.current, |header| {
+                    if defect == "identity" {
+                        header["id"] = json!("a-different-native-session");
+                    } else {
+                        header["version"] = json!(999);
+                    }
+                });
             }
-            let sentinel=fixture.new.join("fox.db");fs::write(&sentinel,b"keep live data").unwrap();
-            let archive=fixture.archive(true);
-            queue_restore(&fixture.new,&archive).unwrap();
-            let error=apply_pending_restore(&fixture.new).unwrap_err();
-            assert!(error.contains("身份")||error.contains("版本")||error.contains("格式"),"{defect}: {error}");
-            assert_eq!(fs::read(&sentinel).unwrap(),b"keep live data");
+            let sentinel = fixture.new.join("fox.db");
+            fs::write(&sentinel, b"keep live data").unwrap();
+            let archive = fixture.archive(true);
+            queue_restore(&fixture.new, &archive).unwrap();
+            let error = apply_pending_restore(&fixture.new).unwrap_err();
+            assert!(
+                error.contains("身份") || error.contains("版本") || error.contains("格式"),
+                "{defect}: {error}"
+            );
+            assert_eq!(fs::read(&sentinel).unwrap(), b"keep live data");
         }
     }
 
     #[test]
     fn native_restore_path_identity_folds_windows_spelling_without_prefix_or_traversal_escapes() {
-        assert_eq!(restore_relative(Path::new(r"D:\Fox Data"),r"\\?\d:\FOX DATA\runtime-sessions\A.jsonl").unwrap(),
-            Some(PathBuf::from("runtime-sessions/A.jsonl")));
-        assert_eq!(restore_relative(Path::new(r"\\Server\Share\Fox"),r"\\?\UNC\server\share\FOX\runtime-sessions\A.jsonl").unwrap(),
-            Some(PathBuf::from("runtime-sessions/A.jsonl")));
-        assert!(restore_relative(Path::new(r"D:\Fox"),r"d:\fox-similar\runtime-sessions\A.jsonl").unwrap().is_none());
-        assert!(restore_relative(Path::new(r"D:\Fox"),r"d:\fox\runtime-sessions\..\A.jsonl").is_err());
+        assert_eq!(
+            restore_relative(
+                Path::new(r"D:\Fox Data"),
+                r"\\?\d:\FOX DATA\runtime-sessions\A.jsonl"
+            )
+            .unwrap(),
+            Some(PathBuf::from("runtime-sessions/A.jsonl"))
+        );
+        assert_eq!(
+            restore_relative(
+                Path::new(r"\\Server\Share\Fox"),
+                r"\\?\UNC\server\share\FOX\runtime-sessions\A.jsonl"
+            )
+            .unwrap(),
+            Some(PathBuf::from("runtime-sessions/A.jsonl"))
+        );
+        assert!(restore_relative(
+            Path::new(r"D:\Fox"),
+            r"d:\fox-similar\runtime-sessions\A.jsonl"
+        )
+        .unwrap()
+        .is_none());
+        assert!(
+            restore_relative(Path::new(r"D:\Fox"), r"d:\fox\runtime-sessions\..\A.jsonl").is_err()
+        );
     }
 
     #[test]
-    fn native_restore_optional_source_root_keeps_old_archives_and_rejects_future_archive_versions() {
-        let fixture=NativeRestoreFixture::new();
-        let archive=fixture.archive(false);
-        let (mut manifest,_)=read_archive(&archive,None).unwrap();
-        assert_eq!(manifest.format_version,1);
+    fn native_restore_optional_source_root_keeps_old_archives_and_rejects_future_archive_versions()
+    {
+        let fixture = NativeRestoreFixture::new();
+        let archive = fixture.archive(false);
+        let (mut manifest, _) = read_archive(&archive, None).unwrap();
+        assert_eq!(manifest.format_version, 1);
         assert!(manifest.source_data_dir.is_none());
-        manifest.format_version=2;
-        manifest.source_data_dir=Some(fixture.old.to_string_lossy().into_owned());
-        let sources=manifest.entries.iter().map(|entry|(fixture.old.join(&entry.path),entry.path.clone())).collect::<Vec<_>>();
-        let future=fixture.root.join("future.foxbackup");
-        write_archive(&future,&manifest,&sources).unwrap();
-        assert!(queue_restore(&fixture.new,&future).unwrap_err().contains("不支持的 Fox 备份版本"));
+        manifest.format_version = 2;
+        manifest.source_data_dir = Some(fixture.old.to_string_lossy().into_owned());
+        let sources = manifest
+            .entries
+            .iter()
+            .map(|entry| (fixture.old.join(&entry.path), entry.path.clone()))
+            .collect::<Vec<_>>();
+        let future = fixture.root.join("future.foxbackup");
+        write_archive(&future, &manifest, &sources).unwrap();
+        assert!(queue_restore(&fixture.new, &future)
+            .unwrap_err()
+            .contains("不支持的 Fox 备份版本"));
         assert!(!fixture.new.join("restore-pending.foxbackup").exists());
     }
 

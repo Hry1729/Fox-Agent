@@ -41,7 +41,56 @@ test('assembled Host tools exactly match the protocol capability catalog order',
   assert.deepEqual(names.slice(names.indexOf('companion_profile_update') + 1, names.indexOf('note_organize')), [
     'companion_task_create', 'companion_task_update', 'companion_task_list', 'companion_task_history',
     'companion_task_pause', 'companion_task_resume', 'companion_task_run_now', 'companion_task_delete',
+    'companion_list', 'companion_create', 'companion_propose_profile', 'companion_propose_model',
+    'companion_propose_deletion', 'companion_propose_archive',
+    'companion_coordinate', 'companion_assignment_status', 'companion_list_unread_notifications',
+    'companion_mark_notifications_read', 'companion_retry_failed_task',
   ])
+})
+
+test('collaboration tools accept bounded P1 inputs and forward the call unchanged', async () => {
+  const requests = []
+  const tools = createHostTools(async (type, payload) => {
+    requests.push({ type, payload })
+    return { payload: { result: {} } }
+  })
+  const coordinate = toolByName(tools, 'companion_coordinate')
+  const input = { targets: ['peer-1', 'peer-2'], instructions: '核对数据', consult: true, done_when: '说明来源' }
+  assert.equal(Check(coordinate.parameters, input), true)
+  for (const invalid of [
+    { ...input, targets: ['peer-1', 'peer-1'] },
+    { ...input, targets: ['a', 'b', 'c', 'd', 'e'] },
+    { ...input, instructions: '甲'.repeat(4001) },
+    { ...input, group_id: 'room-1' },
+  ]) assert.equal(Check(coordinate.parameters, invalid), false)
+  await coordinate.execute('work-1', input)
+  assert.deepEqual(requests, [{ type: 'tool.execute', payload: { toolCallId: 'work-1', tool: 'companion_coordinate', input } }])
+  assert.equal(Check(toolByName(tools, 'companion_assignment_status').parameters, { wait_ms: 100 }), false)
+})
+
+test('companion team tools expose only their P0 fields and send them to the Host unchanged', async () => {
+  const requests = []
+  const tools = createHostTools(async (type, payload) => {
+    requests.push({ type, payload })
+    return { payload: { result: {} } }
+  })
+  const calls = {
+    companion_list: {},
+    companion_create: { name: '周报助手', duty: '整理周报', instructions: '按项目汇总', model: '模型名称' },
+    companion_propose_profile: { target: '周报助手', instructions: '' },
+    companion_propose_model: { target: 'companion-1', providerId: 'provider-1', modelRef: 'model-1' },
+    companion_propose_deletion: { target: 'companion-1' },
+    companion_propose_archive: { target: '周报助手' },
+  }
+  for (const [name, input] of Object.entries(calls)) {
+    const tool = toolByName(tools, name)
+    assert.equal(Check(tool.parameters, input), true, name)
+    assert.equal(Check(tool.parameters, { ...input, permissions: ['admin'] }), false, name)
+    await tool.execute('team-call', input)
+  }
+  assert.deepEqual(requests, Object.entries(calls).map(([tool, input]) => ({
+    type: 'tool.execute', payload: { toolCallId: 'team-call', tool, input },
+  })))
 })
 
 test('companion profile updates accept and forward an explicitly cleared duty', async () => {

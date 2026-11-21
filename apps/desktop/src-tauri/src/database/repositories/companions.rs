@@ -1,15 +1,17 @@
-use super::{
-    activate_expert_binding, now_ms,
-    query_agent_record, Database, DEFAULT_AGENT_ID,
-};
+use super::{activate_expert_binding, now_ms, query_agent_record, Database, DEFAULT_AGENT_ID};
 use crate::data_paths::{companion_notes_dir, companion_workspace};
 use crate::database::{
-    AgentRecord, CompanionProfile, ContactBubbleMarkRecord, ContactFavoriteEntry, ContactQuotePreview,
+    AgentRecord, CompanionProfile, ContactBubbleMarkRecord, ContactFavoriteEntry,
+    ContactQuotePreview,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::path::Path;
 use uuid::Uuid;
+
+#[path = "companion_team.rs"]
+pub(crate) mod companion_team;
 
 #[derive(Debug)]
 pub(crate) enum CompanionError {
@@ -19,6 +21,8 @@ pub(crate) enum CompanionError {
     Deleting,
     RunActive,
     InvalidName,
+    DefaultProtected(&'static str, &'static str),
+    TeamAction(&'static str, &'static str),
     InvalidInput(&'static str),
     NameTaken,
     ModelUnavailable(String),
@@ -41,6 +45,7 @@ impl CompanionError {
             Self::Archived => ("companion.archived", "请先恢复联系人"),
             Self::Deleting => ("companion.deleting", "联系人正在删除"),
             Self::RunActive => ("companion.run_active", "请先停止当前生成"),
+            Self::DefaultProtected(code, message) | Self::TeamAction(code, message) => (code, message),
             Self::InvalidName => ("companion.invalid_name", "名字需要包含 1 至 40 个字符"),
             Self::InvalidInput(message) => ("companion.invalid_profile", message),
             Self::NameTaken => ("companion.name_conflict", "已有联系人使用这个名字"),
@@ -48,8 +53,14 @@ impl CompanionError {
             Self::ReminderModeInvalid => ("companion.reminder_mode_invalid", "未知的提醒模式"),
             Self::BubbleNotFound => ("companion.bubble_not_found", "这条消息还不能标为未读"),
             Self::BackfillPending => ("companion.backfill_pending", "私聊历史仍在整理，稍后再试"),
-            Self::BubbleNotDurable => ("companion.bubble_not_durable", "这条消息还没有保存，暂时不能引用、收藏或加表情"),
-            Self::NotContactChat => ("companion.not_private_chat", "只有联系人私聊支持引用和消息标记"),
+            Self::BubbleNotDurable => (
+                "companion.bubble_not_durable",
+                "这条消息还没有保存，暂时不能引用、收藏或加表情",
+            ),
+            Self::NotContactChat => (
+                "companion.not_private_chat",
+                "只有联系人私聊支持引用和消息标记",
+            ),
             Self::ReactionInvalid => ("companion.reaction_invalid", "未知的表情"),
             Self::Storage(message) => ("storage.error", message),
         }
@@ -71,6 +82,10 @@ pub(crate) struct CompanionView {
     pub profile: CompanionProfile,
     pub conversation_id: String,
     pub latest_message_preview: Option<String>,
+    pub last_message_at: Option<i64>,
+    pub latest_failure_summary: Option<String>,
+    pub latest_bubble_id: Option<String>,
+    pub latest_delivery_order: Option<i64>,
     pub unread_count: i64,
     pub active_run_status: Option<String>,
     /// K6: the effective bubble read position (converted legacy cursor included).
@@ -139,9 +154,21 @@ const EFFECTIVE_READ: &str = "coalesce(p.last_read_delivery_order,
 fn view_sql() -> String {
     format!(
         "SELECT p.*, c.id AS conversation_id,
-            (SELECT substr(ltrim(b.content, char(9,10,13,32)), 1, 240)
-                FROM contact_bubbles b WHERE b.conversation_id=c.id
-                ORDER BY b.delivery_order DESC LIMIT 1) AS latest_message_preview,
+            substr(ltrim(latest.content, char(9,10,13,32)), 1, 240) AS latest_message_preview,
+            coalesce(latest.delivered_at,c.last_message_at) AS last_message_at,
+            received.bubble_id AS latest_bubble_id, received.delivery_order AS latest_delivery_order,
+            (SELECT CASE WHEN status IN ('failed','interrupted')
+                         THEN substr(coalesce(nullif(trim(summary),''),'本次运行失败'),1,240) END
+             FROM (
+               SELECT r.id,r.status,coalesce(r.error_message,r.error_code) AS summary,
+                      coalesce(r.finished_at,r.started_at,r.created_at) AS at
+               FROM runs r WHERE r.conversation_id=c.id
+               UNION ALL
+               SELECT tr.run_id,tr.outcome,
+                      coalesce(nullif(trim(r.error_message),''),d.name),tr.created_at
+               FROM companion_task_reports tr JOIN runs r ON r.id=tr.run_id
+               JOIN digital_colleagues d ON d.id=tr.colleague_id WHERE tr.companion_id=p.id
+             ) ORDER BY at DESC,id DESC LIMIT 1) AS latest_failure_summary,
             ({effective}) AS read_delivery_order,
             (SELECT count(*) FROM contact_bubbles b WHERE b.conversation_id=c.id AND b.author='companion'
                 AND (b.delivery_order > ({effective})
@@ -150,9 +177,17 @@ fn view_sql() -> String {
                 WHERE r.status IN ('queued','running','cancelling','awaiting_confirmation')
                   AND (r.conversation_id=c.id OR r.conversation_id IN (
                       SELECT dc.conversation_id FROM digital_colleagues dc
-                      WHERE dc.companion_id=p.id AND dc.companion_bound=1))
+                      WHERE dc.companion_id=p.id AND dc.companion_bound=1
+                      UNION SELECT t.conversation_id FROM companion_coordination_threads t
+                      WHERE t.recipient_companion_id=p.id))
                 ORDER BY r.created_at DESC LIMIT 1) AS active_run_status
-            FROM companion_profiles p JOIN conversations c ON c.companion_id=p.id",
+            FROM companion_profiles p JOIN conversations c ON c.companion_id=p.id
+            LEFT JOIN contact_bubbles latest ON latest.bubble_id=(
+                SELECT b.bubble_id FROM contact_bubbles b WHERE b.conversation_id=c.id
+                ORDER BY b.delivery_order DESC LIMIT 1)
+            LEFT JOIN contact_bubbles received ON received.bubble_id=(
+                SELECT b.bubble_id FROM contact_bubbles b WHERE b.conversation_id=c.id AND b.author='companion'
+                ORDER BY b.delivery_order DESC LIMIT 1)",
         effective = EFFECTIVE_READ,
     )
 }
@@ -172,6 +207,8 @@ fn view(row: &rusqlite::Row<'_>) -> rusqlite::Result<CompanionView> {
             workspace_error: row.get("workspace_error")?,
             is_default: row.get("is_default")?,
             pinned_at: row.get("pinned_at")?,
+            pinned_order: row.get("pinned_order")?,
+            work_shortcut_order: row.get("work_shortcut_order")?,
             last_read_ordinal: row.get("last_read_ordinal")?,
             template_notice_dismissed_hash: row.get("template_notice_dismissed_hash")?,
             model_provider_id: row.get("model_provider_id")?,
@@ -187,6 +224,10 @@ fn view(row: &rusqlite::Row<'_>) -> rusqlite::Result<CompanionView> {
         },
         conversation_id: row.get("conversation_id")?,
         latest_message_preview: row.get("latest_message_preview")?,
+        last_message_at: row.get("last_message_at")?,
+        latest_failure_summary: row.get("latest_failure_summary")?,
+        latest_bubble_id: row.get("latest_bubble_id")?,
+        latest_delivery_order: row.get("latest_delivery_order")?,
         unread_count: row.get("unread_count")?,
         active_run_status: row.get("active_run_status")?,
         read_delivery_order: row.get("read_delivery_order")?,
@@ -228,6 +269,8 @@ WITH contact_chats AS (
     SELECT dc.companion_id, dc.conversation_id
     FROM digital_colleagues dc
     WHERE dc.companion_bound = 1 AND dc.companion_id IS NOT NULL
+    UNION ALL
+    SELECT t.recipient_companion_id, t.conversation_id FROM companion_coordination_threads t
 ),
 approval_counts AS (
     SELECT cc.companion_id AS companion_id, count(*) AS n
@@ -283,11 +326,20 @@ SELECT companion_id, sum(n) FROM (
     SELECT companion_id, n FROM approval_counts
     UNION ALL
     SELECT companion_id, n FROM question_counts
+    UNION ALL
+    SELECT recipient_companion_id AS companion_id, count(*) AS n
+    FROM companion_assignments
+    WHERE status='needs_input' AND question IS NOT NULL
+    GROUP BY recipient_companion_id
 ) GROUP BY companion_id";
 
-fn pending_action_counts(conn: &Connection) -> rusqlite::Result<std::collections::HashMap<String, i64>> {
+fn pending_action_counts(
+    conn: &Connection,
+) -> rusqlite::Result<std::collections::HashMap<String, i64>> {
     let mut stmt = conn.prepare(PENDING_ACTIONS_SQL)?;
-    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
     rows.collect()
 }
 
@@ -312,13 +364,19 @@ fn name_taken(conn: &Connection, name: &str, id: &str) -> rusqlite::Result<bool>
     )
 }
 
+fn validate_name(conn: &Connection, name: &str, id: &str, active: bool) -> Result<()> {
+    if !(1..=40).contains(&name.chars().count()) {
+        return Err(CompanionError::InvalidName);
+    }
+    if active && name_taken(conn, name, id)? {
+        return Err(CompanionError::NameTaken);
+    }
+    Ok(())
+}
+
 fn available_name(conn: &Connection, desired: &str, id: &str) -> rusqlite::Result<String> {
     let trimmed = desired.trim();
-    let base = if trimmed.is_empty() {
-        "小 Fox"
-    } else {
-        trimmed
-    };
+    let base = if trimmed.is_empty() { "Fox" } else { trimmed };
     let mut name: String = base.chars().take(40).collect();
     let mut index = 2;
     while name_taken(conn, &name, id)? {
@@ -334,9 +392,9 @@ fn available_blank_name(conn: &Connection, id: &str) -> rusqlite::Result<String>
     let mut index = 1;
     loop {
         let name = if index == 1 {
-            "小 Fox".to_owned()
+            "Fox".to_owned()
         } else {
-            format!("小 Fox {index}")
+            format!("Fox {index}")
         };
         if !name_taken(conn, &name, id)? {
             return Ok(name);
@@ -404,8 +462,9 @@ impl Database {
             .lock()
             .map_err(|_| CompanionError::Storage("数据库锁已损坏".into()))?;
         let mut query = conn.prepare(&format!(
-            "{} ORDER BY p.pinned_at DESC,
-            coalesce(c.last_message_at,p.created_at) DESC, p.id",
+            "{} ORDER BY p.is_default DESC, p.pinned_at IS NOT NULL DESC,
+            p.pinned_order IS NOT NULL, p.pinned_order, p.pinned_at DESC,
+            coalesce(latest.delivered_at,c.last_message_at,p.created_at) DESC, p.id",
             view_sql()
         ))?;
         let mut companions: Vec<CompanionView> = query
@@ -456,6 +515,29 @@ impl Database {
         self.companion_transaction(|tx| create_companion(tx, root, None))
     }
 
+    pub(crate) fn create_blank_companion_with_profile(
+        &self,
+        root: &Path,
+        display_name: Option<&str>,
+        avatar_ref: Option<&str>,
+    ) -> Result<CompanionView> {
+        self.companion_transaction(|tx| {
+            create_companion_inner(tx, root, None, false, display_name, avatar_ref)
+        })
+    }
+
+    pub(crate) fn next_companion_default_name(&self) -> Result<String> {
+        self.with_connection(|connection| available_blank_name(connection, ""))
+            .map_err(CompanionError::Storage)
+    }
+
+    pub(crate) fn refresh_default_companion_guide(&self, companion_id: &str) -> Result<()> {
+        self.companion_transaction(|tx| {
+            refresh_default_guide(tx, companion_id)?;
+            Ok(())
+        })
+    }
+
     pub(crate) fn seed_default_companion(&self, root: &Path) -> Result<CompanionView> {
         self.companion_transaction(|tx| {
             let seeded = tx.query_row(
@@ -472,7 +554,10 @@ impl Database {
                 )
                 .optional()?;
             let record = match id {
-                Some(id) => profile(tx, &id)?,
+                Some(id) => {
+                    refresh_default_guide(tx, &id)?;
+                    profile(tx, &id)?
+                }
                 None if seeded => {
                     return Err(CompanionError::Storage(
                         "小狐的初始化标记已有记录，但身份缺失".into(),
@@ -496,16 +581,19 @@ impl Database {
         id: &str,
         edit: &CompanionProfileEdit,
     ) -> Result<CompanionView> {
-        self.save_companion_profile(id, CompanionProfileSaveInput {
-            display_name: edit.display_name.clone(),
-            avatar_ref: edit.avatar_ref.clone(),
-            duty: edit.duty.clone(),
-            preference: match &edit.persona_override {
-                None => CompanionPreferenceEdit::Preserve,
-                Some(value) if value.is_empty() => CompanionPreferenceEdit::Clear,
-                Some(value) => CompanionPreferenceEdit::Replace(value.clone()),
+        self.save_companion_profile(
+            id,
+            CompanionProfileSaveInput {
+                display_name: edit.display_name.clone(),
+                avatar_ref: edit.avatar_ref.clone(),
+                duty: edit.duty.clone(),
+                preference: match &edit.persona_override {
+                    None => CompanionPreferenceEdit::Preserve,
+                    Some(value) if value.is_empty() => CompanionPreferenceEdit::Clear,
+                    Some(value) => CompanionPreferenceEdit::Replace(value.clone()),
+                },
             },
-        })?;
+        )?;
         self.companion_profile(id)
     }
 
@@ -514,72 +602,7 @@ impl Database {
         id: &str,
         edit: CompanionProfileSaveInput,
     ) -> Result<CompanionProfileSaved> {
-        self.companion_transaction(|tx| {
-            let current = profile(tx, id)?;
-            let name = edit.display_name.as_deref().map(str::trim);
-            if let Some(name) = name {
-                if !(1..=40).contains(&name.chars().count()) {
-                    return Err(CompanionError::InvalidName);
-                }
-                if current.profile.archived_at.is_none() && name_taken(tx, name, id)? {
-                    return Err(CompanionError::NameTaken);
-                }
-                tx.execute(
-                    "UPDATE conversations SET title=?2 WHERE id=?1",
-                    params![current.conversation_id, name],
-                )?;
-            }
-            let duty = edit.duty.as_deref().map(str::trim);
-            let existing_persona = current.profile.persona_override.as_deref();
-            let persona = match edit.preference {
-                CompanionPreferenceEdit::Preserve => None,
-                CompanionPreferenceEdit::Add(value) => {
-                    let value = value.trim();
-                    if value.is_empty() {
-                        return Err(CompanionError::InvalidInput("沟通偏好不能为空"));
-                    }
-                    Some(match existing_persona {
-                        Some(existing) if !existing.is_empty() => Some(format!("{existing}\n{value}")),
-                        _ => Some(value.to_owned()),
-                    })
-                }
-                CompanionPreferenceEdit::Replace(value) => {
-                    let value = value.trim();
-                    if value.is_empty() {
-                        return Err(CompanionError::InvalidInput("沟通偏好不能为空；如需清空请使用 clear"));
-                    }
-                    Some(Some(value.to_owned()))
-                }
-                CompanionPreferenceEdit::Clear => Some(None),
-            };
-            let persona_sql = persona.as_ref().map(|value| value.as_deref());
-            tx.execute(
-                "UPDATE companion_profiles SET display_name=coalesce(?2,display_name),
-                avatar_ref=coalesce(?3,avatar_ref), duty=coalesce(?4,duty),
-                persona_override=CASE WHEN ?5 THEN ?6 ELSE persona_override END,
-                updated_at=?7 WHERE id=?1",
-                params![
-                    id,
-                    name,
-                    edit.avatar_ref,
-                    duty,
-                    persona.is_some(),
-                    persona_sql.flatten(),
-                    now_ms()
-                ],
-            )?;
-            let saved = profile(tx, id)?;
-            let mut changes = Vec::new();
-            if saved.profile.display_name != current.profile.display_name { changes.push("displayName"); }
-            if saved.profile.duty != current.profile.duty { changes.push("duty"); }
-            if saved.profile.persona_override != current.profile.persona_override { changes.push("personaOverride"); }
-            Ok(CompanionProfileSaved {
-                display_name: saved.profile.display_name,
-                duty: saved.profile.duty,
-                persona_override: saved.profile.persona_override,
-                changes,
-            })
-        })
+        self.companion_transaction(|tx| save_profile(tx, id, edit))
     }
 
     /// C04: choose the companion's independent model, or NULL/NULL to follow
@@ -592,52 +615,78 @@ impl Database {
         provider_id: Option<&str>,
         model_ref: Option<&str>,
     ) -> Result<CompanionView> {
+        self.companion_transaction(|tx| save_model(tx, id, provider_id, model_ref))
+    }
+
+    pub(crate) fn pin_companion(&self, id: &str, pinned: bool) -> Result<CompanionView> {
         self.companion_transaction(|tx| {
-            profile(tx, id)?;
-            match (provider_id, model_ref) {
-                (None, None) => {}
-                (Some(provider_id), Some(model_ref)) => {
-                    let provider: Option<(String, i64)> = tx
-                        .query_row(
-                            "SELECT name, enabled FROM model_providers WHERE id=?1",
-                            [provider_id],
-                            |row| Ok((row.get(0)?, row.get(1)?)),
-                        )
-                        .optional()?;
-                    let Some((name, enabled)) = provider else {
-                        return Err(CompanionError::ModelUnavailable("所选模型服务已被删除，请重新选择".into()));
-                    };
-                    if enabled == 0 {
-                        return Err(CompanionError::ModelUnavailable(format!("模型服务「{name}」已停用，请先启用或改选其他模型")));
-                    }
-                    let model_exists: bool = tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM provider_models WHERE id=?1 AND provider_id=?2)",
-                        params![model_ref, provider_id],
-                        |row| row.get(0),
-                    )?;
-                    if !model_exists {
-                        return Err(CompanionError::ModelUnavailable("所选模型已不存在，请重新选择".into()));
-                    }
-                }
-                _ => return Err(CompanionError::ModelUnavailable("模型服务与模型必须同时选择".into())),
+            let current = profile(tx, id)?;
+            if current.profile.is_default {
+                return Err(CompanionError::DefaultProtected("companion.default_not_unpinnable", "小狐是默认伙伴，始终置顶"));
             }
             tx.execute(
-                "UPDATE companion_profiles SET model_provider_id=?2, model_ref=?3, updated_at=?4 WHERE id=?1",
-                params![id, provider_id, model_ref, now_ms()],
+                "UPDATE companion_profiles SET pinned_at=CASE WHEN ?2 THEN coalesce(pinned_at,?3)
+                ELSE NULL END,pinned_order=CASE WHEN ?2 THEN pinned_order END,updated_at=?3 WHERE id=?1",
+                params![id, pinned, now_ms()],
             )?;
             profile(tx, id)
         })
     }
 
-    pub(crate) fn pin_companion(&self, id: &str, pinned: bool) -> Result<CompanionView> {
+    pub(crate) fn set_companion_pinned_order(&self, ids: &[String]) -> Result<()> {
         self.companion_transaction(|tx| {
-            profile(tx, id)?;
-            tx.execute(
-                "UPDATE companion_profiles SET pinned_at=CASE WHEN ?2 THEN coalesce(pinned_at,?3)
-                ELSE NULL END,updated_at=?3 WHERE id=?1",
-                params![id, pinned, now_ms()],
+            let mut query = tx.prepare(
+                "SELECT id FROM companion_profiles WHERE is_default=0 AND pinned_at IS NOT NULL
+                 AND archived_at IS NULL AND deleting_at IS NULL",
             )?;
-            profile(tx, id)
+            let rows = query.query_map([], |row| row.get::<_, String>(0))?;
+            let mut active = rows.collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+            if ids.len() != active.len() || ids.iter().any(|id| !active.remove(id)) {
+                return Err(CompanionError::InvalidInput(
+                    "请按顺序提供全部活动的置顶伙伴，小狐不参与排序",
+                ));
+            }
+            for (index, id) in ids.iter().enumerate() {
+                tx.execute(
+                    "UPDATE companion_profiles SET pinned_order=?2 WHERE id=?1",
+                    params![id, index as i64 + 1],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    pub(crate) fn set_companion_work_shortcuts(&self, ids: &[String]) -> Result<()> {
+        if ids.len() > 3 {
+            return Err(CompanionError::InvalidInput("最多选择 3 个常用伙伴"));
+        }
+        let mut unique = std::collections::HashSet::new();
+        if ids.iter().any(|id| !unique.insert(id)) {
+            return Err(CompanionError::InvalidInput("常用伙伴不能重复"));
+        }
+        self.companion_transaction(|tx| {
+            for id in ids {
+                let current = profile(tx, id)?;
+                if current.profile.is_default {
+                    return Err(CompanionError::InvalidInput("小狐固定显示在工作页，不占常用伙伴名额"));
+                }
+                if current.profile.archived_at.is_some() {
+                    return Err(CompanionError::Archived);
+                }
+            }
+            tx.execute(
+                "UPDATE companion_profiles SET work_shortcut_order=NULL
+                 WHERE is_default=0 AND archived_at IS NULL",
+                [],
+            )?;
+            let now = now_ms();
+            for (index, id) in ids.iter().enumerate() {
+                tx.execute(
+                    "UPDATE companion_profiles SET work_shortcut_order=?2, updated_at=?3 WHERE id=?1",
+                    params![id, index as i64 + 1, now],
+                )?;
+            }
+            Ok(())
         })
     }
 
@@ -713,7 +762,11 @@ impl Database {
     /// C07: the composer's quote draft. The private chat is derived from the
     /// contact, never supplied by the caller, so one contact's bubble id can
     /// never be quoted into another contact's chat.
-    pub(crate) fn quote_companion_bubble(&self, id: &str, bubble_id: &str) -> Result<ContactQuotePreview> {
+    pub(crate) fn quote_companion_bubble(
+        &self,
+        id: &str,
+        bubble_id: &str,
+    ) -> Result<ContactQuotePreview> {
         self.companion_transaction(|tx| {
             let current = profile(tx, id)?;
             super::contact_marks::quote_preview_on(tx, &current.conversation_id, bubble_id)
@@ -721,23 +774,47 @@ impl Database {
     }
 
     /// C07: the user's own favorite, on a user message or a contact reply.
-    pub(crate) fn favorite_companion_bubble(&self, id: &str, bubble_id: &str, favorited: bool) -> Result<ContactBubbleMarkRecord> {
+    pub(crate) fn favorite_companion_bubble(
+        &self,
+        id: &str,
+        bubble_id: &str,
+        favorited: bool,
+    ) -> Result<ContactBubbleMarkRecord> {
         self.companion_transaction(|tx| {
             let current = profile(tx, id)?;
-            super::contact_marks::set_favorite_on(tx, &current.conversation_id, bubble_id, favorited)
+            super::contact_marks::set_favorite_on(
+                tx,
+                &current.conversation_id,
+                bubble_id,
+                favorited,
+            )
         })
     }
 
     /// C07: one reaction per bubble — same one clears it, another replaces it.
-    pub(crate) fn react_companion_bubble(&self, id: &str, bubble_id: &str, reaction: &str) -> Result<ContactBubbleMarkRecord> {
+    pub(crate) fn react_companion_bubble(
+        &self,
+        id: &str,
+        bubble_id: &str,
+        reaction: &str,
+    ) -> Result<ContactBubbleMarkRecord> {
         self.companion_transaction(|tx| {
             let current = profile(tx, id)?;
-            super::contact_marks::toggle_reaction_on(tx, &current.conversation_id, bubble_id, reaction)
+            super::contact_marks::toggle_reaction_on(
+                tx,
+                &current.conversation_id,
+                bubble_id,
+                reaction,
+            )
         })
     }
 
     /// C07: the contact's favorites list (summary + time), newest marked first.
-    pub(crate) fn companion_favorites(&self, id: &str, limit: usize) -> Result<Vec<ContactFavoriteEntry>> {
+    pub(crate) fn companion_favorites(
+        &self,
+        id: &str,
+        limit: usize,
+    ) -> Result<Vec<ContactFavoriteEntry>> {
         self.companion_transaction(|tx| {
             let current = profile(tx, id)?;
             super::contact_marks::favorites_on(tx, &current.conversation_id, limit)
@@ -746,7 +823,11 @@ impl Database {
 
     /// K6: per-contact reminder mode. `follow_global` defers to the global
     /// notification preferences; the other three override them.
-    pub(crate) fn set_companion_reminder_mode(&self, id: &str, mode: &str) -> Result<CompanionView> {
+    pub(crate) fn set_companion_reminder_mode(
+        &self,
+        id: &str,
+        mode: &str,
+    ) -> Result<CompanionView> {
         if !matches!(mode, "follow_global" | "all" | "action_only" | "muted") {
             return Err(CompanionError::ReminderModeInvalid);
         }
@@ -763,6 +844,9 @@ impl Database {
     pub(crate) fn archive_companion(&self, id: &str) -> Result<CompanionView> {
         self.companion_transaction(|tx| {
             let record = profile(tx, id)?;
+            if record.profile.is_default {
+                return Err(CompanionError::DefaultProtected("companion.default_not_archivable", "小狐是默认伙伴，不能归档"));
+            }
             require_idle(&record)?;
             let now = now_ms();
             // K2: archiving stops the contact's plans from dispatching, and a
@@ -787,6 +871,123 @@ impl Database {
     }
 }
 
+fn save_profile(
+    tx: &Transaction<'_>,
+    id: &str,
+    edit: CompanionProfileSaveInput,
+) -> Result<CompanionProfileSaved> {
+    let current = profile(tx, id)?;
+    let name = edit.display_name.as_deref().map(str::trim);
+    if let Some(name) = name {
+        validate_name(tx, name, id, current.profile.archived_at.is_none())?;
+        tx.execute(
+            "UPDATE conversations SET title=?2 WHERE id=?1",
+            params![current.conversation_id, name],
+        )?;
+    }
+    let duty = edit.duty.as_deref().map(str::trim);
+    let existing_persona = current.profile.persona_override.as_deref();
+    let persona = match edit.preference {
+        CompanionPreferenceEdit::Preserve => None,
+        CompanionPreferenceEdit::Add(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err(CompanionError::InvalidInput("沟通偏好不能为空"));
+            }
+            Some(match existing_persona {
+                Some(existing) if !existing.is_empty() => {
+                    Some(format!("{existing}\n{value}"))
+                }
+                _ => Some(value.to_owned()),
+            })
+        }
+        CompanionPreferenceEdit::Replace(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err(CompanionError::InvalidInput(
+                    "沟通偏好不能为空；如需清空请使用 clear",
+                ));
+            }
+            Some(Some(value.to_owned()))
+        }
+        CompanionPreferenceEdit::Clear => Some(None),
+    };
+    let persona_sql = persona.as_ref().map(|value| value.as_deref());
+    tx.execute(
+        "UPDATE companion_profiles SET display_name=coalesce(?2,display_name),
+        avatar_ref=coalesce(?3,avatar_ref), duty=coalesce(?4,duty),
+        persona_override=CASE WHEN ?5 THEN ?6 ELSE persona_override END,
+        updated_at=?7 WHERE id=?1",
+        params![
+            id,
+            name,
+            edit.avatar_ref,
+            duty,
+            persona.is_some(),
+            persona_sql.flatten(),
+            now_ms()
+        ],
+    )?;
+    let saved = profile(tx, id)?;
+    let mut changes = Vec::new();
+    if saved.profile.display_name != current.profile.display_name {
+        changes.push("displayName");
+    }
+    if saved.profile.duty != current.profile.duty {
+        changes.push("duty");
+    }
+    if saved.profile.persona_override != current.profile.persona_override {
+        changes.push("personaOverride");
+    }
+    Ok(CompanionProfileSaved {
+        display_name: saved.profile.display_name,
+        duty: saved.profile.duty,
+        persona_override: saved.profile.persona_override,
+        changes,
+    })
+}
+
+fn save_model(
+    tx: &Transaction<'_>,
+    id: &str,
+    provider_id: Option<&str>,
+    model_ref: Option<&str>,
+) -> Result<CompanionView> {
+    profile(tx, id)?;
+    match (provider_id, model_ref) {
+        (None, None) => {}
+        (Some(provider_id), Some(model_ref)) => {
+            let provider: Option<(String, i64)> = tx
+                .query_row(
+                    "SELECT name, enabled FROM model_providers WHERE id=?1",
+                    [provider_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((name, enabled)) = provider else {
+                return Err(CompanionError::ModelUnavailable("所选模型服务已被删除，请重新选择".into()));
+            };
+            if enabled == 0 {
+                return Err(CompanionError::ModelUnavailable(format!("模型服务「{name}」已停用，请先启用或改选其他模型")));
+            }
+            let model_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM provider_models WHERE id=?1 AND provider_id=?2)",
+                params![model_ref, provider_id],
+                |row| row.get(0),
+            )?;
+            if !model_exists {
+                return Err(CompanionError::ModelUnavailable("所选模型已不存在，请重新选择".into()));
+            }
+        }
+        _ => return Err(CompanionError::ModelUnavailable("模型服务与模型必须同时选择".into())),
+    }
+    tx.execute(
+        "UPDATE companion_profiles SET model_provider_id=?2, model_ref=?3, updated_at=?4 WHERE id=?1",
+        params![id, provider_id, model_ref, now_ms()],
+    )?;
+    profile(tx, id)
+}
+
 fn activate_companion_binding(
     tx: &Transaction<'_>,
     conversation_id: &str,
@@ -798,7 +999,7 @@ fn activate_companion_binding(
 }
 
 fn create_default_companion(tx: &Transaction<'_>, root: &Path) -> Result<CompanionView> {
-    create_companion_inner(tx, root, None, true)
+    create_companion_inner(tx, root, None, true, None, None)
 }
 
 fn create_companion(
@@ -806,7 +1007,43 @@ fn create_companion(
     root: &Path,
     expert: Option<&AgentRecord>,
 ) -> Result<CompanionView> {
-    create_companion_inner(tx, root, expert, false)
+    create_companion_inner(tx, root, expert, false, None, None)
+}
+
+fn default_guide(conn: &Connection) -> rusqlite::Result<serde_json::Value> {
+    let has_peers = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM companion_profiles
+         WHERE is_default=0 AND archived_at IS NULL AND deleting_at IS NULL)",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    let first = if has_peers {
+        json!({"label":"伙伴们在忙什么？","message":"伙伴们在忙什么？"})
+    } else {
+        json!({"label":"看看你能做什么","message":"你能帮我做什么？"})
+    };
+    Ok(json!({
+        "title": "你可以这样问我",
+        "options": [
+            first,
+            {"label":"帮我建一个整理周报的伙伴","message":"帮我新建一个伙伴，专门整理周报。"},
+            {"label":"每天早上给我一份今日安排","message":"每天早上给我一份今日安排"},
+            {"label":"怎么让你读我的资料库？","message":"怎么让你读我的资料库？"}
+        ]
+    }))
+}
+
+fn refresh_default_guide(conn: &Connection, companion_id: &str) -> rusqlite::Result<()> {
+    let guide = default_guide(conn)?.to_string();
+    conn.execute(
+        "UPDATE messages SET metadata_json=json_set(metadata_json,'$.companionGuide',json(?2))
+         WHERE conversation_id=(SELECT id FROM conversations WHERE companion_id=?1)
+           AND run_id IS NULL AND role='assistant'
+           AND json_type(metadata_json,'$.companionGuide')='object'
+           AND json_extract(metadata_json,'$.companionGuide')<>json(?2)",
+        params![companion_id, guide],
+    )?;
+    Ok(())
 }
 
 fn create_companion_inner(
@@ -814,13 +1051,20 @@ fn create_companion_inner(
     root: &Path,
     expert: Option<&AgentRecord>,
     is_default: bool,
+    name_override: Option<&str>,
+    avatar_override: Option<&str>,
 ) -> Result<CompanionView> {
     let id = format!("cmp_{}", Uuid::new_v4());
     let conversation_id = Uuid::new_v4().to_string();
-    let name = match (expert, is_default) {
-        (Some(expert), _) => available_name(tx, &expert.name, &id)?,
-        (None, true) => available_name(tx, "小狐", &id)?,
-        (None, false) => available_blank_name(tx, &id)?,
+    let name = match (expert, is_default, name_override) {
+        (_, _, Some(name)) => {
+            let name = name.trim();
+            validate_name(tx, name, &id, true)?;
+            name.to_owned()
+        }
+        (Some(expert), _, None) => available_name(tx, &expert.name, &id)?,
+        (None, true, None) => available_name(tx, "小狐", &id)?,
+        (None, false, None) => available_blank_name(tx, &id)?,
     };
     let workspace = companion_workspace(root, &id);
     let notes = companion_notes_dir(root, &id);
@@ -838,7 +1082,7 @@ fn create_companion_inner(
             id,
             template,
             name,
-            avatar,
+            avatar_override.unwrap_or(avatar),
             workspace.to_string_lossy(),
             notes.to_string_lossy(),
             is_default,
@@ -862,22 +1106,60 @@ fn create_companion_inner(
         activate_companion_binding(tx, &conversation_id, expert, "companion_create")?;
     }
     let greeting_id = Uuid::new_v4().to_string();
-    let introduction = match expert {
-        None => "我可以帮你处理文件、整理资料和日常问题。".to_string(),
-        Some(expert) => {
-            let description = expert.description.split(['。', '！', '？', '\n', '\r']).next().unwrap_or("").trim();
-            if description.is_empty() || description.chars().count() > 80 {
-                "我可以协助你处理相关工作。".to_string()
-            } else {
-                format!("我的职责：{description}。")
-            }
-        }
+    let option = |label: &str, message: &str| json!({"label": label, "message": message});
+    let (introduction, guide) = if is_default {
+        (
+            "我可以帮你处理文件、整理资料和日常问题。".to_owned(),
+            Some(default_guide(tx)?),
+        )
+    } else if let Some(expert) = expert {
+        let description = expert
+            .description
+            .split(['。', '！', '？', '\n', '\r'])
+            .next()
+            .unwrap_or("")
+            .trim();
+        let introduction = if description.is_empty() || description.chars().count() > 80 {
+            "我可以协助你处理相关工作。".to_owned()
+        } else {
+            format!("我的职责是{description}。")
+        };
+        let options: Vec<_> = expert
+            .opening_suggestions
+            .iter()
+            .map(|suggestion| suggestion.trim())
+            .filter(|suggestion| !suggestion.is_empty())
+            .take(3)
+            .map(|suggestion| option(suggestion, suggestion))
+            .collect();
+        let guide =
+            (!options.is_empty()).then(|| json!({"title": "可以先让我做这些", "options": options}));
+        (introduction, guide)
+    } else {
+        (
+            "我刚来，还没有固定的职责，你想让我先帮你做什么？".to_owned(),
+            Some(json!({
+                "title": "先给我定个方向",
+                "options": [
+                    option("整理文件和资料", "以后主要帮我整理文件和资料"),
+                    option("写材料和汇报", "以后主要帮我写材料和汇报"),
+                    option("定期提醒和跟进", "以后主要帮我做定期提醒和跟进"),
+                    option("处理表格和数据", "以后主要帮我处理表格和数据"),
+                ]
+            })),
+        )
     };
-    let greeting = format!("你好，我是{name}。{introduction}有什么需要我帮忙的？");
+    let mut greeting = format!("你好，我是{name}。{introduction}");
+    if !is_default {
+        greeting.push_str("\n\n你也可以直接告诉我：「以后你叫小周」「主要帮我准备周报」「每周五下午提醒我交材料」，我会记下来。");
+    }
+    let metadata = guide
+        .map_or_else(|| json!({}), |guide| json!({"companionGuide": guide}))
+        .to_string();
     tx.execute(
-        "INSERT INTO messages(id,conversation_id,role,kind,content,status,ordinal,created_at,updated_at)
-         VALUES (?1,?2,'assistant','text',?3,'completed',1,?4,?4)",
-        params![greeting_id, conversation_id, greeting, now],
+        "INSERT INTO messages(id,conversation_id,role,kind,content,status,ordinal,created_at,updated_at,metadata_json)
+         VALUES (?1,?2,'assistant','text',?3,'completed',1,?4,?4,?5)",
+        params![greeting_id, conversation_id, greeting, now, metadata],
     )?;
     super::contact_bubbles::project_message_in_transaction(tx, &conversation_id, &greeting_id)?;
     tx.execute(
@@ -926,10 +1208,21 @@ mod tests {
 
         /// K6 test helper: insert a durable bubble directly so delivery order is
         /// deterministic, independent of the projection pipeline.
-        fn bubble(&self, chat: &str, ordinal: i64, author: &str, order: i64, content: &str) -> String {
+        fn bubble(
+            &self,
+            chat: &str,
+            ordinal: i64,
+            author: &str,
+            order: i64,
+            content: &str,
+        ) -> String {
             let id = format!("bubble-{order}");
             let source = format!("src-{order}");
-            let role = if author == "companion" { "assistant" } else { "user" };
+            let role = if author == "companion" {
+                "assistant"
+            } else {
+                "user"
+            };
             self.db.with_connection(|c| {
                 c.execute(
                     "INSERT OR IGNORE INTO messages(id,conversation_id,role,kind,content,status,ordinal,created_at,updated_at)
@@ -957,54 +1250,169 @@ mod tests {
         /// C06/D2 起新建联系人事务即写入完成标记与游标 0；需要“迁移遗留、
         /// 未完成回填”前提的测试必须显式回退该状态，而不是依赖新建缺陷。
         fn reset_backfill(&self, chat: &str) {
-            self.db.with_connection(|c| {
-                c.execute("DELETE FROM contact_bubble_backfills WHERE conversation_id=?1", [chat])?;
-                c.execute(
-                    "UPDATE companion_profiles SET last_read_delivery_order=NULL
+            self.db
+                .with_connection(|c| {
+                    c.execute(
+                        "DELETE FROM contact_bubble_backfills WHERE conversation_id=?1",
+                        [chat],
+                    )?;
+                    c.execute(
+                        "UPDATE companion_profiles SET last_read_delivery_order=NULL
                      WHERE id=(SELECT companion_id FROM conversations WHERE id=?1)",
-                    [chat],
-                )?;
-                Ok(())
-            }).unwrap();
+                        [chat],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
         }
+    }
+
+    #[test]
+    fn default_guide_reflects_active_peers_without_resetting_unread() {
+        let f = Fixture::new();
+        let chief = f.db.seed_default_companion(&f.root).unwrap();
+        let id = &chief.profile.id;
+        let chat = &chief.conversation_id;
+        let first_label = |database: &Database| {
+            let detail = database.load_conversation(chat).unwrap();
+            assert_eq!(detail.messages.len(), 1);
+            assert_eq!(detail.bubbles.len(), 1);
+            assert!(!detail.messages[0].content.contains("主要帮我准备周报"));
+            assert_eq!(
+                detail.bubbles[0].metadata["companionGuide"]["options"][1]["message"],
+                "帮我新建一个伙伴，专门整理周报。"
+            );
+            detail.bubbles[0].metadata["companionGuide"]["options"][0]["label"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(first_label(&f.db), "看看你能做什么");
+        assert_eq!(chief.unread_count, 1);
+        assert_eq!(
+            f.db.list_companions().unwrap().companions[0].unread_count,
+            1
+        );
+        f.db.read_companion_through(id, chief.latest_delivery_order.unwrap(), now_ms())
+            .unwrap();
+        let peer = f.db.create_blank_companion(&f.root).unwrap();
+        f.db.refresh_default_companion_guide(id).unwrap();
+        assert_eq!(first_label(&f.db), "伙伴们在忙什么？");
+        assert_eq!(f.db.companion_profile(id).unwrap().unread_count, 0);
+        f.db.archive_companion(&peer.profile.id).unwrap();
+        drop(f.db);
+        let db = Database::open(f.root.join("fox.db")).unwrap();
+        let initialized = db.seed_default_companion(&f.root).unwrap();
+        assert_eq!(&initialized.profile.id, id);
+        assert_eq!(initialized.unread_count, 0);
+        assert_eq!(first_label(&db), "看看你能做什么");
+        drop(db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    #[test]
+    fn blank_companion_starts_with_selected_profile_and_one_greeting() {
+        let f = Fixture::new();
+        assert_eq!(f.db.next_companion_default_name().unwrap(), "Fox");
+        let profile =
+            f.db.create_blank_companion_with_profile(
+                &f.root,
+                Some(" Fox "),
+                Some("/avatars/fox-assistant.png"),
+            )
+            .unwrap();
+        assert_eq!(profile.profile.display_name, "Fox");
+        assert_eq!(profile.profile.avatar_ref, "/avatars/fox-assistant.png");
+        assert_eq!(f.db.next_companion_default_name().unwrap(), "Fox 2");
+        assert!(matches!(
+            f.db.create_blank_companion_with_profile(&f.root, Some("fox"), None),
+            Err(CompanionError::NameTaken)
+        ));
+        let next =
+            f.db.create_blank_companion_with_profile(&f.root, Some("周报整理员"), Some("🦊"))
+                .unwrap();
+        let detail = f.db.load_conversation(&next.conversation_id).unwrap();
+        assert_eq!(detail.messages.len(), 1);
+        assert!(detail.messages[0]
+            .content
+            .starts_with("你好，我是周报整理员。"));
+        assert_eq!(next.profile.avatar_ref, "🦊");
+        assert_eq!(f.db.list_companions().unwrap().companions.len(), 2);
+        drop(f.db);
+        std::fs::remove_dir_all(f.root).unwrap();
     }
 
     #[test]
     fn new_companions_persist_one_greeting_without_a_run() {
         let f = Fixture::new();
-        f.db.execute_raw_sql("UPDATE agents SET description='定位根因、修复缺陷。后续说明' WHERE id='fox-debugger'").unwrap();
-        for contact in [f.db.seed_default_companion(&f.root).unwrap(), f.add("fox-debugger")] {
-            let rows: Vec<(String, String, Option<String>)> = f.db.with_connection(|c| {
-                let mut statement = c.prepare(
-                    "SELECT m.content, b.content, m.run_id FROM messages m
+        f.db.execute_raw_sql("UPDATE agents SET description='定位根因、修复缺陷。后续说明', opening_suggestions_json='[\"检查崩溃\",\"\",\"整理日志\",\"复现问题\",\"忽略第四项\"]' WHERE id='fox-debugger'").unwrap();
+        for contact in [
+            f.db.seed_default_companion(&f.root).unwrap(),
+            f.add("fox-debugger"),
+        ] {
+            let rows: Vec<(String, String, Option<String>, String)> =
+                f.db.with_connection(|c| {
+                    let mut statement = c.prepare(
+                        "SELECT m.content, b.content, m.run_id, m.metadata_json FROM messages m
                      JOIN contact_bubbles b ON b.source_message_id=m.id
                      WHERE m.conversation_id=?1 AND m.role='assistant'",
-                )?;
-                let rows = statement.query_map([&contact.conversation_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
-                rows.collect()
-            }).unwrap();
+                    )?;
+                    let rows = statement.query_map([&contact.conversation_id], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    })?;
+                    rows.collect()
+                })
+                .unwrap();
             assert_eq!(rows.len(), 1);
             assert!(rows[0].0.contains(&contact.profile.display_name));
             if contact.profile.is_default {
                 assert!(rows[0].0.contains("处理文件、整理资料和日常问题"));
             } else {
-                assert!(rows[0].0.contains("我的职责：定位根因、修复缺陷。"));
+                assert!(rows[0].0.contains("我的职责是定位根因、修复缺陷。"));
                 assert!(!rows[0].0.contains("后续说明"));
             }
             assert_eq!(rows[0].0, rows[0].1);
             assert!(rows[0].2.is_none());
+            let metadata: serde_json::Value = serde_json::from_str(&rows[0].3).unwrap();
+            let guide = metadata.get("companionGuide").unwrap();
+            assert_eq!(
+                guide["options"].as_array().unwrap().len(),
+                if contact.profile.is_default { 4 } else { 3 }
+            );
+            let bubbles =
+                f.db.with_connection(|connection| {
+                    super::super::contact_bubbles::query_window(
+                        connection,
+                        &contact.conversation_id,
+                        0,
+                        None,
+                    )
+                })
+                .unwrap();
+            assert_eq!(bubbles.len(), 1);
+            assert_eq!(bubbles[0].metadata["companionGuide"], *guide);
             assert_eq!(contact.unread_count, 1);
         }
-        f.db.execute_raw_sql(&format!("UPDATE agents SET description='{}' WHERE id='fox-reviewer'", "长".repeat(81))).unwrap();
+        f.db.execute_raw_sql(&format!(
+            "UPDATE agents SET description='{}' WHERE id='fox-reviewer'",
+            "长".repeat(81)
+        ))
+        .unwrap();
         let contact = f.add("fox-reviewer");
-        let content: String = f.db.with_connection(|c| c.query_row(
-            "SELECT content FROM messages WHERE conversation_id=?1", [&contact.conversation_id], |row| row.get(0),
-        )).unwrap();
+        let content: String =
+            f.db.with_connection(|c| {
+                c.query_row(
+                    "SELECT content FROM messages WHERE conversation_id=?1",
+                    [&contact.conversation_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
         assert!(content.contains("我可以协助你处理相关工作。"));
     }
 
     #[test]
-    fn companions_default_is_seeded_once_and_stays_archived_after_restart() {
+    fn companions_default_is_seeded_once_and_cannot_be_archived_or_unpinned() {
         let f = Fixture::new();
         let default = f.db.seed_default_companion(&f.root).unwrap();
         assert!(default.profile.is_default);
@@ -1015,12 +1423,20 @@ mod tests {
             .current_conversation_expert_binding(&default.conversation_id)
             .unwrap()
             .is_none());
-        f.db.archive_companion(&default.profile.id).unwrap();
+        assert!(matches!(
+            f.db.archive_companion(&default.profile.id),
+            Err(CompanionError::DefaultProtected("companion.default_not_archivable", _))
+        ));
+        assert!(matches!(
+            f.db.pin_companion(&default.profile.id, false),
+            Err(CompanionError::DefaultProtected("companion.default_not_unpinnable", _))
+        ));
         drop(f.db);
         let db = Database::open(f.root.join("fox.db")).unwrap();
         let again = db.seed_default_companion(&f.root).unwrap();
         assert_eq!(again.profile.id, default.profile.id);
-        assert!(again.profile.archived_at.is_some());
+        assert!(again.profile.archived_at.is_none());
+        assert!(again.profile.pinned_at.is_none());
         assert_eq!(again.conversation_id, default.conversation_id);
         assert_eq!(db.list_companions().unwrap().companions.len(), 1);
         drop(db);
@@ -1028,7 +1444,8 @@ mod tests {
     }
 
     #[test]
-    fn companions_binding_failure_rolls_back_and_concurrent_adds_create_independent_private_chats() {
+    fn companions_binding_failure_rolls_back_and_concurrent_adds_create_independent_private_chats()
+    {
         let f = Fixture::new();
         f.db.execute_raw_sql(
             "CREATE TRIGGER reject_companion_binding BEFORE INSERT ON conversation_expert_bindings
@@ -1091,17 +1508,28 @@ mod tests {
     #[test]
     fn a02_a03_repeated_creation_freezes_skills_and_survives_source_deletion() {
         let f = Fixture::new();
-        let expert = f.db.copy_agent("fox-debugger", Some("Independent expert")).unwrap();
-        f.db.set_agent_skill_enabled(&expert.id, "frozen-skill", true).unwrap();
+        let expert =
+            f.db.copy_agent("fox-debugger", Some("Independent expert"))
+                .unwrap();
+        f.db.set_agent_skill_enabled(&expert.id, "frozen-skill", true)
+            .unwrap();
         let first = f.add(&expert.id);
         let second = f.add(&expert.id);
         assert_ne!(first.profile.id, second.profile.id);
         assert_ne!(first.conversation_id, second.conversation_id);
-        assert_eq!(first.profile.template_agent_id.as_deref(), Some(expert.id.as_str()));
-        let binding = f.db.current_conversation_expert_binding(&first.conversation_id)
-            .unwrap().unwrap();
+        assert_eq!(
+            first.profile.template_agent_id.as_deref(),
+            Some(expert.id.as_str())
+        );
+        let binding =
+            f.db.current_conversation_expert_binding(&first.conversation_id)
+                .unwrap()
+                .unwrap();
         assert_eq!(binding.expert_id.as_deref(), Some(expert.id.as_str()));
-        assert_eq!(binding.package_snapshot["enabledSkills"], serde_json::json!(["frozen-skill"]));
+        assert_eq!(
+            binding.package_snapshot["enabledSkills"],
+            serde_json::json!(["frozen-skill"])
+        );
         assert_eq!(binding.package_snapshot["name"], expert.name);
         assert_eq!(binding.expert_version, expert.package_version);
         assert!(binding.package_snapshot["systemPrompt"].is_string());
@@ -1111,16 +1539,20 @@ mod tests {
         for record in [&first, &second] {
             let current = f.db.companion_profile(&record.profile.id).unwrap();
             assert_eq!(current.profile.template_agent_id, None);
-            let binding = f.db.current_conversation_expert_binding(&record.conversation_id)
-                .unwrap().unwrap();
+            let binding =
+                f.db.current_conversation_expert_binding(&record.conversation_id)
+                    .unwrap()
+                    .unwrap();
             assert_eq!(binding.expert_id, None);
             assert_eq!(binding.package_snapshot, frozen);
         }
         drop(f.db);
         let reopened = Database::open(f.root.join("fox.db")).unwrap();
         for record in [&first, &second] {
-            let binding = reopened.current_conversation_expert_binding(&record.conversation_id)
-                .unwrap().unwrap();
+            let binding = reopened
+                .current_conversation_expert_binding(&record.conversation_id)
+                .unwrap()
+                .unwrap();
             assert_eq!(binding.expert_id, None);
             assert_eq!(binding.package_snapshot, frozen);
         }
@@ -1132,16 +1564,20 @@ mod tests {
     fn a04_blank_creation_is_nondefault_empty_and_uses_incrementing_names() {
         let f = Fixture::new();
         let default = f.db.seed_default_companion(&f.root).unwrap();
-        f.db.edit_companion(&default.profile.id, &CompanionProfileEdit {
-            display_name: None,
-            avatar_ref: None,
-            duty: Some("customized default duty".into()),
-            persona_override: Some("customized default persona".into()),
-        }).unwrap();
+        f.db.edit_companion(
+            &default.profile.id,
+            &CompanionProfileEdit {
+                display_name: None,
+                avatar_ref: None,
+                duty: Some("customized default duty".into()),
+                persona_override: Some("customized default persona".into()),
+            },
+        )
+        .unwrap();
         let first = f.db.create_blank_companion(&f.root).unwrap();
         let second = f.db.create_blank_companion(&f.root).unwrap();
-        assert_eq!(first.profile.display_name, "小 Fox");
-        assert_eq!(second.profile.display_name, "小 Fox 2");
+        assert_eq!(first.profile.display_name, "Fox");
+        assert_eq!(second.profile.display_name, "Fox 2");
         assert_ne!(first.profile.id, second.profile.id);
         assert_ne!(first.conversation_id, second.conversation_id);
         assert_ne!(first.profile.workspace_dir, second.profile.workspace_dir);
@@ -1150,8 +1586,15 @@ mod tests {
             assert_eq!(record.profile.template_agent_id, None);
             assert_eq!(record.profile.duty, "");
             assert_eq!(record.profile.persona_override, None);
-            assert!(f.db.current_conversation_expert_binding(&record.conversation_id).unwrap().is_none());
-            let messages = f.db.load_conversation(&record.conversation_id).unwrap().messages;
+            assert!(f
+                .db
+                .current_conversation_expert_binding(&record.conversation_id)
+                .unwrap()
+                .is_none());
+            let messages =
+                f.db.load_conversation(&record.conversation_id)
+                    .unwrap()
+                    .messages;
             assert_eq!(messages.len(), 1);
             assert_eq!(messages[0].role, "assistant");
             assert!(messages[0].run_id.is_none());
@@ -1166,31 +1609,220 @@ mod tests {
     }
 
     #[test]
+    fn work_shortcuts_are_ordered_validated_and_preserved_across_archive() {
+        let f = Fixture::new();
+        let default = f.db.seed_default_companion(&f.root).unwrap();
+        let first = f.db.create_blank_companion(&f.root).unwrap();
+        let second = f.db.create_blank_companion(&f.root).unwrap();
+        let third = f.db.create_blank_companion(&f.root).unwrap();
+        let fourth = f.db.create_blank_companion(&f.root).unwrap();
+        let ids = |records: &[&CompanionView]| {
+            records
+                .iter()
+                .map(|record| record.profile.id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        assert!(matches!(
+            f.db.set_companion_work_shortcuts(&ids(&[&first, &second, &third, &fourth])),
+            Err(CompanionError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            f.db.set_companion_work_shortcuts(&ids(&[&first, &first])),
+            Err(CompanionError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            f.db.set_companion_work_shortcuts(&ids(&[&default])),
+            Err(CompanionError::InvalidInput(_))
+        ));
+
+        f.db.set_companion_work_shortcuts(&ids(&[&second, &first, &third]))
+            .unwrap();
+        for (record, order) in [(&second, 1), (&first, 2), (&third, 3), (&fourth, 0)] {
+            assert_eq!(
+                f.db.companion_profile(&record.profile.id)
+                    .unwrap()
+                    .profile
+                    .work_shortcut_order,
+                (order > 0).then_some(order)
+            );
+        }
+        f.db.archive_companion(&second.profile.id).unwrap();
+        assert!(matches!(
+            f.db.set_companion_work_shortcuts(&ids(&[&second])),
+            Err(CompanionError::Archived)
+        ));
+        f.db.set_companion_work_shortcuts(&ids(&[&third, &first]))
+            .unwrap();
+        assert_eq!(
+            f.db.companion_profile(&third.profile.id)
+                .unwrap()
+                .profile
+                .work_shortcut_order,
+            Some(1)
+        );
+        assert_eq!(
+            f.db.companion_profile(&first.profile.id)
+                .unwrap()
+                .profile
+                .work_shortcut_order,
+            Some(2)
+        );
+        assert_eq!(
+            f.db.restore_companion(&second.profile.id)
+                .unwrap()
+                .profile
+                .work_shortcut_order,
+            Some(1)
+        );
+        drop(f.db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    #[test]
+    fn pinned_companion_order_is_atomic_and_preserved_across_restart() {
+        let f = Fixture::new();
+        let default = f.db.seed_default_companion(&f.root).unwrap();
+        let first = f.add("fox-debugger");
+        let second = f.add("fox-reviewer");
+        let third = f.db.create_blank_companion(&f.root).unwrap();
+        let id0 = &default.profile.id;
+        let id1 = &first.profile.id;
+        let id2 = &second.profile.id;
+        let id3 = &third.profile.id;
+        for id in [id1, id2, id3] {
+            f.db.pin_companion(id, true).unwrap();
+        }
+        f.db.set_companion_pinned_order(&[id2.clone(), id3.clone(), id1.clone()])
+            .unwrap();
+        for invalid in [
+            vec![id1.clone(), id2.clone()],
+            vec![id0.clone(), id2.clone(), id3.clone()],
+            vec![id1.clone(), id1.clone(), id2.clone()],
+        ] {
+            assert!(f.db.set_companion_pinned_order(&invalid).is_err());
+        }
+        actual_pinned_order(&f.db, &[id0, id2, id3, id1]);
+        f.db.archive_companion(id3).unwrap();
+        assert!(f
+            .db
+            .set_companion_pinned_order(&[id2.clone(), id3.clone(), id1.clone()])
+            .is_err());
+        assert_eq!(
+            f.db.companion_profile(id3).unwrap().profile.pinned_order,
+            Some(2)
+        );
+        f.db.restore_companion(id3).unwrap();
+        drop(f.db);
+        let db = Database::open(f.root.join("fox.db")).unwrap();
+        actual_pinned_order(&db, &[id0, id2, id3, id1]);
+        let unpinned = db.pin_companion(id2, false).unwrap();
+        assert!(unpinned.profile.pinned_at.is_none() && unpinned.profile.pinned_order.is_none());
+        db.set_companion_pinned_order(&[id1.clone(), id3.clone()])
+            .unwrap();
+        actual_pinned_order(&db, &[id0, id1, id3]);
+        drop(db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    fn actual_pinned_order(db: &Database, ids: &[&String]) {
+        let rows = db.list_companions().unwrap().companions;
+        let pinned: Vec<_> = rows
+            .iter()
+            .filter(|row| row.profile.is_default || row.profile.pinned_at.is_some())
+            .map(|row| &row.profile.id)
+            .collect();
+        assert_eq!(pinned, ids);
+    }
+
+    #[test]
+    fn companion_row_reports_latest_delivered_message_unread_target_and_failure() {
+        let f = Fixture::new();
+        let peer = f.add("fox-debugger");
+        let id = &peer.profile.id;
+        let chat = &peer.conversation_id;
+        let received = f.bubble(chat, 2, "companion", 3000, "伙伴发来的消息");
+        f.bubble(chat, 3, "user", 4000, "最新消息来自用户");
+        f.complete_backfill(chat);
+        let row = f.db.companion_profile(id).unwrap();
+        assert_eq!(row.last_message_at, Some(4000));
+        assert_eq!(
+            row.latest_message_preview.as_deref(),
+            Some("最新消息来自用户")
+        );
+        assert_eq!(row.latest_bubble_id.as_deref(), Some(received.as_str()));
+        assert_eq!(row.latest_delivery_order, Some(3000));
+        let marked = f.db.mark_companion_unread(id, &received).unwrap();
+        assert_eq!(marked.profile.manual_unread_from_order, Some(3000));
+        let fail = f.db.create_run(chat, "开始失败用例", None).unwrap();
+        f.db.mark_run_failed(&fail.run.id, "fixture.failed", "服务连接失败")
+            .unwrap();
+        f.db.with_connection(|c| {
+            c.execute(
+                "UPDATE runs SET created_at=10,finished_at=10 WHERE id=?1",
+                [&fail.run.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let row = f.db.companion_profile(id).unwrap();
+        assert_eq!(row.latest_failure_summary.as_deref(), Some("服务连接失败"));
+        let next = f.db.create_run(chat, "完成用例", None).unwrap();
+        f.db.apply_runtime_event(&next.run.id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        f.db.apply_runtime_event(&next.run.id, 2, &json!({"type":"run.completed"}))
+            .unwrap();
+        assert!(f
+            .db
+            .companion_profile(id)
+            .unwrap()
+            .latest_failure_summary
+            .is_none());
+        drop(f.db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    #[test]
     fn blank_companion_allows_empty_duty_when_saving_avatar_and_preferences() {
         let f = Fixture::new();
         let record = f.db.create_blank_companion(&f.root).unwrap();
-        let saved = f.db.edit_companion(&record.profile.id, &CompanionProfileEdit {
-            display_name: None,
-            avatar_ref: Some("🦊".into()),
-            duty: Some("   ".into()),
-            persona_override: Some("先给结论".into()),
-        }).unwrap();
+        let saved =
+            f.db.edit_companion(
+                &record.profile.id,
+                &CompanionProfileEdit {
+                    display_name: None,
+                    avatar_ref: Some("🦊".into()),
+                    duty: Some("   ".into()),
+                    persona_override: Some("先给结论".into()),
+                },
+            )
+            .unwrap();
         assert_eq!(saved.profile.duty, "");
         assert_eq!(saved.profile.avatar_ref, "🦊");
         assert_eq!(saved.profile.persona_override.as_deref(), Some("先给结论"));
-        let cleared = f.db.edit_companion(&record.profile.id, &CompanionProfileEdit {
-            display_name: None,
-            avatar_ref: None,
-            duty: Some("职责".into()),
-            persona_override: None,
-        }).unwrap();
+        let cleared =
+            f.db.edit_companion(
+                &record.profile.id,
+                &CompanionProfileEdit {
+                    display_name: None,
+                    avatar_ref: None,
+                    duty: Some("职责".into()),
+                    persona_override: None,
+                },
+            )
+            .unwrap();
         assert_eq!(cleared.profile.duty, "职责");
-        let cleared = f.db.edit_companion(&record.profile.id, &CompanionProfileEdit {
-            display_name: None,
-            avatar_ref: None,
-            duty: Some("".into()),
-            persona_override: None,
-        }).unwrap();
+        let cleared =
+            f.db.edit_companion(
+                &record.profile.id,
+                &CompanionProfileEdit {
+                    display_name: None,
+                    avatar_ref: None,
+                    duty: Some("".into()),
+                    persona_override: None,
+                },
+            )
+            .unwrap();
         assert_eq!(cleared.profile.duty, "");
         drop(f.db);
         std::fs::remove_dir_all(f.root).unwrap();
@@ -1222,10 +1854,14 @@ mod tests {
         f.bubble(&first.conversation_id, 3, "companion", 3000, "第二条回复");
         f.complete_backfill(&first.conversation_id);
         f.db.with_connection(|c| {
-            c.execute("INSERT INTO runs(id,conversation_id,status,model,created_at)
-                VALUES ('test-active',?1,'running','fox',1)",[&first.conversation_id])?;
+            c.execute(
+                "INSERT INTO runs(id,conversation_id,status,model,created_at)
+                VALUES ('test-active',?1,'running','fox',1)",
+                [&first.conversation_id],
+            )?;
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(f.db.companion_profile(id).unwrap().unread_count, 2);
         assert!(matches!(
             f.db.archive_companion(id),
@@ -1233,7 +1869,12 @@ mod tests {
         ));
         f.db.execute_raw_sql("UPDATE runs SET status='completed' WHERE id='test-active'")
             .unwrap();
-        assert_eq!(f.db.read_companion_through(id, 2000, 10).unwrap().unread_count, 1);
+        assert_eq!(
+            f.db.read_companion_through(id, 2000, 10)
+                .unwrap()
+                .unread_count,
+            1
+        );
         // Monotonic: reporting an earlier bubble never rewinds the cursor.
         assert_eq!(
             f.db.read_companion_through(id, 1000, 11)
@@ -1270,7 +1911,13 @@ mod tests {
         f.bubble(&active.conversation_id, 3, "user", 3000, "  最新用户消息");
 
         let list = f.db.list_companions().unwrap().companions;
-        let preview = |id: &str| list.iter().find(|c| c.profile.id == id).unwrap().latest_message_preview.as_deref();
+        let preview = |id: &str| {
+            list.iter()
+                .find(|c| c.profile.id == id)
+                .unwrap()
+                .latest_message_preview
+                .as_deref()
+        };
         assert_eq!(preview(&active.profile.id), Some("最新用户消息"));
         assert_eq!(preview(&empty.profile.id), None);
 
@@ -1289,7 +1936,8 @@ mod tests {
         let a = f.add("fox-debugger");
         let b = f.add("fox-reviewer");
         assert_eq!(a.profile.reminder_mode, "follow_global");
-        f.db.set_companion_reminder_mode(&a.profile.id, "muted").unwrap();
+        f.db.set_companion_reminder_mode(&a.profile.id, "muted")
+            .unwrap();
         let list = f.db.list_companions().unwrap().companions;
         let ra = list.iter().find(|c| c.profile.id == a.profile.id).unwrap();
         let rb = list.iter().find(|c| c.profile.id == b.profile.id).unwrap();
@@ -1324,10 +1972,17 @@ mod tests {
         }).unwrap();
         f.bubble(&chat, 2, "companion", 2000, "中途一");
         f.bubble(&chat, 3, "companion", 3000, "中途二");
-        f.db.execute_raw_sql(&format!("UPDATE contact_bubbles SET run_id='r1' WHERE conversation_id='{chat}'")).unwrap();
-        assert_eq!(f.db.companion_profile(&c.profile.id).unwrap().unread_count, 2);
+        f.db.execute_raw_sql(&format!(
+            "UPDATE contact_bubbles SET run_id='r1' WHERE conversation_id='{chat}'"
+        ))
+        .unwrap();
+        assert_eq!(
+            f.db.companion_profile(&c.profile.id).unwrap().unread_count,
+            2
+        );
         // 整轮取消不撤销已送达气泡的未读资格。
-        f.db.execute_raw_sql("UPDATE runs SET status='cancelled' WHERE id='r1'").unwrap();
+        f.db.execute_raw_sql("UPDATE runs SET status='cancelled' WHERE id='r1'")
+            .unwrap();
         let after = f.db.companion_profile(&c.profile.id).unwrap();
         assert_eq!(after.unread_count, 2);
         assert!(after.active_run_status.is_none());
@@ -1378,12 +2033,21 @@ mod tests {
         f.reset_backfill(&chat);
         f.bubble(&chat, 2, "companion", 2000, "一");
         // 回填未完成时不能永久标记。
-        assert!(matches!(f.db.mark_companion_unread(&id, "bubble-2000"), Err(CompanionError::BackfillPending)));
+        assert!(matches!(
+            f.db.mark_companion_unread(&id, "bubble-2000"),
+            Err(CompanionError::BackfillPending)
+        ));
         f.complete_backfill(&chat);
         // 用户气泡或未知气泡不可标记。
-        assert!(matches!(f.db.mark_companion_unread(&id, "missing"), Err(CompanionError::BubbleNotFound)));
+        assert!(matches!(
+            f.db.mark_companion_unread(&id, "missing"),
+            Err(CompanionError::BubbleNotFound)
+        ));
         f.bubble(&chat, 1, "user", 1000, "");
-        assert!(matches!(f.db.mark_companion_unread(&id, "bubble-1000"), Err(CompanionError::BubbleNotFound)));
+        assert!(matches!(
+            f.db.mark_companion_unread(&id, "bubble-1000"),
+            Err(CompanionError::BubbleNotFound)
+        ));
         assert!(f.db.mark_companion_unread(&id, "bubble-2000").is_ok());
         drop(f.db);
         std::fs::remove_dir_all(f.root).unwrap();
@@ -1404,10 +2068,22 @@ mod tests {
             conn.execute("INSERT INTO approvals(id,tool_call_id,status,requested_action,requested_at) VALUES ('a1','t1','pending','write_file',1)", [])?;
             Ok(())
         }).unwrap();
-        let before = f.db.list_companions().unwrap().companions.into_iter().find(|x| x.profile.id == id).unwrap();
+        let before =
+            f.db.list_companions()
+                .unwrap()
+                .companions
+                .into_iter()
+                .find(|x| x.profile.id == id)
+                .unwrap();
         assert_eq!(before.pending_action_count, 1);
         f.db.read_companion_through(&id, 2000, 100).unwrap();
-        let after = f.db.list_companions().unwrap().companions.into_iter().find(|x| x.profile.id == id).unwrap();
+        let after =
+            f.db.list_companions()
+                .unwrap()
+                .companions
+                .into_iter()
+                .find(|x| x.profile.id == id)
+                .unwrap();
         // 阅读不消除待处理审批。
         assert_eq!(after.pending_action_count, 1);
         assert_eq!(after.unread_count, 0);
@@ -1430,7 +2106,11 @@ mod tests {
         assert_eq!(before.read_delivery_order, 2000);
         assert_eq!(before.unread_count, 1);
         f.complete_backfill(&chat);
-        f.db.with_connection(|conn| { super::convert_pending_read_cursors(conn)?; Ok(()) }).unwrap();
+        f.db.with_connection(|conn| {
+            super::convert_pending_read_cursors(conn)?;
+            Ok(())
+        })
+        .unwrap();
         let after = f.db.companion_profile(&id).unwrap();
         assert_eq!(after.profile.last_read_delivery_order, Some(2000));
         assert_eq!(after.read_delivery_order, 2000);
@@ -1445,22 +2125,34 @@ mod tests {
         let f = Fixture::new();
         let record = f.add("fox-debugger");
         let id = &record.profile.id;
-        f.db.edit_companion(id, &CompanionProfileEdit {
-            display_name: None,
-            avatar_ref: None,
-            duty: Some("用户职责".into()),
-            persona_override: Some("用户人设".into()),
-        }).unwrap();
-        let frozen = f.db.current_conversation_expert_binding(&record.conversation_id)
-            .unwrap().unwrap().package_snapshot;
+        f.db.edit_companion(
+            id,
+            &CompanionProfileEdit {
+                display_name: None,
+                avatar_ref: None,
+                duty: Some("用户职责".into()),
+                persona_override: Some("用户人设".into()),
+            },
+        )
+        .unwrap();
+        let frozen =
+            f.db.current_conversation_expert_binding(&record.conversation_id)
+                .unwrap()
+                .unwrap()
+                .package_snapshot;
         f.db.execute_raw_sql("UPDATE agents SET system_prompt='新版专家' WHERE id='fox-debugger'")
             .unwrap();
-        let history = f.db.list_conversation_expert_bindings(&record.conversation_id).unwrap();
+        let history =
+            f.db.list_conversation_expert_bindings(&record.conversation_id)
+                .unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].package_snapshot, frozen);
         let updated = f.db.companion_profile(id).unwrap();
         assert_eq!(updated.profile.duty, "用户职责");
-        assert_eq!(updated.profile.persona_override.as_deref(), Some("用户人设"));
+        assert_eq!(
+            updated.profile.persona_override.as_deref(),
+            Some("用户人设")
+        );
         drop(f.db);
         std::fs::remove_dir_all(f.root).unwrap();
     }
@@ -1505,8 +2197,10 @@ mod tests {
             .unwrap();
         }
         let complete = |db: &Database, chat: &str| {
-            db.with_connection(|c| crate::database::repositories::contact_bubbles::backfill_complete(c, chat))
-                .unwrap()
+            db.with_connection(|c| {
+                crate::database::repositories::contact_bubbles::backfill_complete(c, chat)
+            })
+            .unwrap()
         };
         assert!(!complete(&f.db, &first.conversation_id));
         assert!(!complete(&f.db, &second.conversation_id));
@@ -1542,18 +2236,20 @@ mod tests {
             (first.conversation_id.as_str(), "run-a"),
             (second.conversation_id.as_str(), "run-b"),
         ] {
-            let bubbles = f
-                .db
-                .with_connection(|c| crate::database::repositories::contact_bubbles::query_window(c, chat, 0, None))
+            let bubbles =
+                f.db.with_connection(|c| {
+                    crate::database::repositories::contact_bubbles::query_window(c, chat, 0, None)
+                })
                 .unwrap();
             assert_eq!(bubbles.len(), 2);
             assert_eq!(bubbles[0].id, format!("{run}-user"));
             assert_eq!(bubbles[1].id, format!("{run}:response:1"));
         }
-        let markers: i64 = f
-            .db
-            .with_connection(|c| {
-                c.query_row("SELECT COUNT(*) FROM contact_bubble_backfills", [], |row| row.get(0))
+        let markers: i64 =
+            f.db.with_connection(|c| {
+                c.query_row("SELECT COUNT(*) FROM contact_bubble_backfills", [], |row| {
+                    row.get(0)
+                })
             })
             .unwrap();
         assert_eq!(markers, 2, "ordinary conversations never get a marker");
@@ -1572,7 +2268,9 @@ mod tests {
             })
             .unwrap()
         };
-        let started = f.db.create_run(&companion.conversation_id, "你好", None).unwrap();
+        let started =
+            f.db.create_run(&companion.conversation_id, "你好", None)
+                .unwrap();
         let run = started.run.id.clone();
         // The user bubble exists as soon as the message is inserted.
         let rows = bubbles(&f.db, &companion.conversation_id);
@@ -1580,17 +2278,40 @@ mod tests {
         assert_eq!(rows[0].id, started.user_message.id);
         assert_eq!(rows[0].author, "user");
 
-        f.db.apply_runtime_event(&run, 1, &serde_json::json!({"type":"run.started"})).unwrap();
-        f.db.apply_runtime_event(&run, 2, &serde_json::json!({"type":"message.started"})).unwrap();
-        f.db.apply_runtime_event(&run, 3, &serde_json::json!({"type":"message.delta","delta":"第一段"})).unwrap();
-        f.db.apply_runtime_event(&run, 4, &serde_json::json!({"type":"tool.started","toolCallId":"t","tool":"read","input":{}})).unwrap();
-        f.db.apply_runtime_event(&run, 5, &serde_json::json!({"type":"message.delta","delta":"第二段"})).unwrap();
-        f.db.apply_runtime_event(&run, 6, &serde_json::json!({"type":"message.completed"})).unwrap();
+        f.db.apply_runtime_event(&run, 1, &serde_json::json!({"type":"run.started"}))
+            .unwrap();
+        f.db.apply_runtime_event(&run, 2, &serde_json::json!({"type":"message.started"}))
+            .unwrap();
+        f.db.apply_runtime_event(
+            &run,
+            3,
+            &serde_json::json!({"type":"message.delta","delta":"第一段"}),
+        )
+        .unwrap();
+        f.db.apply_runtime_event(
+            &run,
+            4,
+            &serde_json::json!({"type":"tool.started","toolCallId":"t","tool":"read","input":{}}),
+        )
+        .unwrap();
+        f.db.apply_runtime_event(
+            &run,
+            5,
+            &serde_json::json!({"type":"message.delta","delta":"第二段"}),
+        )
+        .unwrap();
+        f.db.apply_runtime_event(&run, 6, &serde_json::json!({"type":"message.completed"}))
+            .unwrap();
         let rows = bubbles(&f.db, &companion.conversation_id);
-        assert_eq!(rows.len(), 3, "message.completed projects without waiting for the Run");
+        assert_eq!(
+            rows.len(),
+            3,
+            "message.completed projects without waiting for the Run"
+        );
         assert_eq!(rows[1].id, format!("{run}:response:3"));
         assert_eq!(rows[2].id, format!("{run}:response:5"));
-        f.db.apply_runtime_event(&run, 7, &serde_json::json!({"type":"run.completed"})).unwrap();
+        f.db.apply_runtime_event(&run, 7, &serde_json::json!({"type":"run.completed"}))
+            .unwrap();
         let again = bubbles(&f.db, &companion.conversation_id);
         assert_eq!(
             rows.iter().map(|b| &b.id).collect::<Vec<_>>(),
@@ -1599,14 +2320,25 @@ mod tests {
         );
 
         // An ordinary conversation pays only the companion check: no rows.
-        let plain = f.db.create_conversation("fox-general", Some("普通对话"), None, None).unwrap();
+        let plain =
+            f.db.create_conversation("fox-general", Some("普通对话"), None, None)
+                .unwrap();
         let plain_run = f.db.create_run(&plain.id, "普通问题", None).unwrap();
         let id = &plain_run.run.id;
-        f.db.apply_runtime_event(id, 1, &serde_json::json!({"type":"run.started"})).unwrap();
-        f.db.apply_runtime_event(id, 2, &serde_json::json!({"type":"message.started"})).unwrap();
-        f.db.apply_runtime_event(id, 3, &serde_json::json!({"type":"message.delta","delta":"回答"})).unwrap();
-        f.db.apply_runtime_event(id, 4, &serde_json::json!({"type":"message.completed"})).unwrap();
-        f.db.apply_runtime_event(id, 5, &serde_json::json!({"type":"run.completed"})).unwrap();
+        f.db.apply_runtime_event(id, 1, &serde_json::json!({"type":"run.started"}))
+            .unwrap();
+        f.db.apply_runtime_event(id, 2, &serde_json::json!({"type":"message.started"}))
+            .unwrap();
+        f.db.apply_runtime_event(
+            id,
+            3,
+            &serde_json::json!({"type":"message.delta","delta":"回答"}),
+        )
+        .unwrap();
+        f.db.apply_runtime_event(id, 4, &serde_json::json!({"type":"message.completed"}))
+            .unwrap();
+        f.db.apply_runtime_event(id, 5, &serde_json::json!({"type":"run.completed"}))
+            .unwrap();
         assert!(bubbles(&f.db, &plain.id).is_empty());
         drop(f.db);
         std::fs::remove_dir_all(f.root).unwrap();
@@ -1614,7 +2346,10 @@ mod tests {
 
     // C04/K5: independent model resolution and the frozen run snapshot.
 
-    fn global_service(model_id: &str, supports_image_input: bool) -> crate::database::ModelServiceRecord {
+    fn global_service(
+        model_id: &str,
+        supports_image_input: bool,
+    ) -> crate::database::ModelServiceRecord {
         crate::database::ModelServiceRecord {
             name: "全局服务".to_owned(),
             base_url: "https://global.example.com".to_owned(),
@@ -1651,40 +2386,100 @@ mod tests {
     fn companion_model_override_wins_and_the_run_snapshot_is_write_once() {
         let f = Fixture::new();
         let companion = f.add("fox-debugger");
-        f.db.save_model_service(&global_service("global-model", false)).unwrap();
+        f.db.save_model_service(&global_service("global-model", false))
+            .unwrap();
         seed_provider(&f.db, true, true);
-        let global = f.db.resolve_effective_model(&companion.conversation_id).unwrap().unwrap();
+        let global =
+            f.db.resolve_effective_model(&companion.conversation_id)
+                .unwrap()
+                .unwrap();
         assert_eq!(global.model_id, "global-model", "无覆盖时跟随全局");
 
-        f.db.set_companion_model(&companion.profile.id, Some("prov"), Some("prov-model")).unwrap();
-        let resolved = f.db.resolve_effective_model(&companion.conversation_id).unwrap().unwrap();
+        f.db.set_companion_model(&companion.profile.id, Some("prov"), Some("prov-model"))
+            .unwrap();
+        let resolved =
+            f.db.resolve_effective_model(&companion.conversation_id)
+                .unwrap()
+                .unwrap();
         assert_eq!(resolved.model_id, "independent-model");
         assert!(resolved.supports_image_input);
         assert_eq!(resolved.context_window, 64_000);
         assert_eq!(resolved.max_output_tokens, 4_096);
 
-        let run = f.db.create_run(&companion.conversation_id, "用独立模型", None).unwrap();
-        assert_eq!(run.run.model, "independent-model", "Run 的展示模型也是覆盖值");
-        f.db.freeze_run_model_snapshot(&run.run.id, &resolved).unwrap();
-        f.db.save_model_service(&global_service("global-model-v2", true)).unwrap();
-        f.db.execute_raw_sql("UPDATE provider_models SET model_id='renamed', supports_image_input=0").unwrap();
+        let run =
+            f.db.create_run(&companion.conversation_id, "用独立模型", None)
+                .unwrap();
+        assert_eq!(
+            run.run.model, "independent-model",
+            "Run 的展示模型也是覆盖值"
+        );
+        f.db.freeze_run_model_snapshot(&run.run.id, &resolved)
+            .unwrap();
+        f.db.save_model_service(&global_service("global-model-v2", true))
+            .unwrap();
+        f.db.execute_raw_sql(
+            "UPDATE provider_models SET model_id='renamed', supports_image_input=0",
+        )
+        .unwrap();
         let snapshot = f.db.run_model_snapshot(&run.run.id).unwrap().unwrap();
-        assert_eq!(snapshot.model_id, "independent-model", "快照不随全局或供应商变化");
+        assert_eq!(
+            snapshot.model_id, "independent-model",
+            "快照不随全局或供应商变化"
+        );
         assert!(snapshot.supports_image_input);
-        f.db.freeze_run_model_snapshot(&run.run.id, &global_service("attempted-replacement", false)).unwrap();
-        assert_eq!(f.db.run_model_snapshot(&run.run.id).unwrap().unwrap().model_id, "independent-model", "冻结只写一次");
-        assert_eq!(f.db.resolve_effective_model(&companion.conversation_id).unwrap().unwrap().model_id, "renamed", "新发送重新解析当前配置");
+        f.db.freeze_run_model_snapshot(
+            &run.run.id,
+            &global_service("attempted-replacement", false),
+        )
+        .unwrap();
+        assert_eq!(
+            f.db.run_model_snapshot(&run.run.id)
+                .unwrap()
+                .unwrap()
+                .model_id,
+            "independent-model",
+            "冻结只写一次"
+        );
+        assert_eq!(
+            f.db.resolve_effective_model(&companion.conversation_id)
+                .unwrap()
+                .unwrap()
+                .model_id,
+            "renamed",
+            "新发送重新解析当前配置"
+        );
 
-        f.db.set_companion_model(&companion.profile.id, None, None).unwrap();
-        assert_eq!(f.db.resolve_effective_model(&companion.conversation_id).unwrap().unwrap().model_id, "global-model-v2");
-        f.db.set_companion_model(&companion.profile.id, Some("prov"), Some("prov-model")).unwrap();
+        f.db.set_companion_model(&companion.profile.id, None, None)
+            .unwrap();
+        assert_eq!(
+            f.db.resolve_effective_model(&companion.conversation_id)
+                .unwrap()
+                .unwrap()
+                .model_id,
+            "global-model-v2"
+        );
+        f.db.set_companion_model(&companion.profile.id, Some("prov"), Some("prov-model"))
+            .unwrap();
         drop(f.db);
         let db = Database::open(f.root.join("fox.db")).unwrap();
         let view = db.companion_profile(&companion.profile.id).unwrap();
         assert_eq!(view.profile.model_provider_id.as_deref(), Some("prov"));
         assert_eq!(view.profile.model_ref.as_deref(), Some("prov-model"));
-        assert_eq!(db.resolve_effective_model(&companion.conversation_id).unwrap().unwrap().model_id, "renamed");
-        assert_eq!(db.run_model_snapshot(&run.run.id).unwrap().unwrap().model_id, "independent-model", "重开后快照仍在");
+        assert_eq!(
+            db.resolve_effective_model(&companion.conversation_id)
+                .unwrap()
+                .unwrap()
+                .model_id,
+            "renamed"
+        );
+        assert_eq!(
+            db.run_model_snapshot(&run.run.id)
+                .unwrap()
+                .unwrap()
+                .model_id,
+            "independent-model",
+            "重开后快照仍在"
+        );
         drop(db);
         std::fs::remove_dir_all(f.root).unwrap();
     }
@@ -1696,32 +2491,51 @@ mod tests {
     fn contact_background_task_shares_the_contact_model() {
         let f = Fixture::new();
         let companion = f.add("fox-debugger");
-        f.db.save_model_service(&global_service("global-model", false)).unwrap();
+        f.db.save_model_service(&global_service("global-model", false))
+            .unwrap();
         seed_provider(&f.db, true, true);
-        f.db.set_companion_model(&companion.profile.id, Some("prov"), Some("prov-model")).unwrap();
-        let colleague = f.db.create_digital_colleague(&crate::database::CreateDigitalColleagueInput {
-            name: "后台模型".into(),
-            expert_id: "fox-debugger".into(),
-            objective: "整理发布证据".into(),
-            project_id: None,
-            project_root: None,
-            knowledge_references: Vec::new(),
-            max_runs_per_day: 2,
-            max_tokens_per_day: 10_000,
-            max_duration_ms: 60_000,
-            max_output_tokens: 1_024,
-            max_tool_calls: 8,
-            companion_id: Some(companion.profile.id.clone()),
-        }).unwrap();
+        f.db.set_companion_model(&companion.profile.id, Some("prov"), Some("prov-model"))
+            .unwrap();
+        let colleague =
+            f.db.create_digital_colleague(&crate::database::CreateDigitalColleagueInput {
+                name: "后台模型".into(),
+                expert_id: "fox-debugger".into(),
+                objective: "整理发布证据".into(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: Vec::new(),
+                max_runs_per_day: 2,
+                max_tokens_per_day: 10_000,
+                max_duration_ms: 60_000,
+                max_output_tokens: 1_024,
+                max_tool_calls: 8,
+                companion_id: Some(companion.profile.id.clone()),
+            })
+            .unwrap();
         assert_eq!(
-            f.db.resolve_effective_model(&colleague.conversation_id).unwrap().unwrap().model_id,
+            f.db.resolve_effective_model(&colleague.conversation_id)
+                .unwrap()
+                .unwrap()
+                .model_id,
             "independent-model",
             "后台执行会话与私聊共用联系人的有效模型"
         );
-        let accepted = f.db.accept_digital_colleague_trigger(
-            &colleague.id, "manual", None, "manual:model", &serde_json::json!({}), None, "user",
-        ).unwrap();
-        let run = accepted.prepared.expect("a bound task is admitted").started.run;
+        let accepted =
+            f.db.accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "manual:model",
+                &serde_json::json!({}),
+                None,
+                "user",
+            )
+            .unwrap();
+        let run = accepted
+            .prepared
+            .expect("a bound task is admitted")
+            .started
+            .run;
         assert_eq!(run.model, "independent-model", "派发前解析出的模型写进 Run");
         drop(f.db);
         std::fs::remove_dir_all(f.root).unwrap();
@@ -1731,7 +2545,8 @@ mod tests {
     fn a_broken_companion_model_override_errors_instead_of_falling_back() {
         let f = Fixture::new();
         let companion = f.add("fox-debugger");
-        f.db.save_model_service(&global_service("global-model", false)).unwrap();
+        f.db.save_model_service(&global_service("global-model", false))
+            .unwrap();
         seed_provider(&f.db, true, false);
         assert!(matches!(
             f.db.set_companion_model(&companion.profile.id, Some("missing"), Some("m")),
@@ -1745,22 +2560,49 @@ mod tests {
             f.db.set_companion_model(&companion.profile.id, Some("prov"), Some("missing")),
             Err(CompanionError::ModelUnavailable(_))
         ));
-        f.db.set_companion_model(&companion.profile.id, Some("prov"), Some("prov-model")).unwrap();
+        f.db.set_companion_model(&companion.profile.id, Some("prov"), Some("prov-model"))
+            .unwrap();
 
-        f.db.execute_raw_sql("UPDATE model_providers SET enabled=0").unwrap();
-        assert!(matches!(
-            f.db.set_companion_model(&companion.profile.id, Some("prov"), Some("prov-model")),
-            Err(CompanionError::ModelUnavailable(_))
-        ), "停用服务不能新选");
-        assert!(f.db.resolve_effective_model(&companion.conversation_id).unwrap_err().contains("停用"));
-        f.db.execute_raw_sql("UPDATE model_providers SET enabled=1").unwrap();
+        f.db.execute_raw_sql("UPDATE model_providers SET enabled=0")
+            .unwrap();
+        assert!(
+            matches!(
+                f.db.set_companion_model(&companion.profile.id, Some("prov"), Some("prov-model")),
+                Err(CompanionError::ModelUnavailable(_))
+            ),
+            "停用服务不能新选"
+        );
+        assert!(f
+            .db
+            .resolve_effective_model(&companion.conversation_id)
+            .unwrap_err()
+            .contains("停用"));
+        f.db.execute_raw_sql("UPDATE model_providers SET enabled=1")
+            .unwrap();
         f.db.execute_raw_sql("DELETE FROM provider_models").unwrap();
-        assert!(f.db.resolve_effective_model(&companion.conversation_id).unwrap_err().contains("移除"));
+        assert!(f
+            .db
+            .resolve_effective_model(&companion.conversation_id)
+            .unwrap_err()
+            .contains("移除"));
         f.db.execute_raw_sql("DELETE FROM model_providers").unwrap();
-        assert!(f.db.resolve_effective_model(&companion.conversation_id).unwrap_err().contains("删除"));
+        assert!(f
+            .db
+            .resolve_effective_model(&companion.conversation_id)
+            .unwrap_err()
+            .contains("删除"));
 
-        let plain = f.db.create_conversation("fox-general", Some("普通对话"), None, None).unwrap();
-        assert_eq!(f.db.resolve_effective_model(&plain.id).unwrap().unwrap().model_id, "global-model", "普通对话不受影响");
+        let plain =
+            f.db.create_conversation("fox-general", Some("普通对话"), None, None)
+                .unwrap();
+        assert_eq!(
+            f.db.resolve_effective_model(&plain.id)
+                .unwrap()
+                .unwrap()
+                .model_id,
+            "global-model",
+            "普通对话不受影响"
+        );
         drop(f.db);
         std::fs::remove_dir_all(f.root).unwrap();
     }
@@ -1770,12 +2612,21 @@ mod tests {
         let f = Fixture::new();
         let companion = f.add("fox-debugger");
         seed_provider(&f.db, true, true);
-        f.db.set_companion_model(&companion.profile.id, Some("prov"), Some("prov-model")).unwrap();
+        f.db.set_companion_model(&companion.profile.id, Some("prov"), Some("prov-model"))
+            .unwrap();
         assert!(f.db.get_model_service().unwrap().is_none());
-        let resolved = f.db.resolve_effective_model(&companion.conversation_id).unwrap().unwrap();
+        let resolved =
+            f.db.resolve_effective_model(&companion.conversation_id)
+                .unwrap()
+                .unwrap();
         assert_eq!(resolved.model_id, "independent-model");
-        let plain = f.db.create_conversation("fox-general", Some("普通对话"), None, None).unwrap();
-        assert!(f.db.resolve_effective_model(&plain.id).unwrap().is_none(), "无覆盖且无全局时仍是未配置");
+        let plain =
+            f.db.create_conversation("fox-general", Some("普通对话"), None, None)
+                .unwrap();
+        assert!(
+            f.db.resolve_effective_model(&plain.id).unwrap().is_none(),
+            "无覆盖且无全局时仍是未配置"
+        );
         drop(f.db);
         std::fs::remove_dir_all(f.root).unwrap();
     }
@@ -1795,10 +2646,8 @@ mod tests {
     }
 
     fn chat_bubbles(f: &Fixture, chat: &str) -> Vec<crate::database::ContactBubbleRecord> {
-        f.db.with_connection(|c| {
-            super::super::contact_bubbles::query_window(c, chat, 0, None)
-        })
-        .unwrap()
+        f.db.with_connection(|c| super::super::contact_bubbles::query_window(c, chat, 0, None))
+            .unwrap()
     }
 
     #[test]
@@ -1814,11 +2663,20 @@ mod tests {
         // 真实运行事件形成完成回复，不调用 complete_backfill、不手工补标。
         let started = f.db.create_run(&chat, "你好", None).unwrap();
         let run = started.run.id.clone();
-        f.db.apply_runtime_event(&run, 1, &serde_json::json!({"type":"run.started"})).unwrap();
-        f.db.apply_runtime_event(&run, 2, &serde_json::json!({"type":"message.started"})).unwrap();
-        f.db.apply_runtime_event(&run, 3, &serde_json::json!({"type":"message.delta","delta":" runtime 回复"})).unwrap();
-        f.db.apply_runtime_event(&run, 4, &serde_json::json!({"type":"message.completed"})).unwrap();
-        f.db.apply_runtime_event(&run, 5, &serde_json::json!({"type":"run.completed"})).unwrap();
+        f.db.apply_runtime_event(&run, 1, &serde_json::json!({"type":"run.started"}))
+            .unwrap();
+        f.db.apply_runtime_event(&run, 2, &serde_json::json!({"type":"message.started"}))
+            .unwrap();
+        f.db.apply_runtime_event(
+            &run,
+            3,
+            &serde_json::json!({"type":"message.delta","delta":" runtime 回复"}),
+        )
+        .unwrap();
+        f.db.apply_runtime_event(&run, 4, &serde_json::json!({"type":"message.completed"}))
+            .unwrap();
+        f.db.apply_runtime_event(&run, 5, &serde_json::json!({"type":"run.completed"}))
+            .unwrap();
         let reply = format!("{run}:response:3");
         let marked = f.db.mark_companion_unread(&id, &reply).unwrap();
         assert!(marked.profile.manual_unread_from_order.is_some());
@@ -1841,18 +2699,31 @@ mod tests {
         let chat = default.conversation_id.clone();
         assert_eq!(marker_count(&f, &chat), 1);
         assert_eq!(default.profile.last_read_delivery_order, Some(0));
-        let completed_at: i64 = f.db.with_connection(|c| {
-            c.query_row("SELECT completed_at FROM contact_bubble_backfills WHERE conversation_id=?1", [&chat], |r| r.get(0))
-        }).unwrap();
+        let completed_at: i64 =
+            f.db.with_connection(|c| {
+                c.query_row(
+                    "SELECT completed_at FROM contact_bubble_backfills WHERE conversation_id=?1",
+                    [&chat],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
         f.bubble(&chat, 1, "companion", 1000, "一");
-        f.db.read_companion_through(&default.profile.id, 1000, 10).unwrap();
+        f.db.read_companion_through(&default.profile.id, 1000, 10)
+            .unwrap();
         // 再次 seed 不重建、不改已初始化的阅读事实与标记时间。
         let again = f.db.seed_default_companion(&f.root).unwrap();
         assert_eq!(again.profile.id, default.profile.id);
         assert_eq!(again.profile.last_read_delivery_order, Some(1000));
-        let after: i64 = f.db.with_connection(|c| {
-            c.query_row("SELECT completed_at FROM contact_bubble_backfills WHERE conversation_id=?1", [&chat], |r| r.get(0))
-        }).unwrap();
+        let after: i64 =
+            f.db.with_connection(|c| {
+                c.query_row(
+                    "SELECT completed_at FROM contact_bubble_backfills WHERE conversation_id=?1",
+                    [&chat],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
         assert_eq!(after, completed_at);
         assert_eq!(marker_count(&f, &chat), 1);
         drop(f.db);
@@ -1872,9 +2743,18 @@ mod tests {
         let restored = f.db.restore_companion(&id).unwrap();
         assert_eq!(restored.conversation_id, chat, "显式恢复保留原固定私聊");
         assert_eq!(marker_count(&f, &chat), 0, "restore 不得补历史完成标记");
-        assert!(matches!(f.db.mark_companion_unread(&id, "bubble-1000"), Err(CompanionError::BackfillPending)));
-        assert!(matches!(f.db.quote_companion_bubble(&id, "bubble-1000"), Err(CompanionError::BackfillPending)));
-        assert!(matches!(f.db.favorite_companion_bubble(&id, "bubble-1000", true), Err(CompanionError::BackfillPending)));
+        assert!(matches!(
+            f.db.mark_companion_unread(&id, "bubble-1000"),
+            Err(CompanionError::BackfillPending)
+        ));
+        assert!(matches!(
+            f.db.quote_companion_bubble(&id, "bubble-1000"),
+            Err(CompanionError::BackfillPending)
+        ));
+        assert!(matches!(
+            f.db.favorite_companion_bubble(&id, "bubble-1000", true),
+            Err(CompanionError::BackfillPending)
+        ));
         // 只有真实启动回填续跑完成后才放行。
         loop {
             if f.db.backfill_contact_bubbles_batch(8).unwrap() == 0 {
@@ -1884,7 +2764,10 @@ mod tests {
         assert_eq!(marker_count(&f, &chat), 1);
         assert!(f.db.mark_companion_unread(&id, "bubble-1000").is_ok());
         assert!(f.db.quote_companion_bubble(&id, "bubble-1000").is_ok());
-        assert!(f.db.favorite_companion_bubble(&id, "bubble-1000", true).is_ok());
+        assert!(f
+            .db
+            .favorite_companion_bubble(&id, "bubble-1000", true)
+            .is_ok());
         drop(f.db);
         std::fs::remove_dir_all(f.root).unwrap();
     }
@@ -1899,18 +2782,31 @@ mod tests {
         f.bubble(&chat, 2, "companion", 2000, "二");
         f.db.read_companion_through(&id, 2000, 10).unwrap();
         f.db.mark_companion_unread(&id, "bubble-1000").unwrap();
-        f.db.favorite_companion_bubble(&id, "bubble-2000", true).unwrap();
-        let completed_at: i64 = f.db.with_connection(|c| {
-            c.query_row("SELECT completed_at FROM contact_bubble_backfills WHERE conversation_id=?1", [&chat], |r| r.get(0))
-        }).unwrap();
+        f.db.favorite_companion_bubble(&id, "bubble-2000", true)
+            .unwrap();
+        let completed_at: i64 =
+            f.db.with_connection(|c| {
+                c.query_row(
+                    "SELECT completed_at FROM contact_bubble_backfills WHERE conversation_id=?1",
+                    [&chat],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
         f.db.archive_companion(&id).unwrap();
         let restored = f.db.restore_companion(&id).unwrap();
         assert_eq!(restored.conversation_id, chat);
         assert_eq!(restored.profile.last_read_delivery_order, Some(2000));
         assert_eq!(restored.profile.manual_unread_from_order, Some(1000));
-        let after: i64 = f.db.with_connection(|c| {
-            c.query_row("SELECT completed_at FROM contact_bubble_backfills WHERE conversation_id=?1", [&chat], |r| r.get(0))
-        }).unwrap();
+        let after: i64 =
+            f.db.with_connection(|c| {
+                c.query_row(
+                    "SELECT completed_at FROM contact_bubble_backfills WHERE conversation_id=?1",
+                    [&chat],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
         assert_eq!(after, completed_at, "restore 不覆盖原完成时间");
         assert_eq!(f.db.companion_favorites(&id, 10).unwrap().len(), 1);
         drop(f.db);
@@ -1928,15 +2824,24 @@ mod tests {
                         (SELECT count(*) FROM conversation_expert_bindings),
                         (SELECT count(*) FROM contact_bubble_backfills)",
                     [],
-                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?)),
+                    |r| {
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, i64>(2)?,
+                            r.get::<_, i64>(3)?,
+                        ))
+                    },
                 )
-            }).unwrap()
+            })
+            .unwrap()
         };
         // 标记 INSERT 失败：整个创建回滚，不返回半成品联系人。
         f.db.execute_raw_sql(
             "CREATE TRIGGER fail_marker BEFORE INSERT ON contact_bubble_backfills
              BEGIN SELECT RAISE(ABORT,'test marker write failed'); END;",
-        ).unwrap();
+        )
+        .unwrap();
         assert!(f.db.add_companion(&f.root, "fox-debugger").is_err());
         assert_eq!(empty(), (0, 0, 0, 0));
         f.db.execute_raw_sql("DROP TRIGGER fail_marker").unwrap();
@@ -1975,18 +2880,29 @@ mod tests {
         }).unwrap();
         f.db.execute_raw_sql(&format!(
             "UPDATE companion_profiles SET last_read_ordinal=1 WHERE id='{id}'"
-        )).unwrap();
+        ))
+        .unwrap();
         f.db.execute_raw_sql(
             "CREATE TRIGGER fail_second BEFORE INSERT ON contact_bubbles
              WHEN NEW.source_ordinal = 2
              BEGIN SELECT RAISE(ABORT,'injected partial backfill failure'); END;",
-        ).unwrap();
+        )
+        .unwrap();
         assert!(f.db.backfill_contact_bubbles_batch(8).is_err());
         assert_eq!(marker_count(&f, &chat), 0, "部分投影失败不得提前标完成");
         assert_eq!(chat_bubbles(&f, &chat).len(), 1);
-        assert!(matches!(f.db.mark_companion_unread(&id, "bubble-1000"), Err(CompanionError::BackfillPending)));
-        assert!(matches!(f.db.quote_companion_bubble(&id, "bubble-1000"), Err(CompanionError::BackfillPending)));
-        assert!(matches!(f.db.favorite_companion_bubble(&id, "bubble-1000", true), Err(CompanionError::BackfillPending)));
+        assert!(matches!(
+            f.db.mark_companion_unread(&id, "bubble-1000"),
+            Err(CompanionError::BackfillPending)
+        ));
+        assert!(matches!(
+            f.db.quote_companion_bubble(&id, "bubble-1000"),
+            Err(CompanionError::BackfillPending)
+        ));
+        assert!(matches!(
+            f.db.favorite_companion_bubble(&id, "bubble-1000", true),
+            Err(CompanionError::BackfillPending)
+        ));
         f.db.execute_raw_sql("DROP TRIGGER fail_second").unwrap();
         // 真实续跑完成后才标完成，且旧 ordinal 游标正确转换为 delivery order。
         loop {
@@ -2001,7 +2917,10 @@ mod tests {
         assert_eq!(after.read_delivery_order, 1000);
         assert!(f.db.mark_companion_unread(&id, "bubble-1000").is_ok());
         assert!(f.db.quote_companion_bubble(&id, "bubble-1000").is_ok());
-        assert!(f.db.favorite_companion_bubble(&id, "bubble-1000", true).is_ok());
+        assert!(f
+            .db
+            .favorite_companion_bubble(&id, "bubble-1000", true)
+            .is_ok());
         drop(f.db);
         std::fs::remove_dir_all(f.root).unwrap();
     }

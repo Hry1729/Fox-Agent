@@ -53,11 +53,11 @@
 //! together, or a rewrite of both columns into a self-consistent pair, is not
 //! something a single-row reader can see.
 
-#[allow(unused_imports)]
-use crate::canonical_json::CanonicalJson;
-use super::content_requirements::{DecodedSpec, decode_spec};
+use super::content_requirements::{decode_spec, DecodedSpec};
 use super::display_pass_of_finding;
 use super::p2b_consumer::envelope_item_key_of_finding;
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::database::{DeliveryRequirement, RequirementKind};
 
 /// Which contract a checklist row's own frozen requirements select.
@@ -163,13 +163,17 @@ enum RowBinding {
 }
 
 fn row_binding(row_item_key: &str, raw_finding: Option<&str>) -> RowBinding {
-    let legal = |key: &str| !key.trim().is_empty() && key.len() <= 4096 && !key.chars().any(char::is_control);
+    let legal = |key: &str| {
+        !key.trim().is_empty() && key.len() <= 4096 && !key.chars().any(char::is_control)
+    };
     if !legal(row_item_key) {
         return RowBinding::Unusable("当前行 item_key 缺失或不合法，不能证明信封属于此行".into());
     }
     match raw_finding.and_then(envelope_item_key_of_finding) {
         Some(named) if legal(&named) && named == row_item_key => RowBinding::Matches,
-        Some(named) => RowBinding::Unusable(format!("信封 itemKey {named:?} 不属于当前行 {row_item_key:?}")),
+        Some(named) => RowBinding::Unusable(format!(
+            "信封 itemKey {named:?} 不属于当前行 {row_item_key:?}"
+        )),
         None => RowBinding::Unusable("信封缺少可核验的 itemKey".into()),
     }
 }
@@ -295,7 +299,10 @@ mod tests {
 
     #[test]
     fn an_empty_or_absent_contract_column_is_a_legal_legacy_row() {
-        assert_eq!(classify_requirements(Some("[]")), ContractIdentity::LegacyV1);
+        assert_eq!(
+            classify_requirements(Some("[]")),
+            ContractIdentity::LegacyV1
+        );
         assert_eq!(classify_requirements(None), ContractIdentity::LegacyV1);
     }
 
@@ -456,12 +463,8 @@ mod tests {
             })
             .canonical_string()
         };
-        let qualification = passed_qualification_of_row(
-            "passed",
-            Some(&sound()),
-            Some("[]"),
-            "file:out.json",
-        );
+        let qualification =
+            passed_qualification_of_row("passed", Some(&sound()), Some("[]"), "file:out.json");
         assert!(
             qualification.withdraws_pass(),
             "another item's envelope must not support this row's pass: {qualification:?}"
@@ -494,14 +497,28 @@ mod tests {
         })
         .canonical_string();
         for key in ["", " ", "file:out\n.json"] {
-            assert!(matches!(passed_qualification_of_row("passed", Some(&sound), Some("[]"), key),
-                PassQualification::RecordUnusable(_)));
+            assert!(matches!(
+                passed_qualification_of_row("passed", Some(&sound), Some("[]"), key),
+                PassQualification::RecordUnusable(_)
+            ));
         }
-        for value in [serde_json::Value::Null, json!(""), json!(7), json!("file:foreign.json")] {
+        for value in [
+            serde_json::Value::Null,
+            json!(""),
+            json!(7),
+            json!("file:foreign.json"),
+        ] {
             let mut damaged: serde_json::Value = serde_json::from_str(&sound).unwrap();
             damaged["deliveryVerdict"]["itemKey"] = value;
-            assert!(matches!(passed_qualification_of_row("passed", Some(&damaged.canonical_string()), Some("[]"), "file:out.json"),
-                PassQualification::RecordUnusable(_)));
+            assert!(matches!(
+                passed_qualification_of_row(
+                    "passed",
+                    Some(&damaged.canonical_string()),
+                    Some("[]"),
+                    "file:out.json"
+                ),
+                PassQualification::RecordUnusable(_)
+            ));
         }
     }
 }

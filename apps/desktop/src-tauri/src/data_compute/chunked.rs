@@ -17,9 +17,14 @@
 //! (its return value is the result). `attachments` carries metadata only
 //! (`sheets[].rowCount`, never row data).
 
+use super::{
+    cell_to_value_capped, check_load_limits, format_js_error, selected_attachment_ids,
+    validate_input_path, validate_zip_expansion, write_outputs, LoadBudget, INTERRUPT_CANCELLED,
+    INTERRUPT_TIMEOUT, MAX_CODE_BYTES, MAX_FILE_BYTES, MAX_JS_MEMORY_BYTES, MAX_JS_STACK_BYTES,
+    MAX_RESULT_BYTES, MAX_SCRIPT_RESULT_BYTES, MAX_SHEETS_PER_ATTACHMENT, MAX_TOTAL_OUTPUT_BYTES,
+};
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::{cell_to_value_capped, check_load_limits, format_js_error, selected_attachment_ids, validate_input_path, validate_zip_expansion, write_outputs, LoadBudget, INTERRUPT_CANCELLED, INTERRUPT_TIMEOUT, MAX_CODE_BYTES, MAX_FILE_BYTES, MAX_JS_MEMORY_BYTES, MAX_JS_STACK_BYTES, MAX_RESULT_BYTES, MAX_SCRIPT_RESULT_BYTES, MAX_SHEETS_PER_ATTACHMENT, MAX_TOTAL_OUTPUT_BYTES};
 use calamine::{open_workbook_auto_from_rs, Reader, Sheets};
 use rquickjs::{Context, Error as JsError, Function, Runtime};
 use serde_json::{json, Value};
@@ -220,12 +225,30 @@ where
                 }
                 match plan.kind.as_str() {
                     "csv" | "tsv" => emit_delimited_chunks(
-                        &ctx, plan, sheet, &mut rows_done, total_rows, &*cancelled,
-                        deadline, progress, code, code_line_offset,
+                        &ctx,
+                        plan,
+                        sheet,
+                        &mut rows_done,
+                        total_rows,
+                        &*cancelled,
+                        deadline,
+                        progress,
+                        code,
+                        code_line_offset,
                     )?,
                     _ => emit_workbook_chunks(
-                        &ctx, plan, sheet, tier, &mut budget, &mut rows_done, total_rows,
-                        &*cancelled, deadline, progress, code, code_line_offset,
+                        &ctx,
+                        plan,
+                        sheet,
+                        tier,
+                        &mut budget,
+                        &mut rows_done,
+                        total_rows,
+                        &*cancelled,
+                        deadline,
+                        progress,
+                        code,
+                        code_line_offset,
                     )?,
                 }
             }
@@ -276,7 +299,8 @@ where
             MAX_RESULT_BYTES
         ));
     }
-    let output_specs = super::parse_output_specs_with_limits(envelope.get("files"), &*cancelled, deadline)?;
+    let output_specs =
+        super::parse_output_specs_with_limits(envelope.get("files"), &*cancelled, deadline)?;
     let files = write_outputs(output_root, output_specs)?;
     let output_bytes = files
         .iter()
@@ -942,16 +966,21 @@ mod tests {
     // Authored for a later user run; not executed by R3B.
     #[test]
     fn r3b_chunked_installs_the_same_table_export_and_hash_contract() {
-        let root=workspace("r3b-table");let source=csv_fixture(&root,3);
+        let root = workspace("r3b-table");
+        let source = csv_fixture(&root, 3);
         let response=execute(&[("a".to_owned(),source)],&root.join("out"),&json!({"code":r#"
             let count=0;
             function onChunk(chunk){for(const row of chunk.rows){if(row[0]!=='id')count++;}}
             function onFinish(){saveTable('summary.csv',{columns:['key','count'],keyColumns:['key'],rows:[[scalarKey('rows'),count]]});return count;}
         "#}),||false,deadline(5),&|_|{}).unwrap();
-        assert_eq!(response["result"],3);
-        let file=&response["files"][0];let bytes=fs::read(file["path"].as_str().unwrap()).unwrap();
-        assert_eq!(hex::encode(sha2::Sha256::digest(&bytes)),file["renderedHash"].as_str().unwrap());
-        assert_eq!(file["dataContract"]["keyColumns"],json!(["key"]));
+        assert_eq!(response["result"], 3);
+        let file = &response["files"][0];
+        let bytes = fs::read(file["path"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            hex::encode(sha2::Sha256::digest(&bytes)),
+            file["renderedHash"].as_str().unwrap()
+        );
+        assert_eq!(file["dataContract"]["keyColumns"], json!(["key"]));
     }
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Duration;
@@ -979,7 +1008,11 @@ mod tests {
         for (i, slot) in table.iter_mut().enumerate() {
             let mut c = i as u32;
             for _ in 0..8 {
-                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+                c = if c & 1 != 0 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
             }
             *slot = c;
         }
@@ -1107,7 +1140,7 @@ mod tests {
                             if *flag { 1 } else { 0 }
                         ));
                     }
-                    _ => {},
+                    _ => {}
                 }
             }
             xml.push_str("</row>");
@@ -1149,7 +1182,10 @@ mod tests {
         assert_eq!(result["rowsProcessed"], 120_001);
         assert_eq!(result["result"]["rows"], 120_001);
         assert_eq!(result["result"]["meta"], 120_001);
-        assert!(result["result"]["chunks"].as_u64().unwrap() > 1, "multiple chunks delivered");
+        assert!(
+            result["result"]["chunks"].as_u64().unwrap() > 1,
+            "multiple chunks delivered"
+        );
         let expected_sum: u64 = (0..120_000u64).map(|i| i % 100).sum();
         assert_eq!(result["result"]["sum"], expected_sum);
         assert_eq!(result["files"][0]["displayName"], "summary.json");

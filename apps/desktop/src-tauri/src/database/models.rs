@@ -16,6 +16,8 @@ pub struct CompanionProfile {
     pub workspace_error: Option<String>,
     pub is_default: bool,
     pub pinned_at: Option<i64>,
+    pub pinned_order: Option<i64>,
+    pub work_shortcut_order: Option<i64>,
     pub last_read_ordinal: i64,
     pub template_notice_dismissed_hash: Option<String>,
     /// C04: independent model override. Both set = use this provider model;
@@ -1102,6 +1104,7 @@ pub struct TaskLedgerProjection {
 #[serde(rename_all = "camelCase")]
 pub struct ConversationDetail {
     pub conversation: ConversationSummary,
+    pub coordination: Option<CoordinationConversation>,
     pub expert_bindings: Vec<ConversationExpertBinding>,
     pub messages: Vec<MessageRecord>,
     pub runtime_events: Vec<RunEventRecord>,
@@ -1133,6 +1136,15 @@ pub struct ConversationDetail {
     pub child_runs: Vec<ChildRunRecord>,
     pub expert_workflow: Option<ExpertWorkflowSnapshot>,
     pub expert_team: Option<ExpertTeamSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoordinationConversation {
+    pub source_conversation_id: Option<String>,
+    pub source_companion_id: Option<String>,
+    pub source_name: String,
+    pub recipient_companion_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1245,6 +1257,8 @@ pub struct ContactBubbleRecord {
     pub delivered_at: i64,
     pub content: String,
     pub fingerprint: String,
+    /// Structured, read-only message metadata used by the first-run guide.
+    pub metadata: Value,
 }
 
 /// C07: the quote a message was sent with. `summary` is the one-line text the
@@ -1499,6 +1513,7 @@ pub struct ProjectFileEntry {
     pub name: String,
     pub parent: String,
     pub is_directory: bool,
+    pub has_children: bool,
     pub byte_size: i64,
     pub modified_at: Option<i64>,
 }
@@ -2327,7 +2342,7 @@ pub struct RunBudgetSelection {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ResumeYuxiRunRequest {
+pub struct ResumeRunRequest {
     pub conversation_id: String,
     pub parent_run_id: String,
     pub text: String,
@@ -2386,8 +2401,12 @@ impl CreateRunError {
                 "run.conversation_busy",
                 "这个对话上一轮还没结束（可能正在停止），请等它结束后再发送",
             )),
-            Self::ConversationNotFound => Some(("conversation.not_found", "对话不存在或已归档，无法发送")),
-            Self::QuoteUnavailable(message) => Some(("companion.quote_unavailable", message.as_str())),
+            Self::ConversationNotFound => {
+                Some(("conversation.not_found", "对话不存在或已归档，无法发送"))
+            }
+            Self::QuoteUnavailable(message) => {
+                Some(("companion.quote_unavailable", message.as_str()))
+            }
             Self::Storage(_) => None,
         }
     }
@@ -2396,8 +2415,12 @@ impl CreateRunError {
 impl std::fmt::Display for CreateRunError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ConversationBusy { status } => write!(formatter, "conversation has an unfinished run ({status})"),
-            Self::ConversationNotFound => formatter.write_str("conversation not found, archived or trashed"),
+            Self::ConversationBusy { status } => {
+                write!(formatter, "conversation has an unfinished run ({status})")
+            }
+            Self::ConversationNotFound => {
+                formatter.write_str("conversation not found, archived or trashed")
+            }
             Self::QuoteUnavailable(message) => formatter.write_str(message),
             Self::Storage(error) => formatter.write_str(error),
         }

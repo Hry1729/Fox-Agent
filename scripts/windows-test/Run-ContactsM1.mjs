@@ -25,12 +25,13 @@ const xiaofoxAcceptance = argv.at(-1) === '--xiaofox-acceptance'
 const xiaofoxUi = argv.at(-1) === '--xiaofox-ui'
 const xiaofoxLifecycle = argv.at(-1) === '--xiaofox-lifecycle'
 const xiaofoxBehavior = argv.at(-1) === '--xiaofox-behavior'
-if (m2 || xiaofox || xiaofoxAcceptance || xiaofoxUi || xiaofoxLifecycle || xiaofoxBehavior) {
+const companionTeamLive = argv.at(-1) === '--companion-team-live'
+if (m2 || xiaofox || xiaofoxAcceptance || xiaofoxUi || xiaofoxLifecycle || xiaofoxBehavior || companionTeamLive) {
   argv.pop()
   assert.ok(dev && liveProfile && argv[0] === '--exe', 'M2 and Xiao Fox require --exe, --dev and --live-profile')
 }
 if (argv.length && !(argv.length === 2 && argv[0] === '--exe') && !(argv.length === 4 && argv[0] === '--exe' && argv[2] === '--sidecar')) {
-  throw new Error('Usage: node scripts/windows-test/Run-ContactsM1.mjs [--exe candidate.exe [--sidecar candidate-runtime.exe] [--m2|--xiaofox|--xiaofox-acceptance|--xiaofox-lifecycle|--xiaofox-ui|--xiaofox-behavior] [--dev] [--live-profile model-config-snapshot.db]]')
+  throw new Error('Usage: node scripts/windows-test/Run-ContactsM1.mjs [--exe candidate.exe [--sidecar candidate-runtime.exe] [--m2|--xiaofox|--xiaofox-acceptance|--xiaofox-lifecycle|--xiaofox-ui|--xiaofox-behavior|--companion-team-live] [--dev] [--live-profile model-config-snapshot.db]]')
 }
 const directory = await mkdtemp(join(tmpdir(), 'fox-contacts-m1-'))
 const evidence = { revision: spawnSync('git', ['rev-parse', 'HEAD'], {cwd:repo,encoding:'utf8'}).stdout?.trim(), started: new Date().toISOString(), checks: [] }
@@ -144,7 +145,9 @@ async function desktop() {
     const probe = createServer()
     await new Promise((ok,fail) => { probe.once('error',fail); probe.listen(devPort,'127.0.0.1',ok) })
     await new Promise(ok => probe.close(ok))
-    bridge = start(process.execPath,[join(repo,'scripts/windows-test/contacts-m1-dev-webview.mjs')],{...env,FOX_CONTACTS_DEV_PORT:String(devPort)},'vite',desktop,true)
+    bridge = start(process.execPath,[join(repo,'scripts/windows-test/contacts-m1-dev-webview.mjs')],{
+      ...env, FOX_CONTACTS_DEV_PORT:String(devPort), ...(companionTeamLive ? { FOX_CONTACTS_STATIC_VITE:'1' } : {}),
+    },'vite',desktop,true)
     bridge.on('message', item => { if(item.ready) bridge.ready = Date.now() })
     await poll('candidate frontend',async () => (await fetch('http://127.0.0.1:' + devPort + '/')).ok)
   }
@@ -186,6 +189,11 @@ async function desktop() {
     bridge.ready = 0
     app = start(exe, [], appEnv, 'desktop-restart-' + ++restartCount, repo)
     await poll('restarted WebView', () => bridge.ready && Date.now() - bridge.ready >= 1000)
+  }
+  if (companionTeamLive) {
+    const { checkCompanionTeam } = await import('./companion-team-live.mjs')
+    evidence.companionTeam = await checkCompanionTeam({ source: liveProfile, invoke, db, check, poll, builtin, directory })
+    return
   }
   if (xiaofoxBehavior) {
     const { checkXiaoFoxBehavior } = await import('./contacts-xiaofox-behavior.mjs')

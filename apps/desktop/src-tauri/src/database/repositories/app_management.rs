@@ -1,7 +1,7 @@
+use super::companion_ownership::ORDINARY_CHAT_FILTER;
+use super::{now_ms, Database};
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::{now_ms, Database};
-use super::companion_ownership::ORDINARY_CHAT_FILTER;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -144,7 +144,38 @@ impl Database {
         // contact-related event carries its companion id and reminder mode so the
         // alert layer can gate popups/sound per contact while the center keeps the
         // entry in every mode.
-        let contacts = self.contact_reminder_map()?;
+        let mut contacts = self.contact_reminder_map()?;
+        let coordination = self.with_connection(|connection| {
+            let mut query = connection.prepare(
+                "SELECT t.conversation_id,p.id,p.reminder_mode,p.display_name
+                 FROM companion_coordination_threads t JOIN companion_profiles p ON p.id=t.recipient_companion_id
+                 WHERE p.archived_at IS NULL AND p.deleting_at IS NULL")?;
+            let rows = query.query_map([], |row| Ok((row.get::<_,String>(0)?,
+                (row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?))))?;
+            rows.collect::<rusqlite::Result<std::collections::HashMap<_,_>>>()
+        })?;
+        contacts.extend(coordination.clone());
+        self.with_connection(|connection| {
+            connection.execute(
+                "UPDATE app_notifications SET dismissed_at=?1, read_at=coalesce(read_at, ?1)
+                 WHERE dismissed_at IS NULL AND (
+                   merge_key LIKE 'companion-assignment:%'
+                   OR (merge_key LIKE 'run:%' AND (
+                     source_type='companion'
+                     OR EXISTS(SELECT 1 FROM companion_assignments a
+                               WHERE a.source_run_id=substr(app_notifications.merge_key, 5))
+                     OR EXISTS(SELECT 1 FROM companion_coordination_runs cr
+                               WHERE cr.run_id=substr(app_notifications.merge_key, 5))
+                   ))
+                 )",
+                [now_ms()],
+            )?;
+            Ok(())
+        })?;
+        let conversation_action = |id: &str| {
+            if coordination.contains_key(id) { json!({"open":"conversation","coordinationConversationId":id}) }
+            else { json!({"open":"conversation"}) }
+        };
         let approval_items = self.with_connection(|connection| {
             let mut statement = connection.prepare(
                 "SELECT a.id, a.status, a.requested_action, a.requested_at,
@@ -172,24 +203,48 @@ impl Database {
             approval_items
         {
             let pending = status == "pending";
+            let companion = contacts.get(&conversation_id);
+            let title = companion.map_or_else(
+                || {
+                    if pending {
+                        "操作等待审批".to_owned()
+                    } else {
+                        "审批已处理".to_owned()
+                    }
+                },
+                |(_, _, name)| name.clone(),
+            );
+            let body = if companion.is_some() {
+                if pending {
+                    format!("等待你确认：{action}")
+                } else {
+                    format!("审批已处理：{action}")
+                }
+            } else {
+                format!("{conversation_title} · {action}")
+            };
             self.upsert_app_notification(AppNotificationUpsert {
                 merge_key: format!("approval:{id}"),
                 kind: if pending { "approval" } else { "completed" }.to_owned(),
                 severity: if pending { "high" } else { "normal" }.to_owned(),
-                title: if pending {
-                    "操作等待审批"
+                title,
+                body,
+                source_type: if companion.is_some() {
+                    "companion"
                 } else {
-                    "审批已处理"
+                    "approval"
                 }
                 .to_owned(),
-                body: format!("{conversation_title} · {action}"),
-                source_type: "approval".to_owned(),
-                source_id: id,
-                workspace_view: Some("chat".to_owned()),
+                source_id: companion.map_or(id, |(companion_id, _, _)| companion_id.clone()),
+                workspace_view: Some(if coordination.contains_key(&conversation_id) { "companions" } else { "chat" }.to_owned()),
                 entity_id: Some(conversation_id.clone()),
                 progress: None,
                 status,
-                action: contact_action(json!({"open": "conversation"}), &contacts, &conversation_id),
+                action: contact_action(
+                    conversation_action(&conversation_id),
+                    &contacts,
+                    &conversation_id,
+                ),
             })?;
         }
 
@@ -198,7 +253,9 @@ impl Database {
                 "SELECT r.id, r.status, r.error_message, r.conversation_id, c.title,
                         COALESCE(r.finished_at, r.started_at, r.created_at)
                  FROM runs r JOIN conversations c ON c.id = r.conversation_id
-                 WHERE r.run_kind = 'primary'
+                 WHERE r.run_kind = 'primary' AND c.companion_id IS NULL
+                   AND NOT EXISTS(SELECT 1 FROM companion_assignments a WHERE a.source_run_id=r.id)
+                   AND NOT EXISTS(SELECT 1 FROM companion_coordination_runs cr WHERE cr.run_id=r.id)
                  ORDER BY COALESCE(r.finished_at, r.started_at, r.created_at) DESC LIMIT 100",
             )?;
             let records = statement
@@ -216,6 +273,9 @@ impl Database {
             Ok(records)
         })?;
         for (id, status, error, conversation_id, title, _updated_at) in run_items {
+            if contacts.contains_key(&conversation_id) {
+                continue;
+            }
             let (kind, severity, progress, body) = match status.as_str() {
                 "queued" => ("progress", "quiet", Some(0), "任务正在排队".to_owned()),
                 "running" => ("progress", "quiet", None, "Agent 正在执行".to_owned()),
@@ -238,17 +298,18 @@ impl Database {
                 source_type: "run".to_owned(),
                 source_id: id,
                 workspace_view: Some("chat".to_owned()),
-                entity_id: Some(conversation_id.clone()),
+                entity_id: Some(conversation_id),
                 progress,
                 status,
-                action: contact_action(json!({"open": "conversation"}), &contacts, &conversation_id),
+                action: json!({"open":"conversation"}),
             })?;
         }
 
         let colleague_items = self.with_connection(|connection| {
             let mut statement = connection.prepare(
                 "SELECT t.id, t.status, t.error_message, d.name,
-                        d.companion_id, p.reminder_mode
+                        d.companion_id, p.reminder_mode,
+                        (SELECT c.id FROM conversations c WHERE c.companion_id = d.companion_id)
                  FROM digital_colleague_triggers t
                  JOIN digital_colleagues d ON d.id = t.colleague_id
                  LEFT JOIN companion_profiles p ON p.id = d.companion_id
@@ -264,44 +325,64 @@ impl Database {
                         row.get::<_, String>(3)?,
                         row.get::<_, Option<String>>(4)?,
                         row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(records)
         })?;
-        for (id, status, error, name, companion_id, reminder_mode) in colleague_items {
+        for (id, status, error, name, companion_id, reminder_mode, private_conversation_id) in
+            colleague_items
+        {
             let (kind, severity, body) = match status.as_str() {
                 "accepted" | "queued" | "running" => {
-                    ("progress", "quiet", "小 Fox 正在执行定时任务".to_owned())
+                    ("progress", "quiet", "正在执行定时任务".to_owned())
                 }
-                "completed" => ("completed", "normal", "小 Fox 已完成定时任务".to_owned()),
+                "completed" => ("completed", "normal", "已完成定时任务".to_owned()),
                 "failed" | "rejected" => (
                     "failed",
                     "high",
-                    error.unwrap_or_else(|| "小 Fox 定时任务运行失败".to_owned()),
+                    error.unwrap_or_else(|| "定时任务运行失败".to_owned()),
                 ),
                 "cancelled" | "skipped" => ("completed", "normal", format!("运行已{status}")),
                 _ => continue,
             };
             // K6: a bound contact's background task follows the contact's reminder
             // preference — muted/action-only must not popup or sound for it.
-            let mut action = json!({});
-            if let (Some(companion_id), Some(mode)) = (companion_id, reminder_mode) {
+            let mut action = json!({"open": "conversation"});
+            if let Some(companion_id) = companion_id.as_ref() {
                 if let Some(object) = action.as_object_mut() {
                     object.insert("companionId".to_owned(), json!(companion_id));
-                    object.insert("reminderMode".to_owned(), json!(mode));
+                    if let Some(mode) = reminder_mode {
+                        object.insert("reminderMode".to_owned(), json!(mode));
+                    }
                 }
             }
+            let companion_name = companion_id.as_ref().and_then(|id| {
+                contacts
+                    .values()
+                    .find(|(companion_id, _, _)| companion_id == id)
+                    .map(|(_, _, name)| name.clone())
+            });
             self.upsert_app_notification(AppNotificationUpsert {
                 merge_key: format!("digital-colleague:{id}"),
                 kind: kind.to_owned(),
                 severity: severity.to_owned(),
-                title: name,
-                body,
-                source_type: "digital_colleague".to_owned(),
-                source_id: id,
-                workspace_view: None,
-                entity_id: None,
+                title: companion_name.clone().unwrap_or_else(|| name.clone()),
+                body: if companion_name.is_some() {
+                    format!("{name} · {body}")
+                } else {
+                    body
+                },
+                source_type: if companion_id.is_some() {
+                    "companion"
+                } else {
+                    "digital_colleague"
+                }
+                .to_owned(),
+                source_id: companion_id.unwrap_or(id),
+                workspace_view: private_conversation_id.as_ref().map(|_| "chat".to_owned()),
+                entity_id: private_conversation_id,
                 progress: None,
                 status,
                 action,
@@ -310,19 +391,19 @@ impl Database {
 
         // K6: "仅需要处理" alerts on questions, so pending contact questions need a
         // center entry of their own (approvals already produce one above).
-        let mut pending_question_runs = Vec::new();
+        let mut pending_question_companions = Vec::new();
         for (run_id, conversation_id, companion_id, mode, name, question) in
             self.pending_contact_questions(&contacts)?
         {
-            pending_question_runs.push(run_id.clone());
+            pending_question_companions.push(companion_id.clone());
             self.upsert_app_notification(AppNotificationUpsert {
                 merge_key: format!("question:{run_id}"),
                 kind: "question".to_owned(),
                 severity: "high".to_owned(),
                 title: name,
                 body: question,
-                source_type: "run".to_owned(),
-                source_id: run_id,
+                source_type: "companion".to_owned(),
+                source_id: companion_id.clone(),
                 workspace_view: Some("chat".to_owned()),
                 entity_id: Some(conversation_id.clone()),
                 progress: None,
@@ -335,7 +416,12 @@ impl Database {
             })?;
         }
         // Answered (or superseded) questions resolve instead of lingering pending.
-        self.resolve_notifications("run", "question:%", "question", &pending_question_runs)?;
+        self.resolve_notifications(
+            "companion",
+            "question:%",
+            "question",
+            &pending_question_companions,
+        )?;
 
         // K6: "全部提醒" includes new messages. Only explicit `all` contacts get a
         // new-message reminder; `follow_global` keeps today's global behaviour.
@@ -350,7 +436,7 @@ impl Database {
                 severity: "normal".to_owned(),
                 title: name,
                 body: format!("{unread} 条新消息"),
-                source_type: "companion_messages".to_owned(),
+                source_type: "companion".to_owned(),
                 source_id: companion_id.clone(),
                 workspace_view: Some("chat".to_owned()),
                 entity_id: Some(conversation_id.clone()),
@@ -362,7 +448,12 @@ impl Database {
             })?;
         }
         // Once read (or the contact leaves `all` mode) the reminder resolves.
-        self.resolve_notifications("companion_messages", "companion-messages:%", "message", &unread_message_contacts)?;
+        self.resolve_notifications(
+            "companion",
+            "companion-messages:%",
+            "message",
+            &unread_message_contacts,
+        )?;
         Ok(())
     }
 
@@ -382,7 +473,13 @@ impl Database {
                     status='resolved', read_at=?1, updated_at=?1, dismissed_at=NULL
                  WHERE source_type=?2 AND merge_key LIKE ?3 AND kind=?4
                    AND source_id NOT IN (SELECT value FROM json_each(?5))",
-                params![now, source_type, merge_prefix, kind, json!(keep_ids).canonical_string()],
+                params![
+                    now,
+                    source_type,
+                    merge_prefix,
+                    kind,
+                    json!(keep_ids).canonical_string()
+                ],
             )?;
             Ok(())
         })
@@ -406,7 +503,11 @@ impl Database {
             let rows = statement.query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    (row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?),
+                    (
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ),
                 ))
             })?;
             rows.collect::<rusqlite::Result<_>>()
@@ -530,15 +631,19 @@ impl Database {
                     read_at
                  ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14,
-                    CASE WHEN ?7 = 'approval' AND ?3 = 'completed' THEN ?14 ELSE NULL END
+                    CASE WHEN (?7 = 'approval' OR (?7 = 'companion' AND ?2 LIKE 'approval:%'))
+                        AND ?3 = 'completed' THEN ?14 ELSE NULL END
                  )
                  ON CONFLICT(merge_key) DO UPDATE SET
                     kind = excluded.kind, severity = excluded.severity, title = excluded.title,
-                    body = excluded.body, workspace_view = excluded.workspace_view,
+                    body = excluded.body, source_type = excluded.source_type, source_id = excluded.source_id,
+                    workspace_view = excluded.workspace_view,
                     entity_id = excluded.entity_id, progress = excluded.progress,
                     status = excluded.status, action_json = excluded.action_json,
                     read_at = CASE
-                        WHEN excluded.source_type = 'approval' AND excluded.kind = 'completed'
+                        WHEN (excluded.source_type = 'approval'
+                              OR (excluded.source_type = 'companion' AND excluded.merge_key LIKE 'approval:%'))
+                              AND excluded.kind = 'completed'
                             THEN excluded.updated_at
                         WHEN app_notifications.status <> excluded.status
                           OR app_notifications.kind <> excluded.kind THEN NULL
@@ -554,6 +659,8 @@ impl Database {
                     OR app_notifications.severity IS NOT excluded.severity
                     OR app_notifications.title IS NOT excluded.title
                     OR app_notifications.body IS NOT excluded.body
+                    OR app_notifications.source_type IS NOT excluded.source_type
+                    OR app_notifications.source_id IS NOT excluded.source_id
                     OR app_notifications.workspace_view IS NOT excluded.workspace_view
                     OR app_notifications.entity_id IS NOT excluded.entity_id
                     OR app_notifications.progress IS NOT excluded.progress
@@ -788,8 +895,27 @@ impl Database {
         if query.is_empty() {
             return Ok(Vec::new());
         }
-        let pattern = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
+        let pattern = format!(
+            "%{}%",
+            query
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        let limit = limit.clamp(1, 100);
         self.with_connection(|connection| {
+            let mut companions = Vec::new();
+            {
+                let mut statement = connection.prepare(
+                    "SELECT id, display_name, duty, updated_at FROM companion_profiles
+                     WHERE archived_at IS NULL AND deleting_at IS NULL
+                       AND (display_name LIKE ?1 ESCAPE '\\' OR duty LIKE ?1 ESCAPE '\\')
+                     ORDER BY updated_at DESC, id LIMIT ?2")?;
+                companions.extend(statement.query_map(params![pattern, limit.min(5) as i64], |row| Ok(GlobalSearchRecord {
+                    id: row.get(0)?, kind: "companion".to_owned(), title: row.get(1)?, subtitle: row.get(2)?,
+                    workspace_view: "companions".to_owned(), entity_id: Some(row.get(0)?), document_id: None, updated_at: row.get(3)?,
+                }))?.collect::<Result<Vec<_>, _>>()?);
+            }
             let mut results = Vec::new();
             {
                 let mut statement = connection.prepare(&format!(
@@ -870,8 +996,9 @@ impl Database {
                 }))?.collect::<Result<Vec<_>, _>>()?);
             }
             results.sort_by(|left, right| right.updated_at.cmp(&left.updated_at).then_with(|| left.kind.cmp(&right.kind)));
-            results.truncate(limit.clamp(1, 100));
-            Ok(results)
+            results.truncate(limit.saturating_sub(companions.len()));
+            companions.extend(results);
+            Ok(companions)
         })
     }
 
@@ -1011,7 +1138,6 @@ impl Database {
             )? > 0)
         })
     }
-
 }
 
 fn read_git_branch(root: &Path) -> Option<String> {
@@ -1217,6 +1343,43 @@ mod tests {
             .unwrap()
             .is_empty());
 
+        let mut source_update = approval("approval:source", "approval", "pending");
+        database
+            .upsert_app_notification(source_update.clone())
+            .unwrap();
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE app_notifications SET updated_at=7 WHERE merge_key='approval:source'",
+                    [],
+                )
+            })
+            .unwrap();
+        source_update.source_type = "companion".to_owned();
+        source_update.source_id = "companion-one".to_owned();
+        database
+            .upsert_app_notification(source_update.clone())
+            .unwrap();
+        let moved = database
+            .list_app_notifications(false, 20)
+            .unwrap()
+            .into_iter()
+            .find(|record| record.merge_key == "approval:source")
+            .unwrap();
+        assert_eq!(moved.source_type, "companion");
+        assert_eq!(moved.source_id, "companion-one");
+        assert_ne!(moved.updated_at, 7);
+        source_update.kind = "completed".to_owned();
+        source_update.status = "approved".to_owned();
+        database.upsert_app_notification(source_update).unwrap();
+        let resolved = database
+            .list_app_notifications(false, 20)
+            .unwrap()
+            .into_iter()
+            .find(|record| record.merge_key == "approval:source")
+            .unwrap();
+        assert!(resolved.read_at.is_some());
+
         drop(database);
         let _ = fs::remove_file(path);
     }
@@ -1353,6 +1516,88 @@ mod tests {
     }
 
     #[test]
+    fn global_search_partitions_companions_and_matches_like_literals() {
+        let (database, path) = test_database();
+        let root = std::env::temp_dir().join(format!("fox-companion-search-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let companions = (0..6).map(|index| {
+            let record = database.create_blank_companion(&root).unwrap();
+            database.with_connection(|connection| {
+                connection.execute(
+                    "UPDATE companion_profiles SET display_name=?2, duty='负责 SearchMate 检索' WHERE id=?1",
+                    params![record.profile.id, format!("SearchMate {index}")],
+                )?;
+                Ok(())
+            }).unwrap();
+            record
+        }).collect::<Vec<_>>();
+        database
+            .archive_companion(&companions[0].profile.id)
+            .unwrap();
+        let ordinary = database
+            .create_conversation(
+                DEFAULT_AGENT_ID,
+                Some("SearchMate ordinary"),
+                Some(root.to_string_lossy().as_ref()),
+                Some("ask"),
+            )
+            .unwrap();
+        database.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO messages(id,conversation_id,role,kind,content,status,ordinal,created_at,updated_at)
+                 VALUES ('private-search-hit',?1,'user','text','SearchMate private only','completed',2,1,1)",
+                [&companions[1].conversation_id],
+            )?;
+            connection.execute(
+                "UPDATE companion_profiles SET display_name='100% literal' WHERE id=?1",
+                [&companions[2].profile.id],
+            )?;
+            connection.execute(
+                "UPDATE companion_profiles SET display_name='under_score literal' WHERE id=?1",
+                [&companions[3].profile.id],
+            )?;
+            Ok(())
+        }).unwrap();
+
+        let results = database.global_search("SearchMate", 20).unwrap();
+        assert_eq!(
+            results
+                .iter()
+                .filter(|record| record.kind == "companion")
+                .count(),
+            5
+        );
+        assert!(results
+            .iter()
+            .take(5)
+            .all(|record| record.kind == "companion" && record.workspace_view == "companions"));
+        assert!(results.iter().any(|record| record.id == ordinary.id));
+        assert!(!results
+            .iter()
+            .any(|record| record.id == companions[0].profile.id
+                || record.id == companions[1].conversation_id));
+        let limited = database.global_search("SearchMate", 2).unwrap();
+        assert_eq!(limited.len(), 2);
+        assert!(limited.iter().all(|record| record.kind == "companion"));
+        let percent = database.global_search("%", 20).unwrap();
+        assert_eq!(percent.len(), 1);
+        assert_eq!(
+            percent[0].entity_id.as_deref(),
+            Some(companions[2].profile.id.as_str())
+        );
+        let underscore = database.global_search("_", 20).unwrap();
+        assert_eq!(underscore.len(), 1);
+        assert_eq!(
+            underscore[0].entity_id.as_deref(),
+            Some(companions[3].profile.id.as_str())
+        );
+
+        drop(database);
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn c06_contact_reminders_merge_into_notification_center_and_resolve() {
         let (database, path) = test_database();
         let root = std::env::temp_dir().join(format!("fox-c06-notif-{}", Uuid::new_v4()));
@@ -1361,21 +1606,23 @@ mod tests {
         let chat = contact.conversation_id.clone();
         let id = contact.profile.id.clone();
         // C06/D2：真正首次创建已在事务内初始化回填完成标记与游标 0。
-        database.with_connection(|c| {
-            let completed: i64 = c.query_row(
-                "SELECT completed_at FROM contact_bubble_backfills WHERE conversation_id=?1",
-                [&chat],
-                |r| r.get(0),
-            )?;
-            assert!(completed > 0);
-            let cursor: Option<i64> = c.query_row(
-                "SELECT last_read_delivery_order FROM companion_profiles WHERE id=?1",
-                [&id],
-                |r| r.get(0),
-            )?;
-            assert_eq!(cursor, Some(0));
-            Ok(())
-        }).unwrap();
+        database
+            .with_connection(|c| {
+                let completed: i64 = c.query_row(
+                    "SELECT completed_at FROM contact_bubble_backfills WHERE conversation_id=?1",
+                    [&chat],
+                    |r| r.get(0),
+                )?;
+                assert!(completed > 0);
+                let cursor: Option<i64> = c.query_row(
+                    "SELECT last_read_delivery_order FROM companion_profiles WHERE id=?1",
+                    [&id],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(cursor, Some(0));
+                Ok(())
+            })
+            .unwrap();
         database.with_connection(|c| {
             c.execute("INSERT INTO messages(id,conversation_id,role,kind,content,status,ordinal,created_at,updated_at)
                 VALUES ('m1',?1,'assistant','text','你好','completed',1,1,1)", [&chat])?;
@@ -1385,14 +1632,23 @@ mod tests {
         }).unwrap();
         // follow_global keeps today's global behaviour: no new-message reminder.
         database.sync_app_notifications().unwrap();
-        assert!(!database.list_app_notifications(false, 50).unwrap().iter()
+        assert!(!database
+            .list_app_notifications(false, 50)
+            .unwrap()
+            .iter()
             .any(|n| n.merge_key == format!("companion-messages:{id}")));
         // all: a new-message reminder appears, tagged with the contact's mode.
         database.set_companion_reminder_mode(&id, "all").unwrap();
         database.sync_app_notifications().unwrap();
-        let message = database.list_app_notifications(false, 50).unwrap().into_iter()
-            .find(|n| n.merge_key == format!("companion-messages:{id}")).unwrap();
+        let message = database
+            .list_app_notifications(false, 50)
+            .unwrap()
+            .into_iter()
+            .find(|n| n.merge_key == format!("companion-messages:{id}"))
+            .unwrap();
         assert_eq!(message.kind, "message");
+        assert_eq!(message.source_type, "companion");
+        assert_eq!(message.source_id, id);
         assert_eq!(message.action.get("reminderMode").unwrap(), "all");
         assert!(message.read_at.is_none());
         // A pending approval in the contact chat carries the companion + mode.
@@ -1403,15 +1659,25 @@ mod tests {
             Ok(())
         }).unwrap();
         database.sync_app_notifications().unwrap();
-        let approval = database.list_app_notifications(false, 50).unwrap().into_iter()
-            .find(|n| n.merge_key == "approval:a1").unwrap();
+        let approval = database
+            .list_app_notifications(false, 50)
+            .unwrap()
+            .into_iter()
+            .find(|n| n.merge_key == "approval:a1")
+            .unwrap();
+        assert_eq!(approval.source_type, "companion");
+        assert_eq!(approval.source_id, id);
         assert_eq!(approval.action.get("companionId").unwrap(), &id);
         assert_eq!(approval.action.get("reminderMode").unwrap(), "all");
         // muted: the new-message reminder resolves; history stays, unread clears.
         database.set_companion_reminder_mode(&id, "muted").unwrap();
         database.sync_app_notifications().unwrap();
-        let resolved = database.list_app_notifications(false, 50).unwrap().into_iter()
-            .find(|n| n.merge_key == format!("companion-messages:{id}")).unwrap();
+        let resolved = database
+            .list_app_notifications(false, 50)
+            .unwrap()
+            .into_iter()
+            .find(|n| n.merge_key == format!("companion-messages:{id}"))
+            .unwrap();
         assert_eq!(resolved.kind, "completed");
         assert!(resolved.read_at.is_some());
         drop(database);
@@ -1426,22 +1692,28 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let contact = database.seed_default_companion(&root).unwrap();
         let id = contact.profile.id.clone();
-        let input = |name: &str, companion_id: Option<String>| crate::database::CreateDigitalColleagueInput {
-            name: name.to_owned(),
-            expert_id: "fox-debugger".to_owned(),
-            objective: "整理资料".to_owned(),
-            project_id: None,
-            project_root: None,
-            knowledge_references: Vec::new(),
-            max_runs_per_day: 2,
-            max_tokens_per_day: 10_000,
-            max_duration_ms: 60_000,
-            max_output_tokens: 1_024,
-            max_tool_calls: 8,
-            companion_id,
+        let input = |name: &str, companion_id: Option<String>| {
+            crate::database::CreateDigitalColleagueInput {
+                name: name.to_owned(),
+                expert_id: "fox-debugger".to_owned(),
+                objective: "整理资料".to_owned(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: Vec::new(),
+                max_runs_per_day: 2,
+                max_tokens_per_day: 10_000,
+                max_duration_ms: 60_000,
+                max_output_tokens: 1_024,
+                max_tool_calls: 8,
+                companion_id,
+            }
         };
-        let colleague = database.create_digital_colleague(&input("绑定后台", Some(id.clone()))).unwrap();
-        let unbound = database.create_digital_colleague(&input("普通同事", Some(id.clone()))).unwrap();
+        let colleague = database
+            .create_digital_colleague(&input("绑定后台", Some(id.clone())))
+            .unwrap();
+        let unbound = database
+            .create_digital_colleague(&input("普通同事", Some(id.clone())))
+            .unwrap();
         database.with_connection(|c| {
             c.execute("UPDATE digital_colleagues SET companion_id=NULL,report_conversation_id=NULL,companion_bound=0 WHERE id=?1", [&unbound.id])?;
             c.execute("INSERT INTO digital_colleague_triggers(id,colleague_id,source_type,idempotency_key,status,payload_json,created_at,updated_at)
@@ -1451,8 +1723,12 @@ mod tests {
             Ok(())
         }).unwrap();
         let entry = |database: &Database, merge_key: &str| {
-            database.list_app_notifications(false, 100).unwrap().into_iter()
-                .find(|n| n.merge_key == merge_key).unwrap()
+            database
+                .list_app_notifications(false, 100)
+                .unwrap()
+                .into_iter()
+                .find(|n| n.merge_key == merge_key)
+                .unwrap()
         };
         database.set_companion_reminder_mode(&id, "all").unwrap();
         database.sync_app_notifications().unwrap();
@@ -1462,7 +1738,9 @@ mod tests {
         assert!(reminder_allows_alert("all", &bound.kind));
         // action_only keeps questions/approvals; a completed background run must
         // not popup or sound.
-        database.set_companion_reminder_mode(&id, "action_only").unwrap();
+        database
+            .set_companion_reminder_mode(&id, "action_only")
+            .unwrap();
         database.sync_app_notifications().unwrap();
         let bound = entry(&database, "digital-colleague:dt1");
         assert_eq!(bound.kind, "completed");

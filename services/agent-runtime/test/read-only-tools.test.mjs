@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { executeReadOnlyTool } from '../src/read-only-tool-executors.mjs'
 import { createReadOnlyTools } from '../src/read-only-tools.mjs'
+import { nativeHostToolResult } from '../src/pi-native-tool-bridge.mjs'
+import { normalizeFoxToolResultForPi } from '../src/tool-adapter.mjs'
 
 test('executes Fox read, ls, find and grep implementations', async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'fox-read-tools-'))
@@ -81,6 +83,26 @@ test('R4 read version hashes the full raw file and reaches model content on ever
     assert.equal(result.details.readVersion, expected)
     assert.ok(result.content.some(block => block.text.includes(expected)))
   }
+})
+
+test('the model sees actual 1-based file lines without changing the raw read or its cursor', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'fox-read-lines-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  const path = join(root, 'orders.json')
+  const source = '[\r\n  {"id":"O101"},\r\n\r\n  {"id":"O102"}\r\n]\r\n'
+  await writeFile(path, source, 'utf8')
+  const raw = await executeReadOnlyTool('read', { path })
+  const view = nativeHostToolResult('read', { result: raw }, { runId: 'run', toolCallId: 'read' })
+  assert.equal(view.content[0].text, '1\t[\r\n2\t  {"id":"O101"},\r\n3\t\r\n4\t  {"id":"O102"}\r\n5\t]\r\n')
+  assert.equal(normalizeFoxToolResultForPi('read', view).content[0].text, view.content[0].text)
+  assert.equal(raw.content[0].text, source)
+  assert.equal(view.details.readVersion, raw.details.readVersion)
+  assert.equal(view.details.nextOffset, raw.details.nextOffset)
+  assert.deepEqual(view.content.slice(1), raw.content.slice(1))
+  const range = await executeReadOnlyTool('read', { path, startLine: 4, lineCount: 1 })
+  assert.equal(normalizeFoxToolResultForPi('read', range).content[0].text, '4\t  {"id":"O102"}\r\n')
+  const offset = await executeReadOnlyTool('read', { path, offset: 1, limit: 5 })
+  assert.equal(normalizeFoxToolResultForPi('read', offset).content[0].text, offset.content[0].text)
 })
 
 // Windows 创建符号链接通常需要特权，这里只在非 Windows 上跑。

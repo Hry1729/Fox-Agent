@@ -16,7 +16,7 @@ function activateCard(event: KeyboardEvent, action: () => void) {
   action()
 }
 
-export function AgentCard({ agent, onUse, onViewDetail, disabled = false, showAction = true }: { agent: AgentCardData; onUse: () => void; onViewDetail?: () => void; disabled?: boolean; showAction?: boolean }) {
+export function AgentCard({ agent, onUse, onViewDetail, disabled = false, showAction = true, actionLabel, selected }: { actionLabel?: string; selected?: boolean; agent: AgentCardData; onUse: () => void; onViewDetail?: () => void; disabled?: boolean; showAction?: boolean }) {
   const summon = () => {
     if (disabled) return
     if (!agent.available) {
@@ -26,7 +26,7 @@ export function AgentCard({ agent, onUse, onViewDetail, disabled = false, showAc
     onUse()
   }
   return (
-    <Card className={`fox-library-card fox-library-card--stacked-meta fox-shadcn-kb-card fox-shadcn-agent-card ${agent.available ? '' : 'is-unavailable'}`} onClick={summon} onKeyDown={(event) => activateCard(event, summon)} role="button" tabIndex={0} aria-label={`与${agent.name}开始对话`} aria-disabled={disabled || !agent.available}>
+    <Card className={`fox-library-card fox-library-card--stacked-meta fox-shadcn-kb-card fox-shadcn-agent-card ${agent.available ? '' : 'is-unavailable'}`} onClick={summon} onKeyDown={(event) => activateCard(event, summon)} role="button" tabIndex={0} aria-label={actionLabel ?? `与${agent.name}开始对话`} aria-pressed={selected} aria-disabled={disabled || !agent.available}>
       <CardHeader className="fox-shadcn-kb-head">
         <span className="fox-shadcn-kb-icon fox-shadcn-agent-icon"><img src={agent.image} alt="" /></span>
         <span className="fox-shadcn-kb-heading">

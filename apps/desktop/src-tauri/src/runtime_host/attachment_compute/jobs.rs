@@ -442,9 +442,8 @@ pub(crate) fn run_on_lifecycle(
         return finish_cancelled(port, &fence);
     }
 
-    let executed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run(&run_context, params)
-    }));
+    let executed =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&run_context, params)));
     let outcome = match executed {
         Ok(outcome) => outcome,
         Err(_) => Err(ComputeJobError {
@@ -470,9 +469,7 @@ pub(crate) fn run_on_lifecycle(
         Err(error) if error.code == codes::SUPERSEDED => JobTerminal::superseded(error.message),
         // 3) Cancellation observed by the work itself: the work has stopped.
         Err(error) if error.code == codes::CANCELLED => finish_cancelled(port, &fence),
-        Err(error) => {
-            finish_failed(port,error.code,error.message)
-        }
+        Err(error) => finish_failed(port, error.code, error.message),
         Ok(outcome) => {
             // 4) Success and cancellation racing: the user's cancel wins, but
             //    only after the work actually stopped (it has: `run` returned)
@@ -484,15 +481,13 @@ pub(crate) fn run_on_lifecycle(
             match port.settle_completed(&outcome.result) {
                 Ok(()) => JobTerminal::completed(),
                 Err(error) => match error.kind {
-                    PortErrorKind::Conflict => {
-                        JobTerminal::superseded(error.message)
-                    }
+                    PortErrorKind::Conflict => JobTerminal::superseded(error.message),
                     PortErrorKind::Cancelled => finish_cancelled(port, &fence),
                     // The result is not retrievable, so `completed` would be a
                     // lie. Fail it explicitly; this must never surface as a
                     // user cancellation.
                     PortErrorKind::Storage | PortErrorKind::Other => {
-                        finish_failed(port,codes::RESULT_STORAGE_FAILED,error.message)
+                        finish_failed(port, codes::RESULT_STORAGE_FAILED, error.message)
                     }
                 },
             }
@@ -578,8 +573,16 @@ pub(crate) fn run(
     }
     let progress = Arc::clone(&context.progress);
     let stop = context.stop.clone();
-    let project_inputs = super::authorize_project_inputs(&context.database, &context.conversation_id, &context.run_id, &input)
-        .map_err(|message| ComputeJobError { code: codes::INVALID_PARAMS, message })?;
+    let project_inputs = super::authorize_project_inputs(
+        &context.database,
+        &context.conversation_id,
+        &context.run_id,
+        &input,
+    )
+    .map_err(|message| ComputeJobError {
+        code: codes::INVALID_PARAMS,
+        message,
+    })?;
     let result = super::execute_with_options(
         &context.database,
         &context.attachments_dir,
@@ -664,17 +667,16 @@ mod tests {
     use crate::database::AttachmentRecord;
     use crate::kernel::CancellationPort;
     use sha2::Digest;
-    use std::sync::{
-        atomic::AtomicU64,
-        Arc, Mutex,
-    };
+    use std::sync::{atomic::AtomicU64, Arc, Mutex};
     use std::time::Duration;
 
     /// Serializes the tests that install the process-wide at-settle hook.
     static HOOK_LOCK: Mutex<()> = Mutex::new(());
 
     fn lock_hooks() -> std::sync::MutexGuard<'static, ()> {
-        HOOK_LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+        HOOK_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
     }
 
     struct Fixture {
@@ -686,8 +688,7 @@ mod tests {
 
     impl Fixture {
         fn new(tag: &str) -> Self {
-            let root = std::env::temp_dir()
-                .join(format!("fox-job-{tag}-{}", uuid::Uuid::new_v4()));
+            let root = std::env::temp_dir().join(format!("fox-job-{tag}-{}", uuid::Uuid::new_v4()));
             let sessions = root.join("sessions");
             std::fs::create_dir_all(&sessions).unwrap();
             let database = Database::open(root.join("test.db")).unwrap();
@@ -909,7 +910,11 @@ mod tests {
     /// parameter was rejected" apart from "the program ran and threw".
     fn program_of_code_bytes(total_bytes: usize) -> String {
         let head = "function onChunk(c){}\nfunction onFinish(){ return {bytes: 1}; }\n";
-        assert!(total_bytes > head.len(), "the head alone is {} bytes", head.len());
+        assert!(
+            total_bytes > head.len(),
+            "the head alone is {} bytes",
+            head.len()
+        );
         let mut code = String::from(head);
         code.push_str(&" ".repeat(total_bytes - head.len()));
         assert_eq!(code.len(), total_bytes);
@@ -948,7 +953,11 @@ mod tests {
              another branch: expected to contain {expected_message:?}, got {message:?}"
         );
         assert!(
-            !harness.port.events().iter().any(|event| event.starts_with("report")),
+            !harness
+                .port
+                .events()
+                .iter()
+                .any(|event| event.starts_with("report")),
             "no execution may start for a rejected parameter: {:?}",
             harness.port.events()
         );
@@ -964,11 +973,22 @@ mod tests {
         let token = token_for("run-1");
         let terminal = harness.run_with("run-1", &token, code_only_params());
         assert_eq!(terminal.state, TerminalState::NotStarted);
-        assert!(!terminal.settled, "a lost start CAS must not settle anything");
-        assert_eq!(terminal.error_code, Some(codes::SUPERSEDED));
-        assert!(harness.port.settles().is_empty(), "{:?}", harness.port.events());
         assert!(
-            harness.port.events().iter().all(|event| event == "mark_running"),
+            !terminal.settled,
+            "a lost start CAS must not settle anything"
+        );
+        assert_eq!(terminal.error_code, Some(codes::SUPERSEDED));
+        assert!(
+            harness.port.settles().is_empty(),
+            "{:?}",
+            harness.port.events()
+        );
+        assert!(
+            harness
+                .port
+                .events()
+                .iter()
+                .all(|event| event == "mark_running"),
             "no work may run after a lost CAS: {:?}",
             harness.port.events()
         );
@@ -985,10 +1005,19 @@ mod tests {
         let terminal = harness.run_with("run-1", &token, code_only_params());
         assert_eq!(terminal.state, TerminalState::Cancelled);
         assert!(terminal.settled);
-        assert_eq!(harness.port.settles().len(), 1, "{:?}", harness.port.events());
+        assert_eq!(
+            harness.port.settles().len(),
+            1,
+            "{:?}",
+            harness.port.events()
+        );
         assert!(harness.port.settles()[0].starts_with("settle_cancelled"));
         assert!(
-            !harness.port.events().iter().any(|event| event.starts_with("report")),
+            !harness
+                .port
+                .events()
+                .iter()
+                .any(|event| event.starts_with("report")),
             "cancelled before start must not execute work: {:?}",
             harness.port.events()
         );
@@ -1012,15 +1041,27 @@ mod tests {
         let terminal = harness.run_with("run-1", &token, code_only_params());
         test_hooks::set_at_settle(None);
         assert_eq!(terminal.state, TerminalState::Cancelled);
-        assert!(terminal.settled, "the cancel must be persisted, not dropped");
-        assert_eq!(harness.port.settles().len(), 1, "{:?}", harness.port.events());
+        assert!(
+            terminal.settled,
+            "the cancel must be persisted, not dropped"
+        );
+        assert_eq!(
+            harness.port.settles().len(),
+            1,
+            "{:?}",
+            harness.port.events()
+        );
         assert!(
             harness.port.settles()[0].starts_with("settle_cancelled"),
             "{:?}",
             harness.port.events()
         );
         assert!(
-            harness.port.events().iter().all(|event| !event.starts_with("settle_completed")),
+            harness
+                .port
+                .events()
+                .iter()
+                .all(|event| !event.starts_with("settle_completed")),
             "a cancelled job must never publish a completed terminal: {:?}",
             harness.port.events()
         );
@@ -1126,8 +1167,11 @@ mod tests {
         harness.fixture.attach_csv("f1", 120_000);
         // Fail the second progress call: the first is the "measured" phase, so
         // chunk delivery has demonstrably begun.
-        *harness.port.report_error.lock().unwrap() =
-            Some((PortErrorKind::Conflict, "a newer attempt owns this job".into(), 2));
+        *harness.port.report_error.lock().unwrap() = Some((
+            PortErrorKind::Conflict,
+            "a newer attempt owns this job".into(),
+            2,
+        ));
         let token = token_for("run-1");
         let params = json!({
             "processing": "chunked",
@@ -1213,7 +1257,10 @@ mod tests {
         // The real interpreter diagnostics must still be present in the message:
         // this is the executed path, not a synthetic string.
         assert!(message.contains("JavaScript execution failed"), "{message}");
-        assert!(message.contains("processing profile 档位 code is invalid"), "{message}");
+        assert!(
+            message.contains("processing profile 档位 code is invalid"),
+            "{message}"
+        );
         assert!(message.contains("code line"), "{message}");
         let _ = std::fs::remove_dir_all(&harness.fixture.root);
     }
@@ -1263,13 +1310,20 @@ mod tests {
             harness.port.events()
         );
         let message = terminal.error_message.unwrap_or_default();
-        assert!(message.contains("128 KiB"), "must be the byte-bound rejection: {message}");
+        assert!(
+            message.contains("128 KiB"),
+            "must be the byte-bound rejection: {message}"
+        );
         assert!(
             !message.contains(JS_EXECUTION_FAILURE_MARKER),
             "the interpreter must never have run: {message}"
         );
         assert!(
-            !harness.port.events().iter().any(|event| event.starts_with("report")),
+            !harness
+                .port
+                .events()
+                .iter()
+                .any(|event| event.starts_with("report")),
             "progress is only reported once execution starts: {:?}",
             harness.port.events()
         );
@@ -1379,7 +1433,8 @@ mod tests {
     }
 
     #[test]
-    fn invalid_params_and_deadline_produce_their_own_terminals() {        let harness = Harness::new("params");
+    fn invalid_params_and_deadline_produce_their_own_terminals() {
+        let harness = Harness::new("params");
         let token = token_for("run-1");
         let terminal = harness.run_with("run-1", &token, json!({"processing": "chunked"}));
         assert_eq!(terminal.state, TerminalState::Failed);
@@ -1438,10 +1493,12 @@ mod tests {
     }
 }
 
-fn finish_failed(port:&dyn JobLifecyclePort,code:&'static str,message:String)->JobTerminal {
-    match port.settle_failed(code,&message) {
-        Ok(())=>JobTerminal::failed(code,message),
-        Err(error) if error.kind==PortErrorKind::Conflict=>JobTerminal::superseded(error.message),
-        Err(error)=>JobTerminal::unsettled(codes::SETTLE_FAILED,error.message)
+fn finish_failed(port: &dyn JobLifecyclePort, code: &'static str, message: String) -> JobTerminal {
+    match port.settle_failed(code, &message) {
+        Ok(()) => JobTerminal::failed(code, message),
+        Err(error) if error.kind == PortErrorKind::Conflict => {
+            JobTerminal::superseded(error.message)
+        }
+        Err(error) => JobTerminal::unsettled(codes::SETTLE_FAILED, error.message),
     }
 }

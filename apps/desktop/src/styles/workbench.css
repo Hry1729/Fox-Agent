@@ -844,7 +844,7 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding: 0 16px;
+  padding: 0 var(--fox-sidebar-gutter);
   border-right: 0;
   background: transparent;
   box-shadow: none;
@@ -1020,34 +1020,33 @@
   gap: 4px;
   margin-top: -4px;
   margin-bottom: 13px;
-  padding-right: 24px;
+  /* 搜索落在「+」那一列，通知（绝对定位）落在「…」那一列。 */
+  padding-right: calc(var(--fox-sidebar-action-inset) + var(--fox-sidebar-action-size) + var(--fox-sidebar-action-gap));
 }
 
 .fox-mode-tabs {
   min-width: 0;
-  width: 116px;
-  flex: 0 1 116px;
+  width: 148px;
+  flex: 0 0 148px;
 }
 
-/* Same geometry as the shadcn Tabs default variant (muted track, 3px inset,
-   raised active trigger), expressed in px because the root font size is 14px
-   and the component's rem-based utilities would land between the radius steps. */
 .fox-mode-tabs [data-slot='tabs-list'] {
+  isolation: isolate;
   width: 100%;
   height: var(--fox-control-md);
   display: flex;
   gap: 0;
-  border-radius: var(--fox-radius-card);
-  background: var(--muted);
-  padding: 3px;
-  box-shadow: none;
+  border-radius: var(--fox-radius-pill);
+  background: color-mix(in oklch, var(--foreground) 5%, var(--sidebar));
+  padding: 0;
+  box-shadow: inset 0 1px 3px color-mix(in oklch, var(--fox-shadow-color) 7%, transparent), inset 0 0 0 1px color-mix(in oklch, var(--foreground) 6%, transparent);
 }
 
 .fox-mode-tabs [data-slot='tabs-trigger'] {
   height: 100%;
   min-height: 0;
-  border: 1px solid transparent;
-  border-radius: var(--fox-radius-control);
+  border: 0;
+  border-radius: var(--fox-radius-pill);
   gap: var(--fox-space-s);
   padding: 0 var(--fox-space-m);
   color: var(--muted-foreground);
@@ -1065,18 +1064,10 @@
   stroke-width: 1.8;
 }
 
-.fox-mode-tabs [data-slot='tabs-trigger'][data-state='active'] {
-  border-color: transparent;
-  background: var(--background);
-  color: var(--foreground);
-  box-shadow: var(--fox-shadow-sm);
-}
-
-.dark .fox-mode-tabs [data-slot='tabs-trigger'][data-state='active'] {
-  border-color: var(--input);
-  background: color-mix(in oklch, var(--input) 30%, var(--muted));
-  box-shadow: none;
-}
+ .fox-mode-tabs [data-slot='tabs-trigger'][data-state='active'] { color:var(--fox-mode-text); background:transparent; box-shadow:none; }
+.fox-mode-tabs [data-slot='tabs-trigger'] { position:relative; }
+.fox-mode-selection { position:absolute; inset:0; z-index:-1; border-radius:inherit; background:var(--fox-mode-surface); box-shadow:inset 0 0 0 1px color-mix(in oklch, var(--fox-shadow-color) 12%, transparent), inset 0 1px 0 color-mix(in oklch, white 45%, transparent); }
+.fox-mode-content { display:inline-flex; align-items:center; justify-content:center; gap:6px; }
 
 .fox-sidebar-search-trigger {
   width: var(--fox-control-sm);
@@ -2149,29 +2140,16 @@
   pointer-events: none;
 }
 
-/* SPEC item 4: the right sidebar and the private-chat contact card are sibling
-   rounded cards of the content card, outside it. They share the content card's
-   chrome (2px top / 5px bottom margins, 5px gaps, same radii). The panel's
-   resize divider sits inside the pre-existing 5px gap so it adds no width. */
-.fox-workbench > .fox-resize-divider {
-  margin: 0 0 0 -5px;
-}
-
-.fox-workbench > .fox-context-panel {
-  flex: none;
-  margin: 2px 5px 5px 0;
-  min-height: 0;
-  border-radius: calc(var(--fox-radius-window) + 4px) calc(var(--fox-radius-window) + 4px) var(--fox-radius-window) calc(var(--fox-radius-window) + 4px);
-  box-shadow: var(--fox-shadow-sm);
-}
-
-/* Maximized as a sibling card: the panel grows and the chat card narrows —
-   nothing hides and nothing overlays. */
-.fox-workbench > .fox-context-panel.is-maximized {
-  flex: 1 1 auto;
-  width: auto;
-  max-width: none;
-}
+.fox-workbench > .fox-content-card:has(~ .fox-contact-side-card) { margin-right: 3px; }
+.fox-content-card { display: flex; background: var(--fox-canvas); }
+.fox-content-card > .fox-content-surface { flex: 1 1 0%; min-width: 0; width: auto; }
+.fox-content-card:has(> .fox-context-panel:not([hidden])) > .fox-content-surface { border-radius: 0; }
+.fox-content-card > .fox-resize-divider { flex: 0 0 1px; width: 1px; margin: 0; background: var(--fox-border); }
+.fox-content-card > .fox-resize-divider::before { content: ''; position: absolute; inset: 0 -2px; cursor: col-resize; }
+.fox-content-card > .fox-resize-divider:hover,
+.fox-content-card > .fox-resize-divider[data-resizing='true'] { background: var(--fox-border-strong); }
+.fox-content-card > .fox-context-panel { flex: none; margin: 0; border: 0; border-radius: 0; box-shadow: none; background: var(--fox-canvas); }
+.fox-content-card > .fox-context-panel.is-maximized { flex: 1 1 auto; width: auto; max-width: none; border-left: 1px solid var(--fox-border); }
 
 .fox-content-surface {
   position: relative;
@@ -2516,147 +2494,6 @@ button.fox-chat-project-row:disabled {
   background: var(--fox-border);
 }
 
-.fox-conversation-summary {
-  width: min(340px, calc(100vw - 28px));
-  overflow: hidden;
-  border: 1px solid var(--fox-border);
-  border-radius: 10px;
-  background: color-mix(in oklch, var(--fox-card) 97%, transparent);
-  padding: 0;
-  box-shadow: var(--fox-shadow-md);
-  backdrop-filter: blur(20px);
-}
-
-.fox-summary-model {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  padding: 14px;
-  border-bottom: 1px solid var(--fox-border);
-}
-
-.fox-summary-model > div {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.fox-summary-model span,
-.fox-summary-model small,
-.fox-summary-item small {
-  color: var(--fox-faint);
-  font-size: var(--fox-type-meta);
-}
-
-.fox-summary-model strong {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--fox-text);
-  font-size: var(--fox-type-control);
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* The context-window usage readout, its percentage copy and its progress track
-   were removed from this header summary: context accounting is an internal
-   fact. Their dedicated rules are gone with them. */
-
-.fox-summary-list {
-  display: grid;
-  padding: 6px;
-}
-
-.fox-summary-item {
-  width: 100%;
-  min-width: 0;
-  min-height: 46px;
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  padding: 6px 8px;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition: background 120ms ease, color 120ms ease;
-}
-
-.fox-summary-item:hover {
-  background: var(--fox-hover);
-}
-
-.fox-summary-item:focus-visible {
-  outline: 2px solid color-mix(in oklch, var(--fox-accent) 72%, transparent);
-  outline-offset: -2px;
-}
-
-.fox-summary-icon {
-  width: 28px;
-  height: 28px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--fox-border);
-  border-radius: 7px;
-  color: var(--fox-muted);
-}
-
-.fox-summary-item > span:nth-child(2) {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.fox-summary-item strong,
-.fox-summary-item small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fox-summary-item strong {
-  color: var(--fox-text);
-  font-size: var(--fox-type-meta);
-  font-weight: 600;
-}
-
-.fox-summary-item-tail {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 4px;
-  color: var(--fox-faint);
-}
-
-.fox-summary-item-tail b {
-  min-width: 22px;
-  color: var(--fox-muted);
-  font-size: var(--fox-type-meta);
-  font-weight: 600;
-  text-align: right;
-}
-
-.fox-summary-item-tail svg {
-  width: 13px;
-  height: 13px;
-  transition: transform 120ms ease, color 120ms ease;
-}
-
-.fox-summary-item:hover .fox-summary-item-tail {
-  color: var(--fox-text);
-}
-
-.fox-summary-item:hover .fox-summary-item-tail svg {
-  transform: translateX(1px);
-}
 
 .fox-execution-menu {
   min-width: 164px;
@@ -5061,13 +4898,12 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-decision-card > .fox-confirmation .fox-confirmation-body,
 .fox-decision-approval-list > .fox-runtime-confirmation:first-child .fox-confirmation-body,
 .fox-decision-card > .fox-question-prompt .fox-question-heading,
-.fox-question-decision-content > header,
 .fox-goal-decision-content .fox-goal-progress-card > div:first-child {
   padding-right: 82px;
 }
 
 .fox-decision-card .fox-confirmation-actions [data-variant='default'],
-.fox-decision-card .fox-question-suggestions [data-variant='default'] {
+.fox-decision-card .fox-question-answer-rows [data-variant='default'] {
   border-color: var(--fox-accent);
   background: var(--fox-accent) !important;
   color: var(--brand-foreground) !important;
@@ -5082,7 +4918,8 @@ img[src='/avatars/fox-assistant.png'] {
   scrollbar-width: var(--fox-native-scrollbar-width, thin);
 }
 
-.fox-decision-approval-list > .fox-runtime-confirmation {
+.fox-decision-approval-list > .fox-runtime-confirmation,
+.fox-decision-approval-list > .fox-paged-approval > .fox-runtime-confirmation {
   padding: 6px 8px 7px;
 }
 
@@ -5092,52 +4929,11 @@ img[src='/avatars/fox-assistant.png'] {
   gap: 10px;
 }
 
-.fox-question-decision-content > header {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-
-.fox-question-decision-content > header > span {
-  width: 24px;
-  height: 24px;
-  flex: 0 0 24px;
-  display: grid;
-  place-items: center;
-  border-radius: 8px;
-  background: var(--brand-soft);
-  color: var(--fox-accent);
-}
-
-.fox-question-decision-content > header > div {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.fox-question-decision-content > header strong {
-  color: var(--fox-text);
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.fox-question-decision-content > header small {
-  color: var(--fox-faint);
-  font-size: 12px;
-}
-
 .fox-question-decision-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-}
-
-.fox-question-decision-actions input {
-  min-width: 0;
-  flex: 1;
 }
 
 .fox-goal-decision-content .fox-goal-progress-card {
@@ -5244,16 +5040,12 @@ img[src='/avatars/fox-assistant.png'] {
   font-size: var(--fox-type-chrome);
 }
 
-.fox-question-field b {
-  color: var(--fox-text);
-  font-size: 14px;
-  font-weight: 600;
-}
-
 .fox-question-decision-list {
-  max-height: 220px;
+  min-width: 0;
+  max-height: min(47vh, 340px);
   display: grid;
   gap: 11px;
+  padding: 3px;
   overflow-y: auto;
   scrollbar-width: var(--fox-native-scrollbar-width, thin);
 }
@@ -5262,52 +5054,6 @@ img[src='/avatars/fox-assistant.png'] {
   min-width: 0;
   display: grid;
   gap: 7px;
-}
-
-.fox-question-field > div {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-
-.fox-question-field > div small {
-  color: var(--fox-faint);
-  font-size: 12px;
-}
-
-.fox-question-suggestions {
-  gap: 6px !important;
-}
-
-.fox-question-suggestions button {
-  height: 30px;
-  border-radius: 7px;
-  padding-inline: 11px;
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.fox-question-confirmation {
-  min-height: 42px;
-  flex-direction: row !important;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  border: 0;
-  background: transparent;
-  padding: 0;
-}
-
-.fox-question-confirmation [data-slot='alert-description'] {
-  color: var(--fox-text);
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.fox-question-confirmation button {
-  height: 30px;
-  border-radius: 7px;
-  font-size: 12px;
 }
 
 @keyframes foxQuestionDrawerIn {
@@ -6939,11 +6685,6 @@ img[src='/avatars/fox-assistant.png'] {
   flex: 0 0 auto;
 }
 
-.fox-context-tabs,
-.fox-context-tab-actions {
-  transform: translateY(var(--fox-space-xs));
-}
-
 .fox-context-tab-actions > button,
 .fox-context-tab-actions > [data-slot='dropdown-menu-trigger'] {
   width: 32px;
@@ -7068,69 +6809,6 @@ img[src='/avatars/fox-assistant.png'] {
   color: var(--fox-text);
 }
 
-.fox-context-home {
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow-y: auto;
-  background: var(--fox-canvas);
-  padding: 12px 8px 20px;
-}
-
-.fox-context-home > nav {
-  width: min(260px, calc(100% - 48px));
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin: auto;
-}
-
-.fox-context-home button {
-  min-width: 0;
-  min-height: 42px;
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 11px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--fox-text);
-  padding: 0 11px;
-  text-align: left;
-  transition: color 120ms ease, background 120ms ease;
-}
-
-.fox-context-home button:hover {
-  background: var(--fox-hover);
-  color: var(--fox-text);
-}
-
-.fox-context-home button:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--fox-accent) 44%, transparent);
-  outline-offset: -2px;
-}
-
-.fox-context-home button svg {
-  width: 16px;
-  height: 16px;
-  color: var(--fox-muted);
-}
-
-.fox-context-home button span {
-  overflow: hidden;
-  font-size: var(--fox-type-chrome);
-  font-weight: 500;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fox-context-home button small {
-  color: var(--fox-faint);
-  font-size: var(--fox-type-caption);
-  font-variant-numeric: tabular-nums;
-}
 
 .fox-message-artifact-verification {
   max-width: 100%;
@@ -7656,71 +7334,6 @@ img[src='/avatars/fox-assistant.png'] {
   box-shadow: none;
 }
 
-.fox-file-panel > .fox-result-panel.is-single-file,
-.fox-project-file-preview {
-  min-height: 0;
-  overflow: hidden;
-  border-top: 0;
-}
-
-.fox-project-file-toolbar {
-  min-height: 36px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  align-items: center;
-  gap: 8px;
-  flex: 0 0 auto;
-  border-bottom: 1px solid var(--fox-border);
-  padding: 3px 8px 3px 10px;
-}
-
-.fox-file-location {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--fox-faint);
-}
-
-.fox-file-location span {
-  display: block;
-  overflow: hidden;
-  font: 9.5px "Cascadia Code", Consolas, monospace;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fox-project-file-actions {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 4px;
-  flex: 0 0 auto;
-}
-
-.fox-project-file-actions > button {
-  width: 28px;
-  height: 28px;
-  display: grid;
-  place-items: center;
-  flex: 0 0 auto;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--fox-muted);
-}
-
-.fox-project-file-actions > button:not(:disabled):hover {
-  background: var(--fox-hover);
-  color: var(--fox-text);
-}
-
-.fox-project-file-actions [data-slot='dropdown-menu-trigger'] {
-  width: auto;
-  min-height: 28px;
-  gap: 3px;
-  padding-inline: 7px;
-}
-
 .fox-file-open-trigger {
   min-width: 76px;
   height: 30px;
@@ -7753,25 +7366,6 @@ img[src='/avatars/fox-assistant.png'] {
   height: 13px !important;
   flex: 0 0 13px;
   color: var(--fox-faint);
-}
-
-.fox-project-file-content {
-  min-height: 0;
-  display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
-  flex: 1 1 auto;
-  overflow: hidden;
-}
-
-.fox-project-file-content > pre {
-  min-height: 0;
-  margin: 0;
-  overflow: auto;
-  padding: 9px 12px 18px;
-  color: var(--fox-text);
-  font: 10.5px/1.65 "Cascadia Code", Consolas, monospace;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
 
 .fox-file-artifact-head {
@@ -10414,38 +10008,6 @@ img[src='/avatars/fox-assistant.png'] {
   transform: translateX(1px);
 }
 
-.fox-agent-list-more {
-  min-height: 36px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  align-self: stretch;
-  gap: 6px;
-  margin: 7px 9px 0;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--fox-muted);
-  font-size: var(--fox-type-chrome);
-  font-weight: 500;
-  transition: color 120ms ease, background 120ms ease;
-}
-
-.fox-agent-list-more:hover,
-.fox-agent-list-more:focus-visible {
-  background: var(--fox-hover);
-  color: var(--fox-text);
-}
-
-.fox-agent-list-more:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--fox-accent) 44%, transparent);
-  outline-offset: -2px;
-}
-
-.fox-agent-list-more svg {
-  width: 14px;
-  height: 14px;
-}
 
 .fox-agent-conversation {
   min-width: 0;
@@ -10926,10 +10488,8 @@ img[src='/avatars/fox-assistant.png'] {
   .fox-decision-card > .fox-confirmation .fox-confirmation-body,
   .fox-decision-approval-list > .fox-runtime-confirmation:first-child .fox-confirmation-body,
   .fox-decision-card > .fox-question-prompt .fox-question-heading,
-  .fox-question-decision-content > header,
   .fox-goal-decision-content .fox-goal-progress-card > div:first-child { padding-right: 68px; }
   .fox-question-decision-actions { flex-wrap: wrap; }
-  .fox-question-decision-actions input { flex-basis: 100%; }
   .fox-expert-chip { max-width: 112px; }
   .fox-execution-control,
   .fox-agent-control {
@@ -11357,13 +10917,6 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-goal-a1-status>div{display:flex;flex-direction:column;gap:3px;padding:8px;border:1px solid var(--fox-border);border-radius:var(--radius);background:var(--fox-panel)}
 .fox-goal-a1-status b{font-size:10px;font-weight:600}.fox-goal-a1-status span{font-size:9px;color:var(--fox-muted)}
 
-.fox-result-panel {
-  min-height: 0;
-  display: grid;
-  grid-template-rows: minmax(120px, 34%) minmax(0, 1fr);
-  overflow: hidden;
-}
-
 .fox-result-list {
   min-height: 0;
   display: grid;
@@ -11394,8 +10947,7 @@ img[src='/avatars/fox-assistant.png'] {
   font-size: 9px;
 }
 
-.fox-result-list-scroll,
-.fox-result-raw {
+.fox-result-list-scroll {
   min-height: 0;
 }
 
@@ -11459,40 +11011,6 @@ img[src='/avatars/fox-assistant.png'] {
   font: 9px Consolas, monospace;
 }
 
-.fox-result-detail {
-  min-height: 0;
-  display: grid;
-  grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
-  overflow: hidden;
-}
-
-/* The file's diagnostics live here, not on the answer card: change kind, publish
-   state, size, delivery version and verification state, then the delivery note. */
-.fox-result-file-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 10px;
-  padding: 0 12px 8px;
-  color: var(--fox-muted);
-  font-size: 12px;
-}
-
-.fox-result-file-meta span + span::before {
-  content: '·';
-  margin-right: 10px;
-  opacity: .55;
-}
-
-.fox-result-delivery-note {
-  margin: 0 12px 10px;
-  padding: 7px 9px;
-  border-radius: 7px;
-  background: color-mix(in oklch, var(--fox-warning) 12%, var(--fox-card));
-  color: var(--fox-text);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
 .fox-result-detail-head {
   min-width: 0;
   display: flex;
@@ -11531,88 +11049,6 @@ img[src='/avatars/fox-assistant.png'] {
   min-height: 27px;
   gap: 4px;
   font-size: 10px;
-}
-
-.fox-result-feedback {
-  margin: -2px 12px 7px;
-  color: var(--fox-accent);
-  font-size: 9px;
-}
-
-.fox-result-error {
-  display: flex;
-  gap: 7px;
-  margin: 0 12px 8px;
-  padding: 8px;
-  border: 1px solid color-mix(in oklch, var(--destructive) 42%, var(--fox-border));
-  border-radius: 6px;
-  background: color-mix(in oklch, var(--destructive) 8%, transparent);
-  color: var(--destructive);
-}
-
-.fox-result-error > div {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.fox-result-error strong {
-  font: 9px Consolas, monospace;
-}
-
-.fox-result-error span,
-.fox-result-error small {
-  color: var(--fox-muted);
-  font-size: 9px;
-  overflow-wrap: anywhere;
-}
-
-.fox-result-raw {
-  display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
-  border-top: 1px solid var(--fox-border);
-  background: color-mix(in oklch, var(--fox-canvas) 98%, var(--fox-card));
-  overflow: hidden;
-}
-
-.fox-result-raw pre {
-  min-height: 0;
-  margin: 0;
-  overflow: auto;
-  padding: 9px 12px 18px;
-  color: var(--fox-text);
-  font: 10.5px/1.65 "Cascadia Code", Consolas, monospace;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.fox-result-unavailable {
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  padding: 18px;
-  color: var(--fox-faint);
-  text-align: center;
-}
-
-.fox-result-unavailable strong {
-  color: var(--fox-muted);
-  font-size: 10.5px;
-}
-
-.fox-result-unavailable span,
-.fox-result-truncated {
-  color: var(--fox-faint);
-  font-size: 9px;
-}
-
-.fox-result-truncated {
-  padding: 6px 12px 9px;
-  border-top: 1px dashed var(--fox-border);
 }
 
 .fox-command-detail {
@@ -11843,73 +11279,8 @@ img[src='/avatars/fox-assistant.png'] {
   min-width: 0;
 }
 
-.fox-result-panel.is-single-file {
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.fox-result-file-toolbar {
-  min-height: 36px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  align-items: center;
-  gap: 8px;
-  flex: 0 0 auto;
-  border-bottom: 1px solid var(--fox-border);
-  padding: 3px 8px 3px 10px;
-}
-
-.fox-result-file-actions {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 4px;
-  flex: 0 0 auto;
-}
-
-.fox-result-file-actions > button:not([data-slot='dropdown-menu-trigger']) {
-  width: 28px;
-  height: 28px;
-  display: grid;
-  place-items: center;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--fox-muted);
-}
-
-.fox-result-file-actions > button:not(:disabled):hover {
-  background: var(--fox-hover);
-  color: var(--fox-text);
-}
-
-.fox-result-file-actions > button:disabled {
-  opacity: .38;
-}
-
-.fox-result-file-actions [data-slot='dropdown-menu-trigger'] {
-  min-height: 28px;
-  gap: 4px;
-  padding-inline: 8px;
-  font-size: 9.5px;
-}
-
 .fox-result-open-menu {
   min-width: 220px;
-}
-
-.fox-result-panel.is-single-file .fox-result-detail {
-  min-height: 0;
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-}
-
-.fox-result-panel.is-single-file .fox-result-raw {
-  min-height: 160px;
-  flex: 1 1 auto;
 }
 
 .fox-message-actions .is-feedback-selected {
@@ -12199,7 +11570,8 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-topbar-toggle:hover { background: var(--fox-hover); color: var(--fox-text); }
 .fox-topbar-toggle [data-slot='toggle-highlight'] { background: var(--fox-accent-soft); border-radius: inherit; }
 .fox-topbar-toggle[data-state='on'] { color: var(--fox-accent); }
-.fox-topbar-toggle:focus-visible { outline: 2px solid var(--fox-accent); outline-offset: 2px; }
+.fox-topbar-toggle:focus-visible { outline: 2px solid var(--fox-outline); outline-offset: -2px; }
+.fox-chat-top-actions:has(.fox-right-sidebar-expand) { transform: none; align-self: start; margin-top: 0; }
 .fox-animate-file-tree { padding: 4px; font-size: var(--fox-type-chrome); }
 .fox-animate-file-tree :is([data-slot='folder-header'], [data-slot='files'], [data-slot='file'], [data-slot='folder'], [data-slot='file'] > div, [data-slot='folder'] > div) { min-width: 0; }
 .fox-animate-file-tree [data-slot='folder-header'] { margin: 0; }
@@ -12586,3 +11958,43 @@ img[src='/avatars/fox-assistant.png'] {
   overflow-wrap: anywhere;
   font-size: var(--fox-type-caption, 12px);
 }
+
+.fox-content-surface .fox-chat-topbar { position: relative; height: var(--fox-panel-header-height); min-height: var(--fox-panel-header-height); margin: 0; padding: 0 12px; border-radius: 0; }
+.fox-content-surface .fox-chat-topbar .fox-workspace-heading,
+.fox-content-surface .fox-chat-topbar .fox-chat-top-actions { transform: none; align-self: center; margin: 0; max-width: none; }
+.fox-chat-topbar .fox-chat-top-actions .fox-icon-button,
+.fox-chat-topbar .fox-topbar-toggle { width: 28px; height: 28px; min-width: 28px; min-height: 28px; padding: 0; flex: none; }
+.fox-chat-topbar .fox-chat-top-actions svg { width: 16px; height: 16px; flex: none; }
+
+.fox-chat-topbar .fox-topbar-toggle[aria-pressed="true"] { background: var(--fox-selected); color: var(--fox-accent); }
+.fox-chat-topbar .fox-topbar-toggle[aria-pressed="false"] { background: transparent; color: var(--fox-muted); }
+
+.fox-chat-pane .fox-chat-quick-actions { position: absolute; top: 52px; right: 12px; z-index: 25; --fbg-outer: 14px; --fbg-highlight: var(--fox-hover); --fbg-highlight-press: var(--fox-selected); --fbg-rule: var(--fox-border); color: var(--fox-muted); }
+.fox-chat-quick-actions [data-fbg-item]:focus-visible { outline: 2px solid var(--fox-outline); outline-offset: -2px; }
+.fox-execution-control, .fox-expert-chip, .aui-composer-model-trigger { line-height: 1.4; }
+.fox-execution-control > span, .fox-expert-chip > span:not(.fox-expert-icon), .aui-composer-model-trigger > span { line-height: 1.4; padding-block: 1px; }
+
+.fox-mode-tabs [data-slot='tabs-trigger'] { display: inline-flex; align-items: center; justify-content: center; flex: none; gap: 6px; padding: 0 9px; white-space: nowrap; }
+.fox-mode-tabs [data-slot='tabs-trigger'][data-state='active'] { flex: 1; }
+.fox-mode-tabs [data-slot='tabs-trigger'][data-state='inactive'] .fox-mode-label { display: none; }
+.fox-mode-tabs [data-slot='tabs-trigger']:focus-visible { outline: 2px solid var(--ring); outline-offset: -4px; }
+.fox-mode-tabs [data-slot='tabs-trigger'][data-pointer-focus='true']:focus-visible { outline: none; }
+.fox-global-search-results .fox-global-search-copy { display: grid; gap: 2px; min-width: 0; }
+.fox-global-search-results section > button.is-companion { grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 10px; padding: 8px 72px 8px 8px; }
+.fox-global-search-results .is-companion .fox-contact-avatar { width: 28px; height: 28px; }
+.fox-global-search-results .is-companion strong { font-size: 13px; font-weight: 500; }
+.fox-global-search-results .is-companion small { font-size: 12px; }
+.fox-global-search-results .is-companion time { top: 8px; right: 8px; font-size: 12px; }
+
+.fox-sidebar.is-collapsed .fox-sidebar-collapsed-rail { gap:1px; margin:2px 0 4px; }
+.fox-sidebar.is-collapsed .fox-sidebar-collapsed-rail > button,
+.fox-sidebar.is-collapsed .fox-sidebar-collapsed-rail .fox-sidebar-mode-switch { width:28px; height:28px; min-width:28px; min-height:28px; flex:0 0 28px; margin:0; }
+.fox-sidebar.is-collapsed .fox-sidebar-primary { gap:1px; }
+.fox-sidebar.is-collapsed .fox-sidebar-command { width:28px; height:28px; min-height:28px; padding:0; }
+.fox-sidebar.is-collapsed .fox-companion-create-collapsed { width:28px; height:28px; }
+
+.fox-sidebar.is-collapsed .fox-sidebar-collapsed-sections { gap:1px; margin-top:4px; padding-block:4px; }
+.fox-sidebar.is-collapsed .fox-sidebar-collapsed-sections > .fox-sidebar-collapsed-entry > button { width:28px; height:28px; min-width:28px; min-height:28px; }
+
+.fox-sidebar.is-collapsed .fox-sidebar-collapsed-rail .fox-sidebar-search-trigger,
+.fox-shell .fox-sidebar.is-collapsed .fox-sidebar-primary .fox-sidebar-command { width:28px; height:28px; min-width:28px; min-height:28px; flex:0 0 28px; padding:0; }

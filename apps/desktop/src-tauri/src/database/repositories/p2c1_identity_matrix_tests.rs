@@ -25,9 +25,9 @@
 //! itself was taken on the old binary and is recorded in the round's log rather
 //! than asserted here, because the old binary is a different artifact.
 
+use super::Database;
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::Database;
 use crate::database::now_ms;
 
 /// A task whose checklist seeds exactly one promised artifact.
@@ -107,13 +107,14 @@ fn world(tag: &str) -> MatrixWorld {
 
     let db = Database::open(root.join("facts.db")).unwrap();
     let conversation = db
-        .create_conversation(db.default_agent_id(), None, Some(root.to_str().unwrap()), None)
+        .create_conversation(
+            db.default_agent_id(),
+            None,
+            Some(root.to_str().unwrap()),
+            None,
+        )
         .unwrap();
-    let run_id = db
-        .create_run(&conversation.id, TASK, None)
-        .unwrap()
-        .run
-        .id;
+    let run_id = db.create_run(&conversation.id, TASK, None).unwrap().run.id;
 
     // Seed the checklist from the task, so the promised item is the real one the
     // delivery lane would have produced.
@@ -124,7 +125,11 @@ fn world(tag: &str) -> MatrixWorld {
     );
     db.seed_delivery_checklist(&run_id, &seeds, now_ms())
         .unwrap();
-    assert_eq!(seeds.len(), 1, "the fixture relies on a single promised item");
+    assert_eq!(
+        seeds.len(),
+        1,
+        "the fixture relies on a single promised item"
+    );
     let item_key = seeds[0].item_key.clone();
 
     let artifact_id = "artifact-1".to_owned();
@@ -234,7 +239,8 @@ impl MatrixWorld {
     }
 
     /// The checklist row as the real projection reports it.
-    fn checklist_status(&self) -> String {        self.db
+    fn checklist_status(&self) -> String {
+        self.db
             .load_conversation(&self.conversation_id)
             .unwrap()
             .delivery_checklist
@@ -260,12 +266,25 @@ impl MatrixWorld {
     fn assert_pass(&self, expected: bool, label: &str) {
         let checklist = self.checklist_status();
         let artifact = self.artifact_status();
-        let window = self.db.with_connection(|connection| {
-            let record = super::query_artifacts_window(connection, &self.conversation_id, 1, None)?
-                .into_iter().find(|record| record.id == self.artifact_id).expect("real artifact in query window");
-            Ok(record.delivery.expect("real window delivery view").verification_status)
-        }).unwrap();
-        assert_eq!(window == "passed", expected, "{label}: artifact query window ({window})");
+        let window = self
+            .db
+            .with_connection(|connection| {
+                let record =
+                    super::query_artifacts_window(connection, &self.conversation_id, 1, None)?
+                        .into_iter()
+                        .find(|record| record.id == self.artifact_id)
+                        .expect("real artifact in query window");
+                Ok(record
+                    .delivery
+                    .expect("real window delivery view")
+                    .verification_status)
+            })
+            .unwrap();
+        assert_eq!(
+            window == "passed",
+            expected,
+            "{label}: artifact query window ({window})"
+        );
         assert_eq!(
             checklist == "passed",
             expected,
@@ -348,8 +367,14 @@ fn m_legacy_rows_in_all_three_statuses_keep_their_own_status() {
     let world = world("legacy-three");
     world.contract(requirements_json(legacy_spec()));
     for (stored, expected_pass) in [("passed", true), ("failed", false), ("pending", false)] {
-        world.store(stored, Some(legacy_finding(&world.bound_path(), &world.version_id)));
-        world.assert_pass(expected_pass, &format!("legacy contract, stored `{stored}`"));
+        world.store(
+            stored,
+            Some(legacy_finding(&world.bound_path(), &world.version_id)),
+        );
+        world.assert_pass(
+            expected_pass,
+            &format!("legacy contract, stored `{stored}`"),
+        );
     }
 }
 
@@ -359,7 +384,10 @@ fn m_legacy_rows_in_all_three_statuses_keep_their_own_status() {
 fn m_an_empty_requirement_column_is_a_legal_legacy_row() {
     let world = world("legacy-empty");
     world.contract("[]".to_owned());
-    world.store("passed", Some(legacy_finding(&world.bound_path(), &world.version_id)));
+    world.store(
+        "passed",
+        Some(legacy_finding(&world.bound_path(), &world.version_id)),
+    );
     world.assert_pass(true, "empty requirement column");
 }
 
@@ -376,7 +404,11 @@ fn m_a_legal_host_v2_row_with_a_sound_verdict_keeps_its_pass() {
     world.contract(requirements_json(host_v2_spec()));
     world.store(
         "passed",
-        Some(legitimate_pass(&world.item_key, &world.bound_path(), &world.version_id)),
+        Some(legitimate_pass(
+            &world.item_key,
+            &world.bound_path(),
+            &world.version_id,
+        )),
     );
     world.assert_pass(true, "legal Host v2 with a sound verdict");
 }
@@ -449,7 +481,8 @@ fn m_a_v2_row_whose_whole_finding_column_is_deleted_cannot_keep_its_pass() {
 #[test]
 fn m_unparseable_requirements_without_a_usable_record_never_default_to_a_legal_pass() {
     let world = world("bad-json");
-    world.db
+    world
+        .db
         .with_connection(|connection| {
             connection.execute(
                 "UPDATE delivery_checklist_items SET requirements_json='{not json'
@@ -526,7 +559,8 @@ fn m_a_v2_spec_with_an_illegal_checker_marker_is_not_legal_v1() {
 #[test]
 fn m_a_corrupt_contract_beside_a_sound_envelope_still_keeps_its_pass() {
     let world = world("corrupt-contract-sound-envelope");
-    world.db
+    world
+        .db
         .with_connection(|connection| {
             connection.execute(
                 "UPDATE delivery_checklist_items SET requirements_json='{not json'
@@ -544,7 +578,10 @@ fn m_a_corrupt_contract_beside_a_sound_envelope_still_keeps_its_pass() {
             &world.version_id,
         )),
     );
-    world.assert_pass(true, "corrupt contract beside a sound self-describing envelope");
+    world.assert_pass(
+        true,
+        "corrupt contract beside a sound self-describing envelope",
+    );
 }
 
 /// The v2 declaration is **last** among several requirements. Any one requirement
@@ -626,7 +663,11 @@ fn m_a_present_envelope_governs_even_when_the_contract_reads_v1() {
     world.contract(requirements_json(legacy_spec()));
     world.store(
         "passed",
-        Some(legitimate_pass(&world.item_key, &world.bound_path(), &world.version_id)),
+        Some(legitimate_pass(
+            &world.item_key,
+            &world.bound_path(),
+            &world.version_id,
+        )),
     );
     world.assert_pass(true, "present sound envelope on a v1 contract");
 }
@@ -758,7 +799,9 @@ fn m_a_contradiction_past_the_display_truncation_point_is_still_withheld() {
         .as_array()
         .expect("the bounded list is present");
     assert!(
-        !visible.iter().any(|fact| fact["blocking"] == serde_json::json!(true)),
+        !visible
+            .iter()
+            .any(|fact| fact["blocking"] == serde_json::json!(true)),
         "the blocking fact is past the cap, so a truncated read could not see it"
     );
 }
@@ -928,14 +971,33 @@ fn b_a_legacy_row_without_an_envelope_keeps_its_own_status() {
 
 #[test]
 fn b_missing_illegal_and_foreign_envelope_keys_withhold_all_real_read_entries() {
-    let world=world("b-unusable-key");world.contract(requirements_json(host_v2_spec()));
-    let positive=legitimate_pass(&world.item_key,&world.bound_path(),&world.version_id);
-    world.store("passed",Some(positive.clone()));world.assert_pass(true,"same-binding positive control");
-    for value in [serde_json::Value::Null,serde_json::json!(""),serde_json::json!(7),serde_json::json!("foreign"),serde_json::json!("bad\nkey")] {
-        let mut damaged=positive.clone();damaged["deliveryVerdict"]["itemKey"]=value;
-        world.store("passed",Some(damaged));world.assert_pass(false,"missing/illegal/foreign key");
-        assert_eq!(world.artifact_status(),"unverified","same path/hash/version must reach qualification, never early stale");
+    let world = world("b-unusable-key");
+    world.contract(requirements_json(host_v2_spec()));
+    let positive = legitimate_pass(&world.item_key, &world.bound_path(), &world.version_id);
+    world.store("passed", Some(positive.clone()));
+    world.assert_pass(true, "same-binding positive control");
+    for value in [
+        serde_json::Value::Null,
+        serde_json::json!(""),
+        serde_json::json!(7),
+        serde_json::json!("foreign"),
+        serde_json::json!("bad\nkey"),
+    ] {
+        let mut damaged = positive.clone();
+        damaged["deliveryVerdict"]["itemKey"] = value;
+        world.store("passed", Some(damaged));
+        world.assert_pass(false, "missing/illegal/foreign key");
+        assert_eq!(
+            world.artifact_status(),
+            "unverified",
+            "same path/hash/version must reach qualification, never early stale"
+        );
     }
-    let mut missing=positive;missing["deliveryVerdict"].as_object_mut().unwrap().remove("itemKey");
-    world.store("passed",Some(missing));world.assert_pass(false,"key field removed");
+    let mut missing = positive;
+    missing["deliveryVerdict"]
+        .as_object_mut()
+        .unwrap()
+        .remove("itemKey");
+    world.store("passed", Some(missing));
+    world.assert_pass(false, "key field removed");
 }

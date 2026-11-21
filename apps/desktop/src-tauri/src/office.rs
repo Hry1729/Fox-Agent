@@ -113,7 +113,10 @@ pub fn classify_resource_error(error: &str) -> Option<OfficeResourceKind> {
         ("[tool.invalid_input]", OfficeResourceKind::InvalidInput),
         ("[tool.file_conflict]", OfficeResourceKind::Conflict),
         ("[tool.read_only_input]", OfficeResourceKind::ReadOnlyInput),
-        ("[tool.permission_denied]", OfficeResourceKind::PermissionDenied),
+        (
+            "[tool.permission_denied]",
+            OfficeResourceKind::PermissionDenied,
+        ),
     ];
     for (marker, kind) in TYPED {
         if text.contains(marker) {
@@ -386,7 +389,9 @@ pub struct OfficeCallContext<'a> {
 
 impl<'a> OfficeCallContext<'a> {
     /// The Host's private artifact store, or `None` on a context-free path.
-    pub(crate) fn artifact_store(&self) -> Option<crate::runtime_host::artifact_store::ArtifactStore> {
+    pub(crate) fn artifact_store(
+        &self,
+    ) -> Option<crate::runtime_host::artifact_store::ArtifactStore> {
         self.artifacts_dir
             .map(crate::runtime_host::artifact_store::ArtifactStore::new)
     }
@@ -465,7 +470,12 @@ fn private_preview_path(
         .and_then(|value| value.to_str())
         .unwrap_or("html");
     store
-        .preview_path(conversation_id, requested, extension, &format!("mode={mode}"))
+        .preview_path(
+            conversation_id,
+            requested,
+            extension,
+            &format!("mode={mode}"),
+        )
         .unwrap_or_else(|_| requested.to_path_buf())
 }
 
@@ -506,25 +516,46 @@ fn default_deliverable_relative(
     if matches!(name, "." | "..") || name.ends_with(['.', ' ']) {
         return Err("Office name 是无效的文件名".into());
     }
-    let stem = name.split('.').next().unwrap_or_default().to_ascii_uppercase();
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
     if matches!(
         stem.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6"
-            | "COM7" | "COM8" | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6"
-            | "LPT7" | "LPT8" | "LPT9"
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
     ) {
         return Err("Office name 不能是保留设备名".into());
     }
-    let context = context.ok_or(
-        "当前链路没有会话上下文，无法使用 Host 默认成果目录；请显式提供 output",
-    )?;
-    let store = context.artifact_store().ok_or(
-        "当前链路没有 Host 私有产物区，无法确定默认成果目录；请显式提供 output",
-    )?;
+    let context =
+        context.ok_or("当前链路没有会话上下文，无法使用 Host 默认成果目录；请显式提供 output")?;
+    let store = context
+        .artifact_store()
+        .ok_or("当前链路没有 Host 私有产物区，无法确定默认成果目录；请显式提供 output")?;
     let conversation_id = context.conversation_id;
     let candidate = store.deliverable_directory_name("", conversation_id);
-    let project_key =
-        crate::runtime_host::artifact_store::project_key(&root.to_string_lossy());
+    let project_key = crate::runtime_host::artifact_store::project_key(&root.to_string_lossy());
     let folder = context
         .database
         .ensure_deliverable_folder(
@@ -767,9 +798,8 @@ fn scoped_path(root: &Path, value: &str, must_exist: bool) -> Result<PathBuf, St
         // path is never silently materialized.
         if crate::runtime_host::artifact_store::is_deliverable_path(root, &candidate) {
             if let Some(parent) = candidate.parent() {
-                fs::create_dir_all(parent).map_err(|e| {
-                    format!("无法创建会话成果目录 {}: {e}", parent.display())
-                })?;
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("无法创建会话成果目录 {}: {e}", parent.display()))?;
             }
         }
         let parent = candidate
@@ -886,9 +916,18 @@ fn scan_import_data(data: &str, format: &str) -> Result<(u64, u32), String> {
         if let Some(formula) = trimmed.strip_prefix('=') {
             let upper = formula.to_ascii_uppercase();
             if upper.contains('[')
-                || ["WEBSERVICE", "HYPERLINK", "IMAGE(", "RTD(", "DDE", "://", "\\\\", "|"]
-                    .iter()
-                    .any(|needle| upper.contains(needle))
+                || [
+                    "WEBSERVICE",
+                    "HYPERLINK",
+                    "IMAGE(",
+                    "RTD(",
+                    "DDE",
+                    "://",
+                    "\\\\",
+                    "|",
+                ]
+                .iter()
+                .any(|needle| upper.contains(needle))
             {
                 return Err(format!(
                     "Office 数据第 {row} 行包含外部引用、网络或 DDE 公式，首版未开放"
@@ -998,18 +1037,16 @@ pub fn prepare(
 /// never carry `artifactId`).
 /// Whether a tool's own schema offers `output` or `name` as its target.
 fn schema_requires_output_or_name(schema: &Value) -> bool {
-    schema["anyOf"]
-        .as_array()
-        .is_some_and(|options| {
-            let requires = |field: &str| {
-                options.iter().any(|option| {
-                    option["required"]
-                        .as_array()
-                        .is_some_and(|required| required.iter().any(|value| value == field))
-                })
-            };
-            requires("output") || requires("name")
-        })
+    schema["anyOf"].as_array().is_some_and(|options| {
+        let requires = |field: &str| {
+            options.iter().any(|option| {
+                option["required"]
+                    .as_array()
+                    .is_some_and(|required| required.iter().any(|value| value == field))
+            })
+        };
+        requires("output") || requires("name")
+    })
 }
 
 /// Whether a built-in Office call of this tool is a mutating one, given that
@@ -1075,11 +1112,7 @@ pub fn prepare_with_context(
         action.args = vec!["help".into(), string(input, "format")?.into()];
         let mut element: Option<&str> = None;
         if let Some(value) = input["element"].as_str() {
-            if value.is_empty()
-                || !value
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-')
-            {
+            if value.is_empty() || !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
                 return Err("无效的 Office 元素名称".into());
             }
             element = Some(value);
@@ -1094,15 +1127,21 @@ pub fn prepare_with_context(
                 .map(str::trim)
                 .filter(|value| {
                     !value.is_empty()
-                        && value
-                            .chars()
-                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
+                        && value.chars().all(|c| {
+                            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.')
+                        })
                 })
                 .map(str::to_string);
             let page = input["page"].as_u64().unwrap_or(1).clamp(1, 100_000) as usize;
-            let page_size = input["pageSize"].as_u64().unwrap_or(HELP_PAGE_SIZE as u64)
+            let page_size = input["pageSize"]
+                .as_u64()
+                .unwrap_or(HELP_PAGE_SIZE as u64)
                 .clamp(1, 60) as usize;
-            action.help = Some(HelpQuery { property, page, page_size });
+            action.help = Some(HelpQuery {
+                property,
+                page,
+                page_size,
+            });
         }
         return Ok(action);
     }
@@ -1126,7 +1165,10 @@ pub fn prepare_with_context(
     //    conversation result folder it decided for this task, so "use the
     //    default result folder" is a Host guarantee rather than a prompt
     //    suggestion. It never rewrites or prefixes an `output` path.
-    let explicit_output = input.get("output").and_then(Value::as_str).map(str::to_owned);
+    let explicit_output = input
+        .get("output")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let named = input.get("name").and_then(Value::as_str).map(str::to_owned);
     if explicit_output.is_some() && named.is_some() {
         return Err(
@@ -1164,8 +1206,9 @@ pub fn prepare_with_context(
                 }
                 match context.and_then(|context| context.artifact_store()) {
                     Some(store) if !path_is_in_project_deliverable_dir(&action.root, &output) => {
-                        let conversation_id =
-                            context.map(|context| context.conversation_id).unwrap_or_default();
+                        let conversation_id = context
+                            .map(|context| context.conversation_id)
+                            .unwrap_or_default();
                         (
                             private_preview_path(
                                 &action.root,
@@ -1187,18 +1230,13 @@ pub fn prepare_with_context(
                 let store = context
                     .and_then(|context| context.artifact_store())
                     .ok_or("office_render 需要 output/name，或需在此链路提供 Host 私有预览区")?;
-                let conversation_id =
-                    context.map(|context| context.conversation_id).unwrap_or_default();
+                let conversation_id = context
+                    .map(|context| context.conversation_id)
+                    .unwrap_or_default();
                 let requested =
                     default_preview_request(&action.root, action.source.as_deref(), expected);
                 (
-                    private_preview_path(
-                        &action.root,
-                        &requested,
-                        conversation_id,
-                        &store,
-                        mode,
-                    ),
+                    private_preview_path(&action.root, &requested, conversation_id, &store, mode),
                     OutputPlacement::HostPrivatePreview,
                 )
             }
@@ -1323,7 +1361,9 @@ pub fn prepare_with_context(
             let artifact_id = input.get("artifactId").and_then(Value::as_str);
             match (inline, artifact_id) {
                 (Some(_), Some(_)) => {
-                    return Err("Office 导入数据只能使用 data 或 artifactId 其中之一，不能同时传递".into());
+                    return Err(
+                        "Office 导入数据只能使用 data 或 artifactId 其中之一，不能同时传递".into(),
+                    );
                 }
                 (None, None) => {
                     return Err("Office 导入数据缺少 data 或 artifactId：请传入内联 data，或传入本会话 attachment_compute 返回的 artifactId".into());
@@ -1345,7 +1385,11 @@ pub fn prepare_with_context(
                 return Err("Office 导入数据包含空字符".into());
             }
             let (rows, cols) = scan_import_data(&data, &format)?;
-            let start_cell = input["startCell"].as_str().unwrap_or("A1").trim().to_owned();
+            let start_cell = input["startCell"]
+                .as_str()
+                .unwrap_or("A1")
+                .trim()
+                .to_owned();
             let (start_row, start_col) = parse_a1_cell(&start_cell)?;
             if start_row + rows - 1 > EXCEL_MAX_ROWS || start_col + cols - 1 > EXCEL_MAX_COLUMNS {
                 return Err(format!(
@@ -1425,20 +1469,41 @@ pub fn prepare_with_context(
     Ok(action)
 }
 
-fn invoke(binary: &Path, args: &[String], cwd: Option<&Path>, cancellation: Option<&crate::kernel::CancellationToken>, deadline: Instant) -> Result<String, String> {
+fn invoke(
+    binary: &Path,
+    args: &[String],
+    cwd: Option<&Path>,
+    cancellation: Option<&crate::kernel::CancellationToken>,
+    deadline: Instant,
+) -> Result<String, String> {
     invoke_with_stdin(binary, args, None, cwd, cancellation, deadline)
 }
 
-fn invoke_with_stdin(binary: &Path, args: &[String], stdin_data: Option<&str>, cwd: Option<&Path>, cancellation: Option<&crate::kernel::CancellationToken>, deadline: Instant) -> Result<String, String> {
-    if let Some(token) = cancellation { token.check()?; }
-    if Instant::now() >= deadline { return Err("Office execution budget exceeded".into()); }
+fn invoke_with_stdin(
+    binary: &Path,
+    args: &[String],
+    stdin_data: Option<&str>,
+    cwd: Option<&Path>,
+    cancellation: Option<&crate::kernel::CancellationToken>,
+    deadline: Instant,
+) -> Result<String, String> {
+    if let Some(token) = cancellation {
+        token.check()?;
+    }
+    if Instant::now() >= deadline {
+        return Err("Office execution budget exceeded".into());
+    }
     let mut command = Command::new(binary);
     command
         .args(args)
         .env("OFFICECLI_SKIP_UPDATE", "1")
         .env("OFFICECLI_NO_AUTO_RESIDENT", "1")
         .env("OFFICECLI_RESIDENT_FLUSH", "each")
-        .stdin(if stdin_data.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdin(if stdin_data.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(cwd) = cwd {
@@ -1491,17 +1556,23 @@ fn invoke_with_stdin(binary: &Path, args: &[String], stdin_data: Option<&str>, c
             crate::tool_host::terminate_process_tree(&mut child);
             let _ = out.join();
             let _ = err.join();
-            if let Some(handle) = writer.take() { let _ = handle.join(); }
-            return Err("Office execution cancelled or budget exceeded; owned process stopped".into());
+            if let Some(handle) = writer.take() {
+                let _ = handle.join();
+            }
+            return Err(
+                "Office execution cancelled or budget exceeded; owned process stopped".into(),
+            );
         }
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) => {},
+            Ok(None) => {}
             Err(error) => {
                 crate::tool_host::terminate_process_tree(&mut child);
                 let _ = out.join();
                 let _ = err.join();
-                if let Some(handle) = writer.take() { let _ = handle.join(); }
+                if let Some(handle) = writer.take() {
+                    let _ = handle.join();
+                }
                 return Err(format!("Office process status failed: {error}"));
             }
         }
@@ -1509,12 +1580,16 @@ fn invoke_with_stdin(binary: &Path, args: &[String], stdin_data: Option<&str>, c
             crate::tool_host::terminate_process_tree(&mut child);
             let _ = out.join();
             let _ = err.join();
-            if let Some(handle) = writer.take() { let _ = handle.join(); }
+            if let Some(handle) = writer.take() {
+                let _ = handle.join();
+            }
             return Err("Office 操作超过 90 秒，已终止".into());
         }
         thread::sleep(Duration::from_millis(25));
     };
-    if let Some(handle) = writer.take() { let _ = handle.join(); }
+    if let Some(handle) = writer.take() {
+        let _ = handle.join();
+    }
     let stdout = String::from_utf8_lossy(&out.join().unwrap_or_default()).into_owned();
     let stderr = String::from_utf8_lossy(&err.join().unwrap_or_default()).into_owned();
     if !status.success() {
@@ -1554,7 +1629,10 @@ fn shape_help(stdout: &str, query: &HelpQuery) -> Result<String, String> {
     let reference: Value = serde_json::from_str(stdout.trim())
         .map_err(|_| "Office 组件返回了无法解析的说明".to_string())?;
     let format = reference["format"].as_str().unwrap_or_default().to_string();
-    let element = reference["element"].as_str().unwrap_or_default().to_string();
+    let element = reference["element"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
 
     // Element index response (no properties object): pass through a compact form.
     let properties = match reference.get("properties").and_then(Value::as_object) {
@@ -1580,9 +1658,12 @@ fn shape_help(stdout: &str, query: &HelpQuery) -> Result<String, String> {
             .iter()
             .find(|(key, value)| {
                 *key == name
-                    || value.get("aliases")
+                    || value
+                        .get("aliases")
                         .and_then(Value::as_array)
-                        .is_some_and(|aliases| aliases.iter().any(|a| a.as_str() == Some(name.as_str())))
+                        .is_some_and(|aliases| {
+                            aliases.iter().any(|a| a.as_str() == Some(name.as_str()))
+                        })
             })
             .map(|(_, value)| value);
         let Some(value) = found else {
@@ -1748,7 +1829,8 @@ mod source_version_tests {
 
     #[test]
     fn changed_external_document_refuses_in_place_commit() {
-        let path = std::env::temp_dir().join(format!("fox-office-version-{}.xlsx", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("fox-office-version-{}.xlsx", uuid::Uuid::new_v4()));
         fs::write(&path, b"original").unwrap();
         let original = hash_file_meta(&path).unwrap().0;
         assert!(ensure_unchanged_office_source(&path, &original).is_ok());
@@ -1766,7 +1848,16 @@ pub fn execute(
     root: Option<&str>,
     permission: &str,
 ) -> Result<Value, String> {
-    execute_with_cancellation(server, tool, input, root, permission, None, Duration::from_secs(270), None)
+    execute_with_cancellation(
+        server,
+        tool,
+        input,
+        root,
+        permission,
+        None,
+        Duration::from_secs(270),
+        None,
+    )
 }
 
 // Dispatch is synchronous. Thread-local observation avoids cross-test counter
@@ -1777,16 +1868,25 @@ thread_local! {
 }
 
 pub(crate) fn execute_with_cancellation(
-    server: &McpServerRecord, tool: &str, input: &Value, root: Option<&str>, permission: &str,
-    cancellation: Option<&crate::kernel::CancellationToken>, budget: Duration,
+    server: &McpServerRecord,
+    tool: &str,
+    input: &Value,
+    root: Option<&str>,
+    permission: &str,
+    cancellation: Option<&crate::kernel::CancellationToken>,
+    budget: Duration,
     context: Option<&OfficeCallContext<'_>>,
 ) -> Result<Value, String> {
     #[cfg(test)]
     TEST_EXECUTOR_ENTRIES.with(|count| count.set(count.get() + 1));
     let deadline = Instant::now() + budget;
-    let check = || -> Result<(),String> {
-        if let Some(token) = cancellation { token.check()?; }
-        if Instant::now() >= deadline { return Err("Office execution budget exceeded".into()); }
+    let check = || -> Result<(), String> {
+        if let Some(token) = cancellation {
+            token.check()?;
+        }
+        if Instant::now() >= deadline {
+            return Err("Office execution budget exceeded".into());
+        }
         Ok(())
     };
     check()?;
@@ -1858,9 +1958,13 @@ pub(crate) fn execute_with_cancellation(
         }
         if matches!(tool, "office_edit" | "office_create" | "office_import_data") {
             if let Some(source) = &action.source {
-                let baseline = if tool == "office_edit" && action.output.as_deref() == Some(source.as_path()) {
+                let baseline = if tool == "office_edit"
+                    && action.output.as_deref() == Some(source.as_path())
+                {
                     Some(hash_file_meta(source).ok_or("Office 无法读取原文件版本")?.0)
-                } else { None };
+                } else {
+                    None
+                };
                 fs::copy(source, &path).map_err(|e| e.to_string())?;
                 if let Some(hash) = baseline {
                     ensure_unchanged_office_source(source, &hash)?;
@@ -1903,8 +2007,7 @@ pub(crate) fn execute_with_cancellation(
             // and is therefore never touched.
             if let Some(ledger) = ledger.as_ref() {
                 let protect = |path: &Path| staging_reference_reason(context, path);
-                let report =
-                    ledger.reclaim(&[root.as_path(), action.root.as_path()], &protect);
+                let report = ledger.reclaim(&[root.as_path(), action.root.as_path()], &protect);
                 for line in report.diagnostics() {
                     eprintln!("[fox-office] {line}");
                 }
@@ -1991,7 +2094,10 @@ pub(crate) fn execute_with_cancellation(
                     }
                 }
             }
-            if !sheets.iter().any(|name| name.eq_ignore_ascii_case(&spec.sheet)) {
+            if !sheets
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&spec.sheet))
+            {
                 if spec.create_sheet {
                     let add = json!([{"command":"add","parent":"/","type":"sheet","props":{"name":spec.sheet}}]);
                     invoke_with_stdin(
@@ -2020,7 +2126,14 @@ pub(crate) fn execute_with_cancellation(
             )?;
             import_stdout
         } else {
-            invoke_with_stdin(binary, &args, action.stdin_data.as_deref(), cwd, cancellation, deadline)?
+            invoke_with_stdin(
+                binary,
+                &args,
+                action.stdin_data.as_deref(),
+                cwd,
+                cancellation,
+                deadline,
+            )?
         };
         let mut validation = None;
         if let Some(temp) = &temporary {
@@ -2036,7 +2149,8 @@ pub(crate) fn execute_with_cancellation(
                         "--json".into(),
                     ],
                     cwd,
-                    cancellation, deadline,
+                    cancellation,
+                    deadline,
                 )?);
                 // A second open proves the saved document can actually be read.
                 invoke(
@@ -2048,7 +2162,8 @@ pub(crate) fn execute_with_cancellation(
                         "--json".into(),
                     ],
                     cwd,
-                    cancellation, deadline,
+                    cancellation,
+                    deadline,
                 )?;
             }
             let output = action.output.as_ref().expect("output");
@@ -2073,8 +2188,7 @@ pub(crate) fn execute_with_cancellation(
                 let backup = match (before.as_ref(), snapshot_dir.as_ref()) {
                     (Some(_), Some(dir)) => {
                         let path = dir.join(format!("office-{}.foxbak", uuid::Uuid::new_v4()));
-                        fs::copy(output, &path)
-                            .map_err(|e| format!("Office 备份失败: {e}"))?;
+                        fs::copy(output, &path).map_err(|e| format!("Office 备份失败: {e}"))?;
                         Some(path)
                     }
                     _ => None,
@@ -2118,7 +2232,9 @@ pub(crate) fn execute_with_cancellation(
                     None => format!("Office 写入失败，未产生输出: {error}"),
                 })?;
                 if let Some((after_hash, after_size)) = hash_file_meta(output) {
-                    let storage_path = output.canonicalize().unwrap_or_else(|_| output.to_path_buf());
+                    let storage_path = output
+                        .canonicalize()
+                        .unwrap_or_else(|_| output.to_path_buf());
                     // Project-relative display name, tolerating the Windows
                     // extended-length prefix a canonical path carries. A raw
                     // `strip_prefix` silently fails there and the user would see
@@ -2130,7 +2246,11 @@ pub(crate) fn execute_with_cancellation(
                         })
                         .map(|relative| relative.to_string_lossy().into_owned())
                         .unwrap_or_else(|| storage_path.to_string_lossy().into_owned());
-                    let change_kind = if backup.is_some() { "modified" } else { "created" };
+                    let change_kind = if backup.is_some() {
+                        "modified"
+                    } else {
+                        "created"
+                    };
                     let (artifact_class, artifact_origin) =
                         crate::runtime_host::artifact_store::classify(
                             root.map(Path::new),
@@ -2192,8 +2312,7 @@ pub(crate) fn execute_with_cancellation(
             let cols = reported.map(|(_, c)| c).unwrap_or(spec.cols);
             let next_row = spec.start_row + rows;
             let next_cell = format!("{}{}", column_name(spec.start_col), next_row);
-            vec![
-                json!({"type":"text","text":json!({
+            vec![json!({"type":"text","text":json!({
                     "output":action.output,
                     "saved":true,
                     "validation":validation,
@@ -2209,8 +2328,7 @@ pub(crate) fn execute_with_cancellation(
                     },
                     "nextStartCell": next_cell,
                     "continuation": format!("已写入 {rows} 行 x {cols} 列到 /{}（{} 起）。续写下一批时使用同一 output/sheet，startCell={next_cell}；相同 startCell 重跑会覆盖相同单元格，不会重复追加。", spec.sheet, spec.start_cell),
-                }).canonical_string()}),
-            ]
+                }).canonical_string()})]
         } else {
             vec![
                 json!({"type":"text","text":json!({"output":action.output,"result":stdout,"validation":validation,"saved":action.output.is_some(),"visualChecked":false}).canonical_string()}),
@@ -2325,14 +2443,12 @@ mod resource_error_tests {
             ),
         ];
         for (error, expected) in cases {
-            let kind = classify_resource_error(error).unwrap_or_else(|| panic!("unclassified: {error}"));
+            let kind =
+                classify_resource_error(error).unwrap_or_else(|| panic!("unclassified: {error}"));
             assert_eq!(kind, expected, "{error}");
         }
         // The steps have to be *different* facts, not one generic sentence.
-        let steps: Vec<&str> = cases
-            .iter()
-            .map(|(_, kind)| kind.next_step())
-            .collect();
+        let steps: Vec<&str> = cases.iter().map(|(_, kind)| kind.next_step()).collect();
         for (index, step) in steps.iter().enumerate() {
             for (other, competitor) in steps.iter().enumerate() {
                 if index != other {
@@ -2396,44 +2512,107 @@ mod tests {
             "paths":["/chart[1]"],
             "note":"test reference",
             "properties": Value::Object(properties)
-        }).canonical_string()
+        })
+        .canonical_string()
     }
 
     #[test]
     fn office_help_catalog_is_bounded_paged_and_keeps_working_metadata() {
         let reference = chart_reference(115);
-        assert!(reference.len() > 40_000, "fixture must reproduce the 55KB flood");
-        let page1 = shape_help(&reference, &HelpQuery { property: None, page: 1, page_size: 40 }).unwrap();
+        assert!(
+            reference.len() > 40_000,
+            "fixture must reproduce the 55KB flood"
+        );
+        let page1 = shape_help(
+            &reference,
+            &HelpQuery {
+                property: None,
+                page: 1,
+                page_size: 40,
+            },
+        )
+        .unwrap();
         let v: Value = serde_json::from_str(&page1).unwrap();
-        assert!(page1.len() < HELP_MAX_BYTES, "catalog page stays in budget, got {}", page1.len());
+        assert!(
+            page1.len() < HELP_MAX_BYTES,
+            "catalog page stays in budget, got {}",
+            page1.len()
+        );
         assert_eq!(v["totalProperties"], 115);
         assert_eq!(v["properties"].as_array().unwrap().len(), 40);
         assert_eq!(v["complete"], false);
-        assert!(v["next"]["instruction"].as_str().unwrap().contains("page=2"));
+        assert!(v["next"]["instruction"]
+            .as_str()
+            .unwrap()
+            .contains("page=2"));
         // Hint is short; verbose examples/aliases are not on a catalog page.
         let hint = v["properties"][0]["hint"].as_str().unwrap();
         assert!(hint.chars().count() <= HELP_HINT_CHARS + 1);
-        assert!(page1.find("--prop").is_none(), "no example CLI text on catalog page");
+        assert!(
+            page1.find("--prop").is_none(),
+            "no example CLI text on catalog page"
+        );
         // Operational flags survive so the model knows what it can do.
         assert!(v["properties"][0]["ops"].is_array());
 
-        let page3 = shape_help(&reference, &HelpQuery { property: None, page: 3, page_size: 40 }).unwrap();
+        let page3 = shape_help(
+            &reference,
+            &HelpQuery {
+                property: None,
+                page: 3,
+                page_size: 40,
+            },
+        )
+        .unwrap();
         let v3: Value = serde_json::from_str(&page3).unwrap();
         assert_eq!(v3["properties"].as_array().unwrap().len(), 35);
         assert_eq!(v3["complete"], true);
 
         // Single-property detail returns full definition with examples.
-        let detail = shape_help(&reference, &HelpQuery { property: Some("prop7".into()), page: 1, page_size: 40 }).unwrap();
+        let detail = shape_help(
+            &reference,
+            &HelpQuery {
+                property: Some("prop7".into()),
+                page: 1,
+                page_size: 40,
+            },
+        )
+        .unwrap();
         let d: Value = serde_json::from_str(&detail).unwrap();
         assert_eq!(d["found"], true);
         assert!(d["definition"]["examples"].is_array());
-        assert!(d["definition"]["description"].as_str().unwrap().contains("property 7"));
+        assert!(d["definition"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("property 7"));
 
         // Alias lookup works and unknown property is reported without flooding.
-        let by_alias = shape_help(&reference, &HelpQuery { property: Some("prop9alias".into()), page: 1, page_size: 40 }).unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&by_alias).unwrap()["found"], true);
-        let missing = shape_help(&reference, &HelpQuery { property: Some("nope".into()), page: 1, page_size: 40 }).unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&missing).unwrap()["found"], false);
+        let by_alias = shape_help(
+            &reference,
+            &HelpQuery {
+                property: Some("prop9alias".into()),
+                page: 1,
+                page_size: 40,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&by_alias).unwrap()["found"],
+            true
+        );
+        let missing = shape_help(
+            &reference,
+            &HelpQuery {
+                property: Some("nope".into()),
+                page: 1,
+                page_size: 40,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&missing).unwrap()["found"],
+            false
+        );
     }
 
     #[test]
@@ -2448,8 +2627,13 @@ mod tests {
             cancel.request_run_cancel("office-cancel");
         });
         let start = Instant::now();
-        let result = invoke(Path::new("node"), &["-e".into(), "setInterval(()=>{},1000)".into()],
-            None, Some(&token), start + Duration::from_secs(15));
+        let result = invoke(
+            Path::new("node"),
+            &["-e".into(), "setInterval(()=>{},1000)".into()],
+            None,
+            Some(&token),
+            start + Duration::from_secs(15),
+        );
         sender.join().unwrap();
         assert!(result.unwrap_err().contains("owned process stopped"));
         assert!(start.elapsed() < Duration::from_secs(5));
@@ -2550,7 +2734,11 @@ mod tests {
     fn office_fixture() -> (PathBuf, Database, McpServerRecord, String, PathBuf) {
         let root = project();
         let db = Database::open(root.join("test.db")).unwrap();
-        setup(&db, &Path::new(env!("CARGO_MANIFEST_DIR")).join("resources")).unwrap();
+        setup(
+            &db,
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("resources"),
+        )
+        .unwrap();
         let server = db
             .list_mcp_servers()
             .unwrap()
@@ -2633,7 +2821,10 @@ mod tests {
             Some(&context),
         )
         .unwrap();
-        assert_eq!(created["details"]["foxManagedFile"]["artifactClass"], "deliverable");
+        assert_eq!(
+            created["details"]["foxManagedFile"]["artifactClass"],
+            "deliverable"
+        );
         // The saved workbook is really readable and carries the imported rows.
         let read = execute_with_cancellation(
             &server,
@@ -2717,7 +2908,10 @@ mod tests {
         );
         // The Host's own version store kept the undo copy instead.
         let snapshots = fs::read_dir(snapshot_directory(&context)).unwrap().count();
-        assert!(snapshots >= 1, "a pre-write snapshot must exist in the Host store");
+        assert!(
+            snapshots >= 1,
+            "a pre-write snapshot must exist in the Host store"
+        );
         fs::remove_dir_all(root).ok();
     }
 
@@ -2764,7 +2958,10 @@ mod tests {
             &StagingRecord {
                 token: "orphanleftover".to_owned(),
                 staging_path: orphan.to_string_lossy().into_owned(),
-                target_path: root.join("never-produced.xlsx").to_string_lossy().into_owned(),
+                target_path: root
+                    .join("never-produced.xlsx")
+                    .to_string_lossy()
+                    .into_owned(),
                 conversation_id: conversation.clone(),
                 execution_id: "crashed-execution-with-no-lease".to_owned(),
                 state: "staging".to_owned(),
@@ -2790,11 +2987,22 @@ mod tests {
         assert!(root.join("cleanup-probe.xlsx").is_file());
 
         // The user's files are untouched, byte for byte.
-        assert_eq!(fs::read(&user_root).unwrap(), user_bytes, "user file was deleted");
-        assert_eq!(fs::read(&user_nested).unwrap(), user_bytes, "nested user file was deleted");
+        assert_eq!(
+            fs::read(&user_root).unwrap(),
+            user_bytes,
+            "user file was deleted"
+        );
+        assert_eq!(
+            fs::read(&user_nested).unwrap(),
+            user_bytes,
+            "nested user file was deleted"
+        );
         // The registered, owner-free leftover is reclaimed and the ledger
         // converges, so the record cannot accumulate forever.
-        assert!(!orphan.exists(), "a registered orphaned staging file must be reclaimed");
+        assert!(
+            !orphan.exists(),
+            "a registered orphaned staging file must be reclaimed"
+        );
         assert!(!staging_entry_path_for_test(&artifact_root, "orphanleftover").exists());
         // The run itself added nothing: the only staging-looking name in the
         // project root is still the user's own file.
@@ -2855,7 +3063,9 @@ mod tests {
             thread::spawn(move || {
                 /// Depth-first file listing, small enough to run every 2 ms.
                 fn collect(base: &Path, out: &mut Vec<PathBuf>) {
-                    let Ok(entries) = fs::read_dir(base) else { return };
+                    let Ok(entries) = fs::read_dir(base) else {
+                        return;
+                    };
                     for entry in entries.flatten() {
                         let path = entry.path();
                         out.push(path.clone());
@@ -2872,10 +3082,8 @@ mod tests {
                     if let Ok(entries) = fs::read_dir(&ledger_entries) {
                         let mut registered = registered_tokens.lock().unwrap();
                         for entry in entries.flatten() {
-                            if let Some(token) = entry
-                                .path()
-                                .file_stem()
-                                .and_then(|value| value.to_str())
+                            if let Some(token) =
+                                entry.path().file_stem().and_then(|value| value.to_str())
                             {
                                 registered.insert(token.to_owned());
                             }
@@ -2937,7 +3145,10 @@ mod tests {
         observer.join().unwrap();
 
         let observed = seen.lock().unwrap().clone();
-        assert!(!observed.is_empty(), "the observer must have seen the fixture");
+        assert!(
+            !observed.is_empty(),
+            "the observer must have seen the fixture"
+        );
         let transient = |path: &Path| {
             path.file_name()
                 .and_then(|name| name.to_str())
@@ -3014,7 +3225,8 @@ mod tests {
     /// mode, re-rendered in place, and never a file in the user's project.
     #[test]
     #[ignore = "requires the pinned OfficeCLI binary; run explicitly for integration verification"]
-    fn real_office_preview_is_host_private_and_reused() {        let (root, db, server, conversation, sessions) = office_fixture();
+    fn real_office_preview_is_host_private_and_reused() {
+        let (root, db, server, conversation, sessions) = office_fixture();
         let artifacts = project();
         let context = OfficeCallContext {
             database: &db,
@@ -3050,7 +3262,10 @@ mod tests {
         };
         let first = render("preview.html");
         let preview = first["details"]["foxPreview"].clone();
-        assert!(preview.is_object(), "a render must declare its preview artifact: {first}");
+        assert!(
+            preview.is_object(),
+            "a render must declare its preview artifact: {first}"
+        );
         assert_eq!(preview["artifactClass"], "preview");
         assert_eq!(preview["artifactOrigin"], "host_private");
         // A rendered preview is a view, not a content version.
@@ -3065,7 +3280,9 @@ mod tests {
         // A re-render reuses the same preview file, so no stale link survives.
         let second = render("preview.html");
         assert_eq!(
-            second["details"]["foxPreview"]["storagePath"].as_str().unwrap(),
+            second["details"]["foxPreview"]["storagePath"]
+                .as_str()
+                .unwrap(),
             storage.to_string_lossy()
         );
         assert!(!root.join("preview.html").exists());
@@ -3136,7 +3353,9 @@ mod tests {
             "the Host must place a named artifact in the folder it advertises"
         );
         assert_eq!(
-            fs::read_dir(root.join(PROJECT_DELIVERABLE_DIR)).unwrap().count(),
+            fs::read_dir(root.join(PROJECT_DELIVERABLE_DIR))
+                .unwrap()
+                .count(),
             1,
             "one logical task keeps one result folder"
         );
@@ -3174,17 +3393,23 @@ mod tests {
         // the target the approval resolves is the target that is executed.
         let edit = json!({"file":relative,"output":relative,"overwrite":true,"operations":[
             {"command":"set","path":"/Sheet1/A1","props":{"value":"edited"}}]});
-        let prepared = prepare_with_context("office_edit", &edit, r, "allow", Some(&context)).unwrap();
+        let prepared =
+            prepare_with_context("office_edit", &edit, r, "allow", Some(&context)).unwrap();
         assert_eq!(
             prepared.target_path().expect("edit resolves a target"),
             storage.as_path(),
             "the approved target and the executed target must be one path"
         );
         let edited = run("office_edit", edit).unwrap();
-        assert_eq!(edited["details"]["foxManagedFile"]["artifactClass"], "deliverable");
+        assert_eq!(
+            edited["details"]["foxManagedFile"]["artifactClass"],
+            "deliverable"
+        );
         assert_eq!(
             PathBuf::from(
-                edited["details"]["foxManagedFile"]["storagePath"].as_str().unwrap()
+                edited["details"]["foxManagedFile"]["storagePath"]
+                    .as_str()
+                    .unwrap()
             ),
             storage
         );
@@ -3229,7 +3454,10 @@ mod tests {
             Some(&context),
         )
         .unwrap();
-        assert_eq!(created["details"]["foxManagedFile"]["artifactClass"], "deliverable");
+        assert_eq!(
+            created["details"]["foxManagedFile"]["artifactClass"],
+            "deliverable"
+        );
         // The display name is the project-relative path (separators are
         // platform-native, so compare on normalized form).
         assert_eq!(
@@ -3239,7 +3467,10 @@ mod tests {
                 .replace('\\', "/"),
             relative
         );
-        assert!(root.join(&relative).is_file(), "the deliverable must exist where asked");
+        assert!(
+            root.join(&relative).is_file(),
+            "the deliverable must exist where asked"
+        );
         // Contract change (R3), recorded deliberately rather than relaxed:
         // `office_create`/`office_edit`/`office_import_data`/`office_merge` are
         // the *document* channel — the formats the user receives — so a file the
@@ -3302,16 +3533,20 @@ mod tests {
             Some(&context),
         )
         .unwrap();
-        assert_eq!(rendered["details"]["foxPreview"]["artifactOrigin"], "project");
         assert_eq!(
-            rendered["details"]["foxPreview"]["artifactClass"],
-            "deliverable",
+            rendered["details"]["foxPreview"]["artifactOrigin"],
+            "project"
+        );
+        assert_eq!(
+            rendered["details"]["foxPreview"]["artifactClass"], "deliverable",
             "an explicitly exported HTML is the user's result, not a view"
         );
         // An explicitly requested export lands in the project, at the exact
         // requested relative path.
         let exported_storage = PathBuf::from(
-            rendered["details"]["foxPreview"]["storagePath"].as_str().unwrap(),
+            rendered["details"]["foxPreview"]["storagePath"]
+                .as_str()
+                .unwrap(),
         );
         assert_eq!(
             crate::runtime_host::artifact_store::relative_to(&root, &exported_storage)
@@ -3389,7 +3624,9 @@ mod tests {
         assert_eq!(parse_a1_cell("A1").unwrap(), (1, 1));
         assert_eq!(parse_a1_cell("b12").unwrap(), (12, 2));
         assert_eq!(parse_a1_cell("XFD1048576").unwrap(), (1_048_576, 16_384));
-        for bad in ["", "1A", "A0", "A", "XFE1", "A1048577", "AAAA1", "A 1", "A-1"] {
+        for bad in [
+            "", "1A", "A0", "A", "XFE1", "A1048577", "AAAA1", "A 1", "A-1",
+        ] {
             assert!(parse_a1_cell(bad).is_err(), "{bad}");
         }
         assert_eq!(column_name(1), "A");
@@ -3402,7 +3639,10 @@ mod tests {
     fn import_data_scan_counts_bounds_and_screens_formulas() {
         assert_eq!(scan_import_data("a,b\n1,2\n", "csv").unwrap(), (2, 2));
         // Quoted commas/newlines do not inflate the count.
-        assert_eq!(scan_import_data("a,b\n\"x,y\",\"1\n2\"", "csv").unwrap(), (2, 2));
+        assert_eq!(
+            scan_import_data("a,b\n\"x,y\",\"1\n2\"", "csv").unwrap(),
+            (2, 2)
+        );
         assert_eq!(scan_import_data("a\tb\n1\t2", "tsv").unwrap(), (2, 2));
         assert!(scan_import_data("", "csv").is_err());
         assert!(scan_import_data("a,b\n\"unclosed", "csv").is_err());
@@ -3415,7 +3655,10 @@ mod tests {
         assert!(scan_import_data("=HYPERLINK(\"https://x\")", "csv").is_err());
         assert!(scan_import_data("=[1]Sheet!A1", "csv").is_err());
         // Column overflow names the dimension and the remedy.
-        let wide = (0..=IMPORT_MAX_COLUMNS).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        let wide = (0..=IMPORT_MAX_COLUMNS)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         let err = scan_import_data(&wide, "csv").unwrap_err();
         assert!(err.contains("列"), "{err}");
     }
@@ -3469,7 +3712,7 @@ mod tests {
             "office_import_data",
             &json!({"output":"n.xlsx","sheet":"S","startCell":"A1048576","data":"x\n1\n2"}),
             r,
-            "allow"
+            "allow",
         )
         .unwrap_err();
         assert!(err.contains("超出工作表网格"), "{err}");
@@ -3479,7 +3722,7 @@ mod tests {
             "office_import_data",
             &json!({"output":"n.xlsx","sheet":"S","data":big}),
             r,
-            "allow"
+            "allow",
         )
         .unwrap_err();
         assert!(err.contains("nextStartCell"), "{err}");
@@ -3498,13 +3741,19 @@ mod tests {
         )
         .unwrap();
         assert!(!action.args.iter().any(|a| a == "--commands"));
-        assert!(action.stdin_data.as_deref().unwrap().contains("\"command\":\"add\""));
+        assert!(action
+            .stdin_data
+            .as_deref()
+            .unwrap()
+            .contains("\"command\":\"add\""));
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn import_summary_is_parsed_from_the_writer_envelope() {
-        let stdout = json!({"success":true,"data":"Imported 12 rows x 3 cols into /Sheet1 starting at A1"}).canonical_string();
+        let stdout =
+            json!({"success":true,"data":"Imported 12 rows x 3 cols into /Sheet1 starting at A1"})
+                .canonical_string();
         assert_eq!(parse_import_summary(&stdout), Some((12, 3)));
         assert_eq!(parse_import_summary("{\"success\":false}"), None);
         assert_eq!(parse_import_summary("not json"), None);
@@ -3576,8 +3825,12 @@ mod tests {
         let meta2 = &second["details"]["foxManagedFile"];
         assert_eq!(meta2["changeKind"], "modified");
         assert!(meta2["beforeHash"].is_string());
-        assert!(meta2["backupPath"].is_string(), "overwrite keeps a pre-write backup");
-        let shaped2: Value = serde_json::from_str(second["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(
+            meta2["backupPath"].is_string(),
+            "overwrite keeps a pre-write backup"
+        );
+        let shaped2: Value =
+            serde_json::from_str(second["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(shaped2["nextStartCell"], "A5");
 
         // 3) Replaying the SAME batch at the SAME start cell overwrites the
@@ -3693,7 +3946,8 @@ mod tests {
             })
             .collect();
         for chunk in all_ops.chunks(100) {
-            let input = json!({"file":"old.xlsx","output":"old.xlsx","overwrite":true,"operations":chunk});
+            let input =
+                json!({"file":"old.xlsx","output":"old.xlsx","overwrite":true,"operations":chunk});
             old_bytes += input.canonical_string().len();
             old_calls += 1;
             execute(&server, "office_edit", &input, r, "allow").unwrap();
@@ -3865,7 +4119,10 @@ mod tests {
         let meta2 = &second["details"]["foxManagedFile"];
         assert_eq!(meta2["changeKind"], "modified");
         let first_version_hash = meta2["beforeHash"].as_str().unwrap();
-        assert_eq!(first_version_hash, after_hash, "the first version's bytes are recorded");
+        assert_eq!(
+            first_version_hash, after_hash,
+            "the first version's bytes are recorded"
+        );
         let backup = meta2["backupPath"].as_str().unwrap();
         let restored = fs::read(backup).unwrap();
         assert_eq!(hex::encode(Sha256::digest(&restored)), after_hash);
@@ -3888,7 +4145,11 @@ mod tests {
     fn real_import_by_artifact_id_matches_the_saved_data() {
         let root = project();
         let db = Database::open(root.join("artifact.db")).unwrap();
-        setup(&db, &Path::new(env!("CARGO_MANIFEST_DIR")).join("resources")).unwrap();
+        setup(
+            &db,
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("resources"),
+        )
+        .unwrap();
         let server = db
             .list_mcp_servers()
             .unwrap()
@@ -3917,17 +4178,27 @@ mod tests {
         const ROW_COUNT: usize = 927;
         let mut csv = String::from("id,tag,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10\n");
         for index in 0..ROW_COUNT {
-            csv.push_str(&format!("{index},agv-task-{index:05}-zone-{:02}", index % 24));
+            csv.push_str(&format!(
+                "{index},agv-task-{index:05}-zone-{:02}",
+                index % 24
+            ));
             for _ in 0..10 {
                 csv.push_str(&format!(",{}", 10_000 + index));
             }
             csv.push('\n');
         }
-        assert!(csv.len() > 64 * 1024, "fixture {} bytes must exceed the inline result limit", csv.len());
+        assert!(
+            csv.len() > 64 * 1024,
+            "fixture {} bytes must exceed the inline result limit",
+            csv.len()
+        );
         let row_count = ROW_COUNT;
         let artifact_path = outputs.join("saved.csv");
         fs::write(&artifact_path, csv.as_bytes()).unwrap();
-        assert!(csv.len() > 64 * 1024, "the fixture must exceed the inline result limit");
+        assert!(
+            csv.len() > 64 * 1024,
+            "the fixture must exceed the inline result limit"
+        );
         let artifact_path_str = artifact_path.to_string_lossy().into_owned();
         let artifact_id = Database::computed_artifact_id(&artifact_path_str);
         db.with_connection(|connection| {
@@ -3980,7 +4251,8 @@ mod tests {
             "read_only",
         )
         .unwrap();
-        let outer: Value = serde_json::from_str(read["content"][0]["text"].as_str().unwrap()).unwrap();
+        let outer: Value =
+            serde_json::from_str(read["content"][0]["text"].as_str().unwrap()).unwrap();
         let inner: Value = serde_json::from_str(outer["result"].as_str().unwrap()).unwrap();
         let cells = inner["data"]["results"][0]["children"].as_array().unwrap();
         let cell = |path: &str| cells.iter().find(|c| c["path"] == path).cloned().unwrap();
@@ -4002,12 +4274,22 @@ mod tests {
             "read_only",
         )
         .unwrap();
-        let outer: Value = serde_json::from_str(tail["content"][0]["text"].as_str().unwrap()).unwrap();
+        let outer: Value =
+            serde_json::from_str(tail["content"][0]["text"].as_str().unwrap()).unwrap();
         let inner: Value = serde_json::from_str(outer["result"].as_str().unwrap()).unwrap();
         let tail_cells = inner["data"]["results"][0]["children"].as_array().unwrap();
-        let tail_cell = |path: &str| tail_cells.iter().find(|c| c["path"] == path).cloned().unwrap();
+        let tail_cell = |path: &str| {
+            tail_cells
+                .iter()
+                .find(|c| c["path"] == path)
+                .cloned()
+                .unwrap()
+        };
         let last_index = row_count - 1;
-        assert_eq!(tail_cell(&format!("/Sheet1/A{last_row}"))["text"], last_index.to_string());
+        assert_eq!(
+            tail_cell(&format!("/Sheet1/A{last_row}"))["text"],
+            last_index.to_string()
+        );
         assert_eq!(
             tail_cell(&format!("/Sheet1/B{last_row}"))["text"],
             format!("agv-task-{last_index:05}-zone-{:02}", last_index % 24)
@@ -4020,7 +4302,10 @@ mod tests {
         let meta = &created["details"]["foxManagedFile"];
         assert_eq!(meta["tool"], "office_import_data");
         assert_eq!(meta["changeKind"], "created");
-        assert_eq!(meta["afterSize"], fs::metadata(root.join("artifact.xlsx")).unwrap().len() as i64);
+        assert_eq!(
+            meta["afterSize"],
+            fs::metadata(root.join("artifact.xlsx")).unwrap().len() as i64
+        );
         println!("artifact-import artifacts: {}", root.display());
     }
 
@@ -4083,7 +4368,15 @@ mod tests {
             .map(|_| ())
         };
         db.with_connection(|connection| {
-            seed(connection, &ok_id, &conversation, &ok_csv, "text/csv", ok_bytes.len() as i64, &ok_digest)
+            seed(
+                connection,
+                &ok_id,
+                &conversation,
+                &ok_csv,
+                "text/csv",
+                ok_bytes.len() as i64,
+                &ok_digest,
+            )
         })
         .unwrap();
         let txt_bytes = b"not csv";
@@ -4138,8 +4431,13 @@ mod tests {
         )
         .is_err());
         // Unknown id (never registered).
-        let error = import(json!("compute-artifact:0000000000000000000000000000000000000000000000000000000000000000"), Some(&context))
-            .unwrap_err();
+        let error = import(
+            json!(
+                "compute-artifact:0000000000000000000000000000000000000000000000000000000000000000"
+            ),
+            Some(&context),
+        )
+        .unwrap_err();
         assert!(error.contains("不存在"), "{error}");
         // Registered for a different conversation: the frozen binding's
         // conversation is the only one consulted. Seed a distinct artifact
@@ -4161,7 +4459,10 @@ mod tests {
         })
         .unwrap();
         let error = import(json!(foreign_id), Some(&context)).unwrap_err();
-        assert!(error.contains("不存在"), "a cross-conversation reference must not resolve: {error}");
+        assert!(
+            error.contains("不存在"),
+            "a cross-conversation reference must not resolve: {error}"
+        );
         // Wrong extension vs the declared format.
         let error = import(json!(txt_id), Some(&context)).unwrap_err();
         assert!(error.contains("不一致") && error.contains("csv"), "{error}");
@@ -4239,7 +4540,10 @@ mod tests {
         // The CLI receives the saved bytes verbatim via stdin — never a path,
         // never a CLI argument, and never a model-typed copy.
         assert_eq!(action.stdin_data.as_deref().unwrap(), csv);
-        assert!(action.args.iter().all(|a| !a.contains("result.csv")), "the artifact path must not leak onto the command line");
+        assert!(
+            action.args.iter().all(|a| !a.contains("result.csv")),
+            "the artifact path must not leak onto the command line"
+        );
         let spec = action.import.as_ref().unwrap();
         assert_eq!(spec.sheet, "Sheet1");
         assert_eq!((spec.rows, spec.cols), (3, 3));

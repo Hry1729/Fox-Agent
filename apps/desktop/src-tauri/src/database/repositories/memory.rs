@@ -899,14 +899,19 @@ fn parse_optional_json(value: Option<String>) -> Option<Value> {
     value.and_then(|text| serde_json::from_str(&text).ok())
 }
 
-fn require_general_entry(tx: &Transaction<'_>, memory: &MemoryEntityRecord) -> rusqlite::Result<()> {
+fn require_general_entry(
+    tx: &Transaction<'_>,
+    memory: &MemoryEntityRecord,
+) -> rusqlite::Result<()> {
     let private_note = memory.scope == "agent" && memory.scope_key.starts_with("cmp_");
     let pending_shared = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM companion_shared_requests WHERE candidate_memory_id=? AND status IN ('open','stale','rejected'))",
         [&memory.id], |row| row.get::<_, bool>(0),
     )?;
     if private_note || pending_shared {
-        return Err(rusqlite::Error::InvalidParameterName("companion.notes_dedicated_entry 请在联系人的资料页管理笔记".into()));
+        return Err(rusqlite::Error::InvalidParameterName(
+            "companion.notes_dedicated_entry 请在联系人的资料页管理笔记".into(),
+        ));
     }
     Ok(())
 }

@@ -52,6 +52,12 @@ export default defineConfig(({ mode }) => {
   return {
     root,
     plugins: [
+      {
+        name: 'fox-dev-cache',
+        config(config, { command }) {
+          if (command === 'serve') return { cacheDir: `${root}node_modules/.vite-${config.server?.port ?? 1421}` }
+        },
+      },
       startupLayout,
       react(),
       tailwindcss(),

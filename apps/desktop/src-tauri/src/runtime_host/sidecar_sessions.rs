@@ -24,21 +24,38 @@ pub(super) struct Sessions {
 }
 
 impl Sessions {
-    pub fn remember(&mut self, conversation: &str, runtime: &str, generation: i64) -> Result<(), String> {
+    pub fn remember(
+        &mut self,
+        conversation: &str,
+        runtime: &str,
+        generation: i64,
+    ) -> Result<(), String> {
         if conversation.is_empty() || runtime.is_empty() || generation < 1 {
             return Err("sidecar session identity is incomplete".into());
         }
         if let Some(old) = self.by_conversation.get(conversation) {
-            if old.run_id.is_some() && (old.runtime_session_id != runtime || old.generation != generation) {
+            if old.run_id.is_some()
+                && (old.runtime_session_id != runtime || old.generation != generation)
+            {
                 return Err("cannot replace a sidecar session owned by an active Run".into());
             }
-            if old.runtime_session_id == runtime && old.generation == generation { return Ok(()); }
+            if old.runtime_session_id == runtime && old.generation == generation {
+                return Ok(());
+            }
         }
-        self.by_conversation.insert(conversation.to_owned(), Session {
-            conversation_id: conversation.to_owned(), runtime_session_id: runtime.to_owned(),
-            generation, run_id: None, waiting: false, companion_id: None, companion_background: false,
-            preserve_waiting_companion: false,
-        });
+        self.by_conversation.insert(
+            conversation.to_owned(),
+            Session {
+                conversation_id: conversation.to_owned(),
+                runtime_session_id: runtime.to_owned(),
+                generation,
+                run_id: None,
+                waiting: false,
+                companion_id: None,
+                companion_background: false,
+                preserve_waiting_companion: false,
+            },
+        );
         Ok(())
     }
 
@@ -50,12 +67,17 @@ impl Sessions {
         run: &str,
         companion: Option<(&str, bool)>,
     ) -> Result<(), String> {
-        if run.is_empty() || self.by_run(run).is_some() { return Err("sidecar Run is already active or invalid".into()); }
+        if run.is_empty() || self.by_run(run).is_some() {
+            return Err("sidecar Run is already active or invalid".into());
+        }
         if !self.can_admit(conversation, companion.map(|(id, _)| id)) {
             return Err("sidecar conversation or execution capacity is occupied".into());
         }
         self.remember(conversation, runtime, generation)?;
-        let session = self.by_conversation.get_mut(conversation).ok_or("sidecar session disappeared")?;
+        let session = self
+            .by_conversation
+            .get_mut(conversation)
+            .ok_or("sidecar session disappeared")?;
         session.run_id = Some(run.to_owned());
         session.waiting = false;
         session.companion_id = companion.map(|(id, _)| id.to_owned());
@@ -71,12 +93,20 @@ impl Sessions {
         run: &str,
         companion: Option<(&str, bool)>,
     ) -> Result<(), String> {
-        if run.is_empty() || self.by_run(run).is_some()
-            || self.by_conversation.get(conversation).is_some_and(|session| session.run_id.is_some()) {
+        if run.is_empty()
+            || self.by_run(run).is_some()
+            || self
+                .by_conversation
+                .get(conversation)
+                .is_some_and(|session| session.run_id.is_some())
+        {
             return Err("sidecar conversation already has an active Run".into());
         }
         self.remember(conversation, runtime, generation)?;
-        let session = self.by_conversation.get_mut(conversation).ok_or("sidecar session disappeared")?;
+        let session = self
+            .by_conversation
+            .get_mut(conversation)
+            .ok_or("sidecar session disappeared")?;
         session.run_id = Some(run.to_owned());
         session.waiting = true;
         session.companion_id = companion.map(|(id, _)| id.to_owned());
@@ -84,25 +114,45 @@ impl Sessions {
         Ok(())
     }
 
-    pub fn by_conversation(&self, conversation: &str) -> Option<&Session> { self.by_conversation.get(conversation) }
+    pub fn by_conversation(&self, conversation: &str) -> Option<&Session> {
+        self.by_conversation.get(conversation)
+    }
 
     pub fn by_run(&self, run: &str) -> Option<&Session> {
-        self.by_conversation.values().find(|session| session.run_id.as_deref() == Some(run))
+        self.by_conversation
+            .values()
+            .find(|session| session.run_id.as_deref() == Some(run))
     }
 
     pub fn occupied(&self) -> usize {
-        self.by_conversation.values().filter(|session| session.run_id.is_some() && !session.waiting).count()
+        self.by_conversation
+            .values()
+            .filter(|session| session.run_id.is_some() && !session.waiting)
+            .count()
     }
 
     pub fn active(&self) -> Vec<Session> {
-        self.by_conversation.values().filter(|session| session.run_id.is_some()).cloned().collect()
+        self.by_conversation
+            .values()
+            .filter(|session| session.run_id.is_some())
+            .cloned()
+            .collect()
     }
 
-    pub fn is_empty(&self) -> bool { !self.by_conversation.values().any(|session| session.run_id.is_some()) }
+    pub fn is_empty(&self) -> bool {
+        !self
+            .by_conversation
+            .values()
+            .any(|session| session.run_id.is_some())
+    }
 
     pub fn can_admit(&self, conversation: &str, companion: Option<&str>) -> bool {
-        self.resuming.is_empty() && self.occupied() < ACTIVE_RUN_LIMIT
-            && self.by_conversation.get(conversation).is_none_or(|session| session.run_id.is_none())
+        self.resuming.is_empty()
+            && self.occupied() < ACTIVE_RUN_LIMIT
+            && self
+                .by_conversation
+                .get(conversation)
+                .is_none_or(|session| session.run_id.is_none())
             && companion.is_none_or(|id| !self.holds_companion(id))
     }
 
@@ -113,7 +163,9 @@ impl Sessions {
         self.by_conversation.values().any(|session| {
             session.run_id.is_some()
                 && session.companion_id.as_deref() == Some(companion)
-                && (!session.waiting || !session.companion_background || session.preserve_waiting_companion)
+                && (!session.waiting
+                    || !session.companion_background
+                    || session.preserve_waiting_companion)
         })
     }
 
@@ -122,7 +174,9 @@ impl Sessions {
     }
 
     pub fn preserve_waiting_companion(&mut self, run: &str) {
-        if let Some(session) = self.by_conversation.values_mut()
+        if let Some(session) = self
+            .by_conversation
+            .values_mut()
             .find(|session| session.run_id.as_deref() == Some(run))
         {
             session.preserve_waiting_companion = true;
@@ -145,11 +199,13 @@ impl Sessions {
             .by_conversation
             .values()
             .find(|session| session.run_id.as_deref() == Some(run))
-            .map(|session| (
-                session.waiting,
-                session.companion_background && !session.preserve_waiting_companion,
-                session.companion_id.clone(),
-            ))
+            .map(|session| {
+                (
+                    session.waiting,
+                    session.companion_background && !session.preserve_waiting_companion,
+                    session.companion_id.clone(),
+                )
+            })
         else {
             return Ok(false);
         };
@@ -166,9 +222,9 @@ impl Sessions {
                 if occupied + starting >= ACTIVE_RUN_LIMIT
                     || companion.as_deref().is_some_and(|id| {
                         self.holds_companion(id)
-                            || dispatching.iter().any(|(other, reserved)| {
-                                *other != run && *reserved == Some(id)
-                            })
+                            || dispatching
+                                .iter()
+                                .any(|(other, reserved)| *other != run && *reserved == Some(id))
                     })
                 {
                     return Err("sidecar execution capacity is occupied".into());
@@ -180,8 +236,12 @@ impl Sessions {
                 if starting > 0 && occupied + starting >= ACTIVE_RUN_LIMIT {
                     return Err("sidecar execution capacity is occupied".into());
                 }
-                if !self.resuming.iter().any(|pending| pending == run) { self.resuming.push_back(run.to_owned()); }
-                if occupied >= ACTIVE_RUN_LIMIT || self.resuming.front().map(String::as_str) != Some(run) {
+                if !self.resuming.iter().any(|pending| pending == run) {
+                    self.resuming.push_back(run.to_owned());
+                }
+                if occupied >= ACTIVE_RUN_LIMIT
+                    || self.resuming.front().map(String::as_str) != Some(run)
+                {
                     return Err("sidecar execution capacity is occupied".into());
                 }
                 self.resuming.pop_front();
@@ -202,7 +262,11 @@ impl Sessions {
 
     pub fn finish(&mut self, run: &str) -> bool {
         self.resuming.retain(|pending| pending != run);
-        let Some(session) = self.by_conversation.values_mut().find(|session| session.run_id.as_deref() == Some(run)) else {
+        let Some(session) = self
+            .by_conversation
+            .values_mut()
+            .find(|session| session.run_id.as_deref() == Some(run))
+        else {
             return false;
         };
         session.run_id = None;
@@ -214,16 +278,27 @@ impl Sessions {
     }
 
     pub fn remove(&mut self, conversation: &str) -> Result<Option<Session>, String> {
-        if self.by_conversation.get(conversation).is_some_and(|session| session.run_id.is_some()) {
+        if self
+            .by_conversation
+            .get(conversation)
+            .is_some_and(|session| session.run_id.is_some())
+        {
             return Err("cannot close a session with an active Run".into());
         }
         Ok(self.by_conversation.remove(conversation))
     }
 
     pub fn single_active(&self) -> Option<&Session> {
-        let mut active = self.by_conversation.values().filter(|session| session.run_id.is_some());
+        let mut active = self
+            .by_conversation
+            .values()
+            .filter(|session| session.run_id.is_some());
         let first = active.next()?;
-        if active.next().is_some() { None } else { Some(first) }
+        if active.next().is_some() {
+            None
+        } else {
+            Some(first)
+        }
     }
 }
 
@@ -234,13 +309,19 @@ mod tests {
     #[test]
     fn background_wait_with_children_keeps_the_companion_slot() {
         let mut sessions = Sessions::default();
-        sessions.start("task", "task-session", 1, "parent", Some(("fox", true))).unwrap();
-        sessions.start("other", "other-session", 1, "sibling", None).unwrap();
+        sessions
+            .start("task", "task-session", 1, "parent", Some(("fox", true)))
+            .unwrap();
+        sessions
+            .start("other", "other-session", 1, "sibling", None)
+            .unwrap();
 
         sessions.preserve_waiting_companion("parent");
         sessions.set_waiting("parent", true).unwrap();
         assert!(!sessions.can_admit("private", Some("fox")));
-        sessions.start("child", "child-session", 1, "child", None).unwrap();
+        sessions
+            .start("child", "child-session", 1, "child", None)
+            .unwrap();
         assert!(sessions.finish("child"));
         assert!(sessions.set_waiting("parent", false).unwrap());
 
@@ -283,7 +364,10 @@ mod tests {
         sessions.start("a", "sa", 1, "ra", None).unwrap();
         assert!(sessions.remove("a").is_err());
         sessions.finish("ra");
-        assert_eq!(sessions.by_conversation("a").unwrap().runtime_session_id, "sa");
+        assert_eq!(
+            sessions.by_conversation("a").unwrap().runtime_session_id,
+            "sa"
+        );
         sessions.remember("a", "sa2", 2).unwrap();
         assert_eq!(sessions.remove("a").unwrap().unwrap().generation, 2);
         assert!(sessions.by_conversation("a").is_none());
@@ -313,10 +397,15 @@ mod tests {
         assert_eq!(sessions.by_run("rc").unwrap().generation, 5);
         assert_eq!(sessions.occupied(), 2);
         assert!(sessions.set_waiting("rc", false).is_err());
-        assert!(sessions.reserve_waiting("c", "sc", 5, "duplicate", None).is_err());
+        assert!(sessions
+            .reserve_waiting("c", "sc", 5, "duplicate", None)
+            .is_err());
         sessions.finish("rc");
         sessions.finish("rb");
-        assert!(sessions.can_admit("d", None), "cancelled recovery must not leave a resume ticket");
+        assert!(
+            sessions.can_admit("d", None),
+            "cancelled recovery must not leave a resume ticket"
+        );
     }
 
     /// K2: the private chat and every background execution conversation of one
@@ -324,17 +413,27 @@ mod tests {
     #[test]
     fn one_contact_runs_at_a_time_across_chat_and_background_conversations() {
         let mut sessions = Sessions::default();
-        sessions.start("chat", "s1", 1, "foreground", Some(("cmp_a", false))).unwrap();
+        sessions
+            .start("chat", "s1", 1, "foreground", Some(("cmp_a", false)))
+            .unwrap();
         assert!(sessions.holds_companion("cmp_a"));
-        assert!(sessions
-            .start("task-1", "s2", 1, "background", Some(("cmp_a", true)))
-            .is_err(), "a background task of the same contact must queue");
-        assert!(sessions
-            .start("task-2", "s3", 1, "other-contact", Some(("cmp_b", true)))
-            .is_ok(), "another contact keeps the global concurrency");
+        assert!(
+            sessions
+                .start("task-1", "s2", 1, "background", Some(("cmp_a", true)))
+                .is_err(),
+            "a background task of the same contact must queue"
+        );
+        assert!(
+            sessions
+                .start("task-2", "s3", 1, "other-contact", Some(("cmp_b", true)))
+                .is_ok(),
+            "another contact keeps the global concurrency"
+        );
         assert!(!sessions.can_admit("task-1", Some("cmp_a")));
         assert!(sessions.finish("foreground"));
-        assert!(sessions.start("task-1", "s2", 1, "background", Some(("cmp_a", true))).is_ok());
+        assert!(sessions
+            .start("task-1", "s2", 1, "background", Some(("cmp_a", true)))
+            .is_ok());
     }
 
     /// K2: an answered background approval — approved or denied, the Run
@@ -342,13 +441,26 @@ mod tests {
     #[test]
     fn background_approval_yields_the_contact_position_and_requeues_after_an_answer() {
         let mut sessions = Sessions::default();
-        sessions.start("task-1", "s1", 1, "background", Some(("cmp_a", true))).unwrap();
+        sessions
+            .start("task-1", "s1", 1, "background", Some(("cmp_a", true)))
+            .unwrap();
         assert!(sessions.set_waiting("background", true).unwrap());
-        assert!(!sessions.holds_companion("cmp_a"), "waiting background yields the position");
+        assert!(
+            !sessions.holds_companion("cmp_a"),
+            "waiting background yields the position"
+        );
         assert_eq!(sessions.occupied(), 0);
-        sessions.start("chat", "s2", 1, "foreground", Some(("cmp_a", false))).unwrap();
-        assert!(sessions.set_waiting("background", false).is_err(), "the answer must queue behind the chat");
-        assert!(sessions.can_admit("task-2", Some("cmp_b")), "other contacts are not blocked by the wait");
+        sessions
+            .start("chat", "s2", 1, "foreground", Some(("cmp_a", false)))
+            .unwrap();
+        assert!(
+            sessions.set_waiting("background", false).is_err(),
+            "the answer must queue behind the chat"
+        );
+        assert!(
+            sessions.can_admit("task-2", Some("cmp_b")),
+            "other contacts are not blocked by the wait"
+        );
         assert!(sessions.finish("foreground"));
         assert!(sessions.set_waiting("background", false).unwrap());
         assert!(sessions.holds_companion("cmp_a"));
@@ -360,14 +472,18 @@ mod tests {
     #[test]
     fn foreground_approval_keeps_the_contact_position_while_waiting() {
         let mut sessions = Sessions::default();
-        sessions.start("chat", "s1", 1, "foreground", Some(("cmp_a", false))).unwrap();
+        sessions
+            .start("chat", "s1", 1, "foreground", Some(("cmp_a", false)))
+            .unwrap();
         assert!(sessions.set_waiting("foreground", true).unwrap());
         assert!(sessions.holds_companion("cmp_a"));
         assert!(!sessions.can_admit("task-1", Some("cmp_a")));
         assert!(sessions
             .start("task-1", "s2", 1, "background", Some(("cmp_a", true)))
             .is_err());
-        assert!(sessions.start("task-2", "s3", 1, "other", Some(("cmp_b", true))).is_ok());
+        assert!(sessions
+            .start("task-2", "s3", 1, "other", Some(("cmp_b", true)))
+            .is_ok());
         assert!(sessions.set_waiting("foreground", false).unwrap());
     }
 
@@ -376,12 +492,18 @@ mod tests {
     #[test]
     fn recovered_background_approval_queues_for_the_contact_position() {
         let mut sessions = Sessions::default();
-        sessions.start("chat", "s1", 1, "foreground", Some(("cmp_a", false))).unwrap();
+        sessions
+            .start("chat", "s1", 1, "foreground", Some(("cmp_a", false)))
+            .unwrap();
         sessions
             .reserve_waiting("task-1", "s2", 3, "recovered", Some(("cmp_a", true)))
             .unwrap();
         assert!(sessions.by_run("recovered").unwrap().waiting);
-        assert_eq!(sessions.occupied(), 1, "the reservation holds no execution position yet");
+        assert_eq!(
+            sessions.occupied(),
+            1,
+            "the reservation holds no execution position yet"
+        );
         assert!(sessions.set_waiting("recovered", false).is_err());
         assert!(sessions.finish("foreground"));
         assert!(sessions.set_waiting("recovered", false).unwrap());
@@ -394,19 +516,32 @@ mod tests {
     #[test]
     fn answered_background_approval_cannot_preempt_a_dispatch_reservation() {
         let mut sessions = Sessions::default();
-        sessions.start("task-1", "s1", 1, "background", Some(("cmp_a", true))).unwrap();
+        sessions
+            .start("task-1", "s1", 1, "background", Some(("cmp_a", true)))
+            .unwrap();
         assert!(sessions.set_waiting("background", true).unwrap());
         let dispatching = [("granted", Some("cmp_a"))];
-        assert!(sessions.set_waiting_with_dispatch("background", false, &dispatching).is_err(),
-            "the answer must wait for the dispatch reservation");
+        assert!(
+            sessions
+                .set_waiting_with_dispatch("background", false, &dispatching)
+                .is_err(),
+            "the answer must wait for the dispatch reservation"
+        );
         assert!(sessions.by_run("background").unwrap().waiting);
-        sessions.start("task-2", "s2", 1, "granted", Some(("cmp_a", true)))
+        sessions
+            .start("task-2", "s2", 1, "granted", Some(("cmp_a", true)))
             .expect("the granted start must not fail because of the answered approval");
         // Once started, the reservation counts through the session itself.
-        assert!(sessions.set_waiting_with_dispatch("background", false, &dispatching).is_err());
-        assert!(sessions.set_waiting_with_dispatch("background", false, &[]).is_err());
+        assert!(sessions
+            .set_waiting_with_dispatch("background", false, &dispatching)
+            .is_err());
+        assert!(sessions
+            .set_waiting_with_dispatch("background", false, &[])
+            .is_err());
         assert!(sessions.finish("granted"));
-        assert!(sessions.set_waiting_with_dispatch("background", false, &[]).unwrap());
+        assert!(sessions
+            .set_waiting_with_dispatch("background", false, &[])
+            .unwrap());
         assert!(sessions.holds_companion("cmp_a"));
     }
 
@@ -415,20 +550,35 @@ mod tests {
     #[test]
     fn answered_background_approval_respects_reserved_global_capacity() {
         let mut sessions = Sessions::default();
-        sessions.start("task-1", "s1", 1, "background", Some(("cmp_a", true))).unwrap();
-        sessions.start("task-2", "s2", 1, "other", Some(("cmp_b", true))).unwrap();
+        sessions
+            .start("task-1", "s1", 1, "background", Some(("cmp_a", true)))
+            .unwrap();
+        sessions
+            .start("task-2", "s2", 1, "other", Some(("cmp_b", true)))
+            .unwrap();
         assert!(sessions.set_waiting("background", true).unwrap());
         let dispatching = [("granted", Some("cmp_c"))];
-        assert!(sessions.set_waiting_with_dispatch("background", false, &dispatching).is_err(),
-            "one executing Run plus one granted start already fill the capacity");
-        sessions.start("task-3", "s3", 1, "granted", Some(("cmp_c", true)))
+        assert!(
+            sessions
+                .set_waiting_with_dispatch("background", false, &dispatching)
+                .is_err(),
+            "one executing Run plus one granted start already fill the capacity"
+        );
+        sessions
+            .start("task-3", "s3", 1, "granted", Some(("cmp_c", true)))
             .expect("the granted start keeps its reserved slot");
-        assert!(sessions.set_waiting_with_dispatch("background", false, &dispatching).is_err(),
-            "the started reservation now counts through its session");
+        assert!(
+            sessions
+                .set_waiting_with_dispatch("background", false, &dispatching)
+                .is_err(),
+            "the started reservation now counts through its session"
+        );
         assert!(sessions.finish("other"));
         // The reservation still names a started Run: it must not be counted
         // twice, so the freed slot admits the answered approval.
-        assert!(sessions.set_waiting_with_dispatch("background", false, &dispatching).unwrap());
+        assert!(sessions
+            .set_waiting_with_dispatch("background", false, &dispatching)
+            .unwrap());
         assert!(sessions.holds_companion("cmp_a"));
     }
 
@@ -437,17 +587,30 @@ mod tests {
     #[test]
     fn foreground_resume_yields_to_a_dispatch_grant_without_a_ticket() {
         let mut sessions = Sessions::default();
-        sessions.start("chat", "s1", 1, "foreground", Some(("cmp_a", false))).unwrap();
-        sessions.start("task-2", "s2", 1, "other", Some(("cmp_b", true))).unwrap();
+        sessions
+            .start("chat", "s1", 1, "foreground", Some(("cmp_a", false)))
+            .unwrap();
+        sessions
+            .start("task-2", "s2", 1, "other", Some(("cmp_b", true)))
+            .unwrap();
         assert!(sessions.set_waiting("foreground", true).unwrap());
         let dispatching = [("granted", Some("cmp_c"))];
-        assert!(sessions.set_waiting_with_dispatch("foreground", false, &dispatching).is_err());
-        assert!(sessions.can_admit("task-3", Some("cmp_c")),
-            "no resume ticket may block the granted start");
-        sessions.start("task-3", "s3", 1, "granted", Some(("cmp_c", true)))
+        assert!(sessions
+            .set_waiting_with_dispatch("foreground", false, &dispatching)
+            .is_err());
+        assert!(
+            sessions.can_admit("task-3", Some("cmp_c")),
+            "no resume ticket may block the granted start"
+        );
+        sessions
+            .start("task-3", "s3", 1, "granted", Some(("cmp_c", true)))
             .expect("the granted start keeps its reserved slot");
-        assert!(sessions.set_waiting_with_dispatch("foreground", false, &[]).is_err(),
-            "capacity is full once the granted Run started");
+        assert!(
+            sessions
+                .set_waiting_with_dispatch("foreground", false, &[])
+                .is_err(),
+            "capacity is full once the granted Run started"
+        );
         assert!(sessions.finish("other"));
         assert!(sessions.set_waiting("foreground", false).unwrap());
     }

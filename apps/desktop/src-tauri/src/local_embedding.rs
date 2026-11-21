@@ -168,7 +168,11 @@ impl TokenizedInput {
         Self::from_text(package_dir, tokenizer_file, "Fox 本地向量模型隔离推理测试")
     }
 
-    fn from_text(package_dir: &Path, tokenizer_file: &str, text: &str) -> Result<Self, EmbeddingError> {
+    fn from_text(
+        package_dir: &Path,
+        tokenizer_file: &str,
+        text: &str,
+    ) -> Result<Self, EmbeddingError> {
         let tokenizer_path = package_dir.join(tokenizer_file);
         let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path).map_err(|error| {
             EmbeddingError::InvalidInput(format!(
@@ -176,11 +180,9 @@ impl TokenizedInput {
                 tokenizer_path.display()
             ))
         })?;
-        let encoding = tokenizer
-            .encode(text, true)
-            .map_err(|error| {
-                EmbeddingError::InvalidInput(format!("tokenizer smoke encoding failed: {error}"))
-            })?;
+        let encoding = tokenizer.encode(text, true).map_err(|error| {
+            EmbeddingError::InvalidInput(format!("tokenizer smoke encoding failed: {error}"))
+        })?;
         let input_ids = encoding
             .get_ids()
             .iter()

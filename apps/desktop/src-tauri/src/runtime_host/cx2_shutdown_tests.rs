@@ -14,7 +14,10 @@ fn cx2_shutdown_keeps_cleaning_after_a_failed_step_and_reports_errors_together()
     for window in &mut context.config_mut().app.windows {
         window.create = false;
     }
-    let app = tauri::Builder::default().any_thread().build(context).unwrap();
+    let app = tauri::Builder::default()
+        .any_thread()
+        .build(context)
+        .unwrap();
     let host = RuntimeHost::new(
         app.handle().clone(),
         database.clone(),
@@ -24,12 +27,22 @@ fn cx2_shutdown_keeps_cleaning_after_a_failed_step_and_reports_errors_together()
         crate::yuxi::YuxiClient::new().unwrap(),
     );
     let conversation = database
-        .create_conversation(database.default_agent_id(), Some("cx2 shutdown"), None, Some("allow"))
+        .create_conversation(
+            database.default_agent_id(),
+            Some("cx2 shutdown"),
+            None,
+            Some("allow"),
+        )
         .unwrap();
     let text = "queued before exit";
     let started = database.create_run(&conversation.id, text, None).unwrap();
     database
-        .freeze_default_run_control_for_engine(&started.run.id, "legacy", TimeBudgets::continuous(), "pi")
+        .freeze_default_run_control_for_engine(
+            &started.run.id,
+            "legacy",
+            TimeBudgets::continuous(),
+            "pi",
+        )
         .unwrap();
     // A queued entry whose Run row does not exist: marking it interrupted fails.
     // It is queued FIRST, so a shutdown that stops at the first error would
@@ -38,13 +51,31 @@ fn cx2_shutdown_keeps_cleaning_after_a_failed_step_and_reports_errors_together()
     ghost.run.id = "cx2-ghost-run".to_owned();
     {
         let mut state = host.state.lock().unwrap();
-        state.queued_runs.push_back(QueuedRun { started: ghost, text: text.to_owned(), attachments: Vec::new(), companion: None });
-        state.queued_runs.push_back(QueuedRun { started: started.clone(), text: text.to_owned(), attachments: Vec::new(), companion: None });
+        state.queued_runs.push_back(QueuedRun {
+            started: ghost,
+            text: text.to_owned(),
+            attachments: Vec::new(),
+            companion: None,
+        });
+        state.queued_runs.push_back(QueuedRun {
+            started: started.clone(),
+            text: text.to_owned(),
+            attachments: Vec::new(),
+            companion: None,
+        });
     }
 
-    let error = host.shutdown().expect_err("a failed step is reported, not swallowed");
-    assert!(error.starts_with("[runtime.shutdown_incomplete]"), "{error}");
-    assert!(error.contains("queued cx2-ghost-run mark_interrupted"), "{error}");
+    let error = host
+        .shutdown()
+        .expect_err("a failed step is reported, not swallowed");
+    assert!(
+        error.starts_with("[runtime.shutdown_incomplete]"),
+        "{error}"
+    );
+    assert!(
+        error.contains("queued cx2-ghost-run mark_interrupted"),
+        "{error}"
+    );
     let (status, code): (String, Option<String>) = database
         .with_connection(|connection| {
             connection.query_row(
@@ -54,7 +85,10 @@ fn cx2_shutdown_keeps_cleaning_after_a_failed_step_and_reports_errors_together()
             )
         })
         .unwrap();
-    assert_eq!(status, "interrupted", "the step after the failure still ran");
+    assert_eq!(
+        status, "interrupted",
+        "the step after the failure still ran"
+    );
     assert_eq!(code.as_deref(), Some("runtime.application_exit"));
     assert!(host.state.lock().unwrap().queued_runs.is_empty());
     assert!(host.state.lock().unwrap().worker.is_none());

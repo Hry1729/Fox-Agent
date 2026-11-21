@@ -49,8 +49,19 @@ pub fn bridge_subject(tool: &str) -> Option<ToolSubject> {
 }
 
 /// One engine decision for a bridge call (no I/O).
-pub fn decide_bridge_call(backend: AgentBackend, native_mode: &str, tool: &str, project_root: Option<&std::path::Path>, rules: &[approval_policy::PolicyRule]) -> Result<(), ToolError> {
-    let subject = bridge_subject(tool).ok_or_else(|| ToolError::new("tool.invalid_input", format!("{tool} is not a Fox bridge tool")))?;
+pub fn decide_bridge_call(
+    backend: AgentBackend,
+    native_mode: &str,
+    tool: &str,
+    project_root: Option<&std::path::Path>,
+    rules: &[approval_policy::PolicyRule],
+) -> Result<(), ToolError> {
+    let subject = bridge_subject(tool).ok_or_else(|| {
+        ToolError::new(
+            "tool.invalid_input",
+            format!("{tool} is not a Fox bridge tool"),
+        )
+    })?;
     let home = approval_policy::host_home();
     let decision = approval_policy::decide(&approval_policy::PolicyRequest {
         tool,
@@ -64,7 +75,12 @@ pub fn decide_bridge_call(backend: AgentBackend, native_mode: &str, tool: &str, 
         Verdict::Allow => Ok(()),
         Verdict::Deny { code, message } => Err(ToolError::new(code, message)),
         // No card path exists for a bridge call: fail closed.
-        Verdict::Ask => Err(ToolError::new("permission.approval_required", format!("{tool} 需要逐次审批，外部 Agent 的 Fox 工具调用不支持审批卡，已拒绝（未执行）"))),
+        Verdict::Ask => Err(ToolError::new(
+            "permission.approval_required",
+            format!(
+                "{tool} 需要逐次审批，外部 Agent 的 Fox 工具调用不支持审批卡，已拒绝（未执行）"
+            ),
+        )),
     }
 }
 
@@ -72,7 +88,10 @@ pub fn decide_bridge_call(backend: AgentBackend, native_mode: &str, tool: &str, 
 /// desktop already renders for `user.question.requested`).
 pub fn question_card(arguments: &Value) -> Result<Vec<Value>, ToolError> {
     let invalid = |message: &str| ToolError::new("tool.invalid_input", message.to_owned());
-    let questions = arguments.get("questions").and_then(Value::as_array).ok_or_else(|| invalid("questions must be a non-empty array"))?;
+    let questions = arguments
+        .get("questions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("questions must be a non-empty array"))?;
     if questions.is_empty() || questions.len() > 4 {
         return Err(invalid("ask 1 to 4 questions"));
     }
@@ -120,28 +139,64 @@ impl DesktopFoxTools {
 }
 
 impl FoxToolHost for DesktopFoxTools {
-    fn call_tool(&self, context: ToolCallContext, tool: String, arguments: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, ToolError>> + Send + 'static>> {
+    fn call_tool(
+        &self,
+        context: ToolCallContext,
+        tool: String,
+        arguments: Value,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Value, ToolError>> + Send + 'static>,
+    > {
         let app = self.app.clone();
         let runtime = self.runtime.get().cloned();
         Box::pin(async move {
-            let runtime = runtime.ok_or_else(|| ToolError::new("fox_mcp.host_unavailable", "Fox 外部后端运行时尚未就绪"))?;
-            let state = app.try_state::<crate::app_state::AppState>().ok_or_else(|| ToolError::new("fox_mcp.host_unavailable", "Fox Host 尚未就绪"))?;
+            let runtime = runtime.ok_or_else(|| {
+                ToolError::new("fox_mcp.host_unavailable", "Fox 外部后端运行时尚未就绪")
+            })?;
+            let state = app
+                .try_state::<crate::app_state::AppState>()
+                .ok_or_else(|| ToolError::new("fox_mcp.host_unavailable", "Fox Host 尚未就绪"))?;
             let database = state.database.clone();
             let run_id = runtime
                 .active_run_of(&context.conversation_id)
-                .ok_or_else(|| ToolError::new("fox_mcp.no_active_run", "这个会话当前没有正在执行的一轮，Fox 工具调用已拒绝"))?;
+                .ok_or_else(|| {
+                    ToolError::new(
+                        "fox_mcp.no_active_run",
+                        "这个会话当前没有正在执行的一轮，Fox 工具调用已拒绝",
+                    )
+                })?;
             // The conversation's native mode NOW (a switch mid-turn applies to
             // the next call, as with PiNative).
-            let stored = crate::commands::agent_backend_routing::stored_conversation_native_mode(&database, &context.conversation_id);
-            let native_mode = native::effective_mode(context.backend, stored.as_deref(), false, &Default::default());
+            let stored = crate::commands::agent_backend_routing::stored_conversation_native_mode(
+                &database,
+                &context.conversation_id,
+            );
+            let native_mode = native::effective_mode(
+                context.backend,
+                stored.as_deref(),
+                false,
+                &Default::default(),
+            );
             if tool == "fox_web_search" {
-                let mode = runtime.session_info(&context.conversation_id)
-                    .and_then(|info| info.native_mode).ok_or_else(|| ToolError::new("fox_mcp.no_active_run", "搜索会话已结束。"))?;
+                let mode = runtime
+                    .session_info(&context.conversation_id)
+                    .and_then(|info| info.native_mode)
+                    .ok_or_else(|| ToolError::new("fox_mcp.no_active_run", "搜索会话已结束。"))?;
                 let mode = external_access_mode(context.backend, &mode);
                 let host = state.runtime_host.clone();
-                return tauri::async_runtime::spawn_blocking(move || host.external_web_search(
-                    &context.conversation_id, &run_id, &context.tool_call_id, arguments, mode, &runtime
-                )).await.map_err(|error| ToolError::new("tool.failed", error.to_string()))?.map_err(split_code);
+                return tauri::async_runtime::spawn_blocking(move || {
+                    host.external_web_search(
+                        &context.conversation_id,
+                        &run_id,
+                        &context.tool_call_id,
+                        arguments,
+                        mode,
+                        &runtime,
+                    )
+                })
+                .await
+                .map_err(|error| ToolError::new("tool.failed", error.to_string()))?
+                .map_err(split_code);
             }
             let project_root = database
                 .external_conversation_context(&context.conversation_id)
@@ -151,12 +206,34 @@ impl FoxToolHost for DesktopFoxTools {
                     let root = std::path::PathBuf::from(root);
                     root.canonicalize().unwrap_or(root)
                 });
-            let rules = database.policy_rules_for_conversation(&context.conversation_id).map_err(|error| ToolError::new("storage.operation_failed", error))?;
-            decide_bridge_call(context.backend, native_mode, &tool, project_root.as_deref(), &rules)?;
+            let rules = database
+                .policy_rules_for_conversation(&context.conversation_id)
+                .map_err(|error| ToolError::new("storage.operation_failed", error))?;
+            decide_bridge_call(
+                context.backend,
+                native_mode,
+                &tool,
+                project_root.as_deref(),
+                &rules,
+            )?;
             if tool == "ask_user" {
+                let from_peer = database
+                    .companion_coordination_context(&run_id)
+                    .map_err(|error| ToolError::new("storage.operation_failed", error))?
+                    .and_then(|run| run.incoming)
+                    .is_some_and(|assignment| assignment.source_companion_id.is_some());
+                if from_peer {
+                    return Err(ToolError::new(
+                        "companion.question_for_source",
+                        "请单独用 NEEDS INPUT: 开头写明缺什么和试过什么。Fox 会把问题交回发起伙伴。",
+                    ));
+                }
                 let questions = question_card(&arguments)?;
                 let event = json!({ "type": "user.question.requested", "source": "ask_user", "agentBackend": context.backend.as_str(), "questions": questions });
-                runtime.sink().emit(&run_id, &context.conversation_id, event).map_err(|error| ToolError::new("fox_mcp.question_failed", error))?;
+                runtime
+                    .sink()
+                    .emit(&run_id, &context.conversation_id, event)
+                    .map_err(|error| ToolError::new("fox_mcp.question_failed", error))?;
                 if !runtime.mark_awaiting_user(&context.conversation_id, &run_id) {
                     return Err(ToolError::new("fox_mcp.no_active_run", "提问时本轮已结束"));
                 }
@@ -197,41 +274,96 @@ mod tests {
 
     #[test]
     fn native_modes_map_to_their_fox_tier() {
-        assert_eq!(external_access_mode(AgentBackend::Codex, native::CODEX_READ_ONLY), AccessMode::ReadOnly);
-        assert_eq!(external_access_mode(AgentBackend::Codex, native::CODEX_ASK), AccessMode::Ask);
-        assert_eq!(external_access_mode(AgentBackend::Codex, native::CODEX_FULL), AccessMode::FullAccess);
-        assert_eq!(external_access_mode(AgentBackend::Pi, native::PI_ALLOW), AccessMode::Auto);
-        assert_eq!(external_access_mode(AgentBackend::Pi, "nonsense"), AccessMode::Ask, "unknown is never wider");
+        assert_eq!(
+            external_access_mode(AgentBackend::Codex, native::CODEX_READ_ONLY),
+            AccessMode::ReadOnly
+        );
+        assert_eq!(
+            external_access_mode(AgentBackend::Codex, native::CODEX_ASK),
+            AccessMode::Ask
+        );
+        assert_eq!(
+            external_access_mode(AgentBackend::Codex, native::CODEX_FULL),
+            AccessMode::FullAccess
+        );
+        assert_eq!(
+            external_access_mode(AgentBackend::Pi, native::PI_ALLOW),
+            AccessMode::Auto
+        );
+        assert_eq!(
+            external_access_mode(AgentBackend::Pi, "nonsense"),
+            AccessMode::Ask,
+            "unknown is never wider"
+        );
     }
 
     #[test]
     fn bridge_tools_are_reads_in_every_tier_and_unknown_tools_are_refused() {
-        let rules: Vec<PolicyRule> = vec![PolicyRule { id: "b".into(), effect: RuleEffect::Block, tool: "run_command".into(), pattern: "rm".into() }];
-        for mode in [native::PI_READ_ONLY, native::PI_ASK, native::PI_ALLOW, native::PI_FULL] {
-            for tool in fox_agent_backend::fox_mcp::TOOL_NAMES.into_iter().filter(|tool| *tool != "fox_web_search") {
-                assert_eq!(decide_bridge_call(AgentBackend::Pi, mode, tool, None, &rules), Ok(()), "{tool} in {mode}");
+        let rules: Vec<PolicyRule> = vec![PolicyRule {
+            id: "b".into(),
+            effect: RuleEffect::Block,
+            tool: "run_command".into(),
+            pattern: "rm".into(),
+        }];
+        for mode in [
+            native::PI_READ_ONLY,
+            native::PI_ASK,
+            native::PI_ALLOW,
+            native::PI_FULL,
+        ] {
+            for tool in fox_agent_backend::fox_mcp::TOOL_NAMES
+                .into_iter()
+                .filter(|tool| *tool != "fox_web_search")
+            {
+                assert_eq!(
+                    decide_bridge_call(AgentBackend::Pi, mode, tool, None, &rules),
+                    Ok(()),
+                    "{tool} in {mode}"
+                );
             }
         }
-        assert_eq!(decide_bridge_call(AgentBackend::Codex, native::CODEX_ASK, "run_command", None, &rules).unwrap_err().code, "tool.invalid_input");
+        assert_eq!(
+            decide_bridge_call(
+                AgentBackend::Codex,
+                native::CODEX_ASK,
+                "run_command",
+                None,
+                &rules
+            )
+            .unwrap_err()
+            .code,
+            "tool.invalid_input"
+        );
     }
 
     #[test]
     fn ask_user_arguments_become_the_question_card() {
         let card = question_card(&json!({ "questions": [{ "question": " 选哪种格式？ ", "options": ["Word", "PDF"] }, { "question": "截止日期？" }] })).unwrap();
         assert_eq!(card[0]["question"], "选哪种格式？");
-        assert_eq!(card[0]["options"][1], json!({ "label": "PDF", "value": "PDF" }));
+        assert_eq!(
+            card[0]["options"][1],
+            json!({ "label": "PDF", "value": "PDF" })
+        );
         assert_eq!(card[0]["question_id"], "q-1");
-        assert_eq!(card[1]["allow_other"], true, "a question without options is free text");
+        assert_eq!(
+            card[1]["allow_other"], true,
+            "a question without options is free text"
+        );
         assert!(question_card(&json!({ "questions": [] })).is_err());
         assert!(question_card(&json!({ "questions": [{ "question": "" }] })).is_err());
-        assert!(question_card(&json!({ "questions": [{ "question": "q", "options": [1] }] })).is_err());
+        assert!(
+            question_card(&json!({ "questions": [{ "question": "q", "options": [1] }] })).is_err()
+        );
         assert!(question_card(&json!({})).is_err());
     }
 
     #[test]
     fn host_error_codes_are_kept() {
         let error = split_code("[local_knowledge.binding_invalid] not enabled".into());
-        assert_eq!((error.code.as_str(), error.message.as_str()), ("local_knowledge.binding_invalid", "not enabled"));
+        assert_eq!(
+            (error.code.as_str(), error.message.as_str()),
+            ("local_knowledge.binding_invalid", "not enabled")
+        );
         assert_eq!(split_code("plain failure".into()).code, "tool.failed");
     }
 }

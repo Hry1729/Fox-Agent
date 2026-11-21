@@ -1,11 +1,11 @@
+use super::*;
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::*;
 use crate::database::{JobStartRequest, JobState};
 use crate::kernel::CancellationRegistry;
 use crate::process_jobs::BackendCapabilityProof;
-use serde_json::{json, Value};
 use rusqlite::OptionalExtension;
+use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -106,9 +106,17 @@ impl Fixture {
         let input = json!({"action":"start","command":command,"timeoutSeconds":30});
         let binding = self.database.run_control_binding(&self.run_id)?.unwrap();
         let dispatch = fox_engine_protocol::encode_dispatch_id(&self.run_id, key)?;
-        let digest = crate::database::kernel_execution_admission::launch_params_hash("run_command", &input.canonical_string());
-        let credential = if let Some(stored) = self.database.read_execution_credential(&self.run_id, &dispatch)? {
-            if stored.intent_digest != digest { return Err("job_idempotency_conflict".into()); }
+        let digest = crate::database::kernel_execution_admission::launch_params_hash(
+            "run_command",
+            &input.canonical_string(),
+        );
+        let credential = if let Some(stored) = self
+            .database
+            .read_execution_credential(&self.run_id, &dispatch)?
+        {
+            if stored.intent_digest != digest {
+                return Err("job_idempotency_conflict".into());
+            }
             stored
         } else {
             let proof_digest = match proof.availability() {
@@ -116,11 +124,22 @@ impl Fixture {
                 _ => None,
             };
             let mut c = fox_engine_protocol::ExecutionCredential::new(
-                dispatch.clone(), self.run_id.clone(), binding.conversation_id.clone(),
-                digest, fox_engine_protocol::ActionClass::Execute, None,
-                binding.execution_profile_id.clone(), binding.permission_snapshot_id.clone(),
-                Some(1), binding.budgets.tool_execution_ms, None,
-                fox_engine_protocol::BackendRequirement { required:"fixture".into(), evidence_digest:proof_digest })?;
+                dispatch.clone(),
+                self.run_id.clone(),
+                binding.conversation_id.clone(),
+                digest,
+                fox_engine_protocol::ActionClass::Execute,
+                None,
+                binding.execution_profile_id.clone(),
+                binding.permission_snapshot_id.clone(),
+                Some(1),
+                binding.budgets.tool_execution_ms,
+                None,
+                fox_engine_protocol::BackendRequirement {
+                    required: "fixture".into(),
+                    evidence_digest: proof_digest,
+                },
+            )?;
             // Fixture authority only: production derives these requirements from
             // durable policy, and its Host proof remains unavailable.
             c.realtime_requirements.clear();
@@ -128,48 +147,88 @@ impl Fixture {
             self.database.issue_execution_credential(&c)?;
             c
         };
-        match self.database.claim_execution_attempt(&self.run_id, &binding.conversation_id,
-            &credential, &credential.intent_digest, "fixture-host")? {
-            fox_engine_protocol::AttemptOutcome::Claimed => {},
+        match self.database.claim_execution_attempt(
+            &self.run_id,
+            &binding.conversation_id,
+            &credential,
+            &credential.intent_digest,
+            "fixture-host",
+        )? {
+            fox_engine_protocol::AttemptOutcome::Claimed => {}
             fox_engine_protocol::AttemptOutcome::AlreadyRefused { code } => {
-                return Ok(result(json!({"jobId":Value::Null,"state":"refused",
-                    "errorCode":code,"executionStarted":false,"sideEffectState":"none"}), true));
-            },
+                return Ok(result(
+                    json!({"jobId":Value::Null,"state":"refused",
+                    "errorCode":code,"executionStarted":false,"sideEffectState":"none"}),
+                    true,
+                ));
+            }
             _ => {
                 let id: Option<String> = self.database.with_connection(|connection| {
                     connection.query_row("SELECT job_id FROM kernel_jobs WHERE run_id=?1 AND idempotency_key=?2",
                         rusqlite::params![self.run_id, format!("job:{dispatch}")], |r| r.get(0)).optional()
                 }).map_err(|e| e.to_string())?;
-                let row = id.map(|id| self.database.kernel_job_snapshot(&id)).transpose()?;
+                let row = id
+                    .map(|id| self.database.kernel_job_snapshot(&id))
+                    .transpose()?;
                 return match row {
                     Some(row) => Ok(result(public_status(&self.database, &row)?, false)),
-                    None => Ok(result(json!({"state":"uncertain","errorCode":"kernel.uncertain_execution"}), true)),
+                    None => Ok(result(
+                        json!({"state":"uncertain","errorCode":"kernel.uncertain_execution"}),
+                        true,
+                    )),
                 };
             }
         }
         let mut evidence = ExecutionEvidence::NotStarted;
         let mut outcome = CallOutcome::Completed;
-        let response = execute_inner(&self.database, &self.run_id, &input, &self.root,
-            &self.token, Duration::from_secs(30), proof, Some(&credential), &mut evidence, &mut outcome);
+        let response = execute_inner(
+            &self.database,
+            &self.run_id,
+            &input,
+            &self.root,
+            &self.token,
+            Duration::from_secs(30),
+            proof,
+            Some(&credential),
+            &mut evidence,
+            &mut outcome,
+        );
         match evidence {
-            ExecutionEvidence::Started => self.database.record_attempt_started(&self.run_id, &dispatch)?,
-            ExecutionEvidence::Unknown => self.database.mark_attempt_unknown(&self.run_id, &dispatch)?,
+            ExecutionEvidence::Started => self
+                .database
+                .record_attempt_started(&self.run_id, &dispatch)?,
+            ExecutionEvidence::Unknown => self
+                .database
+                .mark_attempt_unknown(&self.run_id, &dispatch)?,
             ExecutionEvidence::NotStarted => {
-                let code = match outcome { CallOutcome::Refused { code } | CallOutcome::Failed { code } => code,
-                    _ => "tool.start_failed".into() };
-                self.database.record_attempt_refusal(&self.run_id, &dispatch, &code)?;
+                let code = match outcome {
+                    CallOutcome::Refused { code } | CallOutcome::Failed { code } => code,
+                    _ => "tool.start_failed".into(),
+                };
+                self.database
+                    .record_attempt_refusal(&self.run_id, &dispatch, &code)?;
             }
         }
         response
     }
 
     fn action_with_proof(
-        &self, value: Value,
+        &self,
+        value: Value,
         proof: Arc<dyn crate::process_jobs::BackendCapabilityProof>,
     ) -> Result<Value, String> {
-        execute_inner(&self.database, &self.run_id, &value, &self.root, &self.token,
-            Duration::from_secs(30), proof, None,
-            &mut ExecutionEvidence::NotStarted, &mut CallOutcome::Completed)
+        execute_inner(
+            &self.database,
+            &self.run_id,
+            &value,
+            &self.root,
+            &self.token,
+            Duration::from_secs(30),
+            proof,
+            None,
+            &mut ExecutionEvidence::NotStarted,
+            &mut CallOutcome::Completed,
+        )
     }
 
     fn wait_terminal(&self, job_id: &str) -> crate::database::JobSnapshot {
@@ -215,10 +274,21 @@ fn start_refusal_is_durable_and_same_dispatch_never_retries() {
     );
     assert_eq!(refused["isError"], true);
 
-    assert!(fixture.database.kernel_jobs_for_run(&fixture.run_id).unwrap().is_empty());
+    assert!(fixture
+        .database
+        .kernel_jobs_for_run(&fixture.run_id)
+        .unwrap()
+        .is_empty());
     let dispatch = fox_engine_protocol::encode_dispatch_id(&fixture.run_id, "denied").unwrap();
-    assert!(matches!(fixture.database.read_execution_attempt(&fixture.run_id, &dispatch).unwrap().unwrap().state,
-        AttemptState::Refused { .. }));
+    assert!(matches!(
+        fixture
+            .database
+            .read_execution_attempt(&fixture.run_id, &dispatch)
+            .unwrap()
+            .unwrap()
+            .state,
+        AttemptState::Refused { .. }
+    ));
     // Restoring backend availability cannot revive the same dispatch.
     let retried = fixture
         .start_with_proof("denied", "echo should-never-run", authorized_proof())
@@ -338,12 +408,15 @@ fn refusal_preserves_status_output_and_cancel_for_existing_jobs() {
 fn raw_system_spawner_refuses_without_a_verified_backend() {
     use crate::process_jobs::{ProcessSpawner, SpawnSpec, SystemSpawner};
     let spawner = SystemSpawner;
-    let outcome = spawner.spawn(refusing_proof().as_ref(), &SpawnSpec {
-        program: "cmd.exe".into(),
-        args: vec!["/C".into(), "echo unconfined".into()],
-        cwd: std::env::temp_dir().to_string_lossy().into_owned(),
-        env: crate::process_jobs::EnvMode::Inherit,
-    });
+    let outcome = spawner.spawn(
+        refusing_proof().as_ref(),
+        &SpawnSpec {
+            program: "cmd.exe".into(),
+            args: vec!["/C".into(), "echo unconfined".into()],
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            env: crate::process_jobs::EnvMode::Inherit,
+        },
+    );
     // `Box<dyn ChildHandle>` is not `Debug`, so match rather than `expect_err`.
     let error = match outcome {
         Ok(child) => panic!(
@@ -412,9 +485,19 @@ fn production_adapter_start_nonzero_and_utf8_byte_paging_are_durable() {
     );
     for action in ["status", "output"] {
         let mut outcome = CallOutcome::Completed;
-        let read = execute_inner(&fixture.database, &fixture.run_id, &json!({"action":action,"jobId":id}),
-            &fixture.root, &fixture.token, Duration::from_secs(5), refusing_proof(), None,
-            &mut ExecutionEvidence::NotStarted, &mut outcome).expect("read failed command");
+        let read = execute_inner(
+            &fixture.database,
+            &fixture.run_id,
+            &json!({"action":action,"jobId":id}),
+            &fixture.root,
+            &fixture.token,
+            Duration::from_secs(5),
+            refusing_proof(),
+            None,
+            &mut ExecutionEvidence::NotStarted,
+            &mut outcome,
+        )
+        .expect("read failed command");
         assert_eq!(read["isError"], false, "{read}");
         assert_eq!(read["details"]["state"], "failed");
         assert_eq!(read["details"]["exitCode"], 7);
@@ -640,58 +723,105 @@ fn interrupted_command_recovery_fails_closed_and_never_becomes_resumable() {
 
 #[test]
 fn r2_status_excludes_full_checkpoints_and_unchanged_checkpoint_does_not_write() {
-    let fixture=Fixture::new("status-window");
-    let id=fixture.database.kernel_job_start(&JobStartRequest {run_id:fixture.run_id.clone(),kind:"command".into(),
-        idempotency_key:"status".into(),params:json!({}),deadline_ms:None,progress_total:None}).unwrap().snapshot().job_id.clone();
-    fixture.database.kernel_job_claim_attempt(&id,1).unwrap();
-    let p=json!({"data":base64::engine::general_purpose::STANDARD.encode(vec![b'x';256*1024]),
+    let fixture = Fixture::new("status-window");
+    let id = fixture
+        .database
+        .kernel_job_start(&JobStartRequest {
+            run_id: fixture.run_id.clone(),
+            kind: "command".into(),
+            idempotency_key: "status".into(),
+            params: json!({}),
+            deadline_ms: None,
+            progress_total: None,
+        })
+        .unwrap()
+        .snapshot()
+        .job_id
+        .clone();
+    fixture.database.kernel_job_claim_attempt(&id, 1).unwrap();
+    let p = json!({"data":base64::engine::general_purpose::STANDARD.encode(vec![b'x';256*1024]),
         "offset":100,"nextOffset":262244,"totalBytes":262244,"droppedBytes":100,"streamClosed":false});
-    let value=json!({"state":"running","stdout":p,"stderr":p,"exitCode":null});
-    fixture.database.kernel_command_job_checkpoint(&id,1,&value).unwrap();
+    let value = json!({"state":"running","stdout":p,"stderr":p,"exitCode":null});
+    fixture
+        .database
+        .kernel_command_job_checkpoint(&id, 1, &value)
+        .unwrap();
     fixture.database.with_connection(|conn| conn.execute_batch(
         "CREATE TRIGGER reject_duplicate_checkpoint BEFORE UPDATE OF cursor ON kernel_jobs BEGIN SELECT RAISE(ABORT,'unexpected duplicate checkpoint'); END;")).unwrap();
-    fixture.database.kernel_command_job_checkpoint(&id,1,&value).expect("identical checkpoint must issue no UPDATE");
+    fixture
+        .database
+        .kernel_command_job_checkpoint(&id, 1, &value)
+        .expect("identical checkpoint must issue no UPDATE");
     for _ in 0..5 {
-        let status=fixture.action(json!({"action":"status","jobId":id})).unwrap();
-        assert!(status.canonical_string().len()<2000,"{status}");
+        let status = fixture
+            .action(json!({"action":"status","jobId":id}))
+            .unwrap();
+        assert!(status.canonical_string().len() < 2000, "{status}");
         assert!(status["details"].get("cursor").is_none());
         assert!(status["details"]["stdout"].get("data").is_none());
-        assert_eq!(status["details"]["stderr"]["totalBytes"],262244);
-        assert_eq!(status["details"]["stdout"]["offset"],100);
+        assert_eq!(status["details"]["stderr"]["totalBytes"], 262244);
+        assert_eq!(status["details"]["stdout"]["offset"], 100);
     }
-    let page=fixture.action(json!({"action":"output","jobId":id,"offset":100,"limit":4})).unwrap();
-    assert_eq!(page["details"]["content"],"xxxx");
-    assert_eq!(page["details"]["nextOffset"],104);
-    fixture.database.with_connection(|conn| conn.execute_batch("DROP TRIGGER reject_duplicate_checkpoint;")).unwrap();
-    let mut done=value;done["state"]=json!("completed");done["exitCode"]=json!(0);
-    fixture.database.kernel_command_job_publish(&id,1,&done).unwrap();
-    let status=fixture.action(json!({"action":"status","jobId":id})).unwrap();
-    assert_eq!(status["details"]["exitCode"],0);
-    assert!(status.canonical_string().len()<2000);
+    let page = fixture
+        .action(json!({"action":"output","jobId":id,"offset":100,"limit":4}))
+        .unwrap();
+    assert_eq!(page["details"]["content"], "xxxx");
+    assert_eq!(page["details"]["nextOffset"], 104);
+    fixture
+        .database
+        .with_connection(|conn| conn.execute_batch("DROP TRIGGER reject_duplicate_checkpoint;"))
+        .unwrap();
+    let mut done = value;
+    done["state"] = json!("completed");
+    done["exitCode"] = json!(0);
+    fixture
+        .database
+        .kernel_command_job_publish(&id, 1, &done)
+        .unwrap();
+    let status = fixture
+        .action(json!({"action":"status","jobId":id}))
+        .unwrap();
+    assert_eq!(status["details"]["exitCode"], 0);
+    assert!(status.canonical_string().len() < 2000);
 }
 
 #[cfg(windows)]
 #[test]
 fn r2_live_noisy_command_status_remains_small_and_cancel_is_responsive() {
-    let fixture=Fixture::new("status-live");
+    let fixture = Fixture::new("status-live");
     let started=fixture.start("noisy", "powershell.exe -NoProfile -Command \"[Console]::Out.Write(('x'*400000));[Console]::Error.Write(('y'*400000));Start-Sleep -Seconds 20\"").unwrap();
-    let id=job_id(&started).to_owned();
-    let deadline=Instant::now()+Duration::from_secs(15);
+    let id = job_id(&started).to_owned();
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let status=fixture.action(json!({"action":"status","jobId":id})).unwrap();
-        assert!(status.canonical_string().len()<2000);
+        let status = fixture
+            .action(json!({"action":"status","jobId":id}))
+            .unwrap();
+        assert!(status.canonical_string().len() < 2000);
         assert!(!status.canonical_string().contains("cursor"));
-        if status["details"]["stderr"]["totalBytes"].as_u64().unwrap_or(0)>=400000 {break;}
-        assert!(Instant::now()<deadline,"noisy command produced no checkpoint: {status}");
+        if status["details"]["stderr"]["totalBytes"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 400000
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "noisy command produced no checkpoint: {status}"
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
-    let page=fixture.action(json!({"action":"output","jobId":id,"stream":"stderr","limit":8})).unwrap();
-    assert_eq!(page["details"]["content"],"yyyyyyyy");
-    let stopped=Instant::now();
-    let status=fixture.action(json!({"action":"cancel","jobId":id})).unwrap();
-    assert!(status.canonical_string().len()<2000);
-    assert_eq!(fixture.wait_terminal(&id).state,JobState::Cancelled);
-    assert!(stopped.elapsed()<Duration::from_secs(5));
+    let page = fixture
+        .action(json!({"action":"output","jobId":id,"stream":"stderr","limit":8}))
+        .unwrap();
+    assert_eq!(page["details"]["content"], "yyyyyyyy");
+    let stopped = Instant::now();
+    let status = fixture
+        .action(json!({"action":"cancel","jobId":id}))
+        .unwrap();
+    assert!(status.canonical_string().len() < 2000);
+    assert_eq!(fixture.wait_terminal(&id).state, JobState::Cancelled);
+    assert!(stopped.elapsed() < Duration::from_secs(5));
 }
 
 #[test]
@@ -699,42 +829,96 @@ fn command_boundary_rejects_rehashed_changed_authoritative_fields() {
     let fixture = Fixture::refusing("tampered-snapshot");
     fixture.start("bound", "echo nope").unwrap();
     let dispatch = fox_engine_protocol::encode_dispatch_id(&fixture.run_id, "bound").unwrap();
-    let mut credential = fixture.database.read_execution_credential(&fixture.run_id, &dispatch).unwrap().unwrap();
+    let mut credential = fixture
+        .database
+        .read_execution_credential(&fixture.run_id, &dispatch)
+        .unwrap()
+        .unwrap();
     credential.resolved_profile = "attacker-rehashed".into();
     credential.credential_digest = credential.recompute_digest();
     let input = json!({"action":"start","command":"echo nope","timeoutSeconds":30});
-    let error = verify_start(&fixture.database, &fixture.run_id, &input,
-        &credential, authorized_proof().as_ref()).unwrap_err();
+    let error = verify_start(
+        &fixture.database,
+        &fixture.run_id,
+        &input,
+        &credential,
+        authorized_proof().as_ref(),
+    )
+    .unwrap_err();
     assert!(error.contains("credential_mismatch"), "{error}");
-    assert!(fixture.database.kernel_jobs_for_run(&fixture.run_id).unwrap().is_empty());
+    assert!(fixture
+        .database
+        .kernel_jobs_for_run(&fixture.run_id)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
 fn model_cannot_supply_a_job_key_or_execution_credential() {
     let fixture = Fixture::new("no-model-identity");
-    for field in ["idempotencyKey", "dispatch_id", "credential_digest", "credential"] {
+    for field in [
+        "idempotencyKey",
+        "dispatch_id",
+        "credential_digest",
+        "credential",
+    ] {
         let mut input = json!({"action":"start","command":"echo nope"});
         input[field] = json!("self-issued");
         assert!(prepare(&input, &fixture.root).is_err());
     }
 }
 
-fn claimed_fixture_credential(fixture: &Fixture, call: &str, input: &Value, digest: &str) -> ExecutionCredential {
-    let binding = fixture.database.run_control_binding(&fixture.run_id).unwrap().unwrap();
+fn claimed_fixture_credential(
+    fixture: &Fixture,
+    call: &str,
+    input: &Value,
+    digest: &str,
+) -> ExecutionCredential {
+    let binding = fixture
+        .database
+        .run_control_binding(&fixture.run_id)
+        .unwrap()
+        .unwrap();
     let mut credential = ExecutionCredential::new(
         fox_engine_protocol::encode_dispatch_id(&fixture.run_id, call).unwrap(),
-        fixture.run_id.clone(), binding.conversation_id.clone(),
-        crate::database::kernel_execution_admission::launch_params_hash("run_command", &input.canonical_string()),
-        fox_engine_protocol::ActionClass::Execute, None,
-        binding.execution_profile_id, binding.permission_snapshot_id, Some(1),
-        binding.budgets.tool_execution_ms, None,
-        fox_engine_protocol::BackendRequirement { required: "fixture".into(), evidence_digest: Some(digest.into()) },
-    ).unwrap();
+        fixture.run_id.clone(),
+        binding.conversation_id.clone(),
+        crate::database::kernel_execution_admission::launch_params_hash(
+            "run_command",
+            &input.canonical_string(),
+        ),
+        fox_engine_protocol::ActionClass::Execute,
+        None,
+        binding.execution_profile_id,
+        binding.permission_snapshot_id,
+        Some(1),
+        binding.budgets.tool_execution_ms,
+        None,
+        fox_engine_protocol::BackendRequirement {
+            required: "fixture".into(),
+            evidence_digest: Some(digest.into()),
+        },
+    )
+    .unwrap();
     credential.realtime_requirements.clear();
     credential.credential_digest = credential.recompute_digest();
-    fixture.database.issue_execution_credential(&credential).unwrap();
-    assert_eq!(fixture.database.claim_execution_attempt(&fixture.run_id, &binding.conversation_id,
-        &credential, &credential.intent_digest, "test-host").unwrap(), fox_engine_protocol::AttemptOutcome::Claimed);
+    fixture
+        .database
+        .issue_execution_credential(&credential)
+        .unwrap();
+    assert_eq!(
+        fixture
+            .database
+            .claim_execution_attempt(
+                &fixture.run_id,
+                &binding.conversation_id,
+                &credential,
+                &credential.intent_digest,
+                "test-host"
+            )
+            .unwrap(),
+        fox_engine_protocol::AttemptOutcome::Claimed
+    );
     credential
 }
 
@@ -744,8 +928,11 @@ fn backend_change_at_manager_boundary_keeps_job_audit_without_start_evidence() {
     impl BackendCapabilityProof for ChangingProof {
         fn availability(&self) -> crate::process_jobs::BackendAvailability {
             if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
-                crate::process_jobs::AvailableInTests::host_user_unconfined("boundary-proof").availability()
-            } else { crate::process_jobs::RefusingInTests.availability() }
+                crate::process_jobs::AvailableInTests::host_user_unconfined("boundary-proof")
+                    .availability()
+            } else {
+                crate::process_jobs::RefusingInTests.availability()
+            }
         }
     }
     let fixture = Fixture::new("manager-proof-change");
@@ -753,24 +940,54 @@ fn backend_change_at_manager_boundary_keeps_job_audit_without_start_evidence() {
     let credential = claimed_fixture_credential(&fixture, "call", &input, "boundary-proof");
     let mut evidence = ExecutionEvidence::NotStarted;
     let mut outcome = CallOutcome::Completed;
-    let response = execute_inner(&fixture.database, &fixture.run_id, &input, &fixture.root,
-        &fixture.token, Duration::from_secs(30),
-        Arc::new(ChangingProof(std::sync::atomic::AtomicUsize::new(0))), Some(&credential),
-        &mut evidence, &mut outcome).unwrap();
+    let response = execute_inner(
+        &fixture.database,
+        &fixture.run_id,
+        &input,
+        &fixture.root,
+        &fixture.token,
+        Duration::from_secs(30),
+        Arc::new(ChangingProof(std::sync::atomic::AtomicUsize::new(0))),
+        Some(&credential),
+        &mut evidence,
+        &mut outcome,
+    )
+    .unwrap();
     assert_eq!(evidence, ExecutionEvidence::NotStarted);
     assert!(matches!(outcome, CallOutcome::Failed { .. }));
     assert_eq!(response["details"]["errorCode"], "sandbox_unavailable");
-    let rows = fixture.database.kernel_jobs_for_run(&fixture.run_id).unwrap();
+    let rows = fixture
+        .database
+        .kernel_jobs_for_run(&fixture.run_id)
+        .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].state, JobState::Failed);
     // Host settlement must not erase the durable job-creation stage.
-    fixture.database.record_attempt_refusal(&fixture.run_id, &credential.dispatch_id,
-        "sandbox_unavailable").unwrap();
-    let receipt = fixture.database.execution_receipt(&fixture.run_id, &credential.dispatch_id)
-        .unwrap().unwrap();
-    assert_eq!(receipt.stage, fox_engine_protocol::ExecutionStage::JobCreated);
-    assert_eq!(receipt.execution_started, fox_engine_protocol::TriState::False);
-    assert_eq!(receipt.control_plane, fox_engine_protocol::ControlPlaneState::NotApplied);
+    fixture
+        .database
+        .record_attempt_refusal(
+            &fixture.run_id,
+            &credential.dispatch_id,
+            "sandbox_unavailable",
+        )
+        .unwrap();
+    let receipt = fixture
+        .database
+        .execution_receipt(&fixture.run_id, &credential.dispatch_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        receipt.stage,
+        fox_engine_protocol::ExecutionStage::JobCreated
+    );
+    assert_eq!(
+        receipt.execution_started,
+        fox_engine_protocol::TriState::False
+    );
+    assert_eq!(
+        receipt.control_plane,
+        fox_engine_protocol::ControlPlaneState::NotApplied
+    );
 }
 
 #[cfg(windows)]
@@ -778,24 +995,49 @@ fn backend_change_at_manager_boundary_keeps_job_audit_without_start_evidence() {
 fn real_child_start_returns_positive_evidence_independent_of_later_exit_failure() {
     let fixture = Fixture::new("real-start-evidence");
     let input = json!({"action":"start","command":"exit /b 7","timeoutSeconds":30});
-    let credential = claimed_fixture_credential(&fixture, "call", &input, "command-jobs-adapter-tests");
+    let credential =
+        claimed_fixture_credential(&fixture, "call", &input, "command-jobs-adapter-tests");
     let mut evidence = ExecutionEvidence::NotStarted;
     let mut outcome = CallOutcome::Completed;
-    let response = execute_inner(&fixture.database, &fixture.run_id, &input, &fixture.root,
-        &fixture.token, Duration::from_secs(30), authorized_proof(), Some(&credential),
-        &mut evidence, &mut outcome).unwrap();
+    let response = execute_inner(
+        &fixture.database,
+        &fixture.run_id,
+        &input,
+        &fixture.root,
+        &fixture.token,
+        Duration::from_secs(30),
+        authorized_proof(),
+        Some(&credential),
+        &mut evidence,
+        &mut outcome,
+    )
+    .unwrap();
     assert_eq!(evidence, ExecutionEvidence::Started);
     let row = fixture.wait_terminal(job_id(&response));
     assert_eq!(row.state, JobState::Failed);
-    assert_eq!(evidence, ExecutionEvidence::Started, "exit failure cannot erase start evidence");
+    assert_eq!(
+        evidence,
+        ExecutionEvidence::Started,
+        "exit failure cannot erase start evidence"
+    );
 }
 
 #[test]
 fn admitted_backend_snapshot_cannot_change_between_manager_and_spawner() {
-    let bound = SnapshotBackendProof { provider: authorized_proof(), expected_digest: "different-issued-digest".into() };
-    assert!(matches!(bound.availability(), crate::process_jobs::BackendAvailability::Unavailable(
-        crate::process_jobs::BackendRefusal::CredentialMismatch)));
-    let matching = SnapshotBackendProof { provider: authorized_proof(), expected_digest: "command-jobs-adapter-tests".into() };
+    let bound = SnapshotBackendProof {
+        provider: authorized_proof(),
+        expected_digest: "different-issued-digest".into(),
+    };
+    assert!(matches!(
+        bound.availability(),
+        crate::process_jobs::BackendAvailability::Unavailable(
+            crate::process_jobs::BackendRefusal::CredentialMismatch
+        )
+    ));
+    let matching = SnapshotBackendProof {
+        provider: authorized_proof(),
+        expected_digest: "command-jobs-adapter-tests".into(),
+    };
     assert!(matching.availability().is_available());
 }
 
@@ -805,34 +1047,73 @@ fn admitted_backend_snapshot_cannot_change_between_manager_and_spawner() {
 /// The binding is frozen first, exactly as production does at Run start, so the
 /// approval, the claim, the credential and the admission all happen against the
 /// routed binding.
-fn native_ask_fixture(label: &str, call: &str, input: &Value) -> (Database, PathBuf, String, String, String) {
-    use fox_engine_protocol::{ExecutionAuthority, ExecutorRoute, FrozenPermission, PermissionMode, ResourceExecutor, RunControlBinding, TimeBudgets};
+fn native_ask_fixture(
+    label: &str,
+    call: &str,
+    input: &Value,
+) -> (Database, PathBuf, String, String, String) {
+    use fox_engine_protocol::{
+        ExecutionAuthority, ExecutorRoute, FrozenPermission, PermissionMode, ResourceExecutor,
+        RunControlBinding, TimeBudgets,
+    };
     let root = std::env::temp_dir().join(format!("fox-native-bg-{label}-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).expect("create native fixture root");
     let root_text = root.to_string_lossy().into_owned();
     let database = Database::open(root.join("facts.db")).expect("open real sqlite fixture");
     let conversation = database
-        .create_conversation(database.default_agent_id(), None, Some(&root_text), Some("ask"))
-        .expect("create conversation").id;
-    let run = database.create_run(&conversation, "native background command", None).expect("create run").run.id;
-    database.with_connection(|connection| {
-        connection.execute("UPDATE runs SET status='running',started_at=?2 WHERE id=?1",
-            rusqlite::params![run, crate::database::now_ms()])?;
-        Ok(())
-    }).unwrap();
-    let permission = FrozenPermission { mode: PermissionMode::Ask, project_root: Some(root_text),
-        grants: Vec::new(), approval_epoch: None };
-    database.freeze_run_control(&RunControlBinding {
-        schema_version: fox_engine_protocol::CONTROL_SCHEMA_VERSION,
-        run_id: run.clone(), conversation_id: conversation.clone(), engine_id: "pi".into(),
-        execution_profile_id: "native-bg-test".into(), authority: ExecutionAuthority::Authoritative,
-        executor_route: Some(ExecutorRoute::PiNative), read_only_executor: ResourceExecutor::Rust,
-        permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(),
-        permission, budgets: TimeBudgets::default(),
-    }).unwrap();
-    let record = database.create_host_tool_call(&run, call, "run_command", input, "pending", true).unwrap();
-    let approval = database.create_approval(&record.id, "background command",
-        &json!({"availableDecisions":["allow_once","deny"]})).unwrap();
+        .create_conversation(
+            database.default_agent_id(),
+            None,
+            Some(&root_text),
+            Some("ask"),
+        )
+        .expect("create conversation")
+        .id;
+    let run = database
+        .create_run(&conversation, "native background command", None)
+        .expect("create run")
+        .run
+        .id;
+    database
+        .with_connection(|connection| {
+            connection.execute(
+                "UPDATE runs SET status='running',started_at=?2 WHERE id=?1",
+                rusqlite::params![run, crate::database::now_ms()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let permission = FrozenPermission {
+        mode: PermissionMode::Ask,
+        project_root: Some(root_text),
+        grants: Vec::new(),
+        approval_epoch: None,
+    };
+    database
+        .freeze_run_control(&RunControlBinding {
+            schema_version: fox_engine_protocol::CONTROL_SCHEMA_VERSION,
+            run_id: run.clone(),
+            conversation_id: conversation.clone(),
+            engine_id: "pi".into(),
+            execution_profile_id: "native-bg-test".into(),
+            authority: ExecutionAuthority::Authoritative,
+            executor_route: Some(ExecutorRoute::PiNative),
+            read_only_executor: ResourceExecutor::Rust,
+            permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(),
+            permission,
+            budgets: TimeBudgets::default(),
+        })
+        .unwrap();
+    let record = database
+        .create_host_tool_call(&run, call, "run_command", input, "pending", true)
+        .unwrap();
+    let approval = database
+        .create_approval(
+            &record.id,
+            "background command",
+            &json!({"availableDecisions":["allow_once","deny"]}),
+        )
+        .unwrap();
     (database, root, conversation, run, approval.id)
 }
 
@@ -853,36 +1134,89 @@ fn native_background_start_after_approval_is_admitted_and_can_be_stopped() {
 
     // Before the approval there is no Host decision and so no credential.
     let version = database.execution_policy(&conversation).unwrap().version;
-    assert!(database.issue_legacy_command_credential(&run, call, version, crate::process_jobs::FOX_JOB_BACKEND_DIGEST)
-        .is_err(), "no credential, and so no admission, before the approval");
+    assert!(
+        database
+            .issue_legacy_command_credential(
+                &run,
+                call,
+                version,
+                crate::process_jobs::FOX_JOB_BACKEND_DIGEST
+            )
+            .is_err(),
+        "no credential, and so no admission, before the approval"
+    );
 
-    database.resolve_approval(&approval, crate::database::ApprovalDecision::AllowOnce).unwrap()
+    database
+        .resolve_approval(&approval, crate::database::ApprovalDecision::AllowOnce)
+        .unwrap()
         .expect("approval resolves");
-    assert!(database.claim_approved_tool_call(&run, call).unwrap(), "approved call is claimed");
-    let credential = database.issue_legacy_command_credential(&run, call, version,
-        crate::process_jobs::FOX_JOB_BACKEND_DIGEST).expect("credential from the claimed approval");
-    assert_eq!(database.claim_execution_attempt(&run, &conversation, &credential, &credential.intent_digest,
-        "native-bg-host").unwrap(), fox_engine_protocol::AttemptOutcome::Claimed);
+    assert!(
+        database.claim_approved_tool_call(&run, call).unwrap(),
+        "approved call is claimed"
+    );
+    let credential = database
+        .issue_legacy_command_credential(
+            &run,
+            call,
+            version,
+            crate::process_jobs::FOX_JOB_BACKEND_DIGEST,
+        )
+        .expect("credential from the claimed approval");
+    assert_eq!(
+        database
+            .claim_execution_attempt(
+                &run,
+                &conversation,
+                &credential,
+                &credential.intent_digest,
+                "native-bg-host"
+            )
+            .unwrap(),
+        fox_engine_protocol::AttemptOutcome::Claimed
+    );
 
     let registry = CancellationRegistry::default();
     registry.register_run(&run).unwrap();
     let token = registry.run_token(&run).unwrap();
-    let (started, evidence, outcome) = execute_with_credential(&database, &run, &input, &root, &token,
-        Duration::from_secs(120), &credential);
+    let (started, evidence, outcome) = execute_with_credential(
+        &database,
+        &run,
+        &input,
+        &root,
+        &token,
+        Duration::from_secs(120),
+        &credential,
+    );
     let started = started.expect("approved background start is admitted");
     assert_eq!(evidence, ExecutionEvidence::Started, "{started}");
     assert!(matches!(outcome, CallOutcome::Completed), "{outcome:?}");
     let id = job_id(&started).to_owned();
 
-    let status = execute(&database, &run, &json!({"action":"status","jobId":id}), &root, &token,
-        Duration::from_secs(5)).expect("status is admitted on the PiNative Run");
+    let status = execute(
+        &database,
+        &run,
+        &json!({"action":"status","jobId":id}),
+        &root,
+        &token,
+        Duration::from_secs(5),
+    )
+    .expect("status is admitted on the PiNative Run");
     assert!(status["details"]["state"].is_string(), "{status}");
-    execute(&database, &run, &json!({"action":"cancel","jobId":id}), &root, &token, Duration::from_secs(5))
-        .expect("cancel is admitted on the PiNative Run");
+    execute(
+        &database,
+        &run,
+        &json!({"action":"cancel","jobId":id}),
+        &root,
+        &token,
+        Duration::from_secs(5),
+    )
+    .expect("cancel is admitted on the PiNative Run");
     let deadline = Instant::now() + Duration::from_secs(20);
     let terminal = loop {
         let row = database.kernel_job_snapshot(&id).unwrap();
-        if row.state.is_terminal() { break row; }
+        if row.state.is_terminal() {
+            break row;
+        }
         assert!(Instant::now() < deadline, "job did not stop: {row:?}");
         std::thread::sleep(Duration::from_millis(20));
     };
@@ -894,14 +1228,23 @@ fn native_background_start_after_approval_is_admitted_and_can_be_stopped() {
 #[test]
 fn native_background_admission_refuses_once_the_run_is_not_running() {
     let input = json!({"action":"start","command":"echo late","timeoutSeconds":30});
-    let (database, _root, _conversation, run, _approval) = native_ask_fixture("ended", "late", &input);
-    database.host_validate_resource_acquisition_for(&run, Some("run_command"))
+    let (database, _root, _conversation, run, _approval) =
+        native_ask_fixture("ended", "late", &input);
+    database
+        .host_validate_resource_acquisition_for(&run, Some("run_command"))
         .expect("a running PiNative Run admits");
-    database.with_connection(|connection| {
-        connection.execute("UPDATE runs SET status='cancelled',finished_at=1 WHERE id=?1", [&run])?;
-        Ok(())
-    }).unwrap();
-    let refused = database.host_validate_resource_acquisition_for(&run, Some("run_command")).unwrap_err();
+    database
+        .with_connection(|connection| {
+            connection.execute(
+                "UPDATE runs SET status='cancelled',finished_at=1 WHERE id=?1",
+                [&run],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let refused = database
+        .host_validate_resource_acquisition_for(&run, Some("run_command"))
+        .unwrap_err();
     assert!(refused.contains("requires running Run"), "{refused}");
 }
 
@@ -910,7 +1253,10 @@ fn r1_4_final_state_note_says_final_not_sampled() {
     let (final_cancelled, label, note) = final_state_note(JobState::Cancelled, &Value::Null);
     assert!(final_cancelled);
     assert_eq!(label, "已取消");
-    assert!(note.contains("最终状态") && note.contains("不是抽样"), "{note}");
+    assert!(
+        note.contains("最终状态") && note.contains("不是抽样"),
+        "{note}"
+    );
     let (done, label, _) = final_state_note(JobState::Completed, &json!(0));
     assert!(done);
     assert_eq!(label, "已结束（退出码 0）");
@@ -927,27 +1273,59 @@ fn r1_4_a_later_run_in_the_same_conversation_reads_but_cannot_cancel_earlier_job
     let fixture = Fixture::new("previous-run-read");
     let first = fixture.start("bg", "ping -n 60 127.0.0.1").expect("start");
     let id = job_id(&first).to_owned();
-    fixture.action(json!({"action":"cancel","jobId":id})).expect("cancel");
+    fixture
+        .action(json!({"action":"cancel","jobId":id}))
+        .expect("cancel");
     assert_eq!(fixture.wait_terminal(&id).state, JobState::Cancelled);
-    let status = fixture.action(json!({"action":"status","jobId":id})).expect("own status");
+    let status = fixture
+        .action(json!({"action":"status","jobId":id}))
+        .expect("own status");
     assert_eq!(status["isError"], false, "{status}");
     assert_eq!(status["details"]["final"], true);
     assert_eq!(status["details"]["stateLabel"], "已取消");
-    assert!(status["details"]["note"].as_str().unwrap().contains("不是抽样"));
+    assert!(status["details"]["note"]
+        .as_str()
+        .unwrap()
+        .contains("不是抽样"));
 
-    let conversation_id = fixture.database.run_control_binding(&fixture.run_id).unwrap().unwrap().conversation_id;
-    fixture.database.mark_run_failed(&fixture.run_id, "test.done", "first run ended").expect("end first run");
-    let later = fixture.database.create_run(&conversation_id, "later run", None).expect("later run").run.id;
-    fixture.database.freeze_legacy_run_control(&later, "command-adapter-test").expect("freeze later run");
+    let conversation_id = fixture
+        .database
+        .run_control_binding(&fixture.run_id)
+        .unwrap()
+        .unwrap()
+        .conversation_id;
+    fixture
+        .database
+        .mark_run_failed(&fixture.run_id, "test.done", "first run ended")
+        .expect("end first run");
+    let later = fixture
+        .database
+        .create_run(&conversation_id, "later run", None)
+        .expect("later run")
+        .run
+        .id;
+    fixture
+        .database
+        .freeze_legacy_run_control(&later, "command-adapter-test")
+        .expect("freeze later run");
     let registry = CancellationRegistry::default();
     registry.register_run(&later).expect("register later run");
     let token = registry.run_token(&later).expect("later token");
     for action in ["status", "output"] {
         let mut outcome = CallOutcome::Completed;
-        let read = execute_inner(&fixture.database, &later, &json!({"action":action,"jobId":id}),
-            &fixture.root, &token, Duration::from_secs(5), refusing_proof(), None,
-            &mut ExecutionEvidence::NotStarted, &mut outcome)
-            .expect("same conversation may read an earlier job");
+        let read = execute_inner(
+            &fixture.database,
+            &later,
+            &json!({"action":action,"jobId":id}),
+            &fixture.root,
+            &token,
+            Duration::from_secs(5),
+            refusing_proof(),
+            None,
+            &mut ExecutionEvidence::NotStarted,
+            &mut outcome,
+        )
+        .expect("same conversation may read an earlier job");
         assert_eq!(read["isError"], false, "{read}");
         assert_eq!(read["details"]["state"], "cancelled");
         assert!(matches!(outcome, CallOutcome::Completed), "{outcome:?}");
@@ -955,7 +1333,14 @@ fn r1_4_a_later_run_in_the_same_conversation_reads_but_cannot_cancel_earlier_job
             assert_eq!(read["details"]["final"], true);
         }
     }
-    let denied = execute(&fixture.database, &later, &json!({"action":"cancel","jobId":id}), &fixture.root, &token, Duration::from_secs(5))
-        .expect_err("writes stay scoped to the job's own Run");
+    let denied = execute(
+        &fixture.database,
+        &later,
+        &json!({"action":"cancel","jobId":id}),
+        &fixture.root,
+        &token,
+        Duration::from_secs(5),
+    )
+    .expect_err("writes stay scoped to the job's own Run");
     assert!(denied.contains("outside this Run"), "{denied}");
 }

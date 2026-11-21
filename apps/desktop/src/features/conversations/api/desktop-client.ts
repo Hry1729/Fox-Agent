@@ -485,6 +485,9 @@ export interface ManagedFileVersion {
   restoreBlocker: string | null
 }
 
+export type ProjectTerminalEvent = { type: 'output'; data: number[] } | { type: 'exited'; code: number | null }
+type ProjectTerminalSize = { cols: number; rows: number }
+
 export const desktopClient = {
   initialize: () => command<RuntimeInitialization>('runtime_initialize'),
   runtimeStatus: () => command<RuntimeStatus>('runtime_status'),
@@ -627,11 +630,22 @@ export const desktopClient = {
     command<MessageFeedbackRecord>('message_feedback_save', { messageId, sentiment, category, comment }),
   globalSearch: (query: string, limit = 40) => command<GlobalSearchRecord[]>('app_global_search', { query, limit }),
   listProjectFiles: (conversationId: string) =>
-    command<ProjectFileEntry[]>('project_files_list', { conversationId }),
+    command<{ entries: ProjectFileEntry[]; truncated: boolean }>('project_files_list', { conversationId }).then(response => response.entries),
+  projectFilesChildren: (conversationId: string, path: string) =>
+    command<{ entries: ProjectFileEntry[]; truncated: boolean }>('project_files_children', { conversationId, path }),
+  projectFilesSearch: (conversationId: string, query: string, limit = 200) =>
+    command<{ entries: ProjectFileEntry[]; truncated: boolean }>('project_files_search', { conversationId, query, limit }),
+  projectTerminalStart: (conversationId: string, size: ProjectTerminalSize, onEvent: (event: ProjectTerminalEvent) => void) =>
+    command<string>('project_terminal_start', { request: { conversationId, size }, output: new Channel(onEvent) }, true),
+  projectTerminalWrite: (id: string, data: string) => command<void>('project_terminal_write', { id, data }, true),
+  projectTerminalResize: (id: string, size: ProjectTerminalSize) => command<void>('project_terminal_resize', { id, size }, true),
+  projectTerminalClose: (id: string) => command<void>('project_terminal_close', { id }, true),
   openProjectFolder: (conversationId: string) =>
     command<boolean>('project_folder_open', { conversationId }),
   readProjectFile: (conversationId: string, path: string) =>
     command<ProjectFilePreview>('project_file_read', { conversationId, path }),
+  readConversationOfficePreview: (conversationId: string, source: { kind: 'project'; path: string } | { kind: 'artifact'; artifactId: string }) =>
+    invoke<ArrayBuffer>('conversation_office_preview_read', { request: { conversationId, source } }),
   projectFileAction: (conversationId: string, path: string, action: ProjectFileActionResponse['action'], applicationId?: string) =>
     command<ProjectFileActionResponse>('project_file_action', { conversationId, path, action, applicationId }),
   inspectArtifact: (conversationId: string, artifactId: string) =>

@@ -26,8 +26,8 @@
 //! conversation never reaches the Fox runtime because a read failed
 //! (external backend wiring batch, item 5).
 use super::*;
-use fox_agent_backend::host_routing::{self, BackendSwitch, HostEntry, RouteError};
 pub(crate) use fox_agent_backend::host_routing::Route;
+use fox_agent_backend::host_routing::{self, BackendSwitch, HostEntry, RouteError};
 use fox_agent_backend::port::AgentBackend;
 
 pub(crate) fn route_failure<T: serde::Serialize>(error: &RouteError) -> ApiResponse<T> {
@@ -44,8 +44,22 @@ fn log_route(
 ) {
     let backend = stored.and_then(AgentBackend::parse);
     let line = match outcome {
-        Ok((bound, route)) => host_routing::audit_line(entry, conversation_id, run_id, Some(*bound), engine_id, Ok(*route)),
-        Err(error) => host_routing::audit_line(entry, conversation_id, run_id, backend, engine_id, Err(error)),
+        Ok((bound, route)) => host_routing::audit_line(
+            entry,
+            conversation_id,
+            run_id,
+            Some(*bound),
+            engine_id,
+            Ok(*route),
+        ),
+        Err(error) => host_routing::audit_line(
+            entry,
+            conversation_id,
+            run_id,
+            backend,
+            engine_id,
+            Err(error),
+        ),
     };
     eprintln!("{line}");
 }
@@ -107,10 +121,16 @@ fn on_lookup_error<T: serde::Serialize>(
 pub(crate) fn choose_new_conversation_backend<T: serde::Serialize>(
     requested: Option<&str>,
 ) -> Result<AgentBackend, ApiResponse<T>> {
-    host_routing::choose_for_new_conversation(requested, &BackendSwitch::from_env()).map_err(|error| {
-        eprintln!("fox.host_routing entry=create agent_backend={} engine_id=- refused={}", requested.unwrap_or("-"), error.code());
-        route_failure(&error)
-    })
+    host_routing::choose_for_new_conversation(requested, &BackendSwitch::from_env()).map_err(
+        |error| {
+            eprintln!(
+                "fox.host_routing entry=create agent_backend={} engine_id=- refused={}",
+                requested.unwrap_or("-"),
+                error.code()
+            );
+            route_failure(&error)
+        },
+    )
 }
 
 /// Gate an entry that names a conversation (start / resume).
@@ -132,14 +152,24 @@ pub(crate) fn gate_conversation<T: serde::Serialize>(
         // external backend on: refused (`on_lookup_error`).
         Err(error) => return on_lookup_error(entry, conversation_id, run_id, requested, &error),
     };
-    let outcome = host_routing::route_stored(entry, Some(&stored), requested, &BackendSwitch::from_env());
+    let outcome =
+        host_routing::route_stored(entry, Some(&stored), requested, &BackendSwitch::from_env());
     let refused = outcome.is_err();
     // Successful Fox routes are not logged per entry on start/resume: the
     // Kernel already logs the run with its engine_id; refusals always are.
     if refused || matches!(outcome, Ok((_, Route::External(_)))) {
-        log_route(entry, conversation_id, run_id, Some(&stored), None, &outcome);
+        log_route(
+            entry,
+            conversation_id,
+            run_id,
+            Some(&stored),
+            None,
+            &outcome,
+        );
     }
-    outcome.map(|(_, route)| route).map_err(|error| route_failure(&error))
+    outcome
+        .map(|(_, route)| route)
+        .map_err(|error| route_failure(&error))
 }
 
 /// Gate an entry that names a run or an approval (cancel / approve). The
@@ -170,7 +200,9 @@ pub(crate) fn gate_run_identity<T: serde::Serialize>(
         identity.engine_id.as_deref(),
         &outcome,
     );
-    outcome.map(|(_, route)| route).map_err(|error| route_failure(&error))
+    outcome
+        .map(|(_, route)| route)
+        .map_err(|error| route_failure(&error))
 }
 
 /// One backend in the new-conversation picker.
@@ -228,9 +260,17 @@ pub fn agent_backends_status() -> ApiResponse<AgentBackendStatus> {
         switch_env: host_routing::EXTERNAL_BACKENDS_ENV.to_owned(),
         // "Can an external backend be picked for a new conversation": a
         // hidden one does not count.
-        any_external_enabled: options.iter().any(|option| option.backend != "fox" && option.enabled && !option.hidden),
-        supported_backends: host_routing::SUPPORTED_BACKENDS.iter().map(|backend| backend.as_str().to_owned()).collect(),
-        retired_backends: host_routing::RETIRED_BACKENDS.iter().map(|backend| backend.as_str().to_owned()).collect(),
+        any_external_enabled: options
+            .iter()
+            .any(|option| option.backend != "fox" && option.enabled && !option.hidden),
+        supported_backends: host_routing::SUPPORTED_BACKENDS
+            .iter()
+            .map(|backend| backend.as_str().to_owned())
+            .collect(),
+        retired_backends: host_routing::RETIRED_BACKENDS
+            .iter()
+            .map(|backend| backend.as_str().to_owned())
+            .collect(),
         options,
         unknown_entries: switch.unknown_entries().to_vec(),
     })
@@ -257,7 +297,9 @@ pub fn agent_backend_capabilities(
             format!("只有外部 Agent 后端有能力声明：{}", request.backend),
             false,
         ),
-        Some(backend) => ApiResponse::success(external.capabilities(request.conversation_id.as_deref(), backend)),
+        Some(backend) => {
+            ApiResponse::success(external.capabilities(request.conversation_id.as_deref(), backend))
+        }
     }
 }
 
@@ -269,7 +311,10 @@ pub struct AgentBackendConversationRequest {
 }
 
 #[tauri::command]
-pub fn agent_backend_network_status(external: tauri::State<'_, crate::external_backend::ExternalBackendHost>, request: AgentBackendConversationRequest) -> ApiResponse<crate::external_backend::NetworkStatus> {
+pub fn agent_backend_network_status(
+    external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
+    request: AgentBackendConversationRequest,
+) -> ApiResponse<crate::external_backend::NetworkStatus> {
     match external.network_status(&request.conversation_id) {
         Ok(status) => ApiResponse::success(status),
         Err(error) => ApiResponse::failure("agent_backend.network_status_failed", error, true),
@@ -285,12 +330,20 @@ pub struct PreviewActionRequest {
 }
 
 #[tauri::command]
-pub async fn agent_backend_preview_action(external: tauri::State<'_, crate::external_backend::ExternalBackendHost>, request: PreviewActionRequest) -> Result<ApiResponse<bool>, ()> {
-    Ok(match external.preview_action(&request.conversation_id, &request.preview, request.stop).await {
-        Ok(_) if request.stop => ApiResponse::success(true),
-        Ok(url) => super::external_url_open(super::OpenExternalUrlRequest { url }),
-        Err(error) => ApiResponse::failure("agent_backend.preview_failed", error, true),
-    })
+pub async fn agent_backend_preview_action(
+    external: tauri::State<'_, crate::external_backend::ExternalBackendHost>,
+    request: PreviewActionRequest,
+) -> Result<ApiResponse<bool>, ()> {
+    Ok(
+        match external
+            .preview_action(&request.conversation_id, &request.preview, request.stop)
+            .await
+        {
+            Ok(_) if request.stop => ApiResponse::success(true),
+            Ok(url) => super::external_url_open(super::OpenExternalUrlRequest { url }),
+            Err(error) => ApiResponse::failure("agent_backend.preview_failed", error, true),
+        },
+    )
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -415,7 +468,11 @@ pub(crate) fn stored_default_backend(database: &crate::database::Database) -> Ag
 
 /// The saved full-access choice (`false` for unset / garbage).
 pub(crate) fn stored_new_external_full_access(database: &crate::database::Database) -> bool {
-    database.app_setting(NEW_EXTERNAL_FULL_ACCESS_KEY).ok().flatten().is_some_and(|value| value.trim() == "1")
+    database
+        .app_setting(NEW_EXTERNAL_FULL_ACCESS_KEY)
+        .ok()
+        .flatten()
+        .is_some_and(|value| value.trim() == "1")
 }
 
 /// Build the preferences view (pure: no environment, no keyring).
@@ -444,17 +501,26 @@ pub(crate) fn preferences_view(
     // Responses API stays effective if it was saved (the user may have their
     // own Codex login in the private HOME), it just cannot be newly picked.
     // A backend saved before it was hidden falls back to Fox too.
-    let effective = if host_routing::is_supported(stored) && !stored.hidden() && switch.is_enabled(stored) { stored } else { AgentBackend::Fox };
+    let effective =
+        if host_routing::is_supported(stored) && !stored.hidden() && switch.is_enabled(stored) {
+            stored
+        } else {
+            AgentBackend::Fox
+        };
     AgentBackendPreferences {
         default_backend: stored.as_str().to_owned(),
         effective_backend: effective.as_str().to_owned(),
         new_external_full_access: full_access,
         effective_full_access: full_access && !forbidden,
         full_access_forbidden: forbidden,
-        forbidden_reason: forbidden.then(|| fox_agent_backend::external_launch::FULL_ACCESS_FORBIDDEN_REASON.to_owned()),
+        forbidden_reason: forbidden
+            .then(|| fox_agent_backend::external_launch::FULL_ACCESS_FORBIDDEN_REASON.to_owned()),
         switch_env: host_routing::EXTERNAL_BACKENDS_ENV.to_owned(),
         forced_off: !switch.any_external(),
-        retired_backends: host_routing::RETIRED_BACKENDS.iter().map(|backend| backend.as_str().to_owned()).collect(),
+        retired_backends: host_routing::RETIRED_BACKENDS
+            .iter()
+            .map(|backend| backend.as_str().to_owned())
+            .collect(),
         options,
         unified_login_provider: provider,
         codex_responses: codex,
@@ -476,7 +542,9 @@ fn current_preferences(state: &AppState) -> AgentBackendPreferences {
 }
 
 #[tauri::command]
-pub fn agent_backend_preferences_get(state: State<'_, AppState>) -> ApiResponse<AgentBackendPreferences> {
+pub fn agent_backend_preferences_get(
+    state: State<'_, AppState>,
+) -> ApiResponse<AgentBackendPreferences> {
     ApiResponse::success(current_preferences(&state))
 }
 
@@ -498,26 +566,45 @@ pub(crate) fn validate_preferences_change(
     let backend = match request.default_backend.as_deref() {
         None => None,
         Some(raw) => {
-            let backend = AgentBackend::parse(raw.trim()).ok_or_else(|| (RouteError::CODE_INVALID, format!("不支持的 Agent 后端「{raw}」")))?;
+            let backend = AgentBackend::parse(raw.trim()).ok_or_else(|| {
+                (
+                    RouteError::CODE_INVALID,
+                    format!("不支持的 Agent 后端「{raw}」"),
+                )
+            })?;
             if backend.hidden() {
                 let refusal = RouteError::Hidden(backend);
                 return Err((RouteError::CODE_HIDDEN, refusal.message()));
             }
-            let option = current.options.iter().find(|option| option.backend == backend.as_str());
+            let option = current
+                .options
+                .iter()
+                .find(|option| option.backend == backend.as_str());
             if host_routing::is_retired(backend) {
-                let refusal = RouteError::Retired { backend, existing_conversation: false };
+                let refusal = RouteError::Retired {
+                    backend,
+                    existing_conversation: false,
+                };
                 return Err((RouteError::CODE_RETIRED, refusal.message()));
             }
             if backend != AgentBackend::Fox && !option.is_some_and(|option| option.enabled) {
-                let reason = option.and_then(|option| option.reason.clone()).unwrap_or_default();
-                return Err((RouteError::CODE_DISABLED, format!("不能选择「{}」：{reason}", backend.as_str())));
+                let reason = option
+                    .and_then(|option| option.reason.clone())
+                    .unwrap_or_default();
+                return Err((
+                    RouteError::CODE_DISABLED,
+                    format!("不能选择「{}」：{reason}", backend.as_str()),
+                ));
             }
             Some(backend)
         }
     };
     let full_access = match request.new_external_full_access {
         Some(true) if current.full_access_forbidden => {
-            return Err((host_routing::CODE_FULL_ACCESS_FORBIDDEN, fox_agent_backend::external_launch::FULL_ACCESS_FORBIDDEN_REASON.to_owned()))
+            return Err((
+                host_routing::CODE_FULL_ACCESS_FORBIDDEN,
+                fox_agent_backend::external_launch::FULL_ACCESS_FORBIDDEN_REASON.to_owned(),
+            ))
         }
         other => other,
     };
@@ -525,19 +612,28 @@ pub(crate) fn validate_preferences_change(
 }
 
 #[tauri::command]
-pub fn agent_backend_preferences_save(state: State<'_, AppState>, request: AgentBackendPreferencesRequest) -> ApiResponse<AgentBackendPreferences> {
+pub fn agent_backend_preferences_save(
+    state: State<'_, AppState>,
+    request: AgentBackendPreferencesRequest,
+) -> ApiResponse<AgentBackendPreferences> {
     let current = current_preferences(&state);
     let (backend, full_access) = match validate_preferences_change(&request, &current) {
         Ok(change) => change,
         Err((code, message)) => return ApiResponse::failure(code, message, false),
     };
     if let Some(backend) = backend {
-        if let Err(error) = state.database.set_app_setting(DEFAULT_BACKEND_KEY, backend.as_str()) {
+        if let Err(error) = state
+            .database
+            .set_app_setting(DEFAULT_BACKEND_KEY, backend.as_str())
+        {
             return storage_error(error);
         }
     }
     if let Some(full_access) = full_access {
-        if let Err(error) = state.database.set_app_setting(NEW_EXTERNAL_FULL_ACCESS_KEY, if full_access { "1" } else { "0" }) {
+        if let Err(error) = state.database.set_app_setting(
+            NEW_EXTERNAL_FULL_ACCESS_KEY,
+            if full_access { "1" } else { "0" },
+        ) {
             return storage_error(error);
         }
     }
@@ -547,7 +643,9 @@ pub fn agent_backend_preferences_save(state: State<'_, AppState>, request: Agent
 /// Explicit connection check for the selected Codex protocol. Settings no
 /// longer run this automatically or use a failed HTTP request as support proof.
 #[tauri::command]
-pub async fn agent_backend_probe_codex_responses(state: State<'_, AppState>) -> Result<ApiResponse<Option<CodexResponsesProbe>>, ()> {
+pub async fn agent_backend_probe_codex_responses(
+    state: State<'_, AppState>,
+) -> Result<ApiResponse<Option<CodexResponsesProbe>>, ()> {
     // AP-4: no provider key is sent on behalf of a Codex that may not run.
     if let Err(refusal) = crate::external_backend::credential_gate(AgentBackend::Codex, false) {
         return Ok(match refusal.error {
@@ -555,10 +653,19 @@ pub async fn agent_backend_probe_codex_responses(state: State<'_, AppState>) -> 
             None => ApiResponse::failure("internal", "unexpected empty refusal", false),
         });
     }
-    let Some(service) = crate::model_service::external_login(&state.database, AgentBackend::Codex) else {
+    let Some(service) = crate::model_service::external_login(&state.database, AgentBackend::Codex)
+    else {
         return Ok(ApiResponse::success(None));
     };
-    let result = state.model_service_client.test(&service.base_url, Some(service.api_key.expose()), &service.api_type, &service.model).await;
+    let result = state
+        .model_service_client
+        .test(
+            &service.base_url,
+            Some(service.api_key.expose()),
+            &service.api_type,
+            &service.model,
+        )
+        .await;
     Ok(ApiResponse::success(Some(CodexResponsesProbe {
         base_url: service.base_url,
         supported: result.is_ok().then_some(true),
@@ -588,37 +695,76 @@ pub(crate) const NATIVE_MODE_DRAFT_FULL_PREFIX: &str = "agent_backend.native_mod
 pub(crate) const NATIVE_MODE_DRAFT_PREFIX: &str = "agent_backend.native_mode.draft.";
 
 /// The new conversation's own (non-full-access) pick.
-pub(crate) fn stored_draft_native_mode(database: &crate::database::Database, backend: AgentBackend) -> Option<String> {
-    non_empty_setting(database, &format!("{NATIVE_MODE_DRAFT_PREFIX}{}", backend.as_str()))
+pub(crate) fn stored_draft_native_mode(
+    database: &crate::database::Database,
+    backend: AgentBackend,
+) -> Option<String> {
+    non_empty_setting(
+        database,
+        &format!("{NATIVE_MODE_DRAFT_PREFIX}{}", backend.as_str()),
+    )
 }
 
 fn non_empty_setting(database: &crate::database::Database, key: &str) -> Option<String> {
-    database.app_setting(key).ok().flatten().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
+    database
+        .app_setting(key)
+        .ok()
+        .flatten()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 /// The conversation's stored choice; `None` = the Agent's default.
-pub(crate) fn stored_conversation_native_mode(database: &crate::database::Database, conversation_id: &str) -> Option<String> {
-    non_empty_setting(database, &format!("{NATIVE_MODE_CONVERSATION_PREFIX}{conversation_id}"))
+pub(crate) fn stored_conversation_native_mode(
+    database: &crate::database::Database,
+    conversation_id: &str,
+) -> Option<String> {
+    non_empty_setting(
+        database,
+        &format!("{NATIVE_MODE_CONVERSATION_PREFIX}{conversation_id}"),
+    )
 }
 
 /// The Agent's last non-full-access choice.
-pub(crate) fn stored_last_native_mode(database: &crate::database::Database, backend: AgentBackend) -> Option<String> {
-    non_empty_setting(database, &format!("{NATIVE_MODE_LAST_PREFIX}{}", backend.as_str()))
+pub(crate) fn stored_last_native_mode(
+    database: &crate::database::Database,
+    backend: AgentBackend,
+) -> Option<String> {
+    non_empty_setting(
+        database,
+        &format!("{NATIVE_MODE_LAST_PREFIX}{}", backend.as_str()),
+    )
 }
 
 /// The new conversation's explicit full-access pick, if any.
-pub(crate) fn draft_full_access_choice(database: &crate::database::Database, backend: AgentBackend) -> Option<bool> {
-    non_empty_setting(database, &format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}{}", backend.as_str())).map(|value| value == "1")
+pub(crate) fn draft_full_access_choice(
+    database: &crate::database::Database,
+    backend: AgentBackend,
+) -> Option<bool> {
+    non_empty_setting(
+        database,
+        &format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}{}", backend.as_str()),
+    )
+    .map(|value| value == "1")
 }
 
 /// Creation consumed the draft pick.
-pub(crate) fn clear_draft_full_access_choice(database: &crate::database::Database, backend: AgentBackend) {
-    let _ = database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}{}", backend.as_str()), "");
+pub(crate) fn clear_draft_full_access_choice(
+    database: &crate::database::Database,
+    backend: AgentBackend,
+) {
+    let _ = database.set_app_setting(
+        &format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}{}", backend.as_str()),
+        "",
+    );
 }
 
 /// 创建之后清空该后端的两枚草稿键，无论起始档位走哪条路径。
 fn clear_draft_native_keys(database: &crate::database::Database, backend: AgentBackend) {
-    let _ = database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_PREFIX}{}", backend.as_str()), "");
+    let _ = database.set_app_setting(
+        &format!("{NATIVE_MODE_DRAFT_PREFIX}{}", backend.as_str()),
+        "",
+    );
     clear_draft_full_access_choice(database, backend);
 }
 
@@ -646,13 +792,21 @@ pub(crate) fn resolve_starting_native_mode(
 ) -> Result<String, NativeModeRefusal> {
     use fox_agent_backend::native_permission as native;
     let catalog = native::catalog(backend, context);
-    let unavailable = |message: String| NativeModeRefusal { code: "agent_backend_permission_unavailable", message };
+    let unavailable = |message: String| NativeModeRefusal {
+        code: "agent_backend_permission_unavailable",
+        message,
+    };
     if let Some(mode) = requested.map(str::trim).filter(|value| !value.is_empty()) {
         let Some(option) = catalog.options.iter().find(|option| option.id == mode) else {
-            return Err(unavailable(format!("「{}」没有权限选项「{mode}」", native::display_name(backend))));
+            return Err(unavailable(format!(
+                "「{}」没有权限选项「{mode}」",
+                native::display_name(backend)
+            )));
         };
         if !option.listed || option.disabled_reason.is_some() {
-            let message = option.disabled_reason.clone().unwrap_or_else(|| format!("「{}」已不再提供，不能作为新会话的起始档位", option.label));
+            let message = option.disabled_reason.clone().unwrap_or_else(|| {
+                format!("「{}」已不再提供，不能作为新会话的起始档位", option.label)
+            });
             return Err(unavailable(message));
         }
         if option.full_access && (forbidden || draft_full != Some(true)) {
@@ -665,8 +819,16 @@ pub(crate) fn resolve_starting_native_mode(
         }
         return Ok(option.id.to_owned());
     }
-    if let Some(mode) = stored_default.map(str::trim).filter(|value| !value.is_empty()) {
-        if let Some(option) = catalog.options.iter().find(|option| option.id == mode && option.listed && option.disabled_reason.is_none() && !option.full_access) {
+    if let Some(mode) = stored_default
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Some(option) = catalog.options.iter().find(|option| {
+            option.id == mode
+                && option.listed
+                && option.disabled_reason.is_none()
+                && !option.full_access
+        }) {
             return Ok(option.id.to_owned());
         }
     }
@@ -684,21 +846,41 @@ pub(crate) fn starting_native_mode_for_create(
 ) -> Result<String, NativeModeRefusal> {
     let forbidden = fox_agent_backend::external_launch::full_access_forbidden_from_env();
     let context = native_context(state, backend, forbidden);
-    let requested = native_permission.map(str::trim).filter(|value| !value.is_empty());
+    let requested = native_permission
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     if requested.is_some() {
         let draft_full = draft_full_access_choice(&state.database, backend);
-        return resolve_starting_native_mode(backend, requested, draft_full, forbidden, None, &context);
+        return resolve_starting_native_mode(
+            backend, requested, draft_full, forbidden, None, &context,
+        );
     }
-    if let Some(external) = external_permission_mode.map(str::trim).filter(|value| !value.is_empty()) {
-        match fox_agent_backend::host_routing::decide_new_conversation_mode(Some(external), backend, forbidden) {
+    if let Some(external) = external_permission_mode
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        match fox_agent_backend::host_routing::decide_new_conversation_mode(
+            Some(external),
+            backend,
+            forbidden,
+        ) {
             Ok(true) => {
-                let Some(full) = fox_agent_backend::native_permission::full_access_mode(backend) else {
-                    return Err(NativeModeRefusal { code: "agent_backend_permission_unavailable", message: "这个后端没有完全访问档位".to_owned() });
+                let Some(full) = fox_agent_backend::native_permission::full_access_mode(backend)
+                else {
+                    return Err(NativeModeRefusal {
+                        code: "agent_backend_permission_unavailable",
+                        message: "这个后端没有完全访问档位".to_owned(),
+                    });
                 };
                 return Ok(full.to_owned());
             }
             Ok(false) => {}
-            Err(refusal) => return Err(NativeModeRefusal { code: refusal.code, message: refusal.message }),
+            Err(refusal) => {
+                return Err(NativeModeRefusal {
+                    code: refusal.code,
+                    message: refusal.message,
+                })
+            }
         }
     }
     let stored = stored_last_native_mode(&state.database, backend);
@@ -706,11 +888,19 @@ pub(crate) fn starting_native_mode_for_create(
 }
 
 /// 把已经决定好的起始档位写入会话，并清空该后端的草稿键。
-pub(crate) fn seed_conversation_native_mode(database: &crate::database::Database, conversation_id: &str, backend: AgentBackend, mode: &str) {
+pub(crate) fn seed_conversation_native_mode(
+    database: &crate::database::Database,
+    conversation_id: &str,
+    backend: AgentBackend,
+    mode: &str,
+) {
     clear_draft_native_keys(database, backend);
     let mode = mode.trim();
     if fox_agent_backend::native_permission::is_known(backend, mode) {
-        let _ = database.set_app_setting(&format!("{NATIVE_MODE_CONVERSATION_PREFIX}{conversation_id}"), mode);
+        let _ = database.set_app_setting(
+            &format!("{NATIVE_MODE_CONVERSATION_PREFIX}{conversation_id}"),
+            mode,
+        );
     }
 }
 
@@ -749,37 +939,63 @@ pub struct NativePermissionRequest {
 
 /// The project a native permission request is about (the conversation's, or
 /// the draft's `projectId`).
-fn native_project(state: &AppState, request: &NativePermissionRequest) -> Result<Option<String>, String> {
+fn native_project(
+    state: &AppState,
+    request: &NativePermissionRequest,
+) -> Result<Option<String>, String> {
     match request.conversation_id.as_deref() {
-        Some(id) => state.database.conversation_access(id).map(|access| access.project_id),
-        None => Ok(request.project_id.clone().filter(|id| !id.trim().is_empty())),
+        Some(id) => state
+            .database
+            .conversation_access(id)
+            .map(|access| access.project_id),
+        None => Ok(request
+            .project_id
+            .clone()
+            .filter(|id| !id.trim().is_empty())),
     }
 }
 
 /// Whether the project already confirmed full access once (a draft without a
 /// project, or an unreadable flag, confirms every time).
 fn project_full_access_confirmed(state: &AppState, project: Option<&str>) -> bool {
-    project.is_some_and(|project| state.database.project_full_access_confirmed(project).unwrap_or(false))
+    project.is_some_and(|project| {
+        state
+            .database
+            .project_full_access_confirmed(project)
+            .unwrap_or(false)
+    })
 }
 
 /// The refusal a full-access pick gets before the user confirmed it once in
 /// this project (the same code and rule as a Fox conversation).
-pub(crate) const FULL_ACCESS_CONFIRMATION_REQUIRED: &str = "permission.full_access_confirmation_required";
+pub(crate) const FULL_ACCESS_CONFIRMATION_REQUIRED: &str =
+    "permission.full_access_confirmation_required";
 
 pub(crate) fn full_access_confirmation_message(backend: AgentBackend) -> String {
     format!(
         "第一次在这个项目让 {} 使用完全访问需要再确认一次：它将不再询问任何操作{}",
         fox_agent_backend::native_permission::display_name(backend),
-        if backend == AgentBackend::Pi { "，只有内置禁止规则和项目禁止规则仍然生效" } else { "，也不再受它自己的沙箱限制" }
+        if backend == AgentBackend::Pi {
+            "，只有内置禁止规则和项目禁止规则仍然生效"
+        } else {
+            "，也不再受它自己的沙箱限制"
+        }
     )
 }
 
-fn native_context(state: &AppState, backend: AgentBackend, forbidden: bool) -> fox_agent_backend::native_permission::CatalogContext {
+fn native_context(
+    state: &AppState,
+    backend: AgentBackend,
+    forbidden: bool,
+) -> fox_agent_backend::native_permission::CatalogContext {
     fox_agent_backend::native_permission::CatalogContext {
         // 13.19 fix ④: no login needed (a draft is judged before its first
         // login); protocol address, else the provider's own URL, else None
         // = fail-closed in the catalog.
-        provider_base_url: crate::external_model::catalog_provider_base_url(&state.database, backend),
+        provider_base_url: crate::external_model::catalog_provider_base_url(
+            &state.database,
+            backend,
+        ),
         full_access_forbidden: forbidden,
     }
 }
@@ -796,20 +1012,42 @@ fn native_target(
         Some(id) => {
             let backend = match state.database.conversation_agent_backend(id) {
                 Ok(Some(stored)) => AgentBackend::parse(&stored).unwrap_or(AgentBackend::Fox),
-                Ok(None) => return Err(ApiResponse::failure("conversation.not_found", "会话不存在", false)),
-                Err(error) => return Err(ApiResponse::failure("agent_backend_lookup_failed", error, true)),
+                Ok(None) => {
+                    return Err(ApiResponse::failure(
+                        "conversation.not_found",
+                        "会话不存在",
+                        false,
+                    ))
+                }
+                Err(error) => {
+                    return Err(ApiResponse::failure(
+                        "agent_backend_lookup_failed",
+                        error,
+                        true,
+                    ))
+                }
             };
             let stored = stored_conversation_native_mode(&state.database, id);
-            let full = stored.as_deref().is_some_and(|mode| fox_agent_backend::native_permission::is_full_access(backend, mode));
+            let full = stored.as_deref().is_some_and(|mode| {
+                fox_agent_backend::native_permission::is_full_access(backend, mode)
+            });
             Ok((backend, full, false))
         }
         None => {
-            let backend = request.backend.as_deref().and_then(AgentBackend::parse).unwrap_or(AgentBackend::Fox);
+            let backend = request
+                .backend
+                .as_deref()
+                .and_then(AgentBackend::parse)
+                .unwrap_or(AgentBackend::Fox);
             // A new conversation cannot use a hidden backend, so it has no
             // draft permission list either.
             if backend.hidden() {
                 let refusal = RouteError::Hidden(backend);
-                return Err(ApiResponse::failure(refusal.code(), refusal.message(), false));
+                return Err(ApiResponse::failure(
+                    refusal.code(),
+                    refusal.message(),
+                    false,
+                ));
             }
             let full = draft_full_access_choice(&state.database, backend) == Some(true);
             Ok((backend, full, false))
@@ -817,7 +1055,11 @@ fn native_target(
     }
 }
 
-fn native_view(state: &AppState, external: &crate::external_backend::ExternalBackendHost, request: &NativePermissionRequest) -> ApiResponse<serde_json::Value> {
+fn native_view(
+    state: &AppState,
+    external: &crate::external_backend::ExternalBackendHost,
+    request: &NativePermissionRequest,
+) -> ApiResponse<serde_json::Value> {
     use fox_agent_backend::native_permission as native;
     let (backend, draft_full, _granted) = match native_target(state, external, request) {
         Ok(target) => target,
@@ -828,7 +1070,8 @@ fn native_view(state: &AppState, external: &crate::external_backend::ExternalBac
     let catalog = native::catalog(backend, &context);
     let stored = match request.conversation_id.as_deref() {
         Some(id) => stored_conversation_native_mode(&state.database, id),
-        None => stored_draft_native_mode(&state.database, backend).or_else(|| stored_last_native_mode(&state.database, backend)),
+        None => stored_draft_native_mode(&state.database, backend)
+            .or_else(|| stored_last_native_mode(&state.database, backend)),
     };
     let draft = request.conversation_id.is_none();
     // A draft's confirmed full-access pick is what creation will use.
@@ -841,13 +1084,24 @@ fn native_view(state: &AppState, external: &crate::external_backend::ExternalBac
     let restricted = stored
         .as_deref()
         .filter(|mode| !native::is_full_access(backend, mode))
-        .filter(|mode| catalog.options.iter().any(|option| option.id == *mode && !option.full_access && option.disabled_reason.is_none()))
+        .filter(|mode| {
+            catalog.options.iter().any(|option| {
+                option.id == *mode && !option.full_access && option.disabled_reason.is_none()
+            })
+        })
         .unwrap_or(catalog.default_mode);
     let current_full = native::is_full_access(backend, current);
-    let current_tier = catalog.options.iter().find(|option| option.id == current).map(|option| option.tier);
+    let current_tier = catalog
+        .options
+        .iter()
+        .find(|option| option.id == current)
+        .map(|option| option.tier);
     // What the live process really runs in; a different stored choice is
     // pending (dsh until its next-turn restart, Codex after a failed switch).
-    let running = request.conversation_id.as_deref().and_then(|id| external.running_native_mode(id));
+    let running = request
+        .conversation_id
+        .as_deref()
+        .and_then(|id| external.running_native_mode(id));
     let pending = running.as_deref().is_some_and(|running| running != current);
     let project = native_project(state, request).ok().flatten();
     ApiResponse::success(serde_json::json!({
@@ -875,10 +1129,20 @@ fn native_view(state: &AppState, external: &crate::external_backend::ExternalBac
 #[tauri::command]
 pub fn agent_backend_approval_modes(state: State<'_, AppState>) -> ApiResponse<serde_json::Value> {
     let forbidden = fox_agent_backend::external_launch::full_access_forbidden_from_env();
-    let lists: Vec<_> = [AgentBackend::Fox, AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek]
-        .into_iter()
-        .map(|backend| fox_agent_backend::native_permission::approval_modes(backend, &native_context(&state, backend, forbidden)))
-        .collect();
+    let lists: Vec<_> = [
+        AgentBackend::Fox,
+        AgentBackend::Pi,
+        AgentBackend::Codex,
+        AgentBackend::Deepseek,
+    ]
+    .into_iter()
+    .map(|backend| {
+        fox_agent_backend::native_permission::approval_modes(
+            backend,
+            &native_context(&state, backend, forbidden),
+        )
+    })
+    .collect();
     ApiResponse::success(serde_json::json!({ "backends": lists }))
 }
 
@@ -909,11 +1173,20 @@ pub async fn agent_backend_native_permission_set(
         Err(refusal) => return Ok(refusal),
     };
     if backend == AgentBackend::Fox {
-        return Ok(ApiResponse::failure(RouteError::CODE_INVALID, "Fox 会话沿用原来的执行方式", false));
+        return Ok(ApiResponse::failure(
+            RouteError::CODE_INVALID,
+            "Fox 会话沿用原来的执行方式",
+            false,
+        ));
     }
     let forbidden = fox_agent_backend::external_launch::full_access_forbidden_from_env();
     let context = native_context(&state, backend, forbidden);
-    let mode = request.mode.as_deref().map(str::trim).unwrap_or_default().to_owned();
+    let mode = request
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_owned();
     if mode.is_empty() && request.conversation_id.is_none() && !request.default_only {
         if let Some(carry) = request.carry_tier.as_deref() {
             // The new conversation's Agent changed (or it was opened): carry
@@ -921,18 +1194,40 @@ pub async fn agent_backend_native_permission_set(
             let from = native::FoxTier::parse(carry);
             let carried = if from.is_none() {
                 // Fresh: the Agent's default (设置), else its catalog default.
-                native::effective_mode(backend, stored_last_native_mode(&state.database, backend).as_deref(), false, &context)
+                native::effective_mode(
+                    backend,
+                    stored_last_native_mode(&state.database, backend).as_deref(),
+                    false,
+                    &context,
+                )
             } else {
                 native::mode_for_tier(backend, from, &context)
             };
             // Full access is never carried; an option the list no longer
             // offers (an older build's default) is not given to a new one.
             let defaults = native::catalog(backend, &context);
-            let offered = defaults.options.iter().any(|option| option.id == carried && option.listed && !option.full_access && option.disabled_reason.is_none());
-            let carried = if offered { carried } else { defaults.default_mode };
+            let offered = defaults.options.iter().any(|option| {
+                option.id == carried
+                    && option.listed
+                    && !option.full_access
+                    && option.disabled_reason.is_none()
+            });
+            let carried = if offered {
+                carried
+            } else {
+                defaults.default_mode
+            };
             let set = |key: String, value: &str| state.database.set_app_setting(&key, value);
-            let stored = set(format!("{NATIVE_MODE_DRAFT_PREFIX}{}", backend.as_str()), carried)
-                .and_then(|_| set(format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}{}", backend.as_str()), "0"));
+            let stored = set(
+                format!("{NATIVE_MODE_DRAFT_PREFIX}{}", backend.as_str()),
+                carried,
+            )
+            .and_then(|_| {
+                set(
+                    format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}{}", backend.as_str()),
+                    "0",
+                )
+            });
             if let Err(error) = stored {
                 return Ok(storage_error(error));
             }
@@ -941,16 +1236,28 @@ pub async fn agent_backend_native_permission_set(
     }
     let catalog = native::catalog(backend, &context);
     let Some(option) = catalog.options.iter().find(|option| option.id == mode) else {
-        return Ok(ApiResponse::failure(RouteError::CODE_INVALID, format!("「{}」没有权限选项「{mode}」", backend.as_str()), false));
+        return Ok(ApiResponse::failure(
+            RouteError::CODE_INVALID,
+            format!("「{}」没有权限选项「{mode}」", backend.as_str()),
+            false,
+        ));
     };
     if let Some(reason) = &option.disabled_reason {
-        let code = if option.full_access { host_routing::CODE_FULL_ACCESS_FORBIDDEN } else { "agent_backend_permission_unavailable" };
+        let code = if option.full_access {
+            host_routing::CODE_FULL_ACCESS_FORBIDDEN
+        } else {
+            "agent_backend_permission_unavailable"
+        };
         return Ok(ApiResponse::failure(code, reason.clone(), false));
     }
     if !option.listed {
         // An older build's mode keeps running where it is stored, but is
         // never picked again.
-        return Ok(ApiResponse::failure("agent_backend_permission_unavailable", format!("「{}」已不再提供", option.label), false));
+        return Ok(ApiResponse::failure(
+            "agent_backend_permission_unavailable",
+            format!("「{}」已不再提供", option.label),
+            false,
+        ));
     }
     // Plan C2: the Agent's full access takes the same first-time second
     // confirmation as a Fox conversation, remembered per project.
@@ -959,8 +1266,14 @@ pub async fn agent_backend_native_permission_set(
             Ok(project) => project,
             Err(error) => return Ok(storage_error(error)),
         };
-        if !request.confirm_full_access && !project_full_access_confirmed(&state, project.as_deref()) {
-            return Ok(ApiResponse::failure(FULL_ACCESS_CONFIRMATION_REQUIRED, full_access_confirmation_message(backend), false));
+        if !request.confirm_full_access
+            && !project_full_access_confirmed(&state, project.as_deref())
+        {
+            return Ok(ApiResponse::failure(
+                FULL_ACCESS_CONFIRMATION_REQUIRED,
+                full_access_confirmation_message(backend),
+                false,
+            ));
         }
         if request.confirm_full_access {
             if let Some(project) = project.as_deref() {
@@ -975,37 +1288,68 @@ pub async fn agent_backend_native_permission_set(
         // New conversation.
         if request.default_only {
             if option.full_access {
-                return Ok(ApiResponse::failure(RouteError::CODE_INVALID, "完全访问由「新外部会话使用完全访问」控制", false));
+                return Ok(ApiResponse::failure(
+                    RouteError::CODE_INVALID,
+                    "完全访问由「新外部会话使用完全访问」控制",
+                    false,
+                ));
             }
-            if let Err(error) = set(format!("{NATIVE_MODE_LAST_PREFIX}{}", backend.as_str()), &mode) {
+            if let Err(error) = set(
+                format!("{NATIVE_MODE_LAST_PREFIX}{}", backend.as_str()),
+                &mode,
+            ) {
                 return Ok(storage_error(error));
             }
             return Ok(native_view(&state, &external, &request));
         }
         let result = if option.full_access {
-            set(format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}{}", backend.as_str()), "1")
+            set(
+                format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}{}", backend.as_str()),
+                "1",
+            )
         } else {
-            set(format!("{NATIVE_MODE_DRAFT_PREFIX}{}", backend.as_str()), &mode)
-                .and_then(|_| set(format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}{}", backend.as_str()), "0"))
+            set(
+                format!("{NATIVE_MODE_DRAFT_PREFIX}{}", backend.as_str()),
+                &mode,
+            )
+            .and_then(|_| {
+                set(
+                    format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}{}", backend.as_str()),
+                    "0",
+                )
+            })
         };
         if let Err(error) = result {
             return Ok(storage_error(error));
         }
         return Ok(native_view(&state, &external, &request));
     };
-    let previous = native::effective_mode(backend, stored_conversation_native_mode(&state.database, &conversation_id).as_deref(), false, &context);
+    let previous = native::effective_mode(
+        backend,
+        stored_conversation_native_mode(&state.database, &conversation_id).as_deref(),
+        false,
+        &context,
+    );
     // Native modes are independent of Fox's removed outer sandbox layer. Store the
     // choice and let the backend switch in its own way (Codex live, dsh on
     // restart, pi at the next request); there is no Fox full-access grant to
     // revoke and no outer sandbox to re-enter.
     // The Agent's default (设置) is not rewritten by a mid-session switch.
-    let stored = set(format!("{NATIVE_MODE_CONVERSATION_PREFIX}{conversation_id}"), &mode);
+    let stored = set(
+        format!("{NATIVE_MODE_CONVERSATION_PREFIX}{conversation_id}"),
+        &mode,
+    );
     if let Err(error) = stored {
         return Ok(storage_error(error));
     }
     let outcome = external.apply_native_mode(&conversation_id, &mode).await;
     let details = serde_json::json!({ "from": previous, "to": mode, "applied": outcome.as_str(), "fullAccessRevoked": false });
-    let _ = state.database.append_agent_backend_audit(Some(&conversation_id), backend.as_str(), "agent_backend.permission_mode_changed", &details);
+    let _ = state.database.append_agent_backend_audit(
+        Some(&conversation_id),
+        backend.as_str(),
+        "agent_backend.permission_mode_changed",
+        &details,
+    );
     let mut view = native_view(&state, &external, &request);
     if let Some(data) = view.data.as_mut() {
         data["applied"] = serde_json::json!(outcome.as_str());
@@ -1022,27 +1366,47 @@ mod tests {
 
     #[test]
     fn lookup_fallback_reason_separates_old_schema_from_storage_errors() {
-        assert_eq!(lookup_fallback_reason("no such column: agent_backend"), "column_missing");
-        assert_eq!(lookup_fallback_reason("no such column: c.agent_backend"), "column_missing");
-        assert_eq!(lookup_fallback_reason("database is locked"), "storage_error");
-        assert_eq!(lookup_fallback_reason("no such column: title"), "storage_error");
+        assert_eq!(
+            lookup_fallback_reason("no such column: agent_backend"),
+            "column_missing"
+        );
+        assert_eq!(
+            lookup_fallback_reason("no such column: c.agent_backend"),
+            "column_missing"
+        );
+        assert_eq!(
+            lookup_fallback_reason("database is locked"),
+            "storage_error"
+        );
+        assert_eq!(
+            lookup_fallback_reason("no such column: title"),
+            "storage_error"
+        );
     }
 
     #[test]
     fn a_failed_lookup_is_refused_while_external_backends_are_on() {
         // A Fox conversation and an unknown conversation both continue on the
         // existing path.
-        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
+        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:"))
+            .expect("database");
         let conversation = database
             .create_conversation(database.default_agent_id(), Some("fox"), None, None)
             .expect("conversation");
         let gated: Result<Route, ApiResponse<()>> =
             gate_conversation(&database, HostEntry::Start, &conversation.id, None, None);
-        assert!(matches!(gated, Ok(Route::Fox)), "fox conversation routes to the existing path");
+        assert!(
+            matches!(gated, Ok(Route::Fox)),
+            "fox conversation routes to the existing path"
+        );
         let gated: Result<Route, ApiResponse<()>> =
             gate_conversation(&database, HostEntry::Start, "missing", None, None);
-        assert!(gated.is_ok(), "unknown conversation is left to the existing path");
-        let unknown: Result<Route, ApiResponse<()>> = gate_run_identity(HostEntry::Cancel, Ok(None), None);
+        assert!(
+            gated.is_ok(),
+            "unknown conversation is left to the existing path"
+        );
+        let unknown: Result<Route, ApiResponse<()>> =
+            gate_run_identity(HostEntry::Cancel, Ok(None), None);
         assert!(unknown.is_ok());
 
         // C1: external backends are on (FOX_EXTERNAL_BACKENDS unset), so a
@@ -1053,19 +1417,33 @@ mod tests {
             return;
         }
         for error in ["database is locked", "no such column: c.agent_backend"] {
-            let refused: Result<Route, ApiResponse<()>> = gate_run_identity(HostEntry::Cancel, Err(error.to_owned()), None);
+            let refused: Result<Route, ApiResponse<()>> =
+                gate_run_identity(HostEntry::Cancel, Err(error.to_owned()), None);
             let failure = refused.unwrap_err().error.unwrap();
             assert_eq!(failure.code, "agent_backend_lookup_failed", "{error}");
             assert!(failure.retryable);
         }
         for named in ["pi", "codex", "deepseek"] {
-            let refused: Result<Route, ApiResponse<()>> =
-                gate_run_identity(HostEntry::Cancel, Err("database is locked".to_owned()), Some(named));
-            assert_eq!(refused.unwrap_err().error.unwrap().code, "agent_backend_lookup_failed", "{named}");
+            let refused: Result<Route, ApiResponse<()>> = gate_run_identity(
+                HostEntry::Cancel,
+                Err("database is locked".to_owned()),
+                Some(named),
+            );
+            assert_eq!(
+                refused.unwrap_err().error.unwrap().code,
+                "agent_backend_lookup_failed",
+                "{named}"
+            );
         }
-        let named: Result<Route, ApiResponse<()>> =
-            gate_run_identity(HostEntry::Cancel, Err("database is locked".to_owned()), Some("gpt"));
-        assert_eq!(named.unwrap_err().error.unwrap().code, "agent_backend_invalid");
+        let named: Result<Route, ApiResponse<()>> = gate_run_identity(
+            HostEntry::Cancel,
+            Err("database is locked".to_owned()),
+            Some("gpt"),
+        );
+        assert_eq!(
+            named.unwrap_err().error.unwrap().code,
+            "agent_backend_invalid"
+        );
     }
 
     /// C1: a conversation frozen to pi / Codex / dsh routes to the external
@@ -1078,65 +1456,125 @@ mod tests {
             eprintln!("SKIPPED: FOX_EXTERNAL_BACKENDS switches every external backend off");
             return;
         }
-        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
-        for backend in [AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek] {
+        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:"))
+            .expect("database");
+        for backend in [
+            AgentBackend::Pi,
+            AgentBackend::Codex,
+            AgentBackend::Deepseek,
+        ] {
             let conversation = database
-                .create_conversation_with_backend(database.default_agent_id(), Some("外部会话"), None, None, backend.as_str())
+                .create_conversation_with_backend(
+                    database.default_agent_id(),
+                    Some("外部会话"),
+                    None,
+                    None,
+                    backend.as_str(),
+                )
                 .expect("conversation");
             assert_eq!(
-                database.conversation_agent_backend(&conversation.id).unwrap().as_deref(),
+                database
+                    .conversation_agent_backend(&conversation.id)
+                    .unwrap()
+                    .as_deref(),
                 Some(backend.as_str()),
                 "the frozen value is never rewritten"
             );
             for entry in [HostEntry::Start, HostEntry::Cancel, HostEntry::Approve] {
-                let gated: Result<Route, ApiResponse<()>> = gate_conversation(&database, entry, &conversation.id, None, None);
-                assert!(matches!(gated, Ok(Route::External(routed)) if routed == backend), "{backend:?} {entry:?}");
+                let gated: Result<Route, ApiResponse<()>> =
+                    gate_conversation(&database, entry, &conversation.id, None, None);
+                assert!(
+                    matches!(gated, Ok(Route::External(routed)) if routed == backend),
+                    "{backend:?} {entry:?}"
+                );
             }
-            let resume: Result<Route, ApiResponse<()>> = gate_conversation(&database, HostEntry::Resume, &conversation.id, None, None);
-            assert_eq!(resume.unwrap_err().error.unwrap().code, "agent_backend_entry_unsupported");
-            let misrouted: Result<Route, ApiResponse<()>> = gate_conversation(&database, HostEntry::Start, &conversation.id, None, Some("fox"));
-            assert_eq!(misrouted.unwrap_err().error.unwrap().code, "agent_backend_misrouted");
+            let resume: Result<Route, ApiResponse<()>> =
+                gate_conversation(&database, HostEntry::Resume, &conversation.id, None, None);
+            assert_eq!(
+                resume.unwrap_err().error.unwrap().code,
+                "agent_backend_entry_unsupported"
+            );
+            let misrouted: Result<Route, ApiResponse<()>> = gate_conversation(
+                &database,
+                HostEntry::Start,
+                &conversation.id,
+                None,
+                Some("fox"),
+            );
+            assert_eq!(
+                misrouted.unwrap_err().error.unwrap().code,
+                "agent_backend_misrouted"
+            );
             let identity = crate::database::RunBackendIdentity {
                 conversation_id: conversation.id.clone(),
                 run_id: "r".to_owned(),
                 agent_backend: backend.as_str().to_owned(),
                 engine_id: None,
             };
-            let cancel: Result<Route, ApiResponse<()>> = gate_run_identity(HostEntry::Cancel, Ok(Some(identity)), None);
-            assert!(matches!(cancel, Ok(Route::External(routed)) if routed == backend), "{backend:?}");
+            let cancel: Result<Route, ApiResponse<()>> =
+                gate_run_identity(HostEntry::Cancel, Ok(Some(identity)), None);
+            assert!(
+                matches!(cancel, Ok(Route::External(routed)) if routed == backend),
+                "{backend:?}"
+            );
         }
         let fox = database
             .create_conversation(database.default_agent_id(), Some("fox"), None, None)
             .expect("fox conversation");
-        let gated: Result<Route, ApiResponse<()>> = gate_conversation(&database, HostEntry::Start, &fox.id, None, None);
+        let gated: Result<Route, ApiResponse<()>> =
+            gate_conversation(&database, HostEntry::Start, &fox.id, None, None);
         assert!(matches!(gated, Ok(Route::Fox)));
     }
 
     #[test]
     fn credential_probe_accepts_draft_and_conversation_targets() {
-        let probe: crate::external_backend::AgentBackendTarget = serde_json::from_value(serde_json::json!({ "backend": "deepseek", "projectRoot": "D:/proj" })).unwrap();
+        let probe: crate::external_backend::AgentBackendTarget = serde_json::from_value(
+            serde_json::json!({ "backend": "deepseek", "projectRoot": "D:/proj" }),
+        )
+        .unwrap();
         assert_eq!(probe.project_root.as_deref(), Some("D:/proj"));
         assert!(!probe.full_access);
-        let conversation: crate::external_backend::AgentBackendTarget = serde_json::from_value(serde_json::json!({ "conversationId": "c2" })).unwrap();
+        let conversation: crate::external_backend::AgentBackendTarget =
+            serde_json::from_value(serde_json::json!({ "conversationId": "c2" })).unwrap();
         assert_eq!(conversation.conversation_id.as_deref(), Some("c2"));
     }
 
     #[test]
     fn agent_backend_draft_probe_finds_the_project_by_id_or_root_and_labels_projects_by_name() {
-        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
+        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:"))
+            .expect("database");
         database
             .with_connection(|connection| {
                 connection.execute("INSERT INTO projects(id,name,root_path,permission_mode,status,created_at,updated_at) VALUES ('p2','第二个项目','D:/two','read_only','active',1,1)", [])?;
                 connection.execute("INSERT INTO projects(id,name,root_path,permission_mode,status,created_at,updated_at) VALUES ('p1','主项目','D:/main','read_only','active',1,1)", [])
             })
             .expect("projects");
-        assert_eq!(database.known_projects().unwrap(), vec![("p1".to_owned(), "主项目".to_owned()), ("p2".to_owned(), "第二个项目".to_owned())]);
-        let by_id = database.project_by_id_or_root(Some("p2"), Some("D:/main")).unwrap();
-        assert_eq!(by_id, Some(("p2".to_owned(), "D:/two".to_owned())), "the id wins");
-        let by_root = database.project_by_id_or_root(Some("gone"), Some("D:/main")).unwrap();
+        assert_eq!(
+            database.known_projects().unwrap(),
+            vec![
+                ("p1".to_owned(), "主项目".to_owned()),
+                ("p2".to_owned(), "第二个项目".to_owned())
+            ]
+        );
+        let by_id = database
+            .project_by_id_or_root(Some("p2"), Some("D:/main"))
+            .unwrap();
+        assert_eq!(
+            by_id,
+            Some(("p2".to_owned(), "D:/two".to_owned())),
+            "the id wins"
+        );
+        let by_root = database
+            .project_by_id_or_root(Some("gone"), Some("D:/main"))
+            .unwrap();
         assert_eq!(by_root, Some(("p1".to_owned(), "D:/main".to_owned())));
         assert_eq!(database.project_by_id_or_root(None, None).unwrap(), None);
-        assert_eq!(database.project_by_id_or_root(Some(""), Some("D:/nowhere")).unwrap(), None);
+        assert_eq!(
+            database
+                .project_by_id_or_root(Some(""), Some("D:/nowhere"))
+                .unwrap(),
+            None
+        );
     }
 
     /// Settings batch, item 4: FOX_EXTERNAL_BACKENDS only forces off; the
@@ -1144,63 +1582,155 @@ mod tests {
     #[test]
     fn preferences_use_the_saved_backend_unless_the_administrator_forced_it_off() {
         let on = BackendSwitch::from_env_value(None);
-        for saved in [AgentBackend::Fox, AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek] {
+        for saved in [
+            AgentBackend::Fox,
+            AgentBackend::Pi,
+            AgentBackend::Codex,
+            AgentBackend::Deepseek,
+        ] {
             let view = preferences_view(saved, false, &on, false, None, None);
             assert_eq!(view.default_backend, saved.as_str());
-            assert_eq!(view.effective_backend, saved.as_str(), "C1: a saved external backend is used again");
+            assert_eq!(
+                view.effective_backend,
+                saved.as_str(),
+                "C1: a saved external backend is used again"
+            );
             assert!(view.retired_backends.is_empty());
             assert!(!view.forced_off);
-            assert!(view.options.iter().all(|option| option.enabled && option.reason.is_none()), "{:?}", view.options);
+            assert!(
+                view.options
+                    .iter()
+                    .all(|option| option.enabled && option.reason.is_none()),
+                "{:?}",
+                view.options
+            );
             assert_eq!(view.options.len(), 4);
         }
         let off = BackendSwitch::from_env_value(Some("0"));
         let view = preferences_view(AgentBackend::Codex, false, &off, false, None, None);
-        assert_eq!(view.default_backend, "codex", "what was saved is reported as saved");
-        assert_eq!(view.effective_backend, "fox", "a backend switched off falls back to Fox");
+        assert_eq!(
+            view.default_backend, "codex",
+            "what was saved is reported as saved"
+        );
+        assert_eq!(
+            view.effective_backend, "fox",
+            "a backend switched off falls back to Fox"
+        );
         assert!(view.forced_off);
         for option in view.options.iter().filter(|option| option.backend != "fox") {
             assert!(!option.enabled);
-            assert!(option.reason.as_deref().unwrap().contains("FOX_EXTERNAL_BACKENDS"), "{}", option.backend);
+            assert!(
+                option
+                    .reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("FOX_EXTERNAL_BACKENDS"),
+                "{}",
+                option.backend
+            );
         }
         let some = BackendSwitch::from_env_value(Some("pi"));
-        assert_eq!(preferences_view(AgentBackend::Pi, false, &some, false, None, None).effective_backend, "pi");
-        assert_eq!(preferences_view(AgentBackend::Deepseek, false, &some, false, None, None).effective_backend, "fox");
+        assert_eq!(
+            preferences_view(AgentBackend::Pi, false, &some, false, None, None).effective_backend,
+            "pi"
+        );
+        assert_eq!(
+            preferences_view(AgentBackend::Deepseek, false, &some, false, None, None)
+                .effective_backend,
+            "fox"
+        );
         // Default when nothing was saved: Fox.
-        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
+        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:"))
+            .expect("database");
         assert_eq!(stored_default_backend(&database), AgentBackend::Fox);
         assert!(!stored_new_external_full_access(&database));
-        database.set_app_setting(DEFAULT_BACKEND_KEY, "codex").unwrap();
-        database.set_app_setting(NEW_EXTERNAL_FULL_ACCESS_KEY, "1").unwrap();
+        database
+            .set_app_setting(DEFAULT_BACKEND_KEY, "codex")
+            .unwrap();
+        database
+            .set_app_setting(NEW_EXTERNAL_FULL_ACCESS_KEY, "1")
+            .unwrap();
         assert_eq!(stored_default_backend(&database), AgentBackend::Codex);
         assert!(stored_new_external_full_access(&database));
-        database.set_app_setting(DEFAULT_BACKEND_KEY, "deepseek_harness").unwrap();
-        assert_eq!(stored_default_backend(&database), AgentBackend::Fox, "garbage reads as Fox");
+        database
+            .set_app_setting(DEFAULT_BACKEND_KEY, "deepseek_harness")
+            .unwrap();
+        assert_eq!(
+            stored_default_backend(&database),
+            AgentBackend::Fox,
+            "garbage reads as Fox"
+        );
     }
 
     /// Settings batch, items 4 / 5: a forced-off backend and full access under
     /// FORBIDDEN cannot be saved.
     #[test]
     fn agent_backend_preference_changes_are_validated_against_the_switches() {
-        let off = preferences_view(AgentBackend::Fox, false, &BackendSwitch::from_env_value(Some("off")), true, None, None);
+        let off = preferences_view(
+            AgentBackend::Fox,
+            false,
+            &BackendSwitch::from_env_value(Some("off")),
+            true,
+            None,
+            None,
+        );
         let request = |backend: Option<&str>, full: Option<bool>| AgentBackendPreferencesRequest {
             default_backend: backend.map(str::to_owned),
             new_external_full_access: full,
         };
-        assert_eq!(validate_preferences_change(&request(None, Some(true)), &off).unwrap_err().0, "agent_backend_full_access_forbidden");
-        assert_eq!(validate_preferences_change(&request(None, Some(false)), &off).unwrap(), (None, Some(false)));
-        assert_eq!(validate_preferences_change(&request(Some("fox"), None), &off).unwrap(), (Some(AgentBackend::Fox), None));
-        assert_eq!(validate_preferences_change(&request(Some("claude"), None), &off).unwrap_err().0, "agent_backend_invalid");
+        assert_eq!(
+            validate_preferences_change(&request(None, Some(true)), &off)
+                .unwrap_err()
+                .0,
+            "agent_backend_full_access_forbidden"
+        );
+        assert_eq!(
+            validate_preferences_change(&request(None, Some(false)), &off).unwrap(),
+            (None, Some(false))
+        );
+        assert_eq!(
+            validate_preferences_change(&request(Some("fox"), None), &off).unwrap(),
+            (Some(AgentBackend::Fox), None)
+        );
+        assert_eq!(
+            validate_preferences_change(&request(Some("claude"), None), &off)
+                .unwrap_err()
+                .0,
+            "agent_backend_invalid"
+        );
         for external in ["pi", "codex", "deepseek"] {
-            assert_eq!(validate_preferences_change(&request(Some(external), None), &off).unwrap_err().0, "agent_backend_disabled", "{external}");
+            assert_eq!(
+                validate_preferences_change(&request(Some(external), None), &off)
+                    .unwrap_err()
+                    .0,
+                "agent_backend_disabled",
+                "{external}"
+            );
         }
         assert!(off.forbidden_reason.is_some() && !off.effective_full_access);
 
-        let on = preferences_view(AgentBackend::Fox, true, &BackendSwitch::from_env_value(None), false, Some("Example".into()), None);
-        for (external, backend) in [("pi", AgentBackend::Pi), ("codex", AgentBackend::Codex), ("deepseek", AgentBackend::Deepseek)] {
-            assert_eq!(validate_preferences_change(&request(Some(external), None), &on).unwrap(), (Some(backend), None));
+        let on = preferences_view(
+            AgentBackend::Fox,
+            true,
+            &BackendSwitch::from_env_value(None),
+            false,
+            Some("Example".into()),
+            None,
+        );
+        for (external, backend) in [
+            ("pi", AgentBackend::Pi),
+            ("codex", AgentBackend::Codex),
+            ("deepseek", AgentBackend::Deepseek),
+        ] {
+            assert_eq!(
+                validate_preferences_change(&request(Some(external), None), &on).unwrap(),
+                (Some(backend), None)
+            );
         }
-        assert_eq!(validate_preferences_change(&request(Some("fox"), None), &on).unwrap(), (Some(AgentBackend::Fox), None));
-
+        assert_eq!(
+            validate_preferences_change(&request(Some("fox"), None), &on).unwrap(),
+            (Some(AgentBackend::Fox), None)
+        );
     }
 
     /// Codex was hidden on 2026-10-24 because of Fox's outer sandbox layer. It is a
@@ -1210,17 +1740,43 @@ mod tests {
     /// 「不会创建 Fox 外层授权」这条断言不变。
     #[test]
     fn native_full_access_is_seeded_as_the_agent_mode_not_a_fox_grant() {
-        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
-        database.set_app_setting("agent_backend.native_mode.last.codex", "workspace-write").unwrap();
-        seed_conversation_native_mode(&database, "c-full", AgentBackend::Codex, "agent-full-access");
-        assert_eq!(stored_conversation_native_mode(&database, "c-full").as_deref(), Some("agent-full-access"));
-        assert!(!database.conversation_full_access_granted("c-full").unwrap(), "no Fox outer grant is created");
-        seed_conversation_native_mode(&database, "c-restricted", AgentBackend::Codex, "workspace-write");
-        assert_eq!(stored_conversation_native_mode(&database, "c-restricted").as_deref(), Some("workspace-write"));
+        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:"))
+            .expect("database");
+        database
+            .set_app_setting("agent_backend.native_mode.last.codex", "workspace-write")
+            .unwrap();
+        seed_conversation_native_mode(
+            &database,
+            "c-full",
+            AgentBackend::Codex,
+            "agent-full-access",
+        );
+        assert_eq!(
+            stored_conversation_native_mode(&database, "c-full").as_deref(),
+            Some("agent-full-access")
+        );
+        assert!(
+            !database.conversation_full_access_granted("c-full").unwrap(),
+            "no Fox outer grant is created"
+        );
+        seed_conversation_native_mode(
+            &database,
+            "c-restricted",
+            AgentBackend::Codex,
+            "workspace-write",
+        );
+        assert_eq!(
+            stored_conversation_native_mode(&database, "c-restricted").as_deref(),
+            Some("workspace-write")
+        );
     }
 
     /// 按数据库里的设置和草稿确认标志决定起始档位，不读取草稿档位键本身。
-    fn decide_start(database: &crate::database::Database, backend: AgentBackend, requested: Option<&str>) -> Result<String, NativeModeRefusal> {
+    fn decide_start(
+        database: &crate::database::Database,
+        backend: AgentBackend,
+        requested: Option<&str>,
+    ) -> Result<String, NativeModeRefusal> {
         let context = fox_agent_backend::native_permission::CatalogContext::default();
         resolve_starting_native_mode(
             backend,
@@ -1236,19 +1792,45 @@ mod tests {
     /// 新规则：没带 nativePermission 时用设置默认（read-only），草稿键只被清空、不决定档位。
     #[test]
     fn the_draft_pick_no_longer_seeds_the_conversation() {
-        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
-        database.set_app_setting("agent_backend.native_mode.last.deepseek", "read-only").unwrap();
-        database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_PREFIX}deepseek"), "workspace-write").unwrap();
-        assert_eq!(stored_draft_native_mode(&database, AgentBackend::Deepseek).as_deref(), Some("workspace-write"));
+        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:"))
+            .expect("database");
+        database
+            .set_app_setting("agent_backend.native_mode.last.deepseek", "read-only")
+            .unwrap();
+        database
+            .set_app_setting(
+                &format!("{NATIVE_MODE_DRAFT_PREFIX}deepseek"),
+                "workspace-write",
+            )
+            .unwrap();
+        assert_eq!(
+            stored_draft_native_mode(&database, AgentBackend::Deepseek).as_deref(),
+            Some("workspace-write")
+        );
         let mode = decide_start(&database, AgentBackend::Deepseek, None).unwrap();
-        assert_eq!(mode, "read-only", "设置默认胜出，草稿键里的 workspace-write 不再生效");
+        assert_eq!(
+            mode, "read-only",
+            "设置默认胜出，草稿键里的 workspace-write 不再生效"
+        );
         seed_conversation_native_mode(&database, "c-draft", AgentBackend::Deepseek, &mode);
-        assert_eq!(stored_conversation_native_mode(&database, "c-draft").as_deref(), Some("read-only"));
-        assert_eq!(stored_draft_native_mode(&database, AgentBackend::Deepseek), None, "草稿键仍被清空");
+        assert_eq!(
+            stored_conversation_native_mode(&database, "c-draft").as_deref(),
+            Some("read-only")
+        );
+        assert_eq!(
+            stored_draft_native_mode(&database, AgentBackend::Deepseek),
+            None,
+            "草稿键仍被清空"
+        );
         let again = decide_start(&database, AgentBackend::Deepseek, None).unwrap();
         seed_conversation_native_mode(&database, "c-default", AgentBackend::Deepseek, &again);
-        assert_eq!(stored_conversation_native_mode(&database, "c-default").as_deref(), Some("read-only"));
-        let request: NativePermissionRequest = serde_json::from_value(serde_json::json!({ "backend": "codex", "carryTier": "ask" })).unwrap();
+        assert_eq!(
+            stored_conversation_native_mode(&database, "c-default").as_deref(),
+            Some("read-only")
+        );
+        let request: NativePermissionRequest =
+            serde_json::from_value(serde_json::json!({ "backend": "codex", "carryTier": "ask" }))
+                .unwrap();
         assert_eq!(request.carry_tier.as_deref(), Some("ask"));
         assert!(request.mode.is_none());
     }
@@ -1257,46 +1839,141 @@ mod tests {
     #[test]
     fn starting_native_mode_uses_the_backend_default_unless_the_request_names_one() {
         let context = fox_agent_backend::native_permission::CatalogContext::default();
-        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
-        database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_PREFIX}deepseek"), "read-only").unwrap();
-        database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}deepseek"), "0").unwrap();
+        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:"))
+            .expect("database");
+        database
+            .set_app_setting(&format!("{NATIVE_MODE_DRAFT_PREFIX}deepseek"), "read-only")
+            .unwrap();
+        database
+            .set_app_setting(&format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}deepseek"), "0")
+            .unwrap();
         let mode = decide_start(&database, AgentBackend::Deepseek, None).unwrap();
-        assert_eq!(mode, "workspace-write", "没带 nativePermission：目录默认，不采用草稿里的 read-only");
+        assert_eq!(
+            mode, "workspace-write",
+            "没带 nativePermission：目录默认，不采用草稿里的 read-only"
+        );
         seed_conversation_native_mode(&database, "c-api", AgentBackend::Deepseek, &mode);
-        assert_eq!(stored_conversation_native_mode(&database, "c-api").as_deref(), Some("workspace-write"));
-        assert_eq!(stored_draft_native_mode(&database, AgentBackend::Deepseek), None);
-        assert_eq!(draft_full_access_choice(&database, AgentBackend::Deepseek), None);
+        assert_eq!(
+            stored_conversation_native_mode(&database, "c-api").as_deref(),
+            Some("workspace-write")
+        );
+        assert_eq!(
+            stored_draft_native_mode(&database, AgentBackend::Deepseek),
+            None
+        );
+        assert_eq!(
+            draft_full_access_choice(&database, AgentBackend::Deepseek),
+            None
+        );
 
-        database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_PREFIX}deepseek"), "workspace-write").unwrap();
+        database
+            .set_app_setting(
+                &format!("{NATIVE_MODE_DRAFT_PREFIX}deepseek"),
+                "workspace-write",
+            )
+            .unwrap();
         let explicit = decide_start(&database, AgentBackend::Deepseek, Some("read-only")).unwrap();
         assert_eq!(explicit, "read-only");
         seed_conversation_native_mode(&database, "c-explicit", AgentBackend::Deepseek, &explicit);
-        assert_eq!(stored_conversation_native_mode(&database, "c-explicit").as_deref(), Some("read-only"));
-        assert_eq!(stored_draft_native_mode(&database, AgentBackend::Deepseek), None, "显式路径同样清空草稿键");
+        assert_eq!(
+            stored_conversation_native_mode(&database, "c-explicit").as_deref(),
+            Some("read-only")
+        );
+        assert_eq!(
+            stored_draft_native_mode(&database, AgentBackend::Deepseek),
+            None,
+            "显式路径同样清空草稿键"
+        );
 
-        database.set_app_setting("agent_backend.native_mode.last.deepseek", "read-only").unwrap();
-        database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_PREFIX}deepseek"), "workspace-write").unwrap();
-        assert_eq!(decide_start(&database, AgentBackend::Deepseek, None).unwrap(), "read-only", "设置默认是 read-only 时没带参数用 read-only");
+        database
+            .set_app_setting("agent_backend.native_mode.last.deepseek", "read-only")
+            .unwrap();
+        database
+            .set_app_setting(
+                &format!("{NATIVE_MODE_DRAFT_PREFIX}deepseek"),
+                "workspace-write",
+            )
+            .unwrap();
+        assert_eq!(
+            decide_start(&database, AgentBackend::Deepseek, None).unwrap(),
+            "read-only",
+            "设置默认是 read-only 时没带参数用 read-only"
+        );
 
-        let unconfirmed = decide_start(&database, AgentBackend::Deepseek, Some("danger-full-access")).unwrap_err();
+        let unconfirmed = decide_start(
+            &database,
+            AgentBackend::Deepseek,
+            Some("danger-full-access"),
+        )
+        .unwrap_err();
         assert_eq!(unconfirmed.code, "agent_backend_permission_unavailable");
-        database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}deepseek"), "0").unwrap();
-        let declined = decide_start(&database, AgentBackend::Deepseek, Some("danger-full-access")).unwrap_err();
+        database
+            .set_app_setting(&format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}deepseek"), "0")
+            .unwrap();
+        let declined = decide_start(
+            &database,
+            AgentBackend::Deepseek,
+            Some("danger-full-access"),
+        )
+        .unwrap_err();
         assert_eq!(declined.code, "agent_backend_permission_unavailable");
-        database.set_app_setting(&format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}deepseek"), "1").unwrap();
-        assert_eq!(decide_start(&database, AgentBackend::Deepseek, Some("danger-full-access")).unwrap(), "danger-full-access");
+        database
+            .set_app_setting(&format!("{NATIVE_MODE_DRAFT_FULL_PREFIX}deepseek"), "1")
+            .unwrap();
+        assert_eq!(
+            decide_start(
+                &database,
+                AgentBackend::Deepseek,
+                Some("danger-full-access")
+            )
+            .unwrap(),
+            "danger-full-access"
+        );
 
-        let forbidden_context = fox_agent_backend::native_permission::CatalogContext { full_access_forbidden: true, provider_base_url: None };
-        let forbidden = resolve_starting_native_mode(AgentBackend::Deepseek, Some("danger-full-access"), Some(true), true, None, &forbidden_context).unwrap_err();
+        let forbidden_context = fox_agent_backend::native_permission::CatalogContext {
+            full_access_forbidden: true,
+            provider_base_url: None,
+        };
+        let forbidden = resolve_starting_native_mode(
+            AgentBackend::Deepseek,
+            Some("danger-full-access"),
+            Some(true),
+            true,
+            None,
+            &forbidden_context,
+        )
+        .unwrap_err();
         assert_eq!(forbidden.code, "agent_backend_permission_unavailable");
-        let flagged = resolve_starting_native_mode(AgentBackend::Deepseek, Some("danger-full-access"), Some(true), true, None, &context).unwrap_err();
+        let flagged = resolve_starting_native_mode(
+            AgentBackend::Deepseek,
+            Some("danger-full-access"),
+            Some(true),
+            true,
+            None,
+            &context,
+        )
+        .unwrap_err();
         assert_eq!(flagged.code, "agent_backend_permission_unavailable");
 
-        let unlisted = decide_start(&database, AgentBackend::Deepseek, Some("workspace-write-never")).unwrap_err();
+        let unlisted = decide_start(
+            &database,
+            AgentBackend::Deepseek,
+            Some("workspace-write-never"),
+        )
+        .unwrap_err();
         assert_eq!(unlisted.code, "agent_backend_permission_unavailable");
-        let unknown = decide_start(&database, AgentBackend::Deepseek, Some("not-a-mode")).unwrap_err();
+        let unknown =
+            decide_start(&database, AgentBackend::Deepseek, Some("not-a-mode")).unwrap_err();
         assert_eq!(unknown.code, "agent_backend_permission_unavailable");
-        let greyed = resolve_starting_native_mode(AgentBackend::Codex, Some("agent"), None, false, None, &context).unwrap_err();
+        let greyed = resolve_starting_native_mode(
+            AgentBackend::Codex,
+            Some("agent"),
+            None,
+            false,
+            None,
+            &context,
+        )
+        .unwrap_err();
         assert_eq!(greyed.code, "agent_backend_permission_unavailable");
     }
 
@@ -1308,16 +1985,26 @@ mod tests {
             eprintln!("SKIPPED: FOX_EXTERNAL_BACKENDS switches every external backend off");
             return;
         }
-        for backend in [AgentBackend::Pi, AgentBackend::Codex, AgentBackend::Deepseek] {
-            let chosen: Result<AgentBackend, ApiResponse<()>> = choose_new_conversation_backend(Some(backend.as_str()));
+        for backend in [
+            AgentBackend::Pi,
+            AgentBackend::Codex,
+            AgentBackend::Deepseek,
+        ] {
+            let chosen: Result<AgentBackend, ApiResponse<()>> =
+                choose_new_conversation_backend(Some(backend.as_str()));
             assert_eq!(chosen.ok(), Some(backend));
         }
         let absent: Result<AgentBackend, ApiResponse<()>> = choose_new_conversation_backend(None);
         assert_eq!(absent.ok(), Some(AgentBackend::Fox));
-        let explicit: Result<AgentBackend, ApiResponse<()>> = choose_new_conversation_backend(Some("fox"));
+        let explicit: Result<AgentBackend, ApiResponse<()>> =
+            choose_new_conversation_backend(Some("fox"));
         assert_eq!(explicit.ok(), Some(AgentBackend::Fox));
-        let unknown: Result<AgentBackend, ApiResponse<()>> = choose_new_conversation_backend(Some("gpt"));
-        assert_eq!(unknown.unwrap_err().error.unwrap().code, "agent_backend_invalid");
+        let unknown: Result<AgentBackend, ApiResponse<()>> =
+            choose_new_conversation_backend(Some("gpt"));
+        assert_eq!(
+            unknown.unwrap_err().error.unwrap().code,
+            "agent_backend_invalid"
+        );
         // Plan C2: the first full access of an external Agent in a project
         // asks once more, in the same words for every Agent.
         assert!(full_access_confirmation_message(AgentBackend::Codex).contains("Codex"));
@@ -1332,7 +2019,8 @@ mod tests {
     /// runnable and its remote knowledge base is untouched.
     #[test]
     fn a_yuxi_remote_expert_stays_on_the_supported_path() {
-        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:")).expect("database");
+        let database = crate::database::Database::open(std::path::PathBuf::from(":memory:"))
+            .expect("database");
         database
             .with_connection(|connection| {
                 connection.execute(
@@ -1344,7 +2032,12 @@ mod tests {
             })
             .expect("yuxi expert");
         let conversation = database
-            .create_conversation(database.default_agent_id(), Some("远程知识库会话"), None, None)
+            .create_conversation(
+                database.default_agent_id(),
+                Some("远程知识库会话"),
+                None,
+                None,
+            )
             .expect("conversation");
         // Rebind the conversation to the remote expert the way the create path
         // does (the summary read-back of a hand-inserted agent row is the
@@ -1360,13 +2053,27 @@ mod tests {
             .expect("bind yuxi expert");
         // The conversation still belongs to the one supported Agent path…
         assert_eq!(
-            database.conversation_agent_backend(&conversation.id).unwrap().as_deref(),
+            database
+                .conversation_agent_backend(&conversation.id)
+                .unwrap()
+                .as_deref(),
             Some("fox"),
             "a Yuxi conversation is the supported Fox path, not a retired backend"
         );
         // …while its expert keeps the remote runtime.
-        assert_eq!(database.conversation_runtime(&conversation.id).unwrap().runtime_type, "yuxi");
-        for entry in [HostEntry::Start, HostEntry::Cancel, HostEntry::Approve, HostEntry::Resume] {
+        assert_eq!(
+            database
+                .conversation_runtime(&conversation.id)
+                .unwrap()
+                .runtime_type,
+            "yuxi"
+        );
+        for entry in [
+            HostEntry::Start,
+            HostEntry::Cancel,
+            HostEntry::Approve,
+            HostEntry::Resume,
+        ] {
             let gated: Result<Route, ApiResponse<()>> =
                 gate_conversation(&database, entry, &conversation.id, None, None);
             assert!(
@@ -1386,13 +2093,24 @@ mod tests {
         }
         let status = agent_backends_status();
         let status = status.data.expect("status data");
-        assert_eq!(status.supported_backends, ["fox".to_owned(), "pi".to_owned(), "codex".to_owned(), "deepseek".to_owned()]);
+        assert_eq!(
+            status.supported_backends,
+            [
+                "fox".to_owned(),
+                "pi".to_owned(),
+                "codex".to_owned(),
+                "deepseek".to_owned()
+            ]
+        );
         assert!(status.retired_backends.is_empty());
         assert!(status.any_external_enabled);
         assert_eq!(status.options.len(), 4);
         for option in &status.options {
-            assert!(option.enabled && option.wired && !option.retired && option.reason.is_none(), "{}", option.backend);
+            assert!(
+                option.enabled && option.wired && !option.retired && option.reason.is_none(),
+                "{}",
+                option.backend
+            );
         }
     }
-
 }

@@ -1,4 +1,4 @@
-// Real chat tree and Base/Motion components; no accordion or state mocks.
+// Real chat tree and ReUI components; no tree-state mocks.
 import assert from 'node:assert/strict'
 import { after, afterEach, test } from 'node:test'
 import path from 'node:path'
@@ -34,21 +34,21 @@ const file = (filePath, parent) => ({ ...directory(filePath, parent), isDirector
 const entries = [directory('src'), directory('src/deep', 'src'), file('src/deep/a.ts', 'src/deep'), directory('docs'), directory('docs/guide', 'docs'), file('docs/guide/readme.md', 'docs/guide')]
 const props = { entries, workspaceName: 'workspace', selectedFile: '', onSelect: () => {} }
 function expanded(view, name, expected = true) {
-  assert.equal(view.getByRole('button', { name, exact: true }).getAttribute('aria-expanded'), String(expected))
+  assert.equal(view.getByRole('treeitem', { name, exact: true }).getAttribute('aria-expanded'), String(expected))
 }
 
 test('chat file tree keeps sibling/ancestor expansion, and file clicks still select the exact path', async () => {
   const selected = []
   const view = render(React.createElement(ProjectFileTree, { ...props, onSelect: value => selected.push(value) }))
-  for (const name of ['src', 'docs', 'deep', 'guide']) fireEvent.click(view.getByRole('button', { name, exact: true }))
+  for (const name of ['src', 'docs', 'deep', 'guide']) fireEvent.click(view.getByRole('treeitem', { name, exact: true }))
   for (const name of ['workspace', 'src', 'docs', 'deep', 'guide']) expanded(view, name)
-  fireEvent.click(view.getByRole('button', { name: '打开 a.ts' }))
-  fireEvent.click(view.getByRole('button', { name: '打开 readme.md' }))
+  fireEvent.click(view.getByRole('treeitem', { name: 'a.ts' }))
+  fireEvent.click(view.getByRole('treeitem', { name: 'readme.md' }))
   assert.deepEqual(selected, ['src/deep/a.ts', 'docs/guide/readme.md'])
-  fireEvent.click(view.getByRole('button', { name: 'deep', exact: true }))
+  fireEvent.click(view.getByRole('treeitem', { name: 'deep', exact: true }))
   expanded(view, 'deep', false)
   for (const name of ['workspace', 'src', 'docs', 'guide']) expanded(view, name)
-  fireEvent.click(view.getByRole('button', { name: 'src', exact: true }))
+  fireEvent.click(view.getByRole('treeitem', { name: 'src', exact: true }))
   expanded(view, 'src', false)
   expanded(view, 'docs')
   expanded(view, 'guide')
@@ -56,21 +56,21 @@ test('chat file tree keeps sibling/ancestor expansion, and file clicks still sel
 
 test('external selection reveals normalized ancestors without losing manual expansion or overriding manual collapse', async () => {
   const view = render(React.createElement(ProjectFileTree, props))
-  fireEvent.click(view.getByRole('button', { name: 'docs', exact: true }))
-  fireEvent.click(view.getByRole('button', { name: 'guide', exact: true }))
+  fireEvent.click(view.getByRole('treeitem', { name: 'docs', exact: true }))
+  fireEvent.click(view.getByRole('treeitem', { name: 'guide', exact: true }))
   const selectedProps = { ...props, selectedFile: '.\\SRC\\deep\\a.ts' }
   view.rerender(React.createElement(ProjectFileTree, selectedProps))
   await waitFor(() => {
     for (const name of ['workspace', 'src', 'deep', 'docs', 'guide']) expanded(view, name)
-    assert.equal(view.getByRole('button', { name: '打开 a.ts' }).getAttribute('aria-current'), 'true')
+    assert.equal(view.getByRole('treeitem', { name: 'a.ts' }).getAttribute('aria-current'), 'true')
   })
-  fireEvent.click(view.getByRole('button', { name: 'src', exact: true }))
+  fireEvent.click(view.getByRole('treeitem', { name: 'src', exact: true }))
   expanded(view, 'src', false)
   view.rerender(React.createElement(ProjectFileTree, selectedProps))
   expanded(view, 'src', false)
   expanded(view, 'guide')
   view.rerender(React.createElement(ProjectFileTree, { ...props, selectedFile: 'docs/guide/readme.md' }))
-  await waitFor(() => assert.equal(view.getByRole('button', { name: '打开 readme.md' }).getAttribute('aria-current'), 'true'))
+  await waitFor(() => assert.equal(view.getByRole('treeitem', { name: 'readme.md' }).getAttribute('aria-current'), 'true'))
   expanded(view, 'src', false)
   expanded(view, 'docs')
   expanded(view, 'guide')
@@ -81,7 +81,7 @@ test('selection arriving before the async file catalog is revealed after entries
   view.rerender(React.createElement(ProjectFileTree, { ...props, selectedFile: 'src/deep/a.ts' }))
   await waitFor(() => {
     for (const name of ['workspace', 'src', 'deep']) expanded(view, name)
-    assert.equal(view.getByRole('button', { name: '打开 a.ts' }).getAttribute('aria-current'), 'true')
+    assert.equal(view.getByRole('treeitem', { name: 'a.ts' }).getAttribute('aria-current'), 'true')
   })
   expanded(view, 'docs', false)
 })

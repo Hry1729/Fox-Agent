@@ -97,6 +97,9 @@
   --fox-accent-soft: var(--fox-blue-soft);
   --fox-success: var(--success);
   --fox-warning: var(--warning);
+  --fox-danger: var(--destructive);
+  --fox-outline: var(--ring);
+  --fox-font-mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
   /* 小号文字用的警示色：浅色下纯 warning 在浅底上只有 3.9:1，往前景色压一点到 ≥ 4.5:1。 */
   --fox-warning-text: color-mix(in oklch, var(--warning) 72%, var(--foreground));
   --fox-surface-subtle: color-mix(in oklch, var(--fox-panel) 32%, var(--fox-card));
@@ -125,9 +128,27 @@
   --fox-shadow-md: 0 4px 16px color-mix(in oklch, var(--fox-shadow-color) 9%, transparent);
   --fox-shadow-lg: 0 16px 45px color-mix(in oklch, var(--fox-shadow-color) 12%, transparent);
   --fox-shadow: var(--fox-shadow-lg);
+  --fox-control-xs: 24px;
   --fox-control-sm: 28px;
+  --fox-row-summary: 44px;
+  --fox-row-section: 38px;
+  --fox-row-list: 40px;
+  --fox-row-tree: 30px;
+  --fox-type-summary: calc(13.5px * var(--fox-text-scale));
+  --fox-selected: color-mix(in oklch, var(--foreground) 6%, transparent);
+  --ctx-history: oklch(0.6 0.15 255);
+  --ctx-tools: oklch(0.68 0.16 50);
+  --ctx-system: oklch(0.64 0.11 175);
+  --ctx-reserve: oklch(0.78 0.14 85);
+  --ctx-margin: color-mix(in oklch, var(--muted-foreground) 45%, var(--fox-canvas));
   --fox-control-md: 32px;
   --fox-control-lg: 36px;
+  --fox-panel-header-height: 40px;
+  --fox-panel-inset: var(--fox-space-l);
+  --fox-panel-gap: var(--fox-space-m);
+  --fox-panel-block-inset: var(--fox-space-s);
+  --fox-panel-section-height: var(--fox-control-sm);
+  --fox-panel-row-height: var(--fox-control-md);
   --fox-action-height: var(--fox-control-md);
   --fox-inline-action-height: var(--fox-control-sm);
   --fox-sidebar-row-height: 32px;
@@ -140,6 +161,27 @@
   --fox-sidebar-icon-gap: var(--fox-space-m);
   --fox-sidebar-action-size: var(--fox-control-sm);
   --fox-sidebar-action-gap: var(--fox-space-micro);
+  /* 侧栏三条竖线：
+     1. 轨道：侧栏左右各留 gutter，所有行（命令、分组标题、Fox、项目、对话）的底色铺满轨道。
+     2. 图标列：轨道左缘 + inset；文字列 = 图标列 + icon-box + icon-gap。
+     3. 动作列：轨道右缘 − action-inset。所有尾部按钮（搜索、通知、分组 + / …、行内 …、
+        页脚）同一尺寸，右缘落在这条线上；28px 按钮在 32px 行里四周各留 2px，与行同心。
+     分组之间只用 section-gap 拉开，分组标题和普通行同高。 */
+  --fox-sidebar-gutter: var(--fox-space-l);
+  --fox-sidebar-action-inset: calc((var(--fox-sidebar-row-height) - var(--fox-sidebar-action-size)) / 2);
+  --fox-sidebar-actions-pair-width: calc(var(--fox-sidebar-action-size) * 2 + var(--fox-sidebar-action-gap));
+  --fox-sidebar-section-head-height: var(--fox-sidebar-row-height);
+  --fox-sidebar-section-gap: var(--fox-space-m);
+  /* 列表区负外边距和内边距成对，滚动条落在轨道外，行宽不变。 */
+  --fox-sidebar-scroll-gutter: var(--fox-space-m);
+  /* 带头像的两行行（Fox）：头像左缘对齐图标列，高度取列表摘要行。 */
+  --fox-sidebar-rich-row-height: var(--fox-row-summary);
+  --fox-sidebar-avatar-size: var(--fox-control-md);
+  --fox-sidebar-companion-row-height: 56px;
+  --fox-sidebar-companion-avatar-size: 40px;
+  --fox-sidebar-companion-tile-avatar-size: 56px;
+  --fox-sidebar-companion-tile-width: 76px;
+  --fox-sidebar-companion-tile-height: 92px;
   --fox-command-row-height: 32px;
   --fox-badge-height: 20px;
   --fox-library-card-tag-height: 20px;
@@ -256,6 +298,12 @@
   --fox-warning-text: var(--warning);
   /* 16% brand is invisible on a dark surface; the highlight needs more of it. */
   --fox-mark: color-mix(in oklch, var(--brand) 28%, transparent);
+  --fox-selected: color-mix(in oklch, var(--foreground) 6%, transparent);
+  --ctx-history: oklch(0.68 0.14 255);
+  --ctx-tools: oklch(0.72 0.15 50);
+  --ctx-system: oklch(0.7 0.1 175);
+  --ctx-reserve: oklch(0.8 0.13 85);
+  --ctx-margin: color-mix(in oklch, var(--muted-foreground) 70%, var(--fox-canvas));
   --fox-shadow-sm: 0 1px 2px color-mix(in oklch, var(--fox-shadow-color) 30%, transparent);
   --fox-shadow-md: 0 6px 20px color-mix(in oklch, var(--fox-shadow-color) 32%, transparent);
   --fox-shadow-lg: 0 18px 55px color-mix(in oklch, var(--fox-shadow-color) 35%, transparent);

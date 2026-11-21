@@ -1,7 +1,9 @@
 //! A1: project permission rules, the four-mode conversation access, the
 //! per-project full-access confirmation and the auto-allow audit log.
 use super::{now_ms, Database};
-use crate::runtime_host::approval_policy::{AccessMode, PolicyDecision, PolicyRule, RuleEffect, Verdict};
+use crate::runtime_host::approval_policy::{
+    AccessMode, PolicyDecision, PolicyRule, RuleEffect, Verdict,
+};
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use serde_json::json;
@@ -92,13 +94,27 @@ impl Database {
                  LEFT JOIN kernel_execution_policies kep ON kep.conversation_id = c.id
                  WHERE c.id = ?1",
                 [conversation_id],
-                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?,
-                          row.get::<_, String>(2)?, row.get::<_, bool>(3)?, row.get::<_, bool>(4)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, bool>(3)?,
+                        row.get::<_, bool>(4)?,
+                    ))
+                },
             )
         })?;
         let (project_id, project_root, stored_mode, full_access, confirmed) = row;
         let mode = AccessMode::from_stored(&stored_mode, full_access)?;
-        Ok(ConversationAccess { project_id, project_root, stored_mode, full_access, mode, project_full_access_confirmed: confirmed })
+        Ok(ConversationAccess {
+            project_id,
+            project_root,
+            stored_mode,
+            full_access,
+            mode,
+            project_full_access_confirmed: confirmed,
+        })
     }
 
     pub fn project_full_access_confirmed(&self, project_id: &str) -> Result<bool, String> {
@@ -125,7 +141,10 @@ impl Database {
         })
     }
 
-    pub fn permission_rules_for_project(&self, project_id: &str) -> Result<Vec<PermissionRuleRecord>, String> {
+    pub fn permission_rules_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<PermissionRuleRecord>, String> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(&format!(
                 "SELECT {RULE_COLUMNS} FROM permission_rules
@@ -138,26 +157,48 @@ impl Database {
     }
 
     /// The live rules the engine sees for a conversation (none without a project).
-    pub fn policy_rules_for_conversation(&self, conversation_id: &str) -> Result<Vec<PolicyRule>, String> {
+    pub fn policy_rules_for_conversation(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<PolicyRule>, String> {
         let project_id: Option<String> = self.with_connection(|connection| {
             connection
-                .query_row("SELECT project_id FROM conversations WHERE id = ?1", [conversation_id], |row| row.get(0))
+                .query_row(
+                    "SELECT project_id FROM conversations WHERE id = ?1",
+                    [conversation_id],
+                    |row| row.get(0),
+                )
                 .optional()
                 .map(Option::flatten)
         })?;
-        let Some(project_id) = project_id else { return Ok(Vec::new()) };
-        Ok(self.permission_rules_for_project(&project_id)?.iter().filter_map(PermissionRuleRecord::policy_rule).collect())
+        let Some(project_id) = project_id else {
+            return Ok(Vec::new());
+        };
+        Ok(self
+            .permission_rules_for_project(&project_id)?
+            .iter()
+            .filter_map(PermissionRuleRecord::policy_rule)
+            .collect())
     }
 
     /// Add (or return the existing live) rule. The pattern must be one plain
     /// command prefix.
-    pub fn add_permission_rule(&self, project_id: &str, effect: &str, tool: &str, pattern: &str, source: &str) -> Result<PermissionRuleRecord, String> {
+    pub fn add_permission_rule(
+        &self,
+        project_id: &str,
+        effect: &str,
+        tool: &str,
+        pattern: &str,
+        source: &str,
+    ) -> Result<PermissionRuleRecord, String> {
         RuleEffect::parse(effect)?;
         if !matches!(source, "user" | "builtin") {
             return Err("permission.invalid_rule: unknown rule source".into());
         }
         if tool != "*" && !crate::runtime_host::approval_policy::is_command_tool(tool) {
-            return Err(format!("permission.invalid_rule: rules apply to command tools, not {tool}"));
+            return Err(format!(
+                "permission.invalid_rule: rules apply to command tools, not {tool}"
+            ));
         }
         let words = crate::runtime_host::approval_policy::parse_rule_pattern(pattern)?;
         let pattern = words.join(" ");
@@ -197,14 +238,29 @@ impl Database {
     /// 自动放行记一行；block / 拒绝也记一行（表结构不变）。
     /// 放行的 reason 仍是 allow_reason；拒绝的 reason 是拒绝码。
     /// block 命中项目规则时，rule_ids_json 写 forcing_rule 的 id。
-    pub fn record_permission_audit(&self, conversation_id: &str, run_id: Option<&str>, tool_call_id: Option<&str>,
-        tool: &str, decision: &PolicyDecision, summary: &str) -> Result<(), String> {
+    pub fn record_permission_audit(
+        &self,
+        conversation_id: &str,
+        run_id: Option<&str>,
+        tool_call_id: Option<&str>,
+        tool: &str,
+        decision: &PolicyDecision,
+        summary: &str,
+    ) -> Result<(), String> {
         let reason = match &decision.verdict {
             Verdict::Deny { code, .. } => code.as_str(),
-            _ => decision.allow_reason.as_ref().map(|reason| reason.as_str()).unwrap_or("unknown"),
+            _ => decision
+                .allow_reason
+                .as_ref()
+                .map(|reason| reason.as_str())
+                .unwrap_or("unknown"),
         };
         let rule_ids = if decision.is_block() {
-            decision.forcing_rule.iter().map(|rule| rule.id.clone()).collect::<Vec<_>>()
+            decision
+                .forcing_rule
+                .iter()
+                .map(|rule| rule.id.clone())
+                .collect::<Vec<_>>()
         } else {
             decision.rule_ids()
         };
@@ -224,8 +280,16 @@ impl Database {
 
     /// 13.38 B5-3：网络保护放行的审计（例如代理 fake-ip 段）。同一张 permission_audit 表，
     /// class 为 network，reason 为放行原因码，summary 是给人看的原因。
-    pub fn record_network_allowance_audit(&self, conversation_id: &str, run_id: Option<&str>, tool_call_id: Option<&str>,
-        tool: &str, mode: &str, reason: &str, summary: &str) -> Result<(), String> {
+    pub fn record_network_allowance_audit(
+        &self,
+        conversation_id: &str,
+        run_id: Option<&str>,
+        tool_call_id: Option<&str>,
+        tool: &str,
+        mode: &str,
+        reason: &str,
+        summary: &str,
+    ) -> Result<(), String> {
         let summary: String = summary.chars().take(500).collect();
         self.with_connection(|connection| {
             connection.execute(
@@ -239,11 +303,19 @@ impl Database {
         })
     }
 
-    pub fn approval_record(&self, approval_id: &str) -> Result<crate::database::ApprovalRecord, String> {
+    pub fn approval_record(
+        &self,
+        approval_id: &str,
+    ) -> Result<crate::database::ApprovalRecord, String> {
         self.with_connection(|connection| super::query_approval(connection, approval_id))
     }
 
-    pub fn permission_audit_list(&self, run_id: Option<&str>, conversation_id: Option<&str>, limit: usize) -> Result<Vec<PermissionAuditRecord>, String> {
+    pub fn permission_audit_list(
+        &self,
+        run_id: Option<&str>,
+        conversation_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<PermissionAuditRecord>, String> {
         if run_id.is_none() && conversation_id.is_none() {
             return Err("permission.audit_scope_required".into());
         }
@@ -287,18 +359,28 @@ mod tests {
 
     struct TempRoot(std::path::PathBuf);
     impl TempRoot {
-        fn path(&self) -> &std::path::Path { &self.0 }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
     }
     impl Drop for TempRoot {
-        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     fn database_with_project() -> (Database, String, String, TempRoot) {
         let database = Database::open(std::path::PathBuf::from(":memory:")).expect("database");
-        let root = TempRoot(std::env::temp_dir().join(format!("fox-a1-rules-{}", uuid::Uuid::new_v4())));
+        let root =
+            TempRoot(std::env::temp_dir().join(format!("fox-a1-rules-{}", uuid::Uuid::new_v4())));
         std::fs::create_dir_all(root.path()).expect("root");
         let conversation = database
-            .create_conversation(database.default_agent_id(), Some("A1"), Some(root.path().to_str().unwrap()), Some("ask"))
+            .create_conversation(
+                database.default_agent_id(),
+                Some("A1"),
+                Some(root.path().to_str().unwrap()),
+                Some("ask"),
+            )
             .expect("conversation");
         let project = conversation.project_id.clone().expect("project");
         (database, project, conversation.id, root)
@@ -307,43 +389,101 @@ mod tests {
     #[test]
     fn a1_permission_rules_add_dedupe_revoke_and_feed_the_engine() {
         let (database, project, conversation, root) = database_with_project();
-        let first = database.add_permission_rule(&project, "allow", "run_command", "  npm   test ", "user").unwrap();
+        let first = database
+            .add_permission_rule(&project, "allow", "run_command", "  npm   test ", "user")
+            .unwrap();
         assert_eq!(first.pattern, "npm test");
-        let again = database.add_permission_rule(&project, "allow", "run_command", "npm test", "user").unwrap();
-        assert_eq!(first.id, again.id, "a live duplicate is returned, not added twice");
-        assert!(database.add_permission_rule(&project, "allow", "write_file", "x", "user").is_err());
-        assert!(database.add_permission_rule(&project, "allow", "run_command", "npm test && rm x", "user").is_err());
-        let rules = database.policy_rules_for_conversation(&conversation).unwrap();
+        let again = database
+            .add_permission_rule(&project, "allow", "run_command", "npm test", "user")
+            .unwrap();
+        assert_eq!(
+            first.id, again.id,
+            "a live duplicate is returned, not added twice"
+        );
+        assert!(database
+            .add_permission_rule(&project, "allow", "write_file", "x", "user")
+            .is_err());
+        assert!(database
+            .add_permission_rule(&project, "allow", "run_command", "npm test && rm x", "user")
+            .is_err());
+        let rules = database
+            .policy_rules_for_conversation(&conversation)
+            .unwrap();
         assert_eq!(rules.len(), 1);
-        let subject = ToolSubject::Command { command: "npm test -- a".into(), cwd: root.path().to_path_buf(), model_risk: None };
-        let decision = decide(&PolicyRequest { tool: "run_command", subject: &subject, mode: AccessMode::Ask,
-            project_root: Some(root.path()), home: None, rules: &rules });
+        let subject = ToolSubject::Command {
+            command: "npm test -- a".into(),
+            cwd: root.path().to_path_buf(),
+            model_risk: None,
+        };
+        let decision = decide(&PolicyRequest {
+            tool: "run_command",
+            subject: &subject,
+            mode: AccessMode::Ask,
+            project_root: Some(root.path()),
+            home: None,
+            rules: &rules,
+        });
         assert!(decision.is_allow());
-        database.record_permission_audit(&conversation, None, Some("call-1"), "run_command", &decision, "npm test -- a").unwrap();
-        let audit = database.permission_audit_list(None, Some(&conversation), 10).unwrap();
+        database
+            .record_permission_audit(
+                &conversation,
+                None,
+                Some("call-1"),
+                "run_command",
+                &decision,
+                "npm test -- a",
+            )
+            .unwrap();
+        let audit = database
+            .permission_audit_list(None, Some(&conversation), 10)
+            .unwrap();
         assert_eq!(audit.len(), 1);
         assert_eq!(audit[0].reason, "rule");
         assert_eq!(audit[0].rule_ids, vec![first.id.clone()]);
         assert!(database.revoke_permission_rule(&first.id).unwrap());
         assert!(!database.revoke_permission_rule(&first.id).unwrap());
-        assert!(database.policy_rules_for_conversation(&conversation).unwrap().is_empty());
+        assert!(database
+            .policy_rules_for_conversation(&conversation)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn a1_permission_rules_full_access_is_a_flag_next_to_allow_and_any_other_change_clears_it() {
         let (database, project, conversation, _root) = database_with_project();
         let access = database.conversation_access(&conversation).unwrap();
-        assert_eq!((access.mode, access.full_access, access.project_full_access_confirmed), (AccessMode::Ask, false, false));
+        assert_eq!(
+            (
+                access.mode,
+                access.full_access,
+                access.project_full_access_confirmed
+            ),
+            (AccessMode::Ask, false, false)
+        );
         let policy = database.execution_policy(&conversation).unwrap();
-        assert!(database.change_execution_policy_with_access(&conversation, "r1", policy.version, "ask", true).is_err());
-        let policy = database.change_execution_policy_with_access(&conversation, "r1", policy.version, "allow", true).unwrap();
-        assert_eq!(database.conversation_access(&conversation).unwrap().mode, AccessMode::FullAccess);
-        let policy = database.change_execution_policy(&conversation, "r2", policy.version, "allow").unwrap();
+        assert!(database
+            .change_execution_policy_with_access(&conversation, "r1", policy.version, "ask", true)
+            .is_err());
+        let policy = database
+            .change_execution_policy_with_access(&conversation, "r1", policy.version, "allow", true)
+            .unwrap();
+        assert_eq!(
+            database.conversation_access(&conversation).unwrap().mode,
+            AccessMode::FullAccess
+        );
+        let policy = database
+            .change_execution_policy(&conversation, "r2", policy.version, "allow")
+            .unwrap();
         let access = database.conversation_access(&conversation).unwrap();
         assert_eq!((access.mode, access.full_access), (AccessMode::Auto, false));
         let _ = policy;
         database.confirm_project_full_access(&project).unwrap();
         assert!(database.project_full_access_confirmed(&project).unwrap());
-        assert!(database.conversation_access(&conversation).unwrap().project_full_access_confirmed);
+        assert!(
+            database
+                .conversation_access(&conversation)
+                .unwrap()
+                .project_full_access_confirmed
+        );
     }
 }

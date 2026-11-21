@@ -9,7 +9,11 @@ pub const MIN_SCHEDULE_INTERVAL_SECONDS: i64 = 60;
 pub const MAX_SCHEDULE_INTERVAL_SECONDS: i64 = 2_592_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum DigitalColleagueScheduleSpec {
     #[serde(rename = "once")]
     Once { at_ms: i64, timezone: String },

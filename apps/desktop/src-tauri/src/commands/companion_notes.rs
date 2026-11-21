@@ -282,7 +282,11 @@ pub(crate) fn companion_project_note_options(
     state: State<'_, AppState>,
     conversation_id: String,
 ) -> ApiResponse<Value> {
-    response(state.database.companion_project_note_options(&conversation_id))
+    response(
+        state
+            .database
+            .companion_project_note_options(&conversation_id),
+    )
 }
 
 #[tauri::command]
@@ -314,7 +318,8 @@ mod project_note_reference_tests {
 
     #[test]
     fn command_sets_and_clears_only_explicit_project_companion_references() {
-        let root = std::env::temp_dir().join(format!("fox-note-reference-command-{}", Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("fox-note-reference-command-{}", Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
         let database = Database::open(root.join("fox.db")).unwrap();
         let contact = database.add_companion(&root, "fox-security").unwrap();
@@ -329,12 +334,23 @@ mod project_note_reference_tests {
             )?;
             Ok(())
         }).unwrap();
-        database.companion_grant_project(&contact.profile.id, "project", true).unwrap();
+        database
+            .companion_grant_project(&contact.profile.id, "project", true)
+            .unwrap();
         set_project_note_reference(&database, "project-chat", Some(&contact.profile.id)).unwrap();
-        assert_eq!(database.companion_note_access("project-chat").unwrap(), Some((contact.profile.id.clone(), false)));
-        assert!(set_project_note_reference(&database, "ordinary-chat", Some(&contact.profile.id)).is_err());
+        assert_eq!(
+            database.companion_note_access("project-chat").unwrap(),
+            Some((contact.profile.id.clone(), false))
+        );
+        assert!(
+            set_project_note_reference(&database, "ordinary-chat", Some(&contact.profile.id))
+                .is_err()
+        );
         set_project_note_reference(&database, "project-chat", None).unwrap();
-        assert!(database.companion_note_access("project-chat").unwrap().is_none());
+        assert!(database
+            .companion_note_access("project-chat")
+            .unwrap()
+            .is_none());
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }

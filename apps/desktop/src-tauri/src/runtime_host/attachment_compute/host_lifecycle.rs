@@ -25,15 +25,26 @@ pub(crate) fn job_result_reference(job_id: &str) -> String {
 
 #[cfg(test)]
 /// Resolve only the published, integrity-checked blob in the owning conversation.
-pub(crate) fn read_job_result(database: &Database, conversation_id: &str, job_id: &str) -> Result<Value, String> {
+pub(crate) fn read_job_result(
+    database: &Database,
+    conversation_id: &str,
+    job_id: &str,
+) -> Result<Value, String> {
     database.kernel_job_result_value(conversation_id, job_id)
 }
 
 fn port_error(message: String) -> super::jobs::PortError {
     use super::jobs::{PortError, PortErrorKind};
-    if message.contains("job.attempt_conflict") { PortError::conflict(message) }
-    else if message.contains("job.cancel_requested") { PortError { kind: PortErrorKind::Cancelled, message } }
-    else { PortError::storage(message) }
+    if message.contains("job.attempt_conflict") {
+        PortError::conflict(message)
+    } else if message.contains("job.cancel_requested") {
+        PortError {
+            kind: PortErrorKind::Cancelled,
+            message,
+        }
+    } else {
+        PortError::storage(message)
+    }
 }
 
 /// job_id -> the cancellation identity its executor honours. Owned by this
@@ -62,7 +73,9 @@ impl JobTokenRegistry {
         token: crate::kernel::CancellationToken,
     ) -> Result<(), String> {
         let mut jobs = self.jobs.lock().map_err(|_| "job registry poisoned")?;
-        if jobs.contains_key(job_id) { return Err("job already has a local executor".into()); }
+        if jobs.contains_key(job_id) {
+            return Err("job already has a local executor".into());
+        }
         jobs.insert(
             job_id.to_owned(),
             JobCancellation {
@@ -101,7 +114,11 @@ impl JobTokenRegistry {
     /// The token the executor is honouring (used by tests and by A's worker
     /// bookkeeping if it wants to observe the same identity).
     pub(crate) fn token_for(&self, job_id: &str) -> Option<crate::kernel::CancellationToken> {
-        self.jobs.lock().unwrap().get(job_id).map(|entry| entry.token.clone())
+        self.jobs
+            .lock()
+            .unwrap()
+            .get(job_id)
+            .map(|entry| entry.token.clone())
     }
 }
 
@@ -133,11 +150,23 @@ impl HostJobLifecycle {
         }
     }
 
-    fn settle(&self, state: JobState, _result: Option<(String,u64,String)>, error: Option<(String,String)>) -> Result<(), super::jobs::PortError> {
-        self.database.kernel_job_settle_attempt(&self.job_id, self.attempt, state,
-            error.as_ref().map(|(code,message)| (code.as_str(),message.as_str()))).map_err(port_error)
+    fn settle(
+        &self,
+        state: JobState,
+        _result: Option<(String, u64, String)>,
+        error: Option<(String, String)>,
+    ) -> Result<(), super::jobs::PortError> {
+        self.database
+            .kernel_job_settle_attempt(
+                &self.job_id,
+                self.attempt,
+                state,
+                error
+                    .as_ref()
+                    .map(|(code, message)| (code.as_str(), message.as_str())),
+            )
+            .map_err(port_error)
     }
-
 }
 
 impl super::jobs::JobLifecyclePort for HostJobLifecycle {
@@ -152,26 +181,38 @@ impl super::jobs::JobLifecyclePort for HostJobLifecycle {
     }
 
     fn mark_running(&self) -> Result<(), super::jobs::PortError> {
-        self.database.kernel_job_claim_attempt(&self.job_id, self.attempt).map(|_| ()).map_err(port_error)
+        self.database
+            .kernel_job_claim_attempt(&self.job_id, self.attempt)
+            .map(|_| ())
+            .map_err(port_error)
     }
 
     fn is_cancel_requested(&self) -> bool {
         // A cancel that another writer already settled counts; the live signal
         // is the token, which the runner observes directly.
-        self.parent.as_ref().is_some_and(|token| token.is_cancelled())
-            || self.database.kernel_job_parent_stopped(&self.job_id).unwrap_or(true)
+        self.parent
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
+            || self
+                .database
+                .kernel_job_parent_stopped(&self.job_id)
+                .unwrap_or(true)
             || matches!(
-            self.database.kernel_job_snapshot(&self.job_id),
-            Ok(snapshot) if snapshot.state == JobState::Cancelled || snapshot.cancel_requested_at.is_some()
-        )
+                self.database.kernel_job_snapshot(&self.job_id),
+                Ok(snapshot) if snapshot.state == JobState::Cancelled || snapshot.cancel_requested_at.is_some()
+            )
     }
 
     fn report(&self, done: u64, total: Option<u64>) -> Result<(), super::jobs::PortError> {
-        self.database.kernel_job_progress_attempt(&self.job_id, self.attempt, done, total).map_err(port_error)
+        self.database
+            .kernel_job_progress_attempt(&self.job_id, self.attempt, done, total)
+            .map_err(port_error)
     }
 
     fn settle_completed(&self, result: &Value) -> Result<(), super::jobs::PortError> {
-        self.database.kernel_job_complete_attempt(&self.job_id, self.attempt, &self.conversation_id, result).map_err(port_error)
+        self.database
+            .kernel_job_complete_attempt(&self.job_id, self.attempt, &self.conversation_id, result)
+            .map_err(port_error)
     }
 
     fn settle_cancelled(&self) -> Result<(), super::jobs::PortError> {
@@ -264,12 +305,9 @@ pub(crate) fn start_host_job(
         attachments_dir: launch.attachments_dir.to_path_buf(),
         sessions_dir: launch.sessions_dir.to_path_buf(),
     };
-    launch.registry.register(
-        &snapshot.job_id,
-        &snapshot.run_id,
-        registry,
-        token.clone(),
-    )?;
+    launch
+        .registry
+        .register(&snapshot.job_id, &snapshot.run_id, registry, token.clone())?;
     let port: Arc<dyn super::jobs::JobLifecyclePort + Send + Sync> = Arc::new(adapter);
     let launch_params = launch.params;
     let registry = launch.registry.clone();
@@ -280,7 +318,9 @@ pub(crate) fn start_host_job(
         let terminal = super::jobs::run_on_lifecycle(&context, &launch_params, port);
         registry.forget(&job_id);
         if terminal.settled {
-            if let Some(notify) = on_terminal { notify(&notice_run); }
+            if let Some(notify) = on_terminal {
+                notify(&notice_run);
+            }
         }
         terminal
     }))
@@ -296,7 +336,9 @@ pub(crate) fn cancel_host_job(
 ) -> Result<JobSnapshot, String> {
     let current = database.kernel_job_snapshot(job_id)?;
     let snapshot = database.kernel_job_request_cancel(&current.conversation_id, job_id)?;
-    if !snapshot.state.is_terminal() { registry.request_cancel(job_id); }
+    if !snapshot.state.is_terminal() {
+        registry.request_cancel(job_id);
+    }
     Ok(snapshot)
 }
 
@@ -321,8 +363,8 @@ mod tests {
 
     impl ProductionFixture {
         fn new(tag: &str) -> Self {
-            let root = std::env::temp_dir()
-                .join(format!("fox-job-prod-{tag}-{}", uuid::Uuid::new_v4()));
+            let root =
+                std::env::temp_dir().join(format!("fox-job-prod-{tag}-{}", uuid::Uuid::new_v4()));
             let storage = root.join("storage");
             let sessions = root.join("sessions");
             std::fs::create_dir_all(&storage).unwrap();
@@ -391,7 +433,8 @@ mod tests {
             params: Value,
         ) -> std::thread::JoinHandle<super::super::jobs::JobTerminal> {
             start_host_job(HostJobLaunch {
-                cancellation: None, parent: None,
+                cancellation: None,
+                parent: None,
                 database: &self.database,
                 attachments_dir: &self.storage,
                 sessions_dir: &self.sessions,
@@ -457,7 +500,10 @@ mod tests {
         assert_eq!(result["result"]["rows"], 80_002);
         let bytes = crate::canonical_json::to_vec(&result).unwrap();
         assert_eq!(settled.result_bytes, Some(bytes.len() as u64));
-        assert_eq!(settled.result_sha256, Some(format!("sha256:{}", hex::encode(Sha256::digest(&bytes)))));
+        assert_eq!(
+            settled.result_sha256,
+            Some(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
+        );
         let _ = std::fs::remove_dir_all(&fixture.root);
     }
 
@@ -526,7 +572,10 @@ mod tests {
         }
         started.store(true, Ordering::SeqCst);
         let _ = poll.join();
-        assert!(observed_running, "the job must be observed as running with progress");
+        assert!(
+            observed_running,
+            "the job must be observed as running with progress"
+        );
 
         let returned = cancel_host_job(&fixture.database, &registry, &queued.job_id).unwrap();
         // The cancel request does not fabricate a terminal state: the row is
@@ -538,7 +587,10 @@ mod tests {
 
         let settled = fixture.snapshot(&queued.job_id);
         assert_eq!(settled.state, JobState::Cancelled);
-        assert_eq!(settled.result_ref, None, "a cancelled job publishes no result");
+        assert_eq!(
+            settled.result_ref, None,
+            "a cancelled job publishes no result"
+        );
         assert!(settled.progress_done > 0, "the pre-cancel progress is kept");
         assert!(
             settled.progress_done < settled.progress_total.unwrap_or(u64::MAX),
@@ -626,7 +678,10 @@ mod tests {
         assert_eq!(terminal.state, super::super::jobs::TerminalState::Completed);
         let settled = fixture.snapshot(&queued.job_id);
         assert_eq!(settled.state, JobState::Completed);
-        assert_eq!(settled.attempts, 2, "the resume is a new attempt, not a replay");
+        assert_eq!(
+            settled.attempts, 2,
+            "the resume is a new attempt, not a replay"
+        );
         assert!(settled.result_ref.is_some());
         let _ = std::fs::remove_dir_all(&fixture.root);
     }
@@ -650,12 +705,20 @@ mod tests {
     #[test]
     fn host_lifecycle_publishes_one_experimental_terminal_fact() {
         use super::super::jobs::JobLifecyclePort;
-        let f=ProductionFixture::new("host-notice");
-        let binding=f.database.freeze_kernel_run_control(&f.run_id,"legacy",
-            fox_engine_protocol::TimeBudgets::default()).unwrap();
-        let frozen=crate::kernel::RunFrozenConfig {
-            engine_id: binding.engine_id.clone(), kernel_mode: "authoritative".into(),
-            capability_manifest_version: 2, capability_manifest_hash: "host-notice-manifest".into(),
+        let f = ProductionFixture::new("host-notice");
+        let binding = f
+            .database
+            .freeze_kernel_run_control(
+                &f.run_id,
+                "legacy",
+                fox_engine_protocol::TimeBudgets::default(),
+            )
+            .unwrap();
+        let frozen = crate::kernel::RunFrozenConfig {
+            engine_id: binding.engine_id.clone(),
+            kernel_mode: "authoritative".into(),
+            capability_manifest_version: 2,
+            capability_manifest_hash: "host-notice-manifest".into(),
             permission_snapshot_id: binding.permission_snapshot_id.clone(),
             execution_profile_id: binding.execution_profile_id.clone(),
             prompt_config_hash: "host-notice-prompt".into(),
@@ -666,69 +729,201 @@ mod tests {
             run_execution_budget_ms: binding.budgets.run_execution_ms,
             run_execution_limited: binding.budgets.run_execution_limited,
             approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
-            provider_max_retries: 2, turn_max_retries: 1,
+            provider_max_retries: 2,
+            turn_max_retries: 1,
             experimental_compute_job_notice: true,
         };
-        f.database.kernel_create_run(&f.run_id,"pi","authoritative",2,
-            &binding.permission_snapshot_id,&binding.execution_profile_id,"host-notice-prompt",
-            &crate::canonical_json::to_string(&frozen).unwrap()).unwrap();
-        let job=f.database.kernel_job_start(&f.start_request("host-notice",chunked_params(&[])))
-            .unwrap().snapshot().job_id.clone();
-        let lifecycle=HostJobLifecycle::new(f.database.clone(),&f.sessions,&f.conversation_id,&job,1);
+        f.database
+            .kernel_create_run(
+                &f.run_id,
+                "pi",
+                "authoritative",
+                2,
+                &binding.permission_snapshot_id,
+                &binding.execution_profile_id,
+                "host-notice-prompt",
+                &crate::canonical_json::to_string(&frozen).unwrap(),
+            )
+            .unwrap();
+        let job = f
+            .database
+            .kernel_job_start(&f.start_request("host-notice", chunked_params(&[])))
+            .unwrap()
+            .snapshot()
+            .job_id
+            .clone();
+        let lifecycle =
+            HostJobLifecycle::new(f.database.clone(), &f.sessions, &f.conversation_id, &job, 1);
         lifecycle.mark_running().unwrap();
-        lifecycle.settle_completed(&serde_json::json!({"host":"done"})).unwrap();
-        assert_eq!(f.database.kernel_job_notice(&f.conversation_id,&f.run_id,&job)
-            .unwrap().unwrap().terminal_state,JobState::Completed);
-        assert_eq!(f.database.kernel_job_snapshot(&job).unwrap().state,JobState::Completed);
-        let _=std::fs::remove_dir_all(&f.root);
+        lifecycle
+            .settle_completed(&serde_json::json!({"host":"done"}))
+            .unwrap();
+        assert_eq!(
+            f.database
+                .kernel_job_notice(&f.conversation_id, &f.run_id, &job)
+                .unwrap()
+                .unwrap()
+                .terminal_state,
+            JobState::Completed
+        );
+        assert_eq!(
+            f.database.kernel_job_snapshot(&job).unwrap().state,
+            JobState::Completed
+        );
+        let _ = std::fs::remove_dir_all(&f.root);
     }
 
     #[test]
     fn stale_attempts_cannot_write_progress_or_overwrite_published_result() {
-        let f=ProductionFixture::new("attempt-fence");
-        let q=f.database.kernel_job_start(&f.start_request("once",chunked_params(&[]))).unwrap().snapshot().clone();
-        f.database.kernel_job_claim_attempt(&q.job_id,1).unwrap();
-        assert!(f.database.kernel_job_claim_attempt(&q.job_id,1).is_err());
-        f.database.with_connection(|c| {c.execute("UPDATE kernel_jobs SET state='paused' WHERE job_id=?1",[&q.job_id])?;Ok(())}).unwrap();
-        f.database.kernel_job_claim_attempt(&q.job_id,2).unwrap();
-        assert!(f.database.kernel_job_progress_attempt(&q.job_id,1,999,None).is_err());
-        assert!(f.database.kernel_job_complete_attempt(&q.job_id,1,&f.conversation_id,&serde_json::json!({"stale":true})).is_err());
-        let winner=serde_json::json!({"result":"winner 中😀"});
-        f.database.kernel_job_complete_attempt(&q.job_id,2,&f.conversation_id,&winner).unwrap();
-        assert!(f.database.kernel_job_complete_attempt(&q.job_id,2,&f.conversation_id,&serde_json::json!({"replace":true})).is_err());
-        assert_eq!(read_job_result(&f.database,&f.conversation_id,&q.job_id).unwrap(),winner);
-        assert!(read_job_result(&f.database,"foreign-conversation",&q.job_id).is_err());
-        let count=f.database.with_connection(|c| c.query_row("SELECT COUNT(*) FROM tool_call_result_blobs",[],|r|r.get::<_,i64>(0))).unwrap();
-        assert_eq!(count,1,"losing attempts write no blob");
+        let f = ProductionFixture::new("attempt-fence");
+        let q = f
+            .database
+            .kernel_job_start(&f.start_request("once", chunked_params(&[])))
+            .unwrap()
+            .snapshot()
+            .clone();
+        f.database.kernel_job_claim_attempt(&q.job_id, 1).unwrap();
+        assert!(f.database.kernel_job_claim_attempt(&q.job_id, 1).is_err());
+        f.database
+            .with_connection(|c| {
+                c.execute(
+                    "UPDATE kernel_jobs SET state='paused' WHERE job_id=?1",
+                    [&q.job_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        f.database.kernel_job_claim_attempt(&q.job_id, 2).unwrap();
+        assert!(f
+            .database
+            .kernel_job_progress_attempt(&q.job_id, 1, 999, None)
+            .is_err());
+        assert!(f
+            .database
+            .kernel_job_complete_attempt(
+                &q.job_id,
+                1,
+                &f.conversation_id,
+                &serde_json::json!({"stale":true})
+            )
+            .is_err());
+        let winner = serde_json::json!({"result":"winner 中😀"});
+        f.database
+            .kernel_job_complete_attempt(&q.job_id, 2, &f.conversation_id, &winner)
+            .unwrap();
+        assert!(f
+            .database
+            .kernel_job_complete_attempt(
+                &q.job_id,
+                2,
+                &f.conversation_id,
+                &serde_json::json!({"replace":true})
+            )
+            .is_err());
+        assert_eq!(
+            read_job_result(&f.database, &f.conversation_id, &q.job_id).unwrap(),
+            winner
+        );
+        assert!(read_job_result(&f.database, "foreign-conversation", &q.job_id).is_err());
+        let count = f
+            .database
+            .with_connection(|c| {
+                c.query_row("SELECT COUNT(*) FROM tool_call_result_blobs", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+            })
+            .unwrap();
+        assert_eq!(count, 1, "losing attempts write no blob");
     }
 
     #[test]
     fn cancellation_requires_worker_ack_and_store_failure_is_not_cancel() {
-        let f=ProductionFixture::new("ack");
-        let q=f.database.kernel_job_start(&f.start_request("once",chunked_params(&[]))).unwrap().snapshot().clone();
-        f.database.kernel_job_claim_attempt(&q.job_id,1).unwrap();
-        let requested=f.database.kernel_job_request_cancel(&f.conversation_id,&q.job_id).unwrap();
-        assert_eq!(requested.state,JobState::Running);
-        assert!(requested.cancel_requested_at.is_some());assert!(requested.cancel_acknowledged_at.is_none());
-        assert!(f.database.kernel_job_complete_attempt(&q.job_id,1,&f.conversation_id,&serde_json::json!({"late":1})).unwrap_err().contains("job.cancel_requested"));
-        f.database.kernel_job_settle_attempt(&q.job_id,1,JobState::Cancelled,None).unwrap();
-        assert!(f.database.kernel_job_snapshot(&q.job_id).unwrap().cancel_acknowledged_at.is_some());
-        let q=f.database.kernel_job_start(&f.start_request("store-failure",chunked_params(&[]))).unwrap().snapshot().clone();
-        f.database.kernel_job_claim_attempt(&q.job_id,1).unwrap();
+        let f = ProductionFixture::new("ack");
+        let q = f
+            .database
+            .kernel_job_start(&f.start_request("once", chunked_params(&[])))
+            .unwrap()
+            .snapshot()
+            .clone();
+        f.database.kernel_job_claim_attempt(&q.job_id, 1).unwrap();
+        let requested = f
+            .database
+            .kernel_job_request_cancel(&f.conversation_id, &q.job_id)
+            .unwrap();
+        assert_eq!(requested.state, JobState::Running);
+        assert!(requested.cancel_requested_at.is_some());
+        assert!(requested.cancel_acknowledged_at.is_none());
+        assert!(f
+            .database
+            .kernel_job_complete_attempt(
+                &q.job_id,
+                1,
+                &f.conversation_id,
+                &serde_json::json!({"late":1})
+            )
+            .unwrap_err()
+            .contains("job.cancel_requested"));
+        f.database
+            .kernel_job_settle_attempt(&q.job_id, 1, JobState::Cancelled, None)
+            .unwrap();
+        assert!(f
+            .database
+            .kernel_job_snapshot(&q.job_id)
+            .unwrap()
+            .cancel_acknowledged_at
+            .is_some());
+        let q = f
+            .database
+            .kernel_job_start(&f.start_request("store-failure", chunked_params(&[])))
+            .unwrap()
+            .snapshot()
+            .clone();
+        f.database.kernel_job_claim_attempt(&q.job_id, 1).unwrap();
         f.database.with_connection(|c|c.execute_batch("CREATE TRIGGER reject_job_blob BEFORE INSERT ON tool_call_result_blobs BEGIN SELECT RAISE(ABORT,'injected storage failure'); END")).unwrap();
-        assert!(f.database.kernel_job_complete_attempt(&q.job_id,1,&f.conversation_id,&serde_json::json!({"value":2})).is_err());
-        let row=f.database.kernel_job_snapshot(&q.job_id).unwrap();
-        assert_eq!(row.state,JobState::Running);assert!(row.result_ref.is_none());assert!(row.cancel_requested_at.is_none());
-        f.database.kernel_job_settle_attempt(&q.job_id,1,JobState::Failed,Some(("compute.result_storage_failed","injected storage failure"))).unwrap();
-        assert_eq!(f.database.kernel_job_snapshot(&q.job_id).unwrap().state,JobState::Failed);
+        assert!(f
+            .database
+            .kernel_job_complete_attempt(
+                &q.job_id,
+                1,
+                &f.conversation_id,
+                &serde_json::json!({"value":2})
+            )
+            .is_err());
+        let row = f.database.kernel_job_snapshot(&q.job_id).unwrap();
+        assert_eq!(row.state, JobState::Running);
+        assert!(row.result_ref.is_none());
+        assert!(row.cancel_requested_at.is_none());
+        f.database
+            .kernel_job_settle_attempt(
+                &q.job_id,
+                1,
+                JobState::Failed,
+                Some(("compute.result_storage_failed", "injected storage failure")),
+            )
+            .unwrap();
+        assert_eq!(
+            f.database.kernel_job_snapshot(&q.job_id).unwrap().state,
+            JobState::Failed
+        );
     }
 
     #[test]
     fn durable_parent_cancellation_stops_a_worker_without_an_in_memory_parent_token() {
         use super::super::jobs::JobLifecyclePort;
-        let f=ProductionFixture::new("parent-cancel");
-        let q=f.database.kernel_job_start(&f.start_request("once",chunked_params(&[]))).unwrap().snapshot().clone();
-        let port=HostJobLifecycle::new(f.database.clone(),&f.root,&f.conversation_id,&q.job_id,1);
+        let f = ProductionFixture::new("parent-cancel");
+        let q = f
+            .database
+            .kernel_job_start(&f.start_request("once", chunked_params(&[])))
+            .unwrap()
+            .snapshot()
+            .clone();
+        let port = HostJobLifecycle::new(
+            f.database.clone(),
+            &f.root,
+            &f.conversation_id,
+            &q.job_id,
+            1,
+        );
         port.mark_running().unwrap();
         assert!(!port.is_cancel_requested());
         f.database.with_connection(|c| {
@@ -737,8 +932,7 @@ mod tests {
         }).unwrap();
         assert!(port.is_cancel_requested());
         port.settle_cancelled().unwrap();
-        assert_eq!(f.snapshot(&q.job_id).state,JobState::Cancelled);
+        assert_eq!(f.snapshot(&q.job_id).state, JobState::Cancelled);
         assert!(f.snapshot(&q.job_id).cancel_acknowledged_at.is_some());
     }
-
 }

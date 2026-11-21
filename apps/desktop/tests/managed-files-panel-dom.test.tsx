@@ -513,13 +513,17 @@ describe('资料库与主对话文件页', () => {
     expect(restoreCalls[1].force).toBe(false)
   })
 
-  test('文件页始终显示版本，预览遮住列表时保留未读，返回列表后清除', async () => {
+  test('文件页与预览都不显示历史版本，返回树后清除未读', async () => {
+    versions = [versionRow({ id: 'v2', versionNo: 2, createdAt: 2 }), versionRow({ id: 'v1', versionNo: 1, createdAt: 1, changeKind: 'created' }), versionRow({ id: 'b1', storagePath: 'C:/tmp/b.txt', displayName: 'b.txt', versionNo: 1, createdAt: 1 })]
     const { RightPanel } = await import('../src/features/chat/right-panel/fox-right-panel')
     const { TooltipProvider } = await import('../src/components/ui/tooltip')
     const id = nextConvId()
     let projectError = false
     mockIPC((command) => {
-      if (command === 'project_files_list' && !projectError) return { ok: true, data: [] }
+      if (command === 'project_files_search' && !projectError) return { ok: true, data: { entries: [], truncated: false } }
+      if (command === 'project_files_children' && !projectError) return { ok: true, data: { entries: [{ path: 'a.txt', name: 'a.txt', parent: '', isDirectory: false }, { path: 'b.txt', name: 'b.txt', parent: '', isDirectory: false }], truncated: false } }
+      if (command === 'project_file_read') return { ok: true, data: { path: 'a.txt', name: 'a.txt', byteSize: 10, content: 'content', truncated: false } }
+      if (command === 'project_file_action') return { ok: true, data: { applications: [] } }
       return { ok: false, error: { code: 'project', message: '项目文件读取失败', retryable: true } }
     })
     const props = {
@@ -537,28 +541,35 @@ describe('资料库与主对话文件页', () => {
       <TooltipProvider><RightPanel {...props} detail={detail} {...overrides} /></TooltipProvider>
     )
     const view = render(panel({}))
-    await screen.findByRole('button', { name: '2 个版本' })
+    await waitFor(() => expect(listCalls).toBeGreaterThan(0))
+    expect(screen.queryByRole('button', { name: '2 个版本' })).toBeNull()
+    expect(screen.queryByRole('region', { name: '文件版本' })).toBeNull()
     expect(screen.getByText('尚未选择项目')).toBeDefined()
 
-    const project = { ...detail, conversation: { ...detail.conversation, projectRoot: 'C:/project' } }
+    const project = { ...detail, conversation: { ...detail.conversation, projectRoot: 'C:/tmp' } }
     view.rerender(panel({ detail: project }))
+    await screen.findByText('已修改')
+    expect(screen.getByText('新建')).toBeDefined()
+    await act(async () => { await Promise.allSettled([...view.container.querySelectorAll('*')].flatMap(element => element.getAnimations()).map(animation => animation.finished)) })
     fireEvent.change(screen.getByPlaceholderText('搜索文件'), { target: { value: 'none' } })
     await screen.findByText('没有匹配的文件')
-    expect(screen.getByRole('button', { name: '2 个版本' })).toBeDefined()
+    expect(screen.queryByRole('button', { name: '2 个版本' })).toBeNull()
 
     const preview = { fileTabs: [{ id: 'a', path: 'a.txt', name: 'a.txt', artifactId: null }], activeFileTabId: 'a' }
     view.rerender(panel({ ...preview, detail: project }))
+    await screen.findByText('content')
+    expect(screen.queryByRole('button', { name: '历史版本' })).toBeNull()
     versions = [versionRow({ id: 'v3', versionNo: 3, createdAt: 3 }), ...versions]
     const completed = { ...project, lastRun: { ...project.lastRun!, status: 'completed' as const } }
     view.rerender(panel({ ...preview, detail: completed }))
-    await waitFor(() => expect(screen.getByRole('button', { name: '打开页面' }).querySelector('.fox-tab-dot')).not.toBeNull())
+    await waitFor(() => expect(screen.getByRole('tab', { name: '文件' }).parentElement?.querySelector('.fox-tab-dot')).not.toBeNull())
     expect(screen.queryByRole('button', { name: '3 个版本' })).toBeNull()
 
     projectError = true
     const changedRoot = { ...completed, conversation: { ...completed.conversation, projectRoot: 'C:/changed' } }
     view.rerender(panel({ detail: changedRoot }))
     await screen.findByText('项目文件读取失败')
-    expect(screen.getByRole('button', { name: '3 个版本' })).toBeDefined()
+    expect(screen.queryByRole('button', { name: '3 个版本' })).toBeNull()
     expect(view.container.querySelector('.fox-tab-dot')).toBeNull()
   })
 })

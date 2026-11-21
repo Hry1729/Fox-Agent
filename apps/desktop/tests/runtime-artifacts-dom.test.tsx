@@ -8,7 +8,7 @@ if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register()
 const React = await import('react')
 const { cleanup, fireEvent, render, screen, within } = await import('@testing-library/react')
 const { RuntimeArtifacts, artifactVerificationLabel } = await import('../src/features/chat/runtime-artifacts')
-const { finalArtifactIds } = await import('../src/features/chat/final-artifact-references')
+const { finalArtifactIds, resolveFinalArtifactReference } = await import('../src/features/chat/final-artifact-references')
 
 afterEach(cleanup)
 
@@ -30,6 +30,14 @@ function declared(record: ArtifactRecord, declaredAt = 1, declaredDescription: s
 }
 
 describe('reply file results', () => {
+  test('an older reply can open a unique recorded output by path, but an ambiguous name stays unresolved', () => {
+    const review = declared({ ...artifact('file-id', 'deliverable', 'review.md'), storagePath: '\\\\?\\D:\\project\\output\\review.md' })
+    const other = { ...review, id: 'other', storagePath: 'D:/project/input/review.md' }
+    expect(resolveFinalArtifactReference('#fox-artifact=file-id', [review, other])).toBe(review)
+    expect(resolveFinalArtifactReference('#fox-artifact=output%2Freview.md', [review, other])).toBe(review)
+    expect(resolveFinalArtifactReference('#fox-artifact=review.md', [review, other])).toBeUndefined()
+    expect(resolveFinalArtifactReference('#fox-artifact=../output/review.md', [review])).toBeUndefined()
+  })
   test('a declared private PDF is delivered while intermediate files stay collapsed, without changing Host facts', () => {
     const pdf = declared({ ...artifact('compute-artifact:pdf', 'process', 'AGV报告.pdf'), artifactOrigin: 'host_private' })
     const artifacts = [pdf, ...[1, 2, 3, 4].map(i => artifact(`chart-${i}`, 'process', `chart-${i}.svg`))]
@@ -132,7 +140,7 @@ describe('reply file results', () => {
     expect(card.textContent).not.toContain('human-tests-20261007-r2')
     // The directory is still one hover away.
     const titled = [card.getAttribute('title'), ...Array.from(card.querySelectorAll<HTMLElement>('[title]')).map((element) => element.getAttribute('title'))]
-    expect(titled).toContain(longPath)
+    expect(titled).toContain(longPath.slice(4))
   })
 
   test('the flat chip shows type, filename and compact size; the model note is for screen readers only, never delivery metadata', () => {

@@ -29,7 +29,7 @@ test('passes the Phase 0B full manifest with complete Runtime tool coverage', as
   const report = await runOfflineEvals()
   assert.equal(report.schemaVersion, 4)
   assert.equal(report.summary.suites, 9)
-  assert.equal(report.summary.total, 142)
+  assert.equal(report.summary.total, 153)
   assert.equal(report.summary.failed, 0, JSON.stringify(report.suites.filter((suite) => suite.cases.some((item) => !item.passed)), null, 2))
   assert.equal(report.metadata.evaluatorVersion, 'fox-offline-evaluator-v8')
   const injectionCases = report.suites.find((suite) => suite.id === 'injection-boundary').cases
@@ -37,11 +37,11 @@ test('passes the Phase 0B full manifest with complete Runtime tool coverage', as
   assert.equal(injectionCases.every((item) => item.isolatedInHostWorkSnapshot && item.workSnapshotAuthorityCount === 1), true)
   assert.equal(injectionCases.some((item) => 'isolatedInWorkspaceContext' in item), false)
   assert.equal(report.baseline.manifest.id, 'phase-0b-full-baseline')
-  assert.equal(report.baseline.manifest.version, '2026-11-06.1')
-  assert.equal(report.baseline.summary.total, 142)
+  assert.equal(report.baseline.manifest.version, '2026-11-16.2')
+  assert.equal(report.baseline.summary.total, 153)
   assert.deepEqual(
     Object.fromEntries(Object.entries(report.baseline.summary.byCategory).map(([category, summary]) => [category, summary.total])),
-    { simple: 10, medium: 102, complex: 25, recovery: 5 },
+    { simple: 10, medium: 113, complex: 25, recovery: 5 },
   )
   const runtimeToolCatalog = report.suites.find((suite) => suite.id === 'runtime-tool-catalog')
   assert.equal(runtimeToolCatalog.cases.length, RUNTIME_TOOL_CATALOG.length)
@@ -119,8 +119,8 @@ test('passes the Phase 0B full manifest with complete Runtime tool coverage', as
     { total: 6, passed: 6, failed: 0 },
   )
   assert.equal(report.metadata.datasetHash, '610af6adb505549587222e7410ac7003b46241b974174e2a96ccb01fddadf933')
-  assert.equal(report.metadata.manifestHash, '782fd6ea8a72e12082b6d29015ca446aa1538a0d2bf6b7a2f9a2af48c0e86ae1')
-  assert.equal(report.metadata.toolCatalogHash, '687edcd404ebd0dbfcfa278e0ea7ef601cabe25e50447a7c4de1951738f9e798')
+  assert.equal(report.metadata.manifestHash, '51b7fb8e23b5767ba6132ef3ff438ff5f64b3915860401f1f4e5a40bcfdfa587')
+  assert.equal(report.metadata.toolCatalogHash, 'fe29805dd39d51247d78f1b1011020908caf0a1bcfa2b660e38cf92639e7d045')
   assert.match(report.metadata.modelConfigHash, /^[a-f0-9]{64}$/)
   assert.match(report.metadata.environmentHash, /^[a-f0-9]{64}$/)
   assert.match(report.metadata.stablePromptHash, /^[a-f0-9]{16,64}$/)
@@ -142,7 +142,8 @@ test('passes the Phase 0B full manifest with complete Runtime tool coverage', as
   // identity moved with both.
   // 2026-10-31: the stable prompt moved with B4b (runtime-instructions.mjs,
   // 1e2db797), so the result identity moved with it (main push CI 41170749997).
-  assert.equal(report.resultHash, 'f98b86e936c0756200f17730b61ac5fcfc4d7ea99928c30021437471c934fb97')
+  // 2026-11-18: the Runtime prompt update changes this hash without changing the tool catalog.
+  assert.equal(report.resultHash, 'a4f8dd02cdbadb1596cb9d2637d819be19e0e0cb20548e8ed346901dcd389435')
 })
 
 test('locks Graph review and final Acceptance schemas, profile boundary, and truthful completion Prompt', () => {

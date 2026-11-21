@@ -33,9 +33,16 @@ use std::time::Duration;
 enum Scripted {
     /// session_created. `persist` decides whether the runtime also wrote the
     /// JSONL (a Pi version that persists eagerly) or only booked the path.
-    Created { path: PathBuf, session_id: String, persist: bool },
+    Created {
+        path: PathBuf,
+        session_id: String,
+        persist: bool,
+    },
     /// request_failed with a stable code.
-    Rejected { code: &'static str, message: &'static str },
+    Rejected {
+        code: &'static str,
+        message: &'static str,
+    },
 }
 
 /// Scripted stand-in for the runtime's session protocol.
@@ -51,11 +58,17 @@ struct ScriptedRuntime {
 
 impl ScriptedRuntime {
     fn with(answers: Vec<Scripted>) -> Self {
-        Self { requests: Vec::new(), answers: answers.into() }
+        Self {
+            requests: Vec::new(),
+            answers: answers.into(),
+        }
     }
 
     fn request_types(&self) -> Vec<&str> {
-        self.requests.iter().map(|(kind, _)| kind.as_str()).collect()
+        self.requests
+            .iter()
+            .map(|(kind, _)| kind.as_str())
+            .collect()
     }
 }
 
@@ -71,14 +84,20 @@ impl SessionRuntimeLink for ScriptedRuntime {
             .and_then(|payload| payload.get("contextGeneration"))
             .cloned()
             .unwrap_or(json!(1));
-        self.requests
-            .push((request.r#type.clone(), request.payload.clone().unwrap_or(Value::Null)));
+        self.requests.push((
+            request.r#type.clone(),
+            request.payload.clone().unwrap_or(Value::Null),
+        ));
         let answer = self
             .answers
             .pop_front()
             .expect("the Host sent a session request the test did not script");
         let (reply_type, payload) = match answer {
-            Scripted::Created { path, session_id, persist } => {
+            Scripted::Created {
+                path,
+                session_id,
+                persist,
+            } => {
                 if persist {
                     // Only the runtime writes the file. The Host never does.
                     std::fs::write(&path, "{\"type\":\"session\"}\n").unwrap();
@@ -94,9 +113,10 @@ impl SessionRuntimeLink for ScriptedRuntime {
                     }),
                 )
             }
-            Scripted::Rejected { code, message } => {
-                ("request_failed", json!({ "code": code, "message": message }))
-            }
+            Scripted::Rejected { code, message } => (
+                "request_failed",
+                json!({ "code": code, "message": message }),
+            ),
         };
         Ok(RuntimeEnvelope {
             protocol: PROTOCOL_NAME.to_owned(),
@@ -156,7 +176,9 @@ impl Fixture {
     }
 
     fn mapping(&self) -> Option<RuntimeSessionRecord> {
-        self.database.get_runtime_session(&self.conversation_id).unwrap()
+        self.database
+            .get_runtime_session(&self.conversation_id)
+            .unwrap()
     }
 
     fn file(&self, name: &str) -> PathBuf {
@@ -220,8 +242,16 @@ impl Fixture {
         path: &std::path::Path,
         format_version: i64,
     ) {
-        let snapshot = if format_version >= 2 { None } else { Some(path.to_string_lossy().into_owned()) };
-        let native = if format_version >= 2 { Some(path.to_string_lossy().into_owned()) } else { None };
+        let snapshot = if format_version >= 2 {
+            None
+        } else {
+            Some(path.to_string_lossy().into_owned())
+        };
+        let native = if format_version >= 2 {
+            Some(path.to_string_lossy().into_owned())
+        } else {
+            None
+        };
         self.database
             .with_connection(|connection| {
                 connection
@@ -290,39 +320,87 @@ fn canonical(dir: &std::path::Path, name: &str) -> PathBuf {
 }
 
 fn recorded_run_session(fixture: &Fixture, run_id: &str) -> Option<String> {
-    fixture.database.with_connection(|connection| {
-        connection.query_row(
-            "SELECT runtime_session_id FROM runs WHERE id = ?1",
-            [run_id],
-            |row| row.get(0),
-        )
-    }).unwrap()
+    fixture
+        .database
+        .with_connection(|connection| {
+            connection.query_row(
+                "SELECT runtime_session_id FROM runs WHERE id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
 }
 
 #[test]
 fn rewind_refuses_failed_native_recovery_without_erasing_the_failure() {
     let fixture = Fixture::new("rewind-corrupt-session");
     let path = fixture.seed_generation_one("corrupt.jsonl", "invalid native session");
-    let started = fixture.database.create_run(&fixture.conversation_id, "retry this prompt", None).unwrap();
-    let refusal = fixture.lifecycle().open_for_run(
-        &fixture.conversation_id,
-        &started.run.id,
-        &mut ScriptedRuntime::with(vec![Scripted::Rejected { code: "session.native_corrupt", message: "invalid JSONL" }]),
-        None,
-    ).unwrap_err();
-    fixture.database.mark_run_failed(&started.run.id, "runtime.start_failed", &refusal.user_message()).unwrap();
-    let detail_before = serde_json::to_value(fixture.database.load_conversation(&fixture.conversation_id).unwrap()).unwrap();
+    let started = fixture
+        .database
+        .create_run(&fixture.conversation_id, "retry this prompt", None)
+        .unwrap();
+    let refusal = fixture
+        .lifecycle()
+        .open_for_run(
+            &fixture.conversation_id,
+            &started.run.id,
+            &mut ScriptedRuntime::with(vec![Scripted::Rejected {
+                code: "session.native_corrupt",
+                message: "invalid JSONL",
+            }]),
+            None,
+        )
+        .unwrap_err();
+    fixture
+        .database
+        .mark_run_failed(
+            &started.run.id,
+            "runtime.start_failed",
+            &refusal.user_message(),
+        )
+        .unwrap();
+    let detail_before = serde_json::to_value(
+        fixture
+            .database
+            .load_conversation(&fixture.conversation_id)
+            .unwrap(),
+    )
+    .unwrap();
     let mapping_before = format!("{:?}", fixture.mapping());
     let generations_before = fixture.generations();
-    assert!(fixture.database.conversation_requires_native_recovery(&fixture.conversation_id).unwrap());
+    assert!(fixture
+        .database
+        .conversation_requires_native_recovery(&fixture.conversation_id)
+        .unwrap());
 
     for _ in 0..2 {
-        let error = fixture.database.rewind_run(&fixture.conversation_id, &started.user_message.id, "retry this prompt", None).unwrap_err();
+        let error = fixture
+            .database
+            .rewind_run(
+                &fixture.conversation_id,
+                &started.user_message.id,
+                "retry this prompt",
+                None,
+            )
+            .unwrap_err();
         assert!(error.contains("session.native_unavailable"), "{error}");
-        assert_eq!(serde_json::to_value(fixture.database.load_conversation(&fixture.conversation_id).unwrap()).unwrap(), detail_before);
+        assert_eq!(
+            serde_json::to_value(
+                fixture
+                    .database
+                    .load_conversation(&fixture.conversation_id)
+                    .unwrap()
+            )
+            .unwrap(),
+            detail_before
+        );
         assert_eq!(format!("{:?}", fixture.mapping()), mapping_before);
         assert_eq!(fixture.generations(), generations_before);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "invalid native session");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "invalid native session"
+        );
         assert_eq!(fixture.files(), vec!["corrupt.jsonl"]);
     }
 }
@@ -331,46 +409,145 @@ fn rewind_refuses_failed_native_recovery_without_erasing_the_failure() {
 fn rewind_retires_the_persisted_mapping_before_a_new_generation_is_created() {
     let fixture = Fixture::new("rewind-ready-session");
     let old_path = fixture.seed_generation_one("old.jsonl", "persisted generation one");
-    let started = fixture.database.create_run(&fixture.conversation_id, "original prompt", None).unwrap();
-    fixture.database.mark_run_failed(&started.run.id, "provider.request_failed", "ordinary provider failure").unwrap();
-    assert!(!fixture.database.conversation_requires_native_recovery(&fixture.conversation_id).unwrap());
-    let replacement = fixture.database.rewind_run(&fixture.conversation_id, &started.user_message.id, "edited prompt", None).unwrap();
+    let started = fixture
+        .database
+        .create_run(&fixture.conversation_id, "original prompt", None)
+        .unwrap();
+    fixture
+        .database
+        .mark_run_failed(
+            &started.run.id,
+            "provider.request_failed",
+            "ordinary provider failure",
+        )
+        .unwrap();
+    assert!(!fixture
+        .database
+        .conversation_requires_native_recovery(&fixture.conversation_id)
+        .unwrap());
+    let replacement = fixture
+        .database
+        .rewind_run(
+            &fixture.conversation_id,
+            &started.user_message.id,
+            "edited prompt",
+            None,
+        )
+        .unwrap();
     assert!(fixture.mapping().is_none());
     let retired = fixture.generations();
     assert_eq!(retired.len(), 1);
-    assert_eq!((retired[0].0, retired[0].1.as_str(), retired[0].3), (1, "runtime-1", false));
-    assert_eq!(fixture.database.next_runtime_session_generation(&fixture.conversation_id).unwrap(), 2);
+    assert_eq!(
+        (retired[0].0, retired[0].1.as_str(), retired[0].3),
+        (1, "runtime-1", false)
+    );
+    assert_eq!(
+        fixture
+            .database
+            .next_runtime_session_generation(&fixture.conversation_id)
+            .unwrap(),
+        2
+    );
     let new_path = fixture.file("edited.jsonl");
-    fixture.lifecycle().open_for_run(
-        &fixture.conversation_id,
-        &replacement.run.id,
-        &mut ScriptedRuntime::with(vec![Scripted::Created { path: new_path, session_id: "pi-edited".into(), persist: true }]),
-        None,
-    ).unwrap();
+    fixture
+        .lifecycle()
+        .open_for_run(
+            &fixture.conversation_id,
+            &replacement.run.id,
+            &mut ScriptedRuntime::with(vec![Scripted::Created {
+                path: new_path,
+                session_id: "pi-edited".into(),
+                persist: true,
+            }]),
+            None,
+        )
+        .unwrap();
     assert_eq!(fixture.mapping().unwrap().context_generation, 2);
-    assert_eq!(std::fs::read_to_string(&old_path).unwrap(), "persisted generation one");
-    fixture.database.mark_run_failed(&replacement.run.id, "run.test", "end test run").unwrap();
-    let reset = fixture.lifecycle().reset(
-        &fixture.conversation_id,
-        &mut ScriptedRuntime::with(vec![Scripted::Created { path: fixture.file("reset.jsonl"), session_id: "pi-reset".into(), persist: false }]),
-    ).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&old_path).unwrap(),
+        "persisted generation one"
+    );
+    fixture
+        .database
+        .mark_run_failed(&replacement.run.id, "run.test", "end test run")
+        .unwrap();
+    let reset = fixture
+        .lifecycle()
+        .reset(
+            &fixture.conversation_id,
+            &mut ScriptedRuntime::with(vec![Scripted::Created {
+                path: fixture.file("reset.jsonl"),
+                session_id: "pi-reset".into(),
+                persist: false,
+            }]),
+        )
+        .unwrap();
     assert_eq!(reset.context_generation, 3);
-    assert_eq!(fixture.generations().iter().map(|row| (row.0, row.3)).collect::<Vec<_>>(), vec![(1, false), (2, false), (3, true)]);
+    assert_eq!(
+        fixture
+            .generations()
+            .iter()
+            .map(|row| (row.0, row.3))
+            .collect::<Vec<_>>(),
+        vec![(1, false), (2, false), (3, true)]
+    );
 }
 
 #[test]
 fn rewind_generation_collision_rolls_back_messages_runs_and_mapping() {
     let fixture = Fixture::new("rewind-generation-collision");
     fixture.seed_generation_one("current.jsonl", "current bytes");
-    fixture.seed_retired_generation(&fixture.conversation_id, 1, "different-runtime", &fixture.file("retired.jsonl"), 2);
-    let started = fixture.database.create_run(&fixture.conversation_id, "keep this prompt", None).unwrap();
-    fixture.database.mark_run_failed(&started.run.id, "provider.request_failed", "ordinary failure").unwrap();
-    let before = serde_json::to_value(fixture.database.load_conversation(&fixture.conversation_id).unwrap()).unwrap();
+    fixture.seed_retired_generation(
+        &fixture.conversation_id,
+        1,
+        "different-runtime",
+        &fixture.file("retired.jsonl"),
+        2,
+    );
+    let started = fixture
+        .database
+        .create_run(&fixture.conversation_id, "keep this prompt", None)
+        .unwrap();
+    fixture
+        .database
+        .mark_run_failed(
+            &started.run.id,
+            "provider.request_failed",
+            "ordinary failure",
+        )
+        .unwrap();
+    let before = serde_json::to_value(
+        fixture
+            .database
+            .load_conversation(&fixture.conversation_id)
+            .unwrap(),
+    )
+    .unwrap();
     let mapping = format!("{:?}", fixture.mapping());
     let generations = fixture.generations();
-    let error = fixture.database.rewind_run(&fixture.conversation_id, &started.user_message.id, "edited prompt", None).unwrap_err();
-    assert!(error.contains("rewind.context_generation_collision"), "{error}");
-    assert_eq!(serde_json::to_value(fixture.database.load_conversation(&fixture.conversation_id).unwrap()).unwrap(), before);
+    let error = fixture
+        .database
+        .rewind_run(
+            &fixture.conversation_id,
+            &started.user_message.id,
+            "edited prompt",
+            None,
+        )
+        .unwrap_err();
+    assert!(
+        error.contains("rewind.context_generation_collision"),
+        "{error}"
+    );
+    assert_eq!(
+        serde_json::to_value(
+            fixture
+                .database
+                .load_conversation(&fixture.conversation_id)
+                .unwrap()
+        )
+        .unwrap(),
+        before
+    );
     assert_eq!(format!("{:?}", fixture.mapping()), mapping);
     assert_eq!(fixture.generations(), generations);
 }
@@ -389,12 +566,24 @@ fn run_session_binding_covers_create_live_adopt_and_resume() {
                 "existing-runtime",
                 &existing_file,
                 2,
-                if route == "resume" { RuntimeSessionStatus::Ready } else { RuntimeSessionStatus::Allocated },
+                if route == "resume" {
+                    RuntimeSessionStatus::Ready
+                } else {
+                    RuntimeSessionStatus::Allocated
+                },
             );
         }
-        let run = fixture.database.create_run(&fixture.conversation_id, "读取当前资料", None).unwrap().run;
+        let run = fixture
+            .database
+            .create_run(&fixture.conversation_id, "读取当前资料", None)
+            .unwrap()
+            .run;
         assert_eq!(recorded_run_session(&fixture, &run.id), None);
-        let response_path = if route == "resume" { existing_file } else { fixture.file("created.jsonl") };
+        let response_path = if route == "resume" {
+            existing_file
+        } else {
+            fixture.file("created.jsonl")
+        };
         let mut runtime = if route == "live" {
             ScriptedRuntime::default()
         } else {
@@ -404,13 +593,20 @@ fn run_session_binding_covers_create_live_adopt_and_resume() {
                 persist: route == "resume",
             }])
         };
-        let opened = fixture.lifecycle().open_for_run(
-            &fixture.conversation_id,
-            &run.id,
-            &mut runtime,
-            (route == "live").then_some("existing-runtime"),
-        ).unwrap();
-        assert_eq!(recorded_run_session(&fixture, &run.id).as_deref(), Some(opened.0.as_str()), "route {route}");
+        let opened = fixture
+            .lifecycle()
+            .open_for_run(
+                &fixture.conversation_id,
+                &run.id,
+                &mut runtime,
+                (route == "live").then_some("existing-runtime"),
+            )
+            .unwrap();
+        assert_eq!(
+            recorded_run_session(&fixture, &run.id).as_deref(),
+            Some(opened.0.as_str()),
+            "route {route}"
+        );
         assert_eq!(fixture.mapping().unwrap().runtime_session_id, opened.0);
         let expected_requests = match route {
             "live" => vec![],
@@ -425,12 +621,19 @@ fn run_session_binding_covers_create_live_adopt_and_resume() {
 fn run_session_binding_does_not_claim_a_failed_restore() {
     let fixture = Fixture::new("run-binding-corrupt");
     fixture.seed_generation_one("corrupt.jsonl", "corrupt");
-    let run = fixture.database.create_run(&fixture.conversation_id, "继续", None).unwrap().run;
+    let run = fixture
+        .database
+        .create_run(&fixture.conversation_id, "继续", None)
+        .unwrap()
+        .run;
     let mut runtime = ScriptedRuntime::with(vec![Scripted::Rejected {
         code: "session.native_corrupt",
         message: "invalid Pi session",
     }]);
-    assert!(fixture.lifecycle().open_for_run(&fixture.conversation_id, &run.id, &mut runtime, None).is_err());
+    assert!(fixture
+        .lifecycle()
+        .open_for_run(&fixture.conversation_id, &run.id, &mut runtime, None)
+        .is_err());
     assert_eq!(recorded_run_session(&fixture, &run.id), None);
     assert_eq!(fixture.mapping().unwrap().status, "unavailable");
 }
@@ -439,33 +642,78 @@ fn run_session_binding_does_not_claim_a_failed_restore() {
 fn run_session_binding_refuses_other_conversations_and_existing_different_bindings() {
     let fixture = Fixture::new("run-binding-owner");
     fixture.seed_generation_one("owned.jsonl", "owned session");
-    let run = fixture.database.create_run(&fixture.conversation_id, "继续", None).unwrap().run;
+    let run = fixture
+        .database
+        .create_run(&fixture.conversation_id, "继续", None)
+        .unwrap()
+        .run;
     let other_conversation = fixture.second_conversation();
-    let other_run = fixture.database.create_run(&other_conversation, "独立对话", None).unwrap().run;
-    assert!(fixture.database.associate_run_runtime_session(&other_run.id, &fixture.conversation_id, "runtime-1").is_err());
-    assert!(fixture.database.associate_run_runtime_session(&run.id, &other_conversation, "runtime-1").is_err());
+    let other_run = fixture
+        .database
+        .create_run(&other_conversation, "独立对话", None)
+        .unwrap()
+        .run;
+    assert!(fixture
+        .database
+        .associate_run_runtime_session(&other_run.id, &fixture.conversation_id, "runtime-1")
+        .is_err());
+    assert!(fixture
+        .database
+        .associate_run_runtime_session(&run.id, &other_conversation, "runtime-1")
+        .is_err());
     assert_eq!(recorded_run_session(&fixture, &other_run.id), None);
     assert_eq!(recorded_run_session(&fixture, &run.id), None);
-    fixture.database.with_connection(|connection| {
-        connection.execute("UPDATE runs SET runtime_session_id = 'previous-runtime' WHERE id = ?1", [&run.id])
-    }).unwrap();
-    assert!(fixture.database.associate_run_runtime_session(&run.id, &fixture.conversation_id, "runtime-1").is_err());
-    assert_eq!(recorded_run_session(&fixture, &run.id).as_deref(), Some("previous-runtime"));
+    fixture
+        .database
+        .with_connection(|connection| {
+            connection.execute(
+                "UPDATE runs SET runtime_session_id = 'previous-runtime' WHERE id = ?1",
+                [&run.id],
+            )
+        })
+        .unwrap();
+    assert!(fixture
+        .database
+        .associate_run_runtime_session(&run.id, &fixture.conversation_id, "runtime-1")
+        .is_err());
+    assert_eq!(
+        recorded_run_session(&fixture, &run.id).as_deref(),
+        Some("previous-runtime")
+    );
 }
 
 #[test]
 fn run_session_binding_is_idempotent_but_does_not_change_finished_runs() {
     let fixture = Fixture::new("run-binding-finished");
     fixture.seed_generation_one("owned.jsonl", "owned session");
-    let run = fixture.database.create_run(&fixture.conversation_id, "继续", None).unwrap().run;
+    let run = fixture
+        .database
+        .create_run(&fixture.conversation_id, "继续", None)
+        .unwrap()
+        .run;
     for _ in 0..2 {
-        fixture.database.associate_run_runtime_session(&run.id, &fixture.conversation_id, "runtime-1").unwrap();
+        fixture
+            .database
+            .associate_run_runtime_session(&run.id, &fixture.conversation_id, "runtime-1")
+            .unwrap();
     }
-    fixture.database.with_connection(|connection| {
-        connection.execute("UPDATE runs SET status = 'completed' WHERE id = ?1", [&run.id])
-    }).unwrap();
-    assert!(fixture.database.associate_run_runtime_session(&run.id, &fixture.conversation_id, "runtime-1").is_err());
-    assert_eq!(recorded_run_session(&fixture, &run.id).as_deref(), Some("runtime-1"));
+    fixture
+        .database
+        .with_connection(|connection| {
+            connection.execute(
+                "UPDATE runs SET status = 'completed' WHERE id = ?1",
+                [&run.id],
+            )
+        })
+        .unwrap();
+    assert!(fixture
+        .database
+        .associate_run_runtime_session(&run.id, &fixture.conversation_id, "runtime-1")
+        .is_err());
+    assert_eq!(
+        recorded_run_session(&fixture, &run.id).as_deref(),
+        Some("runtime-1")
+    );
 }
 
 // ------------------------------------------ (a) two resets, three generations --
@@ -487,11 +735,19 @@ fn companion_session_reset_preserves_private_facts_and_the_other_contact() {
     let workspace = crate::companion_workspace::repair(db, &fixture.root, id).unwrap();
     let file = workspace.join("报价.txt");
     std::fs::write(&file, "报价明细 7731").unwrap();
-    db.companion_note_save_user(id, None, None, "报价以含税金额为准", None, None).unwrap();
-    db.companion_topic_save(id, None, "报价明细", &[], "报价单编号 7731", None).unwrap();
-    let project = db.with_connection(|c| c.query_row(
-        "SELECT project_id FROM conversations WHERE id=?", [&fixture.conversation_id], |r| r.get::<_, String>(0),
-    )).unwrap();
+    db.companion_note_save_user(id, None, None, "报价以含税金额为准", None, None)
+        .unwrap();
+    db.companion_topic_save(id, None, "报价明细", &[], "报价单编号 7731", None)
+        .unwrap();
+    let project = db
+        .with_connection(|c| {
+            c.query_row(
+                "SELECT project_id FROM conversations WHERE id=?",
+                [&fixture.conversation_id],
+                |r| r.get::<_, String>(0),
+            )
+        })
+        .unwrap();
     db.companion_grant_project(id, &project, true).unwrap();
     let run = db.create_run(chat, "保存报价", None).unwrap().run.id;
     db.mark_run_failed(&run, "run.test", "测试已结束").unwrap();
@@ -504,17 +760,43 @@ fn companion_session_reset_preserves_private_facts_and_the_other_contact() {
     let old = fixture.file("contact-old.jsonl");
     std::fs::write(&old, "旧会话记录").unwrap();
     fixture.seed_mapping(chat, "owner-old", &old, 1, RuntimeSessionStatus::Ready);
-    fixture.seed_mapping(&other.conversation_id, "other-live", &fixture.file("other.jsonl"), 3, RuntimeSessionStatus::Allocated);
+    fixture.seed_mapping(
+        &other.conversation_id,
+        "other-live",
+        &fixture.file("other.jsonl"),
+        3,
+        RuntimeSessionStatus::Allocated,
+    );
 
-    let outcome = fixture.lifecycle().reset(chat, &mut ScriptedRuntime::with(vec![Scripted::Created {
-        path: fixture.file("new.jsonl"), session_id: "owner-new".into(), persist: true,
-    }])).unwrap();
+    let outcome = fixture
+        .lifecycle()
+        .reset(
+            chat,
+            &mut ScriptedRuntime::with(vec![Scripted::Created {
+                path: fixture.file("new.jsonl"),
+                session_id: "owner-new".into(),
+                persist: true,
+            }]),
+        )
+        .unwrap();
 
     assert_eq!(outcome.context_generation, 2);
-    assert_eq!(db.get_runtime_session(&other.conversation_id).unwrap().unwrap().runtime_session_id, "other-live");
+    assert_eq!(
+        db.get_runtime_session(&other.conversation_id)
+            .unwrap()
+            .unwrap()
+            .runtime_session_id,
+        "other-live"
+    );
     let after = db.load_conversation_history(chat, i64::MAX, 100).unwrap();
-    assert_eq!(serde_json::to_value(after.messages).unwrap(), serde_json::to_value(history.messages).unwrap());
-    assert_eq!(db.companion_runtime_notes(chat, "报价").unwrap().unwrap(), notes);
+    assert_eq!(
+        serde_json::to_value(after.messages).unwrap(),
+        serde_json::to_value(history.messages).unwrap()
+    );
+    assert_eq!(
+        db.companion_runtime_notes(chat, "报价").unwrap().unwrap(),
+        notes
+    );
     assert_eq!(db.companion_grants_list(id).unwrap(), grants);
     assert_eq!(std::fs::read_to_string(file).unwrap(), "报价明细 7731");
     assert_eq!(std::fs::read_to_string(old).unwrap(), "旧会话记录");
@@ -588,7 +870,10 @@ fn two_resets_record_three_generations_and_keep_the_chat_intact() {
         )
         .expect("the first reset succeeds");
     assert_eq!(first.context_generation, 2);
-    assert_eq!(first.session_path, canonical(&fixture.sessions_dir, "gen-2.jsonl"));
+    assert_eq!(
+        first.session_path,
+        canonical(&fixture.sessions_dir, "gen-2.jsonl")
+    );
     std::fs::write(&generation_two, "generation two bytes").unwrap();
 
     let second = fixture
@@ -623,14 +908,28 @@ fn two_resets_record_three_generations_and_keep_the_chat_intact() {
         vec![1, 2, 3],
         "a reset must not lose a generation"
     );
-    let mut ids = generations.iter().map(|row| row.1.clone()).collect::<Vec<_>>();
+    let mut ids = generations
+        .iter()
+        .map(|row| row.1.clone())
+        .collect::<Vec<_>>();
     ids.sort();
     ids.dedup();
-    assert_eq!(ids.len(), 3, "every generation has a distinct runtime session id: {generations:?}");
-    let mut paths = generations.iter().map(|row| row.2.clone()).collect::<Vec<_>>();
+    assert_eq!(
+        ids.len(),
+        3,
+        "every generation has a distinct runtime session id: {generations:?}"
+    );
+    let mut paths = generations
+        .iter()
+        .map(|row| row.2.clone())
+        .collect::<Vec<_>>();
     paths.sort();
     paths.dedup();
-    assert_eq!(paths.len(), 3, "every generation has its own file: {generations:?}");
+    assert_eq!(
+        paths.len(),
+        3,
+        "every generation has its own file: {generations:?}"
+    );
     assert_eq!(
         generations
             .iter()
@@ -685,7 +984,10 @@ fn two_resets_record_three_generations_and_keep_the_chat_intact() {
             )
         })
         .unwrap();
-    assert_eq!(backend_after, backend_before, "agent_backend is not a session fact");
+    assert_eq!(
+        backend_after, backend_before,
+        "agent_backend is not a session fact"
+    );
 }
 // --------------------------------------- (b) no old context into the new session --
 
@@ -716,7 +1018,13 @@ fn a_reset_never_reopens_the_old_context_on_the_next_run() {
     );
     let (_, create_payload) = &resetting.requests[0];
     assert_eq!(create_payload["contextGeneration"], json!(2));
-    for forbidden in ["messages", "history", "transcript", "sessionPath", "nativeSessionPath"] {
+    for forbidden in [
+        "messages",
+        "history",
+        "transcript",
+        "sessionPath",
+        "nativeSessionPath",
+    ] {
         assert!(
             create_payload.get(forbidden).is_none(),
             "a reset must not replay the old context ({forbidden}): {create_payload}"
@@ -769,11 +1077,20 @@ fn a_reset_never_reopens_the_old_context_on_the_next_run() {
         "a stale live id is never treated as the live session"
     );
     let adopted_mapping = fixture.mapping().expect("the mapping survives adoption");
-    assert_eq!(adopted_mapping.context_generation, 2, "adoption keeps the generation");
-    assert_eq!(adopted_mapping.status, "allocated");
-    assert_eq!(adopted_mapping.native_session_ref.as_deref(), Some("pi-2-adopted"));
     assert_eq!(
-        adopted_mapping.native_session_path.as_deref().map(PathBuf::from),
+        adopted_mapping.context_generation, 2,
+        "adoption keeps the generation"
+    );
+    assert_eq!(adopted_mapping.status, "allocated");
+    assert_eq!(
+        adopted_mapping.native_session_ref.as_deref(),
+        Some("pi-2-adopted")
+    );
+    assert_eq!(
+        adopted_mapping
+            .native_session_path
+            .as_deref()
+            .map(PathBuf::from),
         Some(canonical(&fixture.sessions_dir, "gen-2-adopted.jsonl")),
         "the row names the file Pi will really write, so permanent delete can find it"
     );
@@ -844,7 +1161,10 @@ fn a_reset_while_a_run_is_active_is_refused_and_changes_nothing() {
         .reset(&fixture.conversation_id, &mut runtime)
         .expect_err("a live Run must refuse the reset");
     assert_eq!(refusal.code, RESET_RUN_ACTIVE);
-    assert!(runtime.requests.is_empty(), "a refused reset must not touch the runtime");
+    assert!(
+        runtime.requests.is_empty(),
+        "a refused reset must not touch the runtime"
+    );
 
     let mapping = fixture.mapping().expect("the mapping must survive");
     assert_eq!(mapping.context_generation, 1);
@@ -853,7 +1173,11 @@ fn a_reset_while_a_run_is_active_is_refused_and_changes_nothing() {
         mapping.native_session_path.as_deref().map(PathBuf::from),
         Some(generation_one.clone())
     );
-    assert_eq!(fixture.files(), vec!["gen-1.jsonl".to_owned()], "no new file");
+    assert_eq!(
+        fixture.files(),
+        vec!["gen-1.jsonl".to_owned()],
+        "no new file"
+    );
     assert!(
         fixture
             .database
@@ -979,13 +1303,23 @@ fn permanent_delete_removes_every_owned_generation_file_and_nothing_else() {
         .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
     removed.sort();
-    assert_eq!(removed, vec!["gen-1.jsonl".to_owned(), "gen-2.jsonl".to_owned()]);
+    assert_eq!(
+        removed,
+        vec!["gen-1.jsonl".to_owned(), "gen-2.jsonl".to_owned()]
+    );
     assert!(!generation_one.exists());
     assert!(!outcome.session_path.exists());
-    assert!(other_file.exists(), "another conversation's file is never deleted");
+    assert!(
+        other_file.exists(),
+        "another conversation's file is never deleted"
+    );
     assert!(unowned.exists(), "an unowned file is never deleted");
     assert!(
-        fixture.database.get_runtime_session(&other_conversation).unwrap().is_some(),
+        fixture
+            .database
+            .get_runtime_session(&other_conversation)
+            .unwrap()
+            .is_some(),
         "the other conversation's mapping is untouched"
     );
 }
@@ -1011,7 +1345,10 @@ fn a_session_file_outside_the_sessions_directory_is_refused() {
     )
     .expect_err("a path outside the session directory must be refused");
     assert_eq!(refusal.code, SESSION_FILE_OUTSIDE_DIRECTORY);
-    assert!(outside.exists(), "a file outside the directory is never deleted");
+    assert!(
+        outside.exists(),
+        "a file outside the directory is never deleted"
+    );
     assert!(inside.exists(), "a refusal deletes nothing at all");
 }
 
@@ -1039,7 +1376,11 @@ fn a_session_file_owned_by_another_conversation_is_refused() {
     assert_eq!(refusal.code, SESSION_FILE_OTHER_OWNER);
     assert!(shared.exists(), "the shared file must not be deleted");
     assert!(
-        fixture.database.get_runtime_session(&other_conversation).unwrap().is_some(),
+        fixture
+            .database
+            .get_runtime_session(&other_conversation)
+            .unwrap()
+            .is_some(),
         "the other conversation's mapping survives"
     );
 }
@@ -1068,7 +1409,10 @@ fn trash_and_restore_keep_every_generation_file() {
         .trash_conversation(&fixture.conversation_id)
         .unwrap()
         .is_some());
-    assert!(generation_one.exists(), "moving to trash deletes no session file");
+    assert!(
+        generation_one.exists(),
+        "moving to trash deletes no session file"
+    );
     assert!(outcome.session_path.exists());
     assert!(fixture
         .database
@@ -1122,7 +1466,10 @@ fn an_allocated_session_is_reused_only_by_its_exact_live_worker() {
         &record(RuntimeSessionStatus::Allocated),
         Some("runtime-1")
     ));
-    assert!(!allocated_mapping_is_live(&record(RuntimeSessionStatus::Allocated), None));
+    assert!(!allocated_mapping_is_live(
+        &record(RuntimeSessionStatus::Allocated),
+        None
+    ));
     // Only `allocated` may be reused: `ready` reopens the file (proving it),
     // `unavailable` is a recovery problem the user must reset explicitly.
     assert!(!allocated_mapping_is_live(
@@ -1171,11 +1518,17 @@ fn a_reset_recovers_an_unavailable_session_without_touching_its_file() {
         .database
         .conversation_runtime_session_files(&fixture.conversation_id)
         .unwrap();
-    let retired_one = retired.iter().find(|row| !row.current).expect("generation 1 is retired");
+    let retired_one = retired
+        .iter()
+        .find(|row| !row.current)
+        .expect("generation 1 is retired");
     assert_eq!(retired_one.context_generation, 1);
     assert_eq!(retired_one.status, "unavailable");
     assert_eq!(
-        retired_one.native_session_path.as_deref().map(PathBuf::from),
+        retired_one
+            .native_session_path
+            .as_deref()
+            .map(PathBuf::from),
         Some(corrupted.clone()),
         "the retired row keeps naming the file it owned"
     );
@@ -1296,8 +1649,14 @@ fn a_reset_allocates_above_every_retired_generation() {
     assert_eq!(one.runtime_session_id, "runtime-1");
     // No file lost its owner or its bytes.
     assert!(live_one.exists());
-    assert_eq!(std::fs::read_to_string(&retired_two).unwrap(), "retired two");
-    assert_eq!(std::fs::read_to_string(&retired_five).unwrap(), "retired five");
+    assert_eq!(
+        std::fs::read_to_string(&retired_two).unwrap(),
+        "retired two"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&retired_five).unwrap(),
+        "retired five"
+    );
 }
 
 /// A ledger generation is never overwritten by a different session: the write
@@ -1308,7 +1667,13 @@ fn a_ledger_generation_is_never_overwritten_by_another_session() {
     let live_one = fixture.seed_generation_one("gen-1.jsonl", "generation one bytes");
     let retired_one = fixture.file("retired-gen-1.jsonl");
     std::fs::write(&retired_one, "retired one").unwrap();
-    fixture.seed_retired_generation(&fixture.conversation_id, 1, "runtime-retired", &retired_one, 2);
+    fixture.seed_retired_generation(
+        &fixture.conversation_id,
+        1,
+        "runtime-retired",
+        &retired_one,
+        2,
+    );
     let new_file = fixture.file("gen-2.jsonl");
 
     let error = fixture
@@ -1332,7 +1697,10 @@ fn a_ledger_generation_is_never_overwritten_by_another_session() {
         .database
         .conversation_runtime_session_files(&fixture.conversation_id)
         .unwrap();
-    let retired = rows.iter().find(|row| !row.current).expect("the retired row survives");
+    let retired = rows
+        .iter()
+        .find(|row| !row.current)
+        .expect("the retired row survives");
     assert_eq!(retired.runtime_session_id, "runtime-retired");
     assert_eq!(
         retired.native_session_path.as_deref().map(PathBuf::from),
@@ -1390,8 +1758,15 @@ fn an_edit_rerun_replacement_retires_the_row_it_replaces() {
         .database
         .conversation_runtime_session_files(&fixture.conversation_id)
         .unwrap();
-    assert_eq!(rows.len(), 2, "live row plus the retired snapshot: {rows:?}");
-    let retired = rows.iter().find(|row| !row.current).expect("the replaced row is retired");
+    assert_eq!(
+        rows.len(),
+        2,
+        "live row plus the retired snapshot: {rows:?}"
+    );
+    let retired = rows
+        .iter()
+        .find(|row| !row.current)
+        .expect("the replaced row is retired");
     assert_eq!(retired.runtime_session_id, "runtime-legacy");
     assert_eq!(retired.format_version, 1);
     assert_eq!(
@@ -1411,7 +1786,10 @@ fn an_edit_rerun_replacement_retires_the_row_it_replaces() {
         .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
     names.sort();
-    assert_eq!(names, vec!["gen-2.jsonl".to_owned(), "legacy-snapshot.json".to_owned()]);
+    assert_eq!(
+        names,
+        vec!["gen-2.jsonl".to_owned(), "legacy-snapshot.json".to_owned()]
+    );
     assert!(!legacy_snapshot.exists());
     assert!(!new_file.exists());
 }
@@ -1436,7 +1814,10 @@ fn a_just_reset_generation_continues_after_a_worker_restart() {
         )
         .expect("reset");
     assert_eq!(outcome.context_generation, 2);
-    assert!(!outcome.session_path.exists(), "Pi never wrote the new generation");
+    assert!(
+        !outcome.session_path.exists(),
+        "Pi never wrote the new generation"
+    );
 
     // The app restarts: the live worker (and its runtime session id) is gone.
     let mut restarting = ScriptedRuntime::with(vec![Scripted::Created {
@@ -1471,10 +1852,16 @@ fn a_just_reset_generation_continues_after_a_worker_restart() {
     }
 
     let mapping = fixture.mapping().expect("a live mapping");
-    assert_eq!(mapping.context_generation, 2, "adoption keeps the generation");
+    assert_eq!(
+        mapping.context_generation, 2,
+        "adoption keeps the generation"
+    );
     assert_eq!(mapping.runtime_session_id, outcome.runtime_session_id);
     assert_eq!(mapping.status, "allocated");
-    assert_eq!(mapping.native_session_ref.as_deref(), Some("pi-2-restarted"));
+    assert_eq!(
+        mapping.native_session_ref.as_deref(),
+        Some("pi-2-restarted")
+    );
     assert_eq!(
         mapping.native_session_path.as_deref().map(PathBuf::from),
         Some(canonical(&fixture.sessions_dir, "gen-2-restarted.jsonl")),
@@ -1531,7 +1918,11 @@ fn a_ready_row_whose_file_is_missing_refuses_and_never_adopts() {
         .open(&fixture.conversation_id, &mut first)
         .expect_err("a ready row with no file is a recovery problem");
     assert_eq!(recovery_code(&error), Some("session.native_missing"));
-    assert_eq!(first.request_types(), vec!["resume_session"], "the missing file is asked for and refused");
+    assert_eq!(
+        first.request_types(),
+        vec!["resume_session"],
+        "the missing file is asked for and refused"
+    );
     assert_eq!(fixture.mapping().unwrap().status, "unavailable");
 
     let mut twice = ScriptedRuntime::default();
@@ -1540,7 +1931,10 @@ fn a_ready_row_whose_file_is_missing_refuses_and_never_adopts() {
         .open(&fixture.conversation_id, &mut twice)
         .expect_err("the second attempt refuses as well");
     assert_eq!(recovery_code(&error), Some(SESSION_UNAVAILABLE));
-    assert!(twice.requests.is_empty(), "no runtime request may stand in for a missing file");
+    assert!(
+        twice.requests.is_empty(),
+        "no runtime request may stand in for a missing file"
+    );
     assert!(!missing.exists(), "nothing may create an empty context");
 }
 
@@ -1561,7 +1955,10 @@ fn an_empty_allocated_file_is_not_adopted() {
 
     let mapping = fixture.mapping().unwrap();
     assert!(super::session_lifecycle::context_recovery_issue(Some(&mapping), None).is_some());
-    assert!(super::session_lifecycle::context_recovery_issue(Some(&mapping), Some("runtime-8")).is_none());
+    assert!(
+        super::session_lifecycle::context_recovery_issue(Some(&mapping), Some("runtime-8"))
+            .is_none()
+    );
     let mut runtime = ScriptedRuntime::default();
     let error = fixture
         .lifecycle()
@@ -1569,7 +1966,11 @@ fn an_empty_allocated_file_is_not_adopted() {
         .expect_err("an existing file is not a booked path");
     assert_eq!(recovery_code(&error), Some(SESSION_NOT_PERSISTED));
     assert!(runtime.requests.is_empty());
-    assert_eq!(std::fs::read(&path).unwrap(), Vec::<u8>::new(), "the Host never touches Pi's file");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        Vec::<u8>::new(),
+        "the Host never touches Pi's file"
+    );
 }
 
 /// A legacy `format_version 1` conversation has no Pi session to reset: the
@@ -1595,7 +1996,10 @@ fn a_reset_is_refused_for_a_legacy_snapshot() {
         .reset(&fixture.conversation_id, &mut runtime)
         .expect_err("a legacy snapshot is not a Pi session to reset");
     assert_eq!(refusal.code, RESET_LEGACY_CONTEXT);
-    assert!(runtime.requests.is_empty(), "a refused reset must not touch the runtime");
+    assert!(
+        runtime.requests.is_empty(),
+        "a refused reset must not touch the runtime"
+    );
     let mapping = fixture.mapping().expect("the mapping survives");
     assert_eq!(mapping.runtime_session_id, "runtime-legacy");
     assert_eq!(mapping.format_version, 1);
@@ -1668,7 +2072,10 @@ fn reset_availability_matches_the_host_boundary() {
         session_path: Some("C:/fox/sessions/legacy.json".into()),
         ..pi_native.clone()
     };
-    assert!(reset_availability("pi", None).supported, "a conversation with no mapping can be reset");
+    assert!(
+        reset_availability("pi", None).supported,
+        "a conversation with no mapping can be reset"
+    );
     assert!(reset_availability("pi", Some(&pi_native)).supported);
     let legacy_view = reset_availability("pi", Some(&legacy));
     assert!(!legacy_view.supported);
@@ -1680,6 +2087,9 @@ fn reset_availability_matches_the_host_boundary() {
         "the command's own refusal uses the same code"
     );
     let yuxi_view = reset_availability("yuxi", Some(&pi_native));
-    assert!(!yuxi_view.supported, "the runtime wins over the row's format");
+    assert!(
+        !yuxi_view.supported,
+        "the runtime wins over the row's format"
+    );
     assert_eq!(yuxi_view.code.as_deref(), Some(RESET_UNSUPPORTED_RUNTIME));
 }

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { ContactSidebar } from '../src/features/companions/chat-controls'
 import { ContactsContext, type ContactsContextValue } from '../src/features/companions/context'
@@ -12,6 +12,7 @@ const refreshes = { count: 0 }
 let createBlank: () => Promise<Companion>
 let companionCounter = 0
 const tauriCoreAsFound = { ...(await import('@tauri-apps/api/core')) }
+afterAll(() => { mock.module('@tauri-apps/api/core', () => tauriCoreAsFound) })
 const ok = (data: unknown) => ({ ok: true, data })
 const companion = (id: string): Companion => ({
   id, conversationId: `chat-${id}`, templateAgentId: null, displayName: id,
@@ -68,12 +69,12 @@ afterEach(cleanup)
 describe('唯一的小 Fox 创建入口', () => {
   test('右加号只有两项，折叠侧栏没有第二个创建入口', async () => {
     mount()
-    fireEvent.pointerDown(screen.getByRole('button', { name: '新建小 Fox' }), { button: 0, ctrlKey: false, pointerType: 'mouse' })
+    fireEvent.pointerDown(screen.getByRole('button', { name: '新建 Fox' }), { button: 0, ctrlKey: false, pointerType: 'mouse' })
     await waitFor(() => expect(screen.getAllByRole('menuitem')).toHaveLength(2))
-    expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual(['新建小 Fox', '从专家创建'])
+    expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual(['新建 Fox', '从专家创建'])
     cleanup()
     mount(true)
-    expect(screen.queryByRole('button', { name: '新建小 Fox' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '新建 Fox' })).toBeNull()
     expect(screen.queryByText('从专家创建')).toBeNull()
   })
 
@@ -81,12 +82,12 @@ describe('唯一的小 Fox 创建入口', () => {
     let resolve!: (value: Companion) => void
     createBlank = () => new Promise(value => { resolve = value })
     mount()
-    fireEvent.pointerDown(screen.getByRole('button', { name: '新建小 Fox' }), { button: 0, ctrlKey: false, pointerType: 'mouse' })
-    const item = await screen.findByRole('menuitem', { name: '新建小 Fox' })
+    fireEvent.pointerDown(screen.getByRole('button', { name: '新建 Fox' }), { button: 0, ctrlKey: false, pointerType: 'mouse' })
+    const item = await screen.findByRole('menuitem', { name: '新建 Fox' })
     fireEvent.click(item)
     fireEvent.click(item)
     await waitFor(() => expect(calls.filter(call => call.command === 'companion_create_blank')).toHaveLength(1))
-    expect(screen.getByRole('button', { name: '新建小 Fox' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '新建 Fox' })).toHaveProperty('disabled', true)
     resolve(companion('blank'))
     await waitFor(() => expect(opened).toEqual(['blank']))
     expect(refreshes.count).toBe(1)
@@ -96,7 +97,7 @@ describe('唯一的小 Fox 创建入口', () => {
   test('专家只列兼容可用项，同一来源每次确认都新建并打开', async () => {
     mount()
     for (const expected of ['created-1', 'created-2']) {
-      fireEvent.pointerDown(screen.getByRole('button', { name: '新建小 Fox' }), { button: 0, ctrlKey: false, pointerType: 'mouse' })
+      fireEvent.pointerDown(screen.getByRole('button', { name: '新建 Fox' }), { button: 0, ctrlKey: false, pointerType: 'mouse' })
       fireEvent.click(await screen.findByRole('menuitem', { name: '从专家创建' }))
       await screen.findByRole('radio', { name: /compatible-a/ })
       expect(screen.queryByRole('radio', { name: /unavailable/ })).toBeNull()

@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="zh-CN" data-color-theme="paper">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Fox 伙伴协作 · 交互原型</title>
+<link rel="stylesheet" href="../../../apps/desktop/node_modules/harmonyos-sans-sc-webfont-splitted/dist/Regular.css" />
+<link rel="stylesheet" href="../../../apps/desktop/node_modules/harmonyos-sans-sc-webfont-splitted/dist/Medium.css" />
+<link rel="stylesheet" href="../../../apps/desktop/node_modules/harmonyos-sans-sc-webfont-splitted/dist/Semibold.css" />
+<link rel="stylesheet" href="../../../apps/desktop/src/styles/themes.css" />
+<link rel="stylesheet" href="../../../apps/desktop/src/features/companions/assignment-thread.css" />
+<link rel="stylesheet" href="../../../apps/desktop/src/features/companions/contact-chat.css" />
+<script src="../设置页美化/icons.js"></script>
+<style>
+:root {
+  --fox-canvas: var(--chat-background, var(--background));
+  --fox-card: var(--card);
+  --fox-panel: var(--muted);
+  --fox-hover: color-mix(in oklch, var(--fox-panel) 78%, var(--fox-card));
+  --fox-text: var(--foreground);
+  --fox-muted: var(--muted-foreground);
+  --fox-border: var(--border);
+  --fox-space-xs: 4px;
+  --fox-space-s: 6px;
+  --fox-space-m: 8px;
+  --fox-space-l: 12px;
+  --fox-space-xl: 16px;
+  --fox-radius-pill: 999px;
+  --fox-type-caption: 12px;
+  --fox-type-body: 14px;
+  --hairline: color-mix(in oklch, var(--border) 72%, transparent);
+  --side-hover: color-mix(in oklch, var(--sidebar-accent) 62%, var(--sidebar));
+  --shadow-sm: 0 1px 2px color-mix(in oklch, oklch(0.2 0 0) 6%, transparent);
+  --shadow-lg: 0 18px 48px color-mix(in oklch, oklch(0.2 0 0) 12%, transparent);
+  font-family: "HarmonyOS Sans SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  font-synthesis: none;
+  color: var(--foreground);
+  -webkit-font-smoothing: antialiased;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: color-mix(in oklch, var(--shell) 70%, var(--muted)); }
+button, input, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .5; }
+button, a { -webkit-tap-highlight-color: transparent; }
+:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
+::selection { background: var(--brand-soft); color: var(--foreground); }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: color-mix(in oklch, var(--muted-foreground) 30%, transparent); border: 2px solid transparent; border-radius: 8px; background-clip: padding-box; }
+[hidden] { display: none !important; }
+svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.grow { flex: 1; }
+
+/* Document shell: the same quiet specimen layout as the settings prototype. */
+.doc { width: 100%; max-width: 1360px; margin: 0 auto; padding: 24px 32px 80px; }
+.doc-hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px 24px; margin-bottom: 16px; }
+.doc-hero h1 { margin: 0 0 5px; font-size: 28px; line-height: 1.25; font-weight: 600; letter-spacing: -.02em; }
+.doc-hero p { margin: 0; color: var(--muted-foreground); font-size: 13px; line-height: 1.65; }
+.toc { display: flex; flex: none; flex-wrap: wrap; gap: 6px 14px; }
+.toc a { color: var(--muted-foreground); font-size: 12px; line-height: 2; text-underline-offset: 3px; }
+.toc a:hover { color: var(--foreground); }
+.frame { margin-top: 56px; scroll-margin-top: 28px; }
+#conversation { margin-top: 0; }
+.frame-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 14px; margin-bottom: 18px; }
+.frame-head h2 { margin: 0; font-size: 23px; line-height: 1.4; font-weight: 600; letter-spacing: -.015em; }
+.frame-head p { margin: 0; color: var(--muted-foreground); font-size: 13px; line-height: 1.6; }
+.prototype-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 14px; margin-bottom: 10px; padding: 6px; border: 1px solid var(--border); border-radius: var(--fox-radius-card); background: var(--card); }
+.scenarios { display: flex; flex-wrap: wrap; gap: 4px; }
+.scenario { min-height: 32px; padding: 0 10px; border: 1px solid transparent; border-radius: var(--fox-radius-control); background: transparent; color: var(--muted-foreground); font-size: 12px; }
+.scenario:hover { background: var(--fox-hover); color: var(--foreground); }
+.scenario[aria-pressed="true"] { border-color: color-mix(in oklch, var(--brand) 24%, var(--border)); background: var(--brand-soft); color: var(--foreground); font-weight: 600; }
+
+/* Desktop application frame. */
+.win { position: relative; width: 100%; height: clamp(550px, calc(100dvh - 148px), 744px); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--shell); box-shadow: var(--shadow-lg); color: var(--foreground); font-size: 13px; }
+.titlebar { height: 36px; flex: none; display: flex; align-items: center; justify-content: space-between; }
+.tb-left { display: flex; align-items: center; gap: 2px; padding-left: 10px; color: var(--muted-foreground); }
+.tb-left img { width: 20px; height: 20px; margin-right: 6px; border-radius: 5px; }
+.tb-left > span { width: 28px; height: 28px; display: grid; place-items: center; }
+.tb-left > span.off { opacity: .45; }
+.wctl { display: flex; height: 100%; }
+.wctl span { width: 44px; display: grid; place-items: center; color: var(--muted-foreground); }
+.wctl svg { width: 14px; height: 14px; }
+.app { position: relative; flex: 1; min-height: 0; display: flex; }
+.sidebar { width: 236px; flex: none; display: flex; flex-direction: column; padding: 2px 12px 10px; background: var(--sidebar); }
+.side-head { display: flex; align-items: center; gap: 4px; height: 38px; flex: none; margin-bottom: 8px; padding: 0 6px; font-size: 14px; font-weight: 600; }
+.side-head .ab { margin-left: 0; }
+.side-head .ab:first-of-type { margin-left: auto; }
+.sidebar-navigation { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
+.sidebar-navigation[hidden], .notification-center[hidden] { display: none; }
+.side-label { display: flex; align-items: center; height: 28px; padding: 0 8px; color: var(--muted-foreground); font-size: 12px; }
+.side-label button { margin-left: auto; }
+.side-row { position: relative; width: 100%; height: 40px; display: flex; align-items: center; gap: 9px; padding: 0 8px; border: 0; border-radius: var(--fox-radius-control); background: transparent; color: var(--foreground); text-align: left; }
+.side-row:hover { background: var(--side-hover); }
+.side-row.on { background: var(--background); box-shadow: var(--shadow-sm); }
+.side-row > svg { width: 16px; height: 16px; color: var(--muted-foreground); }
+.side-row .name { min-width: 0; flex: 1; overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.side-row small { color: var(--muted-foreground); font-size: 11px; }
+.side-sep { height: 1px; margin: 10px 8px; background: var(--hairline); }
+.avatar { position: relative; width: 28px; height: 28px; flex: none; overflow: hidden; border-radius: 50%; background: var(--muted); }
+.avatar img { width: 100%; height: 100%; object-fit: cover; }
+.avatar.sm { width: 22px; height: 22px; }
+.avatar.xs { width: 18px; height: 18px; }
+.sidebar .scroll { flex: 1; min-height: 0; overflow: auto; }
+.sidebar-foot { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 6px 4px 0; }
+.sidebar-foot b { font-size: 13px; font-weight: 500; }
+.ab { width: 28px; height: 28px; display: grid; place-items: center; flex: none; padding: 0; border: 0; border-radius: var(--fox-radius-control); background: transparent; color: var(--muted-foreground); }
+.ab:hover { background: var(--fox-hover); color: var(--foreground); }
+.ab svg { width: 15px; height: 15px; }
+.card { position: relative; flex: 1; min-width: 0; display: flex; margin: 0 6px 6px 0; overflow: hidden; border-radius: var(--fox-radius-large); background: var(--fox-canvas); box-shadow: var(--shadow-sm); }
+.chat { position: relative; flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.chat-top { min-height: 48px; flex: none; display: flex; align-items: center; gap: 10px; padding: 8px 18px; border-bottom: 1px solid var(--hairline); }
+.chat-top .who { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.chat-top strong { font-size: 14px; font-weight: 600; }
+.chat-top small { color: var(--muted-foreground); font-size: 12px; }
+.chat-top .actions { margin-left: auto; display: flex; gap: 2px; }
+.chat-scroll { flex: 1; min-height: 0; overflow: auto; padding: 18px 28px 20px; }
+.thread { width: 100%; max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+.time { padding: 2px 0 4px; color: var(--muted-foreground); font-size: 12px; line-height: 18px; text-align: center; }
+.msg { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; min-width: 0; }
+.msg.user { align-items: flex-end; }
+.bubble { max-width: 76%; padding: 10px 15px; border-radius: 18px; background: var(--muted); font-size: 14px; line-height: 1.65; overflow-wrap: anywhere; }
+.msg.user .bubble { background: var(--primary); color: var(--primary-foreground); }
+.msg .bubble p { margin: 0; }
+.msg .bubble p + p { margin-top: 8px; }
+
+.fox-contact-avatar { object-fit: cover; border-radius: 50%; }
+.status-dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--muted-foreground); }
+.status-dot.ok { background: var(--success); }
+.btn { min-height: 30px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 11px; border: 1px solid var(--border); border-radius: var(--fox-radius-control); background: var(--card); color: var(--foreground); font-size: 12px; font-weight: 500; }
+.btn:hover { background: var(--fox-hover); }
+.btn.primary { border-color: transparent; background: var(--primary); color: var(--primary-foreground); }
+.btn.primary:hover { background: color-mix(in oklch, var(--primary) 90%, var(--foreground)); }
+.btn svg { width: 14px; height: 14px; }
+.fox-contact-decision :where(p, pre) { margin: 0; }
+
+/* Composer stays free of orphaned status text and raw failures. */
+.composer-wrap { flex: none; padding: 5px 28px 14px; }
+.composer { width: 100%; max-width: 720px; margin: 0 auto; padding: 9px 10px 6px; border: 1px solid var(--border); border-radius: 16px; background: var(--card); box-shadow: var(--shadow-sm); }
+.composer-input { display: block; width: 100%; padding: 0; border: 0; background: transparent; font-size: 13px; line-height: 22px; }
+.composer-input::placeholder { color: var(--muted-foreground); }
+.composer-foot { display: flex; align-items: center; gap: 5px; margin-top: 4px; }
+.composer-foot .model { display: inline-flex; align-items: center; gap: 5px; padding: 3px 5px; color: var(--muted-foreground); font-size: 11.5px; }
+.composer-foot .model svg { width: 13px; height: 13px; }
+.send { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 50%; background: var(--primary); color: var(--primary-foreground); }
+.send svg { width: 15px; height: 15px; }
+
+.state-list { margin: 14px 0 0; padding: 0 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); font-size: 13px; line-height: 1.6; }
+.state-list > div { display: grid; grid-template-columns: minmax(125px, 20%) minmax(0, 1fr); gap: 4px 18px; padding: 11px 0; }
+.state-list > div + div { border-top: 1px solid var(--hairline); }
+.state-list dt { font-weight: 600; }
+.state-list dd { margin: 0; color: var(--muted-foreground); }
+.notification-trigger[aria-expanded="true"] { background: var(--fox-panel); color: var(--foreground); }
+.notification-center { width: 100%; flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--sidebar); }
+.nc-head { min-height: 44px; display: flex; align-items: center; gap: 5px; padding: 0 6px; border-top: 1px solid var(--hairline); }
+.nc-head h2 { flex: 1; margin: 0; font-size: 14px; font-weight: 600; }
+.nc-empty { margin: 0; padding: 18px 8px; color: var(--muted-foreground); font-size: 12px; }
+.communication-preview { width: min(440px, calc(100% - 28px)); max-height: 80dvh; padding: 16px; border: 1px solid var(--border); border-radius: var(--fox-radius-large); background: var(--card); color: var(--foreground); box-shadow: var(--shadow-lg); }
+.communication-preview::backdrop { background: oklch(0.2 0 0 / 25%); }
+.communication-preview header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.communication-preview h3, .communication-preview p { margin: 0; }
+.communication-preview h3 { font-size: 14px; }
+.communication-preview p { margin-top: 10px; line-height: 1.55; font-size: 13px; white-space: pre-line; }
+
+@media (max-width: 900px) {
+  .doc { padding: 20px 20px 64px; }
+  .sidebar { width: 190px; }
+  .chat-scroll, .composer-wrap { padding-left: 20px; padding-right: 20px; }
+}
+@media (max-width: 700px) {
+  .doc { padding: 16px 12px 56px; }
+  .doc-hero { display: block; }
+  .doc-hero h1 { font-size: 23px; }
+  .toc { margin-top: 6px; }
+  .frame { margin-top: 40px; }
+  .scenarios { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; }
+  .scenario { min-height: 44px; padding-inline: 4px; }
+  .win { height: clamp(500px, calc(100dvh - 215px), 650px); border-radius: 10px; }
+  .sidebar { width: 44px; padding: 2px 4px 8px; }
+  .side-brand, .side-head [data-icon="plus"], .sidebar-navigation, .sidebar-foot { display: none; }
+  .side-head { height: auto; flex-direction: column; padding: 0; }
+  .side-head .notification-trigger { margin-left: 0; }
+  .app.center-open .sidebar { position: absolute; z-index: 7; inset: 0; width: 100%; padding: 2px 12px 10px; }
+  .app.center-open .card { visibility: hidden; }
+  .app.center-open .side-head { height: 38px; flex-direction: row; padding: 0 6px; }
+  .app.center-open .side-brand { display: inline; }
+  .app.center-open .side-head [data-icon="plus"] { display: grid; margin-left: auto; }
+  .app.center-open .sidebar-foot { display: flex; }
+  .notification-center { position: static; width: 100%; }
+  .card { margin: 0 4px 4px; }
+  .titlebar .tb-left > span { display: none; }
+  .wctl span { width: 34px; }
+  .chat-top { padding-left: 14px; padding-right: 10px; }
+  .chat-top small { display: none; }
+  .chat-scroll { padding: 12px 12px 16px; }
+  .thread { gap: 12px; }
+  .bubble { max-width: 90%; font-size: 13px; }
+  .chat.is-contact-chat { --fox-bubble-width: 90%; }
+  .composer-wrap { padding: 8px 12px 14px; }
+  .state-list > div { grid-template-columns: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
+</style>
+</head>
+<body>
+<div class="doc">
+  <header class="doc-hero">
+    <div>
+      <h1>伙伴协作</h1>
+      <p>切换场景，看看联系人如何处理任务，以及什么时候会请你介入。</p>
+    </div>
+    <nav class="toc" aria-label="原型内容">
+      <a href="#rules">协作规则</a>
+    </nav>
+  </header>
+
+  <section class="frame" id="conversation" aria-label="协作场景演示">
+    <div class="prototype-bar">
+      <div class="scenarios" role="group" aria-label="协作场景">
+        <button class="scenario" data-scenario="handled" aria-pressed="true">联系人自行处理</button>
+        <button class="scenario" data-scenario="blocked" aria-pressed="false">请你补充</button>
+        <button class="scenario" data-scenario="choice" aria-pressed="false">请你选方案</button>
+        <button class="scenario" data-scenario="approval" aria-pressed="false">请你授权</button>
+        <button class="scenario" data-scenario="multiple" aria-pressed="false">历史协作</button>
+      </div>
+    </div>
+    <div class="win" id="app-window">
+      <header class="titlebar">
+        <div class="tb-left"><img src="../../../apps/desktop/public/avatars/fox-assistant.png" alt="" /><span data-icon="menu"></span><span data-icon="panel-left"></span><span data-icon="arrow-left"></span><span class="off" data-icon="arrow-right"></span></div>
+        <div class="wctl"><span data-icon="minus"></span><span data-icon="square"></span><span data-icon="x"></span></div>
+      </header>
+      <div class="app" id="app-shell">
+        <aside class="sidebar" aria-label="对话侧栏">
+          <div class="side-head"><strong class="side-brand">Fox</strong><button class="ab" aria-label="新建对话" data-icon="plus"></button><button class="ab notification-trigger" id="notification-trigger" aria-label="通知中心" aria-controls="notification-center" aria-expanded="false"><span data-icon="bell"></span></button></div>
+          <div class="sidebar-navigation" id="sidebar-navigation">
+            <div class="side-label">今天</div>
+            <button class="side-row on"><span data-icon="message-circle-more"></span><span class="name">整理本周项目进度</span></button>
+            <button class="side-row"><span data-icon="message-circle-more"></span><span class="name">复测伙伴协作</span><small>昨天</small></button>
+            <button class="side-row"><span data-icon="message-circle-more"></span><span class="name">发布前检查</span></button>
+            <div class="side-sep"></div>
+            <div class="side-label">伙伴<button class="ab" aria-label="管理伙伴" data-icon="ellipsis"></button></div>
+            <button class="side-row"><span class="avatar sm"><img src="../../../apps/desktop/public/avatars/fox-assistant.png" alt="" /></span><span class="name">Fox</span><small>默认</small></button>
+            <button class="side-row"><span class="avatar sm"><img src="../../../apps/desktop/public/avatars/experts/Fox_ResearchAnalyst.png" alt="" /></span><span class="name">小狐</span><i class="status-dot ok" aria-label="在线"></i></button>
+            <button class="side-row"><span class="avatar sm"><img src="../../../apps/desktop/public/avatars/experts/Fox_ContentWriter.png" alt="" /></span><span class="name">写作伙伴</span></button>
+            <div class="grow"></div>
+          </div>
+          <aside class="notification-center" id="notification-center" aria-label="通知中心" hidden>
+            <header class="nc-head"><h2 id="nc-title" tabindex="-1">通知</h2><button class="ab" aria-label="关闭通知中心" data-close-center data-icon="x"></button></header>
+            <p class="nc-empty">暂无通知</p>
+          </aside>
+          <div class="sidebar-foot"><span class="avatar sm"><img src="../../../apps/desktop/public/avatars/defaults/fox_big_smile.png" alt="" /></span><b>Hury</b><div class="grow"></div><button class="ab" aria-label="设置" data-icon="settings"></button></div>
+        </aside>
+        <div class="card">
+          <main class="chat is-contact-chat" aria-label="Fox 对话">
+            <header class="chat-top" tabindex="-1">
+              <div class="who"><span class="avatar sm"><img src="../../../apps/desktop/public/avatars/fox-assistant.png" alt="" /></span><strong>Fox</strong><small>默认伙伴</small></div>
+              <div class="actions"><button class="ab" aria-label="搜索对话" data-icon="search"></button><button class="ab" aria-label="更多操作" data-icon="ellipsis"></button></div>
+            </header>
+            <div class="chat-scroll" id="chat-scroll"></div>
+            <div class="composer-wrap">
+              <form class="composer" id="composer">
+                <input class="composer-input" id="chat-reply" aria-label="给 Fox 发送消息" placeholder="给 Fox 发送消息" autocomplete="off" readonly />
+                <div class="composer-foot">
+                  <button class="ab" type="button" aria-label="添加附件" data-icon="plus"></button>
+                  <span class="model"><span data-icon="sparkles"></span>DeepSeek Chat<span data-icon="chevron-down"></span></span>
+                  <div class="grow"></div>
+                  <button class="ab" type="button" aria-label="语音输入" data-icon="menu"></button>
+                  <button class="send" type="submit" aria-label="发送" data-icon="arrow-right" disabled></button>
+                </div>
+              </form>
+            </div>
+          </main>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="frame" id="rules">
+    <div class="frame-head"><h2>协作规则</h2></div>
+    <dl class="state-list">
+      <div><dt>联系人自行处理</dt><dd>联系对方确认进展，或请对方补发结果。处理完后在原对话里回复。</dd></div>
+      <div><dt>确实需要你介入</dt><dd>联系人先说明缺什么、试过什么、会影响什么。你可以直接在聊天里补充信息。</dd></div>
+      <div><dt>需要选择或授权</dt><dd>联系人先发一条说明，再给出方案选项或普通审批卡。</dd></div>
+    </dl>
+  </section>
+</div>
+<dialog class="communication-preview" id="communication-preview" aria-labelledby="communication-title">
+  <header><h3 id="communication-title"></h3><form method="dialog"><button class="btn">关闭聊天</button></form></header>
+  <p id="communication-message"></p>
+</dialog>
+<script>
+const ROOT = '../../../apps/desktop/public'
+const FOX_USER = `${ROOT}/avatars/defaults/fox_big_smile.png`
+const PARTNER = `${ROOT}/avatars/experts/Fox_ResearchAnalyst.png`
+window.FOX_ICONS.bell = '<path d="M10.27 21a2 2 0 0 0 3.46 0"/><path d="M3.26 15.33A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.67C19.41 13.96 18 12.5 18 8A6 6 0 0 0 6 8c0 4.5-1.41 5.96-2.74 7.33"/>'
+const I = name => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${window.FOX_ICONS[name] || ''}</svg>`
+const filename = '周报/项目进度.md'
+const state = { scenario: 'handled', center: false, selection: -1, reply: '', receipt: '' }
+const peers = {
+  partner: { name: '小狐', avatar: PARTNER, message: '请核对本周的项目记录，并回传可用于周报的进度摘要。' },
+  user: { name: 'Fox 用户', avatar: FOX_USER, message: '这项协作先暂停，保留已经发送的消息。' },
+}
+const recoveredExchange = 'Fox：刚才没收到核对结果，麻烦补发一份。\n\n小狐：补发给你。接口联调和测试环境部署都已完成，验收材料也汇总好了。'
+const explanations = {
+  handled: '本周完成了接口联调和测试环境部署。验收材料已汇总，周五提交周报。',
+  blocked: '我跟小狐确认过，也查了项目记录，还是找不到实际验收日期。你能告诉我是哪天吗？我把日期补进周报。',
+  choice: '小狐暂时拿不到财务确认单。我可以先发一份已核实的摘要，财务部分标为待确认，也可以等确认单到了再发完整周报。你更希望怎么处理？',
+  approval: '周报摘要已经整理好。我想把它写到工作目录的「周报/项目进度.md」，需要你确认这次写入。',
+}
+const choices = [
+  { label: '先发已核实的摘要', reply: '先把核实过的部分发给你：接口联调和测试环境部署已完成，验收材料已汇总。财务部分等确认单到了再补。' },
+  { label: '等财务确认后再发完整周报', reply: '好，我会跟小狐确认财务数据，等确认单到了再发完整周报。' },
+]
+const $ = selector => document.querySelector(selector)
+
+function choiceButton(label, index, attrs) {
+  return `<button class="fox-contact-choice" type="button" ${attrs}>
+    <span class="fox-contact-choice-key" aria-hidden="true">${String.fromCharCode(65 + index)}</span><span>${label}</span>
+  </button>`
+}
+
+function decisionCard(scenario) {
+  const approval = scenario === 'approval'
+  const resolved = Boolean(state.receipt)
+  const title = approval ? '可以写入周报文件吗？' : '这次周报怎么发？'
+  const operation = `<pre class="fox-contact-operation" tabindex="0">${filename}</pre>`
+  let body
+  if (resolved) {
+    body = `<p class="fox-contact-receipt" role="status">${state.receipt}</p>
+      ${approval ? `<details class="fox-contact-receipt-details"><summary>查看操作详情</summary>${operation}</details>` : ''}`
+  } else if (approval) {
+    body = `${operation}
+      <div class="fox-contact-choices">
+        ${choiceButton('仅允许这一次', 0, 'data-approve')}
+        ${choiceButton('拒绝', 1, 'data-deny')}
+      </div>`
+  } else {
+    body = `<div class="fox-contact-choices">
+        ${choices.map(({ label }, index) => choiceButton(label, index, `data-choice="${index}" aria-pressed="${state.selection === index}"`)).join('')}
+      </div>
+      <button class="btn primary" type="button" data-send-choice ${state.selection < 0 ? 'disabled' : ''}>发送选择</button>`
+  }
+  return `<div class="fox-contact-decision-entry">
+    <section class="fox-contact-decision${resolved ? ' is-resolved' : ''}" id="chat-decision-card" tabindex="-1" aria-labelledby="chat-decision-title">
+      <header><strong id="chat-decision-title">${title}</strong></header>${body}
+    </section>
+  </div>`
+}
+
+function communicationLine(peerId, count) {
+  const peer = peers[peerId]
+  const label = `${count} 条消息往来：`
+  return `<div class="fox-communication-line" data-communication-count="${count}">
+    <span class="fox-communication-label">${label}</span>
+    <button type="button" class="fox-assignment-chip" aria-label="${label} ${peer.name}，查看对话" data-communication="${peerId}">
+      <img class="fox-contact-avatar" src="${peer.avatar}" alt="" /><span class="fox-assignment-name">${peer.name}</span>
+    </button>
+  </div>`
+}
+
+function thread() {
+  const scenario = state.scenario
+  if (scenario === 'multiple') return `<div class="thread"><div class="time">昨天 18:46</div>
+    <div class="msg user"><div class="bubble">这几项先不用继续了，保留已经发的消息就好。</div></div>
+    <div class="msg"><div class="bubble">好的，这几项协作都已停止。</div></div>
+    <div>${communicationLine('partner', 2)}${communicationLine('user', 4)}${communicationLine('partner', 2)}</div>
+  </div>`
+  return `<div class="thread"><div class="time">今天 14:32</div>
+    <div class="msg user"><div class="bubble">帮我核对本周的项目进度，整理成一段周报摘要。</div></div>
+    <div class="msg"><div class="bubble">我请小狐核对项目记录，再把结果整理给你。</div></div>
+    ${communicationLine('partner', 2)}
+    <div class="msg"><div class="bubble" id="scene-explanation">${explanations[scenario]}</div></div>
+    ${scenario === 'choice' || scenario === 'approval' ? decisionCard(scenario) : ''}
+    ${scenario === 'choice' && state.receipt ? `<div class="msg"><div class="bubble">${choices[state.selection].reply}</div></div>` : ''}
+    ${state.reply ? `<div class="msg user"><div class="bubble" id="submitted-answer"></div></div>
+      <div class="msg"><div class="bubble" id="chat-reply-result" tabindex="-1">收到，我把这个日期补进周报。</div></div>` : ''}
+  </div>`
+}
+
+function render(focusSelector) {
+  document.querySelectorAll('[data-scenario]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.scenario === state.scenario)))
+  $('#chat-scroll').innerHTML = thread()
+  const answer = $('#submitted-answer')
+  if (answer) answer.textContent = state.reply
+  const input = $('#chat-reply')
+  input.readOnly = state.scenario !== 'blocked' || Boolean(state.reply)
+  $('#composer .send').disabled = input.readOnly || !input.value.trim()
+  if (focusSelector) $(focusSelector)?.focus()
+}
+
+function setCenter(open, focus) {
+  state.center = open
+  $('#notification-center').hidden = !open
+  $('#sidebar-navigation').hidden = open
+  $('#app-shell').classList.toggle('center-open', open)
+  $('#notification-trigger').setAttribute('aria-expanded', String(open))
+  if (focus) $(open ? '#nc-title' : '#notification-trigger').focus()
+}
+
+function settleDecision(receipt) {
+  state.receipt = receipt
+  render('#chat-decision-card')
+}
+
+$('#chat-reply').addEventListener('input', event => {
+  $('#composer .send').disabled = event.target.readOnly || !event.target.value.trim()
+})
+
+$('#composer').addEventListener('submit', event => {
+  event.preventDefault()
+  const input = $('#chat-reply')
+  if (input.readOnly) return
+  const reply = input.value.trim()
+  if (!reply) return
+  state.reply = reply
+  input.value = ''
+  render('#chat-reply-result')
+})
+
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && state.center && event.target.closest('#notification-center, #notification-trigger')) {
+    event.preventDefault()
+    setCenter(false, true)
+  }
+})
+
+document.addEventListener('click', event => {
+  const target = event.target
+  const scenario = target.closest('[data-scenario]')
+  if (scenario) {
+    state.scenario = scenario.dataset.scenario
+    state.selection = -1
+    state.reply = ''
+    state.receipt = ''
+    $('#chat-reply').value = ''
+    $('#chat-scroll').scrollTop = 0
+    setCenter(false)
+    render()
+    return
+  }
+
+  if (target.closest('#notification-trigger')) return setCenter(!state.center, true)
+  if (target.closest('[data-close-center]')) return setCenter(false, true)
+
+  const communication = target.closest('[data-communication]')
+  if (communication) {
+    const peerId = communication.dataset.communication
+    const peer = peers[peerId]
+    $('#communication-title').textContent = `与${peer.name}的消息往来`
+    $('#communication-message').textContent = state.scenario === 'handled' && peerId === 'partner' ? recoveredExchange : peer.message
+    $('#communication-preview').showModal()
+    return
+  }
+
+  const option = target.closest('[data-choice]')
+  if (option) {
+    state.selection = Number(option.dataset.choice)
+    render(`[data-choice="${state.selection}"]`)
+    return
+  }
+  if (target.closest('[data-send-choice]')) return settleDecision(`已选择：${choices[state.selection].label}`)
+  if (target.closest('[data-approve]')) return settleDecision('已允许这一次')
+  if (target.closest('[data-deny]')) settleDecision('已拒绝')
+})
+
+document.querySelectorAll('[data-icon]').forEach(el => { el.innerHTML = I(el.dataset.icon) })
+render()
+</script>
+</body>
+</html>

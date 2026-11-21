@@ -7,12 +7,11 @@ import { desktopRuntimeAvailable } from '@/features/conversations/api/desktop-cl
 import type { ApiResponse } from '@/features/conversations/model/types'
 import { Button } from '@/components/ui/button'
 import { ContextBudgetPanel } from './ContextBudgetPanel'
-import type { ContextBudgetDto } from './context-budget-presentation'
+import { useContextBudget } from '../hooks/use-context-budget'
 import { JobProgressCard } from '@/features/jobs/JobProgressCard'
 import type { JobSnapshot } from '@/features/jobs/job-presentation'
 import { readRunBudget, saveRunBudget, type RunBudgetSelection } from './run-budget'
 
-interface Snapshot { runId: string | null; contextBudget: ContextBudgetDto | null; jobs: JobSnapshot[] }
 async function call<T>(command: string, request: unknown): Promise<T> {
   const result = await invoke<ApiResponse<T>>(command, { request })
   if (!result.ok) throw new Error(result.error.message)
@@ -20,23 +19,14 @@ async function call<T>(command: string, request: unknown): Promise<T> {
 }
 export function RunReliabilityPanel({ conversationId, active }: { conversationId?: string; active: boolean }) {
   const developerUi = useDeveloperUi()
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
+  const { snapshot, error: snapshotError } = useContextBudget(conversationId, active)
   const [budget, setBudget] = useState<RunBudgetSelection>({ tier: 'standard' })
   const [error, setError] = useState<string | null>(null)
   const [page, setPage] = useState<{ jobId: string; content: string; nextOffset: number | null; complete: boolean } | null>(null)
   useEffect(() => {
-    setSnapshot(null); setPage(null); setError(null)
-    if (!conversationId || !desktopRuntimeAvailable) return
-    setBudget(readRunBudget(conversationId))
-    let alive = true
-    const load = async () => {
-      try { const data = await call<Snapshot>('kernel_reliability_snapshot', { conversationId }); if (alive) { setSnapshot(data); setError(null) } }
-      catch (cause) { if (alive) setError(userFacingError(String(cause), developerUi, '任务状态没有读出来，请重试。')) }
-    }
-    void load()
-    const timer = window.setInterval(() => void load(), active ? 1500 : 5000)
-    return () => { alive = false; window.clearInterval(timer) }
-  }, [conversationId, active, developerUi])
+    setPage(null); setError(null)
+    if (conversationId) setBudget(readRunBudget(conversationId))
+  }, [conversationId])
   if (!conversationId || !desktopRuntimeAvailable) return null
   const select = (next: RunBudgetSelection) => { saveRunBudget(conversationId, next); setBudget(next) }
   const jobAction = async (job: JobSnapshot, tool: string, input: unknown) => {
@@ -62,7 +52,7 @@ export function RunReliabilityPanel({ conversationId, active }: { conversationId
         {job.resumable && <Button size="sm" disabled={!active || job.runId !== snapshot.runId} onClick={() => { void jobAction(job, 'compute_job_start', { jobId: job.jobId }).catch(cause => setError(userFacingError(String(cause), developerUi, '没有恢复成功，请重试。'))) }}>恢复任务</Button>}
       </div>)}
       {page && <div><pre className="max-h-72 overflow-auto whitespace-pre-wrap">{page.content}</pre>{page.nextOffset !== null && <Button size="sm" onClick={() => { const job = snapshot?.jobs.find(j => j.jobId === page.jobId); if (job) void readPage(job, page.nextOffset!) }}>下一页</Button>}</div>}
-      {error && <p role="alert" className="text-destructive">{error}</p>}
+      {(error || snapshotError) && <p role="alert" className="text-destructive">{error || userFacingError(snapshotError!, developerUi, '任务状态没有读出来，请重试。')}</p>}
     </div>
   </FoxDisclosure>
 }

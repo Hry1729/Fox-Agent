@@ -20,7 +20,9 @@ pub const UTF8_CHCP_LINE: &str = "@chcp 65001 >nul";
 pub fn is_batch_script(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("bat") || extension.eq_ignore_ascii_case("cmd"))
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("bat") || extension.eq_ignore_ascii_case("cmd")
+        })
 }
 
 /// 需要转换时返回系统 ANSI 代码页；非 Windows 返回 None（行为不变）。
@@ -38,7 +40,11 @@ pub fn batch_code_page() -> Option<u32> {
 
 /// 这个路径在本机是否要走批处理编码。
 pub fn batch_code_page_for(path: &Path) -> Option<u32> {
-    if is_batch_script(path) { batch_code_page() } else { None }
+    if is_batch_script(path) {
+        batch_code_page()
+    } else {
+        None
+    }
 }
 
 /// Windows ANSI 代码页 → encoding_rs 编码。不认识的返回 None（只能走 UTF-8 回退）。
@@ -77,7 +83,11 @@ fn strip_fox_chcp(text: &str) -> &str {
         Some(index) => (&text[..index], &text[index + 1..]),
         None => (text, ""),
     };
-    if first.trim_end_matches('\r').trim().eq_ignore_ascii_case(UTF8_CHCP_LINE) {
+    if first
+        .trim_end_matches('\r')
+        .trim()
+        .eq_ignore_ascii_case(UTF8_CHCP_LINE)
+    {
         rest
     } else {
         text
@@ -96,22 +106,34 @@ pub struct EncodedBatch {
 pub fn encode_batch(text: &str, code_page: u32) -> EncodedBatch {
     let body = to_crlf(strip_fox_chcp(text));
     if body.is_ascii() {
-        return EncodedBatch { bytes: body.into_bytes(), encoding: format!("cp{code_page}") };
+        return EncodedBatch {
+            bytes: body.into_bytes(),
+            encoding: format!("cp{code_page}"),
+        };
     }
     if code_page == 65001 {
-        return EncodedBatch { bytes: body.into_bytes(), encoding: "utf-8".into() };
+        return EncodedBatch {
+            bytes: body.into_bytes(),
+            encoding: "utf-8".into(),
+        };
     }
     if let Some(encoding) = encoding_for_code_page(code_page) {
         let (bytes, _, unmappable) = encoding.encode(&body);
         if !unmappable {
-            return EncodedBatch { bytes: bytes.into_owned(), encoding: format!("cp{code_page}") };
+            return EncodedBatch {
+                bytes: bytes.into_owned(),
+                encoding: format!("cp{code_page}"),
+            };
         }
     }
     let mut bytes = Vec::with_capacity(body.len() + UTF8_CHCP_LINE.len() + 2);
     bytes.extend_from_slice(UTF8_CHCP_LINE.as_bytes());
     bytes.extend_from_slice(b"\r\n");
     bytes.extend_from_slice(body.as_bytes());
-    EncodedBatch { bytes, encoding: "utf-8+chcp65001".into() }
+    EncodedBatch {
+        bytes,
+        encoding: "utf-8+chcp65001".into(),
+    }
 }
 
 /// 读回 .bat / .cmd：返回 (文本, 编码名, 是否有解不了的字节)。文本里的换行统一成 LF。
@@ -125,7 +147,11 @@ pub fn decode_batch(bytes: &[u8], code_page: u32) -> (String, String, bool) {
         let (text, lossy) = encoding.decode_without_bom_handling(bytes);
         (text.into_owned(), format!("cp{code_page}"), lossy)
     } else {
-        (String::from_utf8_lossy(bytes).into_owned(), format!("cp{code_page}-lossy"), true)
+        (
+            String::from_utf8_lossy(bytes).into_owned(),
+            format!("cp{code_page}-lossy"),
+            true,
+        )
     };
     (text.replace("\r\n", "\n"), encoding, lossy)
 }
@@ -150,12 +176,28 @@ mod tests {
         let script = "@echo off\necho 参数是 %1\n";
         let encoded = encode_batch(script, GBK);
         assert_eq!(encoded.encoding, "cp936");
-        let expected = encoding_rs::GBK.encode("@echo off\r\necho 参数是 %1\r\n").0.into_owned();
+        let expected = encoding_rs::GBK
+            .encode("@echo off\r\necho 参数是 %1\r\n")
+            .0
+            .into_owned();
         assert_eq!(encoded.bytes, expected);
-        assert!(!encoded.bytes.windows(2).any(|pair| pair[0] != b'\r' && pair[1] == b'\n'), "每个 LF 前都有 CR");
-        assert!(std::str::from_utf8(&encoded.bytes).is_err(), "不再是 UTF-8 字节");
+        assert!(
+            !encoded
+                .bytes
+                .windows(2)
+                .any(|pair| pair[0] != b'\r' && pair[1] == b'\n'),
+            "每个 LF 前都有 CR"
+        );
+        assert!(
+            std::str::from_utf8(&encoded.bytes).is_err(),
+            "不再是 UTF-8 字节"
+        );
         let (text, encoding, lossy) = decode_batch(&encoded.bytes, GBK);
-        assert_eq!((text.as_str(), encoding.as_str(), lossy), (script, "cp936", false), "读回原文");
+        assert_eq!(
+            (text.as_str(), encoding.as_str(), lossy),
+            (script, "cp936", false),
+            "读回原文"
+        );
     }
 
     #[test]
@@ -163,7 +205,10 @@ mod tests {
         let script = "echo 你好 😀 %1\n";
         let encoded = encode_batch(script, GBK);
         assert_eq!(encoded.encoding, "utf-8+chcp65001");
-        assert_eq!(encoded.bytes, "@chcp 65001 >nul\r\necho 你好 😀 %1\r\n".as_bytes());
+        assert_eq!(
+            encoded.bytes,
+            "@chcp 65001 >nul\r\necho 你好 😀 %1\r\n".as_bytes()
+        );
         assert!(!encoded.bytes.starts_with(&[0xEF, 0xBB, 0xBF]), "无 BOM");
         let (text, encoding, _) = decode_batch(&encoded.bytes, GBK);
         assert_eq!(encoding, "utf-8");
@@ -178,14 +223,21 @@ mod tests {
         let edited = "@chcp 65001 >nul\necho 你好 %1\n";
         let encoded = encode_batch(edited, GBK);
         assert_eq!(encoded.encoding, "cp936");
-        assert_eq!(encoded.bytes, encoding_rs::GBK.encode("echo 你好 %1\r\n").0.into_owned());
+        assert_eq!(
+            encoded.bytes,
+            encoding_rs::GBK.encode("echo 你好 %1\r\n").0.into_owned()
+        );
     }
 
     #[test]
     fn ascii_and_mixed_line_endings_become_crlf() {
         let encoded = encode_batch("@echo off\r\necho a\recho b\n", GBK);
         assert_eq!(encoded.bytes, b"@echo off\r\necho a\r\necho b\r\n");
-        assert_eq!(encode_batch("echo %1", GBK).bytes, b"echo %1", "没有换行就不加");
+        assert_eq!(
+            encode_batch("echo %1", GBK).bytes,
+            b"echo %1",
+            "没有换行就不加"
+        );
     }
 
     #[test]
@@ -195,14 +247,23 @@ mod tests {
         assert_eq!(latin.bytes, b"echo caf\xe9\r\n");
         assert_eq!(decode_batch(&latin.bytes, 1252).0, "echo café\n");
         // 系统本身是 UTF-8（Beta：使用 Unicode UTF-8）：不需要 chcp。
-        assert_eq!(encode_batch("echo 你好\n", 65001).bytes, "echo 你好\r\n".as_bytes());
+        assert_eq!(
+            encode_batch("echo 你好\n", 65001).bytes,
+            "echo 你好\r\n".as_bytes()
+        );
         // 不认识的代码页：非 ASCII 只能 UTF-8 + chcp。
-        assert_eq!(encode_batch("echo 你好\n", 12345).encoding, "utf-8+chcp65001");
+        assert_eq!(
+            encode_batch("echo 你好\n", 12345).encoding,
+            "utf-8+chcp65001"
+        );
     }
 
     #[test]
     fn existing_utf8_and_bom_files_still_read() {
-        assert_eq!(decode_batch("echo 你好\r\n".as_bytes(), GBK), ("echo 你好\n".to_owned(), "utf-8".to_owned(), false));
+        assert_eq!(
+            decode_batch("echo 你好\r\n".as_bytes(), GBK),
+            ("echo 你好\n".to_owned(), "utf-8".to_owned(), false)
+        );
         let mut bom = vec![0xEF, 0xBB, 0xBF];
         bom.extend_from_slice("echo 你好".as_bytes());
         assert_eq!(decode_batch(&bom, GBK).1, "utf-8-bom");

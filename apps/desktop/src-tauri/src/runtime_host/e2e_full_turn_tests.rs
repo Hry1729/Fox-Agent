@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 use tauri::Manager;
 
 const CHILD: &str = "FOX_TEST_E2E_FULL_TURN_CHILD";
-const TEST: &str = "runtime_host::e2e_full_turn_tests::e2e_fox_native_full_turn_approval_second_turn_and_cancel";
+const TEST: &str =
+    "runtime_host::e2e_full_turn_tests::e2e_fox_native_full_turn_approval_second_turn_and_cancel";
 
 struct HostCleanup(RuntimeHost);
 impl Drop for HostCleanup {
@@ -31,14 +32,19 @@ impl Drop for HostCleanup {
 
 fn run_status(database: &Database, run: &str) -> String {
     database
-        .with_connection(|connection| connection.query_row("SELECT status FROM runs WHERE id=?1", [run], |row| row.get(0)))
+        .with_connection(|connection| {
+            connection.query_row("SELECT status FROM runs WHERE id=?1", [run], |row| {
+                row.get(0)
+            })
+        })
         .unwrap()
 }
 
 fn event_types(database: &Database, run: &str) -> Vec<String> {
     database
         .with_connection(|connection| {
-            let mut statement = connection.prepare("SELECT event_type FROM run_events WHERE run_id=?1 ORDER BY seq")?;
+            let mut statement = connection
+                .prepare("SELECT event_type FROM run_events WHERE run_id=?1 ORDER BY seq")?;
             let rows = statement.query_map([run], |row| row.get::<_, String>(0))?;
             rows.collect::<Result<Vec<_>, _>>()
         })
@@ -59,7 +65,12 @@ fn report(host: &RuntimeHost, database: &Database, run: &str, root: &Path) -> St
     )
 }
 
-fn wait_for(label: &str, seconds: u64, mut done: impl FnMut() -> bool, explain: impl Fn() -> String) {
+fn wait_for(
+    label: &str,
+    seconds: u64,
+    mut done: impl FnMut() -> bool,
+    explain: impl Fn() -> String,
+) {
     let deadline = Instant::now() + Duration::from_secs(seconds);
     while !done() {
         if Instant::now() >= deadline {
@@ -86,7 +97,13 @@ fn pending_approval(database: &Database, run: &str) -> Option<String> {
 
 fn approval_status(database: &Database, approval: &str) -> String {
     database
-        .with_connection(|connection| connection.query_row("SELECT status FROM approvals WHERE id=?1", [approval], |row| row.get(0)))
+        .with_connection(|connection| {
+            connection.query_row(
+                "SELECT status FROM approvals WHERE id=?1",
+                [approval],
+                |row| row.get(0),
+            )
+        })
         .unwrap()
 }
 
@@ -127,7 +144,16 @@ fn pi_result_ids(path: &Path) -> Vec<String> {
 }
 
 fn worker_pid(host: &RuntimeHost) -> u32 {
-    host.state.lock().unwrap().worker.as_ref().expect("worker").child.lock().unwrap().id()
+    host.state
+        .lock()
+        .unwrap()
+        .worker
+        .as_ref()
+        .expect("worker")
+        .child
+        .lock()
+        .unwrap()
+        .id()
 }
 
 /// Gone = no such process, or (Linux) a zombie nobody will run again.
@@ -137,8 +163,12 @@ fn process_gone(pid: u32) -> bool {
 
 #[cfg(not(windows))]
 fn zombie(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()
-        .and_then(|stat| stat.rsplit_once(')').and_then(|(_, rest)| rest.trim_start().chars().next()))
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit_once(')')
+                .and_then(|(_, rest)| rest.trim_start().chars().next())
+        })
         == Some('Z')
 }
 
@@ -181,8 +211,12 @@ fn long_command() -> &'static str {
 }
 
 fn write_relay(root: &Path) -> PathBuf {
-    let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../services/agent-runtime/src/pi-runtime.mjs");
-    assert!(runtime.is_absolute() && runtime.is_file(), "real Pi runtime source is absent");
+    let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../services/agent-runtime/src/pi-runtime.mjs");
+    assert!(
+        runtime.is_absolute() && runtime.is_file(),
+        "real Pi runtime source is absent"
+    );
     let script = root.join("e2e-runtime-relay.mjs");
     let constants = format!(
         "const runtime = {};\nconst root = {};\nconst longCommand = {};\n",
@@ -278,15 +312,29 @@ fn e2e_fox_native_full_turn_approval_second_turn_and_cancel() {
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        let (stdout, stderr) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
-        assert!(status.success(), "child stdout: {stdout}\nchild stderr: {stderr}");
+        let (stdout, stderr) = (
+            out.join().unwrap_or_default(),
+            err.join().unwrap_or_default(),
+        );
+        assert!(
+            status.success(),
+            "child stdout: {stdout}\nchild stderr: {stderr}"
+        );
         return;
     }
 
-    let parent = std::env::var_os("FOX_TEST_NATIVE_HOST_FIXTURE_ROOT").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let parent = std::env::var_os("FOX_TEST_NATIVE_HOST_FIXTURE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
     let root = parent.join(format!("fox-e2e-full-turn-{}", uuid::Uuid::new_v4()));
     println!("e2e native full turn fixture: {}", root.display());
-    for directory in [&root, &root.join("sessions"), &root.join("attachments"), &root.join("skills"), &root.join("project")] {
+    for directory in [
+        &root,
+        &root.join("sessions"),
+        &root.join("attachments"),
+        &root.join("skills"),
+        &root.join("project"),
+    ] {
         std::fs::create_dir_all(directory).unwrap();
     }
     std::env::set_var("FOX_RUNTIME_SCRIPT", write_relay(&root));
@@ -294,13 +342,21 @@ fn e2e_fox_native_full_turn_approval_second_turn_and_cancel() {
     let database = Database::open(root.join("facts.db")).unwrap();
     configure_model(&database);
     let conversation = database
-        .create_conversation(database.default_agent_id(), Some("e2e native"), Some(project.to_str().unwrap()), Some("ask"))
+        .create_conversation(
+            database.default_agent_id(),
+            Some("e2e native"),
+            Some(project.to_str().unwrap()),
+            Some("ask"),
+        )
         .unwrap();
     let mut context = tauri::generate_context!();
     for window in &mut context.config_mut().app.windows {
         window.create = false;
     }
-    let app = tauri::Builder::default().any_thread().build(context).unwrap();
+    let app = tauri::Builder::default()
+        .any_thread()
+        .build(context)
+        .unwrap();
     let client = crate::yuxi::YuxiClient::new().unwrap();
     let host = RuntimeHost::new(
         app.handle().clone(),
@@ -328,22 +384,46 @@ fn e2e_fox_native_full_turn_approval_second_turn_and_cancel() {
     let start = |text: &str| -> String {
         let started = database.create_run(&conversation.id, text, None).unwrap();
         let binding = database
-            .freeze_default_run_control_for_engine(&started.run.id, "legacy", TimeBudgets::continuous(), "pi")
+            .freeze_default_run_control_for_engine(
+                &started.run.id,
+                "legacy",
+                TimeBudgets::continuous(),
+                "pi",
+            )
             .unwrap();
         assert_eq!(binding.authority, ExecutionAuthority::Authoritative);
         assert_eq!(binding.executor_route, Some(ExecutorRoute::PiNative));
-        assert_eq!(binding.permission.mode, PermissionMode::Ask, "the conversation runs in 询问");
+        assert_eq!(
+            binding.permission.mode,
+            PermissionMode::Ask,
+            "the conversation runs in 询问"
+        );
         if let Err(error) = host.start_run(&started, text, &[]) {
-            panic!("native start failed: {error}; {}", report(&host, &database, &started.run.id, &root));
+            panic!(
+                "native start failed: {error}; {}",
+                report(&host, &database, &started.run.id, &root)
+            );
         }
         started.run.id
     };
     let settled = |run: &str, status: &str, seconds: u64| {
-        wait_for(&format!("Run {status}"), seconds, || run_status(&database, run) == status, || report(&host, &database, run, &root));
+        wait_for(
+            &format!("Run {status}"),
+            seconds,
+            || run_status(&database, run) == status,
+            || report(&host, &database, run, &root),
+        );
         wait_for(
             "Run session ownership released",
             seconds,
-            || host.state.lock().unwrap().worker.as_ref().map_or(true, |worker| worker.sessions.by_run(run).is_none()),
+            || {
+                host.state
+                    .lock()
+                    .unwrap()
+                    .worker
+                    .as_ref()
+                    .map_or(true, |worker| worker.sessions.by_run(run).is_none())
+            },
             || report(&host, &database, run, &root),
         );
     };
@@ -359,7 +439,10 @@ fn e2e_fox_native_full_turn_approval_second_turn_and_cancel() {
             || report(&host, &database, run, &root),
         );
         let approval = found.unwrap();
-        assert!(database.native_run_waiting_approval(run).unwrap(), "the Run waits for the user");
+        assert!(
+            database.native_run_waiting_approval(run).unwrap(),
+            "the Run waits for the user"
+        );
         assert_eq!(run_status(&database, run), "running");
         approval
     };
@@ -367,31 +450,56 @@ fn e2e_fox_native_full_turn_approval_second_turn_and_cancel() {
     // ── 1. 写工具出卡 → 批准 ──────────────────────────────────────────────
     let approve = start("e2e-approve");
     let card = await_card(&approve);
-    assert!(!project.join("approved.txt").exists(), "nothing is written before the user approves");
-    assert!(host.resolve_approval(&card, ApprovalDecision::AllowOnce).unwrap());
+    assert!(
+        !project.join("approved.txt").exists(),
+        "nothing is written before the user approves"
+    );
+    assert!(host
+        .resolve_approval(&card, ApprovalDecision::AllowOnce)
+        .unwrap());
     settled(&approve, "completed", 60);
     assert_eq!(approval_status(&database, &card), "approved");
-    assert_eq!(std::fs::read_to_string(project.join("approved.txt")).unwrap(), "approved-by-user");
+    assert_eq!(
+        std::fs::read_to_string(project.join("approved.txt")).unwrap(),
+        "approved-by-user"
+    );
     let written = native_result(&database, &approve, "e2e-write-approved");
     assert_ne!(written["isError"], true, "{written}");
     assert!(assistant_text(&database, &approve).contains("e2e approve turn complete"));
     let events = event_types(&database, &approve);
-    assert!(events.iter().any(|kind| kind == "message.delta"), "streamed text: {events:?}");
-    let session = database.get_runtime_session(&conversation.id).unwrap().expect("native session");
+    assert!(
+        events.iter().any(|kind| kind == "message.delta"),
+        "streamed text: {events:?}"
+    );
+    let session = database
+        .get_runtime_session(&conversation.id)
+        .unwrap()
+        .expect("native session");
     assert!(session.is_native());
     let session_file = session.native_path().expect("native session file");
-    assert!(pi_result_ids(&session_file).contains(&"e2e-write-approved".to_owned()), "Pi received the tool result");
+    assert!(
+        pi_result_ids(&session_file).contains(&"e2e-write-approved".to_owned()),
+        "Pi received the tool result"
+    );
     let pid = worker_pid(&host);
 
     // ── 2. 同样的写工具 → 拒绝 ───────────────────────────────────────────
     let deny = start("e2e-deny");
     let card = await_card(&deny);
-    assert!(host.resolve_approval(&card, ApprovalDecision::Deny).unwrap());
+    assert!(host
+        .resolve_approval(&card, ApprovalDecision::Deny)
+        .unwrap());
     settled(&deny, "completed", 60);
     assert_eq!(approval_status(&database, &card), "denied");
-    assert!(!project.join("denied.txt").exists(), "a denied write leaves no file");
+    assert!(
+        !project.join("denied.txt").exists(),
+        "a denied write leaves no file"
+    );
     let refused = native_result(&database, &deny, "e2e-write-denied");
-    assert_eq!(refused["isError"], true, "the model sees the refusal: {refused}");
+    assert_eq!(
+        refused["isError"], true,
+        "the model sees the refusal: {refused}"
+    );
     assert!(assistant_text(&database, &deny).contains("e2e deny turn complete"));
     assert!(pi_result_ids(&session_file).contains(&"e2e-write-denied".to_owned()));
 
@@ -399,7 +507,10 @@ fn e2e_fox_native_full_turn_approval_second_turn_and_cancel() {
     let plain = start("e2e-plain");
     settled(&plain, "completed", 60);
     assert!(assistant_text(&database, &plain).contains("e2e plain turn complete"));
-    let same = database.get_runtime_session(&conversation.id).unwrap().unwrap();
+    let same = database
+        .get_runtime_session(&conversation.id)
+        .unwrap()
+        .unwrap();
     assert_eq!(same.runtime_session_id, session.runtime_session_id);
     assert_eq!(same.native_session_path, session.native_session_path);
     assert_eq!(worker_pid(&host), pid, "one worker serves every turn");
@@ -407,22 +518,34 @@ fn e2e_fox_native_full_turn_approval_second_turn_and_cancel() {
     // ── 4. run_command 运行中取消 → 子进程被回收 ─────────────────────────
     let reap = start("e2e-reap");
     let card = await_card(&reap);
-    assert!(host.resolve_approval(&card, ApprovalDecision::AllowOnce).unwrap());
+    assert!(host
+        .resolve_approval(&card, ApprovalDecision::AllowOnce)
+        .unwrap());
     let pid_file = project.join("pid.txt");
     let mut command_pid = 0u32;
     wait_for(
         "the long command to report its pid",
         60,
         || {
-            command_pid = std::fs::read_to_string(&pid_file).ok().and_then(|text| text.trim().parse().ok()).unwrap_or(0);
+            command_pid = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+                .unwrap_or(0);
             command_pid > 0
         },
         || report(&host, &database, &reap, &root),
     );
     std::thread::sleep(Duration::from_millis(300));
-    assert!(!process_gone(command_pid), "the command is running before the cancel (pid {command_pid})");
+    assert!(
+        !process_gone(command_pid),
+        "the command is running before the cancel (pid {command_pid})"
+    );
     assert_eq!(run_status(&database, &reap), "running");
-    assert!(host.cancel_run(&reap).unwrap(), "{}", report(&host, &database, &reap, &root));
+    assert!(
+        host.cancel_run(&reap).unwrap(),
+        "{}",
+        report(&host, &database, &reap, &root)
+    );
     settled(&reap, "cancelled", 30);
     wait_for(
         &format!("command process {command_pid} to be reaped"),
@@ -436,6 +559,9 @@ fn e2e_fox_native_full_turn_approval_second_turn_and_cancel() {
     let after = start("e2e-after-cancel");
     settled(&after, "completed", 60);
     assert!(assistant_text(&database, &after).contains("e2e after cancel complete"));
-    let continued = database.get_runtime_session(&conversation.id).unwrap().unwrap();
+    let continued = database
+        .get_runtime_session(&conversation.id)
+        .unwrap()
+        .unwrap();
     assert_eq!(continued.runtime_session_id, session.runtime_session_id);
 }

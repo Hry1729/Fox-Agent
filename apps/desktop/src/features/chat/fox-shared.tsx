@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { type LocalKnowledgeBaseDto } from '@/features/conversations/api/desktop-client'
 import { normalizeAssistantMarkdown } from '@/features/conversations/model/assistant-presentation'
-import { type RuntimeQuestion, type RuntimeQuestionRequest } from '@/features/conversations/model/pending-interactions'
+import type { RuntimeQuestionRequest } from '@/features/conversations/model/pending-interactions'
 import { type ApprovalRecord, type AttachmentRecord, type ChildRunRecord, type ConversationDetail, type ConversationMessage, type GlobalSearchRecord, type KnowledgeBaseRecord, type KnowledgeBindingRecord, type KnowledgeReference, type ProjectRecord } from '@/features/conversations/model/types'
 import { notify as toast } from '@/features/notifications'
 import { type UserProfile } from '@/features/profile/user-profile'
@@ -29,9 +29,11 @@ export const layoutStorage = {
   rightMode: 'fox.layout.rightMode',
   rightTabs: 'fox.layout.rightTabs',
   rightSidebarCollapsed: 'fox.layout.rightSidebarCollapsed',
-  rightWidth: 'fox.layout.rightWidth',
+  rightWidth: 'fox.layout.rightWidth.v2',
   theme: 'fox.theme',
-  seenChanges: 'fox.layout.seenChanges'
+  seenChanges: 'fox.layout.seenChanges',
+  workConversation: 'fox.workspace.workConversation',
+  companionConversation: 'fox.workspace.companionConversation'
 } as const
 
 // In the profile build, lazily load the telemetry collector and forward React
@@ -80,7 +82,7 @@ export const EMPTY_CONVERSATION_MESSAGES: ConversationMessage[] = []
 export const EMPTY_CONVERSATION_ATTACHMENTS: AttachmentRecord[] = []
 export const EMPTY_RUNTIME_APPROVALS: ApprovalRecord[] = []
 
-export type RightMode = 'activity' | 'changes' | 'browser' | 'files' | 'knowledge' | 'agents'
+export type RightMode = 'terminal' | 'evidence' | 'changes' | 'browser' | 'files' | 'knowledge' | 'agents' | 'background'
 export interface OpenFileTab {
   id: string
   path: string
@@ -92,17 +94,12 @@ export interface ChildAgentSelection {
   avatarIndex: number
 }
 export type ChatState = 'complete' | 'running' | 'question' | 'approval' | 'error' | 'denied'
-export type AssistantMode = 'assistant' | 'knowledge'
+export type AssistantMode = 'work' | 'companions' | 'knowledge'
 
 export const CONVERSATION_FORK_EVENT = 'fox:conversation-fork'
 
 export function requestConversationFork(messageId: string) {
   window.dispatchEvent(new CustomEvent(CONVERSATION_FORK_EVENT, { detail: { messageId } }))
-}
-
-export function isConfirmationQuestion(question: RuntimeQuestion) {
-  if (question.options.length !== 2 || question.multiSelect) return false
-  return question.options.every((option) => /确认|取消|同意|拒绝|继续|停止|是|否|yes|no/i.test(option.label))
 }
 
 export async function copyTextWithFeedback(text: string, successMessage: string) {
@@ -136,22 +133,24 @@ export function readStoredNumber(key: string, fallback: number, min: number, max
 }
 
 export function readStoredRightMode(): RightMode | null {
-  if (typeof window === 'undefined') return 'files'
-  const value = window.localStorage.getItem(layoutStorage.rightMode)
+  if (typeof window === 'undefined') return null
+  return restoreRightMode(window.localStorage.getItem(layoutStorage.rightMode))
+}
+
+function restoreRightMode(value: unknown): RightMode | null {
   if (value === 'results') return 'files'
-  return value === 'activity' || value === 'changes' || value === 'browser' || value === 'files' || value === 'knowledge' || value === 'agents'
+  if (value === 'activity') return 'terminal'
+  return value === 'terminal' || value === 'changes' || value === 'browser' || value === 'files' || value === 'knowledge' || value === 'agents' || value === 'background'
     ? value
-    : value === 'closed' ? null : 'files'
+    : null
 }
 
 export function readStoredRightTabs(): RightMode[] {
-  if (typeof window === 'undefined') return ['files']
+  if (typeof window === 'undefined') return []
   try {
     const value: unknown = JSON.parse(window.localStorage.getItem(layoutStorage.rightTabs) ?? 'null')
     if (Array.isArray(value)) {
-      return [...new Set(value.filter((item): item is RightMode => (
-        item === 'activity' || item === 'changes' || item === 'browser' || item === 'files' || item === 'knowledge' || item === 'agents'
-      )))]
+      return [...new Set(value.map(restoreRightMode).filter(mode => mode !== null))]
     }
   } catch {
     // Fall back to the previously persisted single-page state.
@@ -196,7 +195,7 @@ export function IconButton({
 
 export function globalSearchKindLabel(kind: GlobalSearchRecord['kind']): string {
   return ({
-    conversation: '对话', project: '项目', agent: '专家',
+    conversation: '对话', companion: '伙伴', project: '项目', agent: '专家',
     knowledge_base: '资料库', knowledge_document: '文档', task: '任务', artifact: '生成文件',
   })[kind]
 }

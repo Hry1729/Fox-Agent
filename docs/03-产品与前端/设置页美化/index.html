@@ -1,0 +1,1379 @@
+<!doctype html>
+<html lang="zh-CN" data-color-theme="paper">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Fox 设置 · 全局规则 · 原型</title>
+<link rel="stylesheet" href="../../../apps/desktop/node_modules/harmonyos-sans-sc-webfont-splitted/dist/Regular.css" />
+<link rel="stylesheet" href="../../../apps/desktop/node_modules/harmonyos-sans-sc-webfont-splitted/dist/Medium.css" />
+<link rel="stylesheet" href="../../../apps/desktop/node_modules/harmonyos-sans-sc-webfont-splitted/dist/Semibold.css" />
+<!-- Colours and radii come straight from the app; this mockup only covers Paper light. -->
+<link rel="stylesheet" href="../../../apps/desktop/src/styles/themes.css" />
+<script src="icons.js"></script>
+<style>
+/* Derived tokens, same recipes as apps/desktop/src/styles/globals.css. */
+:root {
+  --fox-canvas: var(--chat-background, var(--background));
+  --fox-card: var(--card);
+  --fox-panel: var(--muted);
+  --fox-border: var(--border);
+  --fox-border-strong: color-mix(in oklch, var(--border) 72%, var(--foreground) 28%);
+  --fox-text: var(--foreground);
+  --fox-muted: var(--muted-foreground);
+  --fox-faint: color-mix(in oklch, var(--muted-foreground) 78%, var(--fox-canvas));
+  --fox-hover: color-mix(in oklch, var(--fox-panel) 78%, var(--fox-card));
+  --fox-accent: var(--brand);
+  --fox-accent-soft: var(--brand-soft);
+  --fox-control-xs: 24px;
+  --fox-control-md: 32px;
+  --fox-control-lg: 36px;
+  --fox-action-height: var(--fox-control-md);
+  --fox-space-xs: 4px;
+  --fox-space-s: 6px;
+  --fox-space-m: 8px;
+  --fox-space-l: 12px;
+  --fox-space-xl: 16px;
+  --fox-space-2xl: 20px;
+  --fox-space-3xl: 24px;
+
+  --fox-sidebar-width: 260px;
+  --fox-sidebar-gutter: 12px;
+  --fox-sidebar-inset: 8px;
+  --fox-sidebar-row-height: 32px;
+  --fox-sidebar-action-size: 28px;
+  --fox-sidebar-action-inset: 2px;
+
+  /* Settings page geometry (settings-layout.css). */
+  --sp-width: 760px;
+  --sp-group-gap: 28px;
+  --sp-group-pad: 16px;
+  --sp-row-min: 60px;
+  --sp-mark: 32px;
+  --sp-sheet: 480px;
+  --sp-gutter: 24px;
+  --sheet-gutter: var(--fox-space-3xl);
+  --hairline: color-mix(in oklch, var(--border) 70%, transparent);
+
+  --side-hover: color-mix(in oklch, var(--sidebar-accent) 62%, var(--sidebar));
+  --side-selected: var(--background);
+  --shadow-sm: 0 1px 2px color-mix(in oklch, oklch(0.2 0 0) 6%, transparent);
+  --shadow-md: 0 4px 16px color-mix(in oklch, oklch(0.2 0 0) 9%, transparent);
+  --shadow-lg: 0 16px 45px color-mix(in oklch, oklch(0.2 0 0) 12%, transparent);
+  font-family: "HarmonyOS Sans SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  font-synthesis: none;
+  color: var(--foreground);
+  -webkit-font-smoothing: antialiased;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: color-mix(in oklch, var(--shell) 70%, var(--muted)); }
+svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.grow { flex: 1; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 1.1s linear infinite; }
+code, .mono { font-family: "Cascadia Mono", Consolas, monospace; font-size: 12px; }
+
+/* ---------- Doc shell ---------- */
+.doc { width: 100%; max-width: 1360px; margin: 0 auto; padding: 32px 40px 120px; }
+.doc-hero h1 { margin: 0 0 8px; font-size: 32px; font-weight: 600; letter-spacing: -.02em; }
+.doc-hero p { margin: 0; max-width: 940px; color: var(--muted-foreground); font-size: 14px; line-height: 1.75; }
+.toc { margin-top: 16px; }
+.toc .sel { max-width: 100%; }
+.frame { margin-top: 64px; scroll-margin-top: 40px; }
+.frame:first-of-type { margin-top: 26px; }
+.frame-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 18px; }
+.frame-head h2 { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -.01em; white-space: nowrap; }
+.frame-head p { margin: 0; color: var(--muted-foreground); font-size: 14px; }
+body.single .doc { height: 100dvh; display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 14px; padding: 24px; }
+
+/* ---------- Window ---------- */
+.win { position: relative; width: 100%; height: var(--frame-height); display: flex; flex-direction: column; overflow: hidden; border-radius: 10px; background: var(--shell); border: 1px solid var(--border); box-shadow: var(--shadow-lg); color: var(--foreground); font-size: 13px; }
+body.single .win { height: 100%; }
+.titlebar { height: 36px; flex: none; display: flex; align-items: center; justify-content: space-between; }
+.tb-left { display: flex; align-items: center; gap: 2px; padding-left: 10px; color: var(--muted-foreground); }
+.tb-left img { width: 20px; height: 20px; margin-right: 6px; border-radius: 5px; }
+.tb-left span { width: 28px; height: 28px; display: grid; place-items: center; }
+.tb-left span.off { opacity: .45; }
+.wctl { display: flex; height: 100%; }
+.wctl span { width: 46px; display: grid; place-items: center; color: var(--muted-foreground); }
+.wctl svg { width: 15px; height: 15px; }
+.app { position: relative; flex: 1; min-height: 0; display: flex; }
+.card { position: relative; flex: 1; min-width: 0; display: flex; margin: 0 6px 6px 0; border-radius: var(--fox-radius-large); background: var(--fox-canvas); box-shadow: var(--shadow-sm); overflow: hidden; }
+
+/* ---------- Settings sidebar ---------- */
+.side { position: relative; width: var(--fox-sidebar-width); flex: none; display: flex; flex-direction: column; padding: 2px var(--fox-sidebar-gutter) 10px; background: var(--sidebar); }
+.compact-nav { display: none; }
+.mode-row { display: flex; align-items: center; height: 32px; margin-bottom: 8px; }
+.back { height: 28px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px 0 8px; border-radius: var(--fox-radius-control); color: var(--muted-foreground); font-size: 13px; }
+.back svg { width: 15px; height: 15px; }
+.row { position: relative; height: var(--fox-sidebar-row-height); display: flex; align-items: center; gap: 8px; padding: 0 var(--fox-sidebar-inset); border-radius: var(--fox-radius-control); color: color-mix(in oklch, var(--foreground) 90%, var(--muted-foreground)); font-size: 13.5px; white-space: nowrap; }
+.row svg { width: 16px; height: 16px; color: var(--muted-foreground); }
+.row.on { background: var(--side-selected); color: var(--foreground); font-weight: 500; box-shadow: var(--shadow-sm); }
+.row.on svg { color: var(--foreground); }
+.row .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sgroup { display: grid; gap: 2px; }
+.sgroup + .sgroup { margin-top: 14px; }
+.sglabel { padding: 0 var(--fox-sidebar-inset) 4px; color: var(--fox-faint); font-size: 12px; font-weight: 500; }
+.scroll { flex: 1; min-height: 0; overflow: auto; }
+.foot { display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 var(--fox-sidebar-action-inset) 0 var(--fox-sidebar-inset); }
+.foot img { width: 26px; height: 26px; border-radius: 50%; }
+.foot b { font-weight: 500; font-size: 13.5px; }
+.foot .chev { width: 14px; height: 14px; color: var(--muted-foreground); }
+.ab { position: relative; width: var(--fox-sidebar-action-size); height: var(--fox-sidebar-action-size); flex: none; display: grid; place-items: center; border-radius: var(--fox-radius-control); color: var(--muted-foreground); }
+
+/* ---------- Settings page ---------- */
+.spage { flex: 1; min-width: 0; overflow: auto; container: settings / inline-size; }
+.sp { width: min(var(--sp-width), calc(100% - 2 * var(--sp-gutter))); margin: 0 auto; padding: 48px 0 56px; }
+.sp-head { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 32px; }
+.sp-head h1 { margin: 0 0 4px; font-size: 24px; font-weight: 600; line-height: 1.33; }
+.sp-head p { margin: 0; color: var(--muted-foreground); font-size: 13px; line-height: 1.5; }
+.sp-head .acts { display: flex; gap: 8px; flex: none; }
+.grp + .grp, .grp + .grp-foot + .grp { margin-top: var(--sp-group-gap); }
+.grp-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; min-height: 28px; padding-bottom: 8px; }
+.grp-head h2 { margin: 0; font-size: 13px; font-weight: 600; line-height: 1.5; }
+.grp-aside { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--muted-foreground); font-size: 12px; font-variant-numeric: tabular-nums; }
+.grp-body { padding: 0 var(--sp-group-pad); border: 1px solid var(--fox-border); border-radius: var(--fox-radius-card); background: var(--card); }
+.grp-foot { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 12px; }
+.saved { display: inline-flex; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: 12px; }
+.saved svg { width: 14px; height: 14px; color: var(--success); }
+
+/* Plain row: name + one sentence left, control right. */
+.srow { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-height: var(--sp-row-min); padding: 12px 0; border-bottom: 1px solid var(--hairline); }
+.srow:last-child { border-bottom: 0; }
+.st { min-width: 0; display: grid; gap: 2px; }
+.st b { font-size: 13.5px; font-weight: 500; line-height: 1.43; }
+.st small { color: var(--muted-foreground); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.st small code { color: var(--foreground); }
+.sc { display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: 8px; max-width: 100%; }
+
+/* Item row: mark + name + status + controls; hover bleeds 8px past the text edge. */
+.irow { position: relative; margin: 0 -8px; padding: 0 8px; border-radius: var(--fox-radius-card); }
+.irow + .irow::before, [data-agent] + [data-agent] > .irow::before { content: ''; position: absolute; top: 0; left: 8px; right: 8px; height: 1px; background: var(--hairline); }
+.irow.hover, .irow.open { background: var(--fox-hover); }
+.irow.hover::before, .irow.hover + .irow::before, .irow.open::before, .irow.open + .irow::before { opacity: 0; }
+.ir { min-height: var(--sp-row-min); display: flex; align-items: center; gap: 12px; padding: 12px 0; }
+.ir > .it { min-width: 0; flex: 1; display: grid; gap: 2px; }
+.in { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.in b { font-size: 13.5px; font-weight: 500; line-height: 1.43; overflow-wrap: anywhere; }
+.it small { color: var(--muted-foreground); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.it small.warn { color: var(--warning); }
+.it small.err { color: var(--destructive); }
+.it small.mono { color: var(--muted-foreground); }
+.ir-meta, .ir .tail { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.ir-meta { flex: none; gap: 8px 12px; }
+.ir .chev { width: 14px; height: 14px; color: var(--muted-foreground); }
+.irow.dis .in b, .irow.dis .mk { opacity: .55; }
+.below { padding: 0 0 14px calc(var(--sp-mark) + 12px); }
+
+.mk { width: var(--sp-mark); height: var(--sp-mark); flex: none; display: grid; place-items: center; border: 1px solid var(--border); border-radius: var(--fox-radius-control); background: var(--card); color: var(--muted-foreground); }
+.mk svg { width: 16px; height: 16px; }
+.mk img { width: 16px; height: 16px; object-fit: contain; }
+.mk.av { overflow: hidden; padding: 0; border-radius: 50%; }
+.mk.av img { width: 100%; height: 100%; object-fit: cover; }
+.mk.lt { color: var(--foreground); font-size: 14px; font-weight: 600; }
+.mk.lg { width: 40px; height: 40px; }
+.mk.lg img { width: 20px; height: 20px; }
+.mk.lg.av img { width: 100%; height: 100%; }
+.mk.lg svg { width: 18px; height: 18px; }
+.mk.xs { width: 18px; height: 18px; border-radius: 5px; }
+.mk.xs img { width: 11px; height: 11px; }
+.mk.xs.av img { width: 100%; height: 100%; }
+.mk.xs.lt { font-size: 10px; }
+
+.pill { height: 20px; flex: none; display: inline-flex; align-items: center; gap: 4px; padding: 0 7px; border-radius: 999px; background: var(--muted); color: var(--muted-foreground); font-size: 11.5px; font-weight: 500; white-space: nowrap; }
+.pill.ok { background: color-mix(in oklch, var(--success) 12%, transparent); color: color-mix(in oklch, var(--success) 85%, var(--foreground)); }
+.pill.warn { background: color-mix(in oklch, var(--warning) 16%, transparent); color: color-mix(in oklch, var(--warning) 75%, var(--foreground)); }
+.pill.err { background: color-mix(in oklch, var(--destructive) 10%, transparent); color: var(--destructive); }
+.pill.info { background: var(--brand-soft); color: color-mix(in oklch, var(--brand) 80%, var(--foreground)); }
+.pill.line { background: transparent; box-shadow: inset 0 0 0 1px var(--border); }
+.dot { width: 6px; height: 6px; flex: none; display: inline-block; border-radius: 50%; background: var(--fox-muted); }
+.dot.ok { background: var(--success); }
+.dot.warn { background: var(--warning); }
+.dot.err { background: var(--destructive); }
+.dot.empty { background: transparent; box-shadow: inset 0 0 0 1px var(--fox-muted); }
+.stat { flex: none; display: inline-flex; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.stat b { color: var(--foreground); font-weight: 500; }
+.stat .sep { color: var(--fox-faint); }
+
+/* ---------- Controls ---------- */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 5px; height: 28px; padding: 0 10px; border: 1px solid var(--fox-border); border-radius: var(--fox-radius-control); background: var(--fox-card); color: var(--fox-text); font-size: 12.5px; font-weight: 500; white-space: nowrap; }
+.btn svg { width: 14px; height: 14px; }
+.btn.primary { border-color: transparent; background: var(--primary); color: var(--primary-foreground); }
+.btn.ghost { border-color: transparent; background: transparent; color: var(--fox-muted); }
+.btn.ghost.strong { color: var(--fox-text); }
+.btn.danger { border-color: transparent; background: transparent; color: var(--destructive); }
+.btn.lg { height: 32px; padding: 0 14px; font-size: 13px; }
+.btn.dis { opacity: .45; }
+.btn.hover { background: var(--fox-hover); }
+.btn.icon { width: 28px; padding: 0; }
+.sw { position: relative; width: 32px; height: 18px; flex: none; display: inline-block; border-radius: 999px; background: color-mix(in oklch, var(--foreground) 16%, transparent); }
+.sw i { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: white; box-shadow: 0 1px 2px oklch(0.2 0 0 / 20%); }
+.sw.on { background: var(--primary); }
+.sw.on i { left: 16px; }
+.sw.dis { opacity: .45; }
+.sel { height: 32px; flex: none; display: inline-flex; align-items: center; gap: 8px; padding: 0 8px 0 10px; border: 1px solid var(--input); border-radius: var(--fox-radius-control); background: var(--background); font-size: 13px; white-space: nowrap; }
+.sel .v { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sel .cv { width: 14px; height: 14px; color: var(--muted-foreground); }
+.sel > svg:first-child { width: 14px; height: 14px; color: var(--muted-foreground); }
+.sel img { width: 16px; height: 16px; }
+.sel.sm { height: 28px; font-size: 12.5px; }
+.sel.open { border-color: var(--fox-border-strong); box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 22%, transparent); }
+.seg { height: 32px; flex: none; display: inline-flex; padding: 2px; border-radius: var(--fox-radius-control); background: var(--muted); }
+.seg span { height: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 12px; border-radius: calc(var(--fox-radius-control) - 2px); color: var(--muted-foreground); font-size: 12.5px; font-weight: 500; white-space: nowrap; }
+.seg span.on { background: var(--background); color: var(--foreground); box-shadow: var(--shadow-sm); }
+.seg.full { display: flex; }
+.seg.full span { flex: 1; }
+.seg.sm { height: 28px; }
+.seg.sm span { padding: 0 10px; font-size: 12px; }
+.inp { height: 32px; display: flex; align-items: center; gap: 6px; padding: 0 10px; border: 1px solid var(--input); border-radius: var(--fox-radius-control); background: var(--background); font-size: 13px; }
+.inp .v { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.inp .ph { flex: 1; color: var(--fox-faint); }
+.inp svg { width: 15px; height: 15px; color: var(--muted-foreground); }
+.inp.focus { border-color: var(--fox-border-strong); box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 22%, transparent); }
+.inp.focus .v::after { content: ''; display: inline-block; width: 1.5px; height: 15px; margin-left: 1px; vertical-align: -3px; background: var(--foreground); }
+.inp.mono .v, .ta.mono { font-family: "Cascadia Mono", Consolas, monospace; font-size: 12px; }
+.ta { min-height: 76px; padding: 8px 10px; border: 1px solid var(--input); border-radius: var(--fox-radius-control); background: var(--background); font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ta .ph { color: var(--fox-faint); }
+.fld { display: grid; gap: 6px; }
+.fld + .fld, .fld-row + .fld, .fld + .fld-row { margin-top: 14px; }
+.fld > label { font-size: 12px; font-weight: 500; }
+.fld > small { color: var(--muted-foreground); font-size: 12px; line-height: 1.5; }
+.fld-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.fld-row > .fld + .fld { margin-top: 0; }
+.chk { width: 16px; height: 16px; flex: none; display: grid; place-items: center; border-radius: 4px; box-shadow: inset 0 0 0 1.5px var(--fox-border-strong); }
+.chk.on { background: var(--primary); box-shadow: none; color: var(--primary-foreground); }
+.chk svg { width: 11px; height: 11px; stroke-width: 3; }
+
+/* Agent coverage under a service row. */
+.cov { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.cov-l { margin-right: 2px; color: var(--fox-faint); font-size: 12px; }
+.chip { height: 24px; display: inline-flex; align-items: center; gap: 5px; padding: 0 8px 0 3px; border-radius: 999px; background: var(--muted); color: var(--foreground); font-size: 12px; }
+.chip .ck { width: 12px; height: 12px; color: var(--success); stroke-width: 2.4; }
+.chip em { color: var(--fox-faint); font-style: normal; }
+.cov .miss { display: inline-flex; align-items: center; gap: 4px; margin-left: 4px; color: var(--warning); font-size: 12px; }
+.cov .miss svg { width: 13px; height: 13px; }
+
+/* Verification ladder: four layers left to right. */
+.verify { padding: 14px 16px 16px; border-radius: var(--fox-radius-card); background: var(--fox-canvas); box-shadow: inset 0 0 0 1px var(--hairline); }
+.vh { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.vh b { font-size: 13px; font-weight: 600; }
+.vh small { color: var(--muted-foreground); font-size: 12px; }
+.ladder { display: grid; grid-template-columns: repeat(4, 1fr); margin: 0; padding: 0; list-style: none; }
+.ladder li { position: relative; display: grid; gap: 3px; padding-right: 12px; }
+.ladder li::after { content: ''; position: absolute; top: 9px; left: 26px; right: 8px; height: 1.5px; background: var(--border); }
+.ladder li:last-child::after { display: none; }
+.ladder li.done::after { background: color-mix(in oklch, var(--success) 50%, var(--border)); }
+.ladder .lc { width: 20px; height: 20px; display: grid; place-items: center; margin-bottom: 4px; border-radius: 50%; background: var(--muted); color: var(--muted-foreground); }
+.ladder .lc svg { width: 12px; height: 12px; stroke-width: 2.4; }
+.ladder li.done .lc { background: var(--success); color: white; }
+.ladder li.run .lc { background: var(--brand-soft); color: var(--brand); }
+.ladder li.fail .lc { background: var(--destructive); color: white; }
+.ladder b { font-size: 12.5px; font-weight: 600; }
+.ladder small { color: var(--muted-foreground); font-size: 12px; line-height: 1.45; }
+.ladder li.run small { color: var(--foreground); }
+.vfoot { display: flex; align-items: center; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--hairline); color: var(--muted-foreground); font-size: 12px; }
+
+/* Search provider options. */
+/* ---------- Sheet (480px, right) ---------- */
+.scrim { position: absolute; inset: 0; z-index: 10; background: color-mix(in oklch, var(--foreground) 8%, transparent); }
+.sheet { position: absolute; z-index: 11; top: 0; right: 0; bottom: 0; width: min(var(--sp-sheet), 100%); display: flex; flex-direction: column; border-left: 1px solid var(--border); border-top-left-radius: var(--fox-radius-card); background: var(--popover); box-shadow: var(--shadow-lg); font-size: 13px; container: drawer / inline-size; }
+.sh-head { flex: none; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--fox-space-l); padding: var(--fox-space-3xl) var(--sheet-gutter) var(--fox-space-2xl); border-bottom: 1px solid var(--hairline); }
+.sh-head .tt { min-width: 0; display: grid; gap: 2px; }
+.sh-head .tn { display: flex; flex-wrap: wrap; align-items: center; gap: var(--fox-space-xs) var(--fox-space-m); font-size: 16px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
+.sh-head small { color: var(--muted-foreground); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.sh-head .x { width: var(--fox-action-height); height: var(--fox-action-height); display: grid; place-items: center; border-radius: var(--fox-radius-control); color: var(--muted-foreground); }
+.sh-head .x:hover { background: var(--fox-hover); }
+.sh-body { flex: 1; min-height: 0; overflow: auto; padding: 0 var(--sheet-gutter); }
+.sh-sec { padding: 18px 0; }
+.sh-sec + .sh-sec { border-top: 1px solid var(--hairline); }
+.sh-sec-h { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; min-height: 28px; margin-bottom: 10px; }
+.sh-sec-h h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.sh-sec-h small { color: var(--muted-foreground); font-size: 12px; }
+.hint { display: flex; align-items: flex-start; gap: 6px; margin: 10px 0 0; color: var(--muted-foreground); font-size: 12px; line-height: 1.55; }
+.hint svg { width: 13px; height: 13px; flex: none; margin-top: 2px; }
+.hint.warn { color: var(--warning); }
+.sh-foot { flex: none; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--fox-space-m); padding: var(--fox-space-l) var(--sheet-gutter); border-top: 1px solid var(--border); }
+.sh-foot .btn { height: var(--fox-action-height); padding-inline: var(--fox-space-l); font-size: 13px; }
+.steps { display: flex; align-items: center; gap: 10px; padding: 16px 0 2px; font-size: 12.5px; color: var(--muted-foreground); }
+.steps span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.steps i { width: 18px; height: 18px; display: grid; place-items: center; border-radius: 50%; background: var(--muted); font-style: normal; font-size: 11px; font-weight: 600; }
+.steps i svg { width: 11px; height: 11px; stroke-width: 2.6; }
+.steps .on { color: var(--foreground); font-weight: 500; }
+.steps .on i { background: var(--primary); color: var(--primary-foreground); }
+.steps .done i { background: var(--success); color: white; }
+.steps .ln { flex: 1; height: 1px; background: var(--border); }
+.tgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.tgt { position: relative; display: grid; justify-items: start; gap: 8px; padding: 10px; border-radius: var(--fox-radius-card); box-shadow: inset 0 0 0 1px var(--border); background: var(--card); }
+.tgt b { font-size: 12.5px; font-weight: 500; }
+.tgt small { margin-top: -6px; color: var(--muted-foreground); font-size: 11.5px; }
+.tgt .chk { position: absolute; top: 10px; right: 10px; }
+.tgt.on { box-shadow: inset 0 0 0 1.5px var(--primary); background: color-mix(in oklch, var(--primary) 3%, var(--card)); }
+.summary { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--fox-radius-card); background: var(--muted); }
+.summary .tx { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.summary b { font-size: 12.5px; font-weight: 500; }
+.summary small { color: var(--muted-foreground); font-size: 12px; }
+.ladder.three { grid-template-columns: repeat(3, 1fr); }
+.ladder li.fail small { color: var(--destructive); }
+.disc { display: flex; align-items: center; gap: 10px; margin: 0 -8px; padding: 10px 8px; border-radius: var(--fox-radius-card); }
+.disc > svg { width: 16px; height: 16px; color: var(--muted-foreground); }
+.disc .tx { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.disc b { font-size: 13px; font-weight: 600; }
+.disc small { color: var(--muted-foreground); font-size: 12px; }
+.facts { margin: 0; }
+.facts > div { display: grid; grid-template-columns: 96px 1fr; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--hairline); }
+.facts > div:last-child { border-bottom: 0; }
+.facts dt { color: var(--muted-foreground); font-size: 12px; }
+.facts dd { min-width: 0; margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.rules { margin: 10px 0 0; padding: 0; list-style: none; }
+.rules li { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--hairline); }
+.rules li:last-child { border-bottom: 0; }
+.rules li > div { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.rules code { color: var(--foreground); }
+.rules small { color: var(--muted-foreground); font-size: 12px; }
+.tools { display: grid; }
+.tools > div { display: grid; gap: 2px; padding: 8px 0; border-bottom: 1px solid var(--hairline); }
+.tools > div:last-child { border-bottom: 0; }
+.tools b { font-family: "Cascadia Mono", Consolas, monospace; font-size: 12px; font-weight: 500; }
+.tools small { color: var(--muted-foreground); font-size: 12px; }
+.hook-form { margin-bottom: 4px; padding: 14px; border-radius: var(--fox-radius-card); background: var(--fox-canvas); box-shadow: inset 0 0 0 1px var(--border); }
+.hook-form .acts { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+
+/* ---------- Floating surfaces ---------- */
+.menu { position: absolute; z-index: 20; width: 180px; padding: 4px; border: 1px solid var(--fox-border); border-radius: var(--fox-radius-card); background: var(--popover); box-shadow: var(--shadow-md); font-size: 13px; }
+.menu .mi { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px; border-radius: var(--fox-radius-control); white-space: nowrap; }
+.menu .mi svg { width: 15px; height: 15px; color: var(--fox-muted); }
+.menu .mi.on { background: var(--fox-hover); }
+.menu .mi.off { opacity: .45; }
+.menu .mi.danger, .menu .mi.danger svg { color: var(--destructive); }
+.menu .ms { height: 1px; margin: 4px 0; background: var(--fox-border); }
+.menu .mi img { width: 16px; height: 16px; }
+.menu .mi .ck { margin-left: auto; width: 14px; height: 14px; color: var(--foreground); }
+.menu .mi small { margin-left: auto; color: var(--fox-faint); font-size: 12px; }
+.banner { display: flex; align-items: center; gap: 12px; margin: 0 0 24px; padding: 12px 14px; border: 1px solid color-mix(in oklch, var(--destructive) 35%, var(--border)); border-radius: var(--fox-radius-card); background: color-mix(in oklch, var(--destructive) 5%, var(--card)); }
+.banner > svg { width: 16px; height: 16px; color: var(--destructive); }
+.banner .tx { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.banner b { font-size: 13.5px; font-weight: 500; }
+.banner small { color: var(--muted-foreground); font-size: 12px; }
+.banner.info { border-color: color-mix(in oklch, var(--brand) 30%, var(--border)); background: color-mix(in oklch, var(--brand-soft) 45%, var(--card)); }
+.banner.info > svg { color: var(--brand); }
+.blank { padding: 20px 0; color: var(--muted-foreground); font-size: 13px; }
+.loading { display: flex; align-items: center; gap: 8px; padding: 20px 0; color: var(--muted-foreground); font-size: 13px; }
+.loading svg { width: 14px; height: 14px; }
+
+/* Component sheet. */
+.kit { padding: 32px 36px; border-radius: 14px; background: var(--background); box-shadow: var(--shadow-md); display: grid; grid-template-columns: 1fr 1fr; gap: 32px 48px; }
+.kit h5 { margin: 0 0 12px; font-size: 13px; font-weight: 600; color: var(--muted-foreground); }
+.kit .line { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.kit .line + .line { margin-top: 12px; }
+.kit .cap { color: var(--fox-faint); font-size: 12px; }
+.spec { width: 100%; border-collapse: collapse; font-size: 13px; }
+.spec td { padding: 7px 0; border-bottom: 1px solid var(--hairline); }
+.spec td:first-child { color: var(--muted-foreground); width: 46%; }
+.spec td code { color: var(--foreground); }
+.kit .wide { grid-column: 1 / -1; }
+.row { text-decoration: none; }
+button, input, select { font: inherit; color: inherit; }
+button, .btn, .sw, .seg > span, .x, .mi, .disc { cursor: pointer; }
+.btn.dis, .sw.dis { cursor: not-allowed; }
+:focus-visible { outline: 2px solid var(--fox-accent); outline-offset: 3px; }
+select.sel { max-width: min(100%, 290px); min-width: 0; background: var(--fox-card); }
+.fld select.sel { width: 100% !important; max-width: none; }
+input.inp { background: var(--fox-card); min-width: 0; width: 100%; }
+.sheet textarea.ta { display: block; width: 100%; resize: vertical; color: inherit; font: inherit; }
+.sheet .fld > span { font-size: 12px; font-weight: 500; }
+.sheet .fld input, .sheet .fld select { min-height: var(--fox-action-height); }
+.provider-toolbar { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: var(--fox-space-m); padding-block: var(--fox-space-l); background: var(--popover); }
+.provider-toolbar .inp { flex: 1; min-width: 0; }
+.provider-toolbar :is(.inp, .btn) { height: var(--fox-action-height, var(--fox-control-md)); }
+.provider-directory h3 { margin: 10px 0 8px; font-size: 13px; font-weight: 600; }
+.provider-directory section { padding: 0 0 16px; }
+.provider-directory section + section { border-top: 1px solid var(--hairline); padding-top: 6px; }
+.provider-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.provider-option { display: grid; grid-template-columns: var(--fox-control-xs) minmax(0, 1fr) 12px; align-items: center; gap: var(--fox-space-m); min-width: 0; height: var(--fox-control-lg); padding-inline: var(--fox-space-m); border: 1px solid var(--fox-border); border-radius: var(--fox-radius-control); background: var(--fox-card); text-align: start; }
+.provider-option:hover { background: var(--fox-hover); border-color: var(--fox-border-strong); }
+.provider-option .mk { width: var(--fox-control-xs); height: var(--fox-control-xs); }
+.provider-option .i:last-child { width: 12px; margin-left: auto; color: var(--fox-muted); }
+.provider-name { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.model-service-open { display: block; max-width: 100%; border: 0; padding: 0; font-weight: 500; text-align: start; background: transparent; overflow-wrap: anywhere; }
+.model-service-open::after { content: ''; position: absolute; inset: 0; border-radius: var(--fox-radius-card); }
+.model-service-open:focus-visible::after { outline: 2px solid var(--fox-accent); outline-offset: 1px; }
+.irow:has(.model-service-open:hover) { background: var(--fox-hover); }
+.provider-note { margin: 0 0 var(--fox-space-xl); }
+.provider-empty { padding-block: 22px; color: var(--fox-muted); }
+.model-options summary { cursor: pointer; width: fit-content; color: var(--foreground); font-weight: 500; }
+.model-options[open] summary { margin-bottom: 12px; }
+.model-baseline { display: grid; gap: 3px; margin-top: 14px; }
+.model-baseline small { font-size: 12px; color: var(--muted-foreground); }
+.model-baseline code { overflow-wrap: anywhere; }
+.model-key-row { display: flex; gap: 8px; align-items: center; }
+.model-key-row input { flex: 1; }
+.model-key-row .btn { height: var(--fox-action-height); }
+[data-sheet="model"] label.fld:focus-within { outline: none; }
+.sh-foot .model-return { margin-right: auto; padding-inline: 6px; }
+.drawer-feedback { flex: 0 0 100%; min-width: 0; margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted-foreground); overflow-wrap: anywhere; }
+.drawer-feedback:empty { display: none; }
+.drawer-feedback.error { color: var(--destructive); }
+.drawer-feedback.success { color: color-mix(in oklch, var(--success) 75%, var(--foreground)); }
+.sheet .tools b { overflow-wrap: anywhere; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.source-service { margin-top: 18px; }
+[hidden] { display: none !important; }
+.developer-details { padding: 4px 18px 18px; line-height: 2; }
+.directory-preview { display: grid; gap: var(--fox-space-l); padding-block: var(--fox-space-xl); }
+.directory-preview .directory-head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--fox-space-m) var(--fox-space-l); }
+.directory-head .st { flex: 1 1 180px; }
+.directory-preview .btn { height: var(--fox-action-height); }
+.directory-path { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: var(--fox-space-m); padding: var(--fox-space-m) var(--fox-space-l); border: 1px solid var(--hairline); border-radius: var(--fox-radius-control); background: var(--muted); line-height: 1.6; }
+.directory-path > .i { color: var(--muted-foreground); margin-top: var(--fox-space-micro, 2px); }
+.directory-contents { display: flex; flex-wrap: wrap; gap: var(--fox-space-xs) var(--fox-space-xl); margin: 0; padding: 0; list-style: none; color: var(--muted-foreground); font-size: 12px; }
+.directory-contents li { display: inline-flex; flex-wrap: wrap; gap: var(--fox-space-m); align-items: baseline; }
+.directory-contents code { color: var(--foreground); }
+.root-path { overflow-wrap: anywhere; }
+.grp details { padding: 14px 0; }
+.grp summary { cursor: pointer; font-weight: 500; }
+.search-services { min-width: 0; margin: 0; padding: 0; border: 0; }
+.search-services legend { margin: 0 0 8px; padding: 0; font-weight: 600; }
+.search-options { display: grid; border: 1px solid var(--fox-border); border-radius: var(--fox-radius-card); background: var(--fox-card); }
+.search-option { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; min-height: 54px; padding: 8px 12px; cursor: pointer; }
+.search-option + .search-option { border-top: 1px solid var(--hairline); }
+.search-option:first-child { border-radius: var(--fox-radius-card) var(--fox-radius-card) 0 0; }
+.search-option:last-child { border-radius: 0 0 var(--fox-radius-card) var(--fox-radius-card); }
+.search-option:hover { background: var(--fox-hover); }
+.search-option:has(input:checked) { background: color-mix(in oklch, var(--fox-accent-soft) 52%, var(--fox-card)); }
+.search-option .mk { width: 28px; height: 28px; }
+.search-option b { font-size: 13px; line-height: 1.4; }
+.search-option small { display: block; margin-top: 2px; color: var(--muted-foreground); font-size: 12px; line-height: 1.5; }
+.search-option input { width: 16px; height: 16px; margin: 0; accent-color: var(--primary); cursor: inherit; }
+.search-fields { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--hairline); }
+.search-fields .fld > span { font-weight: 500; }
+.search-fields input { min-height: 34px; }
+.backup-file { width: 1px; height: 1px; opacity: 0; position: absolute; }
+label:focus-within { outline: 2px solid var(--fox-accent); }
+.prototype-bar { display: flex; justify-content: space-between; gap: 4px 12px; font-size: 12px; color: var(--muted-foreground); }
+.prototype-bar a, .frame-head a { color: var(--foreground); }
+.prototype-notice { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); pointer-events: none; background: var(--foreground); color: var(--background); border-radius: 8px; padding: 12px 16px; z-index: 100; width: max-content; max-width: calc(100vw - 32px); box-shadow: var(--shadow-md); font-size: 13px; }
+.frame-head { flex-wrap: wrap; }
+.frame-head h2 { white-space: normal; }
+.frame-head a { margin-left: auto; font-size: 12px; }
+
+@container settings (max-width: 560px) {
+  .sp { --sp-gutter: 16px; padding-block: 26px 40px; }
+  .sp-head { flex-wrap: wrap; gap: 12px; margin-bottom: 24px; }
+  .srow { flex-wrap: wrap; gap: 8px 16px; }
+  .srow .st { flex: 1 1 180px; }
+  .ir:has(.stat + .tail, .tail select) { display: grid; grid-template-columns: var(--sp-mark) minmax(0, 1fr); gap: 6px 12px; }
+  .ir:has(.stat + .tail, .tail select) > .mk { align-self: start; }
+  .ir-meta { grid-column: 2; }
+  .banner { flex-wrap: wrap; }
+  .banner .tx { flex: 1 1 160px; }
+}
+@container drawer (max-width: 380px) {
+  .sh-head, .sh-body, .sh-foot { --sheet-gutter: 14px; }
+  .sh-head { gap: var(--fox-space-m); padding-block: var(--fox-space-xl); }
+  .sh-head > .mk { width: 32px; height: 32px; }
+  .sh-body .ir { display: grid; grid-template-columns: var(--sp-mark) minmax(0, 1fr); gap: 6px 12px; }
+  .sh-body .ir-meta { grid-column: 2; }
+  .search-option { gap: 8px; min-height: 50px; padding: 6px 8px; }
+}
+@media (max-width: 1050px) {
+  :root { --fox-sidebar-width: 180px; }
+  .doc, body.single .doc { padding: 16px; }
+}
+@media (max-width: 620px) {
+  .doc, body.single .doc { padding: 10px; }
+  .app { flex-direction: column; }
+  .side { width: 100%; padding: 8px 12px; }
+  .side > :not(.compact-nav), .titlebar .tb-left span { display: none; }
+  .compact-nav { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 12px; font-weight: 500; }
+  .compact-nav .sel { width: 100%; max-width: none; min-height: 40px; }
+  .card { position: static; margin: 0 4px 4px; }
+  .sp-head h1 { font-size: 22px; }
+  .sheet { border-radius: var(--fox-radius-large); }
+}
+@container drawer (max-width: 310px) {
+  .sh-body .fld-row { grid-template-columns: minmax(0, 1fr); }
+  .provider-toolbar { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: start; }
+  .provider-option { grid-template-columns: var(--fox-control-xs) minmax(0, 1fr); padding-inline: var(--fox-space-s); gap: var(--fox-space-s); }
+  .provider-option .i:last-child { display: none; }
+  .sh-foot .model-return { flex-basis: 100%; justify-content: flex-start; }
+}
+</style>
+</head>
+<body>
+<div class="doc" id="doc"></div>
+<script>
+const ROOT = '../../../apps/desktop/public'
+const ASSET = `${ROOT}/avatars`
+const P = (n) => `${ROOT}/providers/${n}.svg`
+const ME = `${ASSET}/defaults/fox_big_smile.png`
+const FOX = `${ASSET}/fox-assistant.png`
+const glyph = (name) => window.FOX_ICONS[name] || ''
+const I = (name, cls = '') => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${glyph(name)}</svg>`
+const escapeHtml = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char])
+
+/* ---------- Primitives ---------- */
+const pill = (t, tone = '') => `<span class="pill ${tone}">${t}</span>`
+const dot = (tone) => `<i class="dot ${tone}"></i>`
+const stat = (tone, label, meta = '') => `<span class="stat">${dot(tone)}<b>${label}</b>${meta ? `<span class="sep">·</span><span>${meta}</span>` : ''}</span>`
+const sw = (on, dis = false) => `<span class="sw ${on ? 'on' : ''} ${dis ? 'dis' : ''}"><i></i></span>`
+const sel = (v, w = 160, o = {}) => `<span class="sel ${o.sm ? 'sm' : ''} ${o.open ? 'open' : ''}" style="width:${typeof w === 'number' ? w + 'px' : w}">${o.img ? `<img src="${o.img}" alt="">` : o.icon ? I(o.icon) : ''}<span class="v">${v}</span>${I('chevron-down', 'cv')}</span>`
+const seg = (items, on, cls = '') => `<span class="seg ${cls}">${items.map((t, i) => `<span class="${i === on ? 'on' : ''}">${t}</span>`).join('')}</span>`
+const btn = (t, { kind = 'outline', icon = '', trail = '', cls = '', action = '', disabled = false } = {}) => {
+  const content = `${icon ? I(icon, icon === 'loader-circle' ? 'spin' : '') : ''}${t}${trail ? I(trail) : ''}`
+  return action
+    ? `<button type="button" class="btn ${kind} ${cls}" data-action="${action}" ${disabled ? 'disabled' : ''}>${content}</button>`
+    : `<span class="btn ${kind} ${cls}">${content}</span>`
+}
+const ibtn = (icon, cls = '') => `<span class="btn ghost icon ${cls}">${I(icon)}</span>`
+const inp = (v, { ph = '', cls = '', pre = '', suf = '', w = '' } = {}) => `<span class="inp ${cls}" ${w ? `style="width:${w}px"` : ''}>${pre ? I(pre) : ''}${v ? `<span class="v">${v}</span>` : `<span class="ph">${ph}</span>`}${suf}</span>`
+const ta = (v, { ph = '', cls = '', h = 76 } = {}) => `<div class="ta ${cls}" style="min-height:${h}px">${v || `<span class="ph">${ph}</span>`}</div>`
+const fld = (label, control, help = '') => `<div class="fld"><label>${label}</label>${control}${help ? `<small>${help}</small>` : ''}</div>`
+const mark = (m = {}) => {
+  const size = m.size ? ` ${m.size}` : ''
+  if (m.img) return `<span class="mk${m.av ? ' av' : ''}${size}"><img src="${m.img}" alt=""></span>`
+  if (m.letter) return `<span class="mk lt${size}">${m.letter}</span>`
+  return `<span class="mk${size}">${I(m.icon || 'server')}</span>`
+}
+
+/* ---------- Page structure ---------- */
+const phead = (title, desc, acts = '') => `<header class="sp-head"><div><h1>${title}</h1><p>${desc}</p></div>${acts ? `<div class="acts">${acts}</div>` : ''}</header>`
+const group = (title, body, { aside = '', cls = '' } = {}) => `<section class="grp ${cls}"><div class="grp-head"><h2>${title}</h2>${aside ? `<div class="grp-aside">${aside}</div>` : ''}</div><div class="grp-body">${body}</div></section>`
+const srow = (title, desc, ctrl) => `<div class="srow"><div class="st"><b>${title}</b>${desc ? `<small>${desc}</small>` : ''}</div>${ctrl !== undefined ? `<div class="sc">${ctrl}</div>` : ''}</div>`
+const irow = ({ m, name, pills = '', desc = '', descCls = '', status = '', tail = '', cls = '', below = '', extra = '' }) => `<div class="irow ${cls}">
+  <div class="ir">${mark(m)}<span class="it"><span class="in"><b>${name}</b>${pills}</span>${desc ? `<small class="${descCls}">${desc}</small>` : ''}</span>${status || tail ? `<span class="ir-meta">${status}${tail ? `<span class="tail">${tail}</span>` : ''}</span>` : ''}</div>
+  ${below ? `<div class="below">${below}</div>` : ''}${extra}</div>`
+
+/* ---------- Window + settings sidebar ---------- */
+const NAV = [
+  ['偏好', [['general', 'sliders-horizontal', '通用'], ['conv', 'message-circle-more', '对话'], ['companions', 'users', '伙伴']]],
+  ['能力', [['models', 'boxes', '模型'], ['agent', 'bot', 'Agent'], ['plugins', 'blocks', '插件'], ['library', 'library-big', '资料库']]],
+  ['系统', [['security', 'shield-check', '权限与安全'], ['data', 'database', '数据与关于']]],
+]
+const settingsSide = (active) => `<aside class="side">
+  <div class="mode-row"><span class="back">${I('arrow-left')}返回</span></div>
+  <div class="scroll">${NAV.map(([label, items]) => `<section class="sgroup"><span class="sglabel">${label}</span>${items.map(([k, ic, l]) => `<a href="?frame=${k}" class="row ${k === active ? 'on' : ''}" ${k === active ? 'aria-current="page"' : ''}>${I(ic)}<span class="lbl">${l}</span></a>`).join('')}</section>`).join('')}</div>
+  <label class="compact-nav">设置页面
+    <select name="settings-page" class="sel">${NAV.map(([label, items]) => `<optgroup label="${label}">${items.map(([k, , title]) => `<option value="${k}" ${k === active ? 'selected' : ''}>${title}</option>`).join('')}</optgroup>`).join('')}</select>
+  </label>
+  <div class="foot"><img src="${ME}" alt=""><b>Hury</b>${I('chevron-down', 'chev')}<div class="grow"></div><span class="ab">${I('sun')}</span><span class="ab">${I('settings')}</span></div>
+</aside>`
+const titlebar = () => `<header class="titlebar">
+  <div class="tb-left"><img src="${FOX}" alt=""><span>${I('menu')}</span><span>${I('panel-left')}</span><span>${I('arrow-left')}</span><span class="off">${I('arrow-right')}</span></div>
+  <div class="wctl"><span>${I('minus')}</span><span>${I('square')}</span><span>${I('x')}</span></div>
+</header>`
+const win = (active, page, { overlay = '', h = 800 } = {}) => `<div class="win" style="--frame-height:${h}px">${titlebar()}<div class="app">${settingsSide(active)}<div class="card"><main class="spage" tabindex="-1"><div class="sp">${page}</div></main>${overlay}</div></div></div>`
+const sheet = ({ m, title, pills = '', desc = '', body, foot, kind = '' }) => `<div class="scrim"></div><aside class="sheet" data-sheet="${kind}">
+  <header class="sh-head">${mark({ ...m, size: 'lg' })}<div class="tt"><div class="tn"><span>${title}</span>${pills}</div>${desc ? `<small>${desc}</small>` : ''}</div><span class="x">${I('x')}</span></header>
+  <div class="sh-body">${body}</div>
+  <footer class="sh-foot ${kind ? 'review-foot' : ''}">${foot}</footer>
+</aside>`
+const sec = (title, body, aside = '') => `<section class="sh-sec">${title ? `<div class="sh-sec-h"><h3>${title}</h3>${aside}</div>` : ''}${body}</section>`
+const feedback = (message, tone = '') => `<p class="drawer-feedback ${tone}" role="status">${message}</p>`
+
+/* ---------- Data ---------- */
+const demoKey = 'fox-settings-prototype-v2'
+let demo = { services: [], connectors: {}, projects: {}, agents: {}, companionRoot: 'D:\\Fox\\companions', search: { provider: 'tavily', endpoint: '', keys: ['tavily'] } }
+try {
+  demo = { ...demo, ...JSON.parse(sessionStorage.getItem(demoKey)) }
+} catch {}
+function saveDemo() {
+  try { sessionStorage.setItem(demoKey, JSON.stringify(demo)) } catch {}
+}
+
+const AG = {
+  fox: { name: 'Fox', m: { img: FOX, av: true } },
+  pi: { name: 'Pi', m: { letter: 'π' } },
+  codex: { name: 'Codex', m: { img: P('openai') } },
+  deepseek: { name: 'DeepSeek（dsh）', m: { img: P('deepseek') } },
+}
+const SEED_SERVICES = [
+  { id: 'deepseek', def: true, hasKey: true, status: stat('ok', '已连接') },
+  { id: 'openrouter', hasKey: true, status: stat('ok', '已连接') },
+  { id: 'moonshot', hasKey: false, status: stat('empty', '未检测') },
+  { id: 'alibaba', hasKey: true, status: stat('err', '不可用') },
+]
+function modelServices() {
+  const saved = new Map(demo.services.map(service => [service.id, service]))
+  const seeds = SEED_SERVICES.map(seed => {
+    const [, name, endpoint, models] = PRESETS.find(entry => entry[0] === seed.id)
+    return { name, endpoint, models, host: new URL(endpoint).host, protocol: 'openai-completions', ...seed, ...saved.get(seed.id) }
+  })
+  return [...seeds, ...demo.services.filter(service => !SEED_SERVICES.some(seed => seed.id === service.id))]
+}
+const modelOptions = () => modelServices().flatMap(service => service.models.map(model => `${service.name} · ${model}`))
+const modelServiceList = () => {
+  const services = modelServices()
+  return group('模型服务', services.map(service => irow({
+    m: providerMark(service.id),
+    name: `<button type="button" class="model-service-open" data-action="edit-model" data-service="${service.id}" aria-label="配置 ${escapeHtml(service.name)}">${escapeHtml(service.name)}</button>`,
+    pills: service.def ? pill('默认') : '',
+    desc: `${service.models.length} 个模型 · ${escapeHtml(service.host)}`,
+    status: service.status || stat(service.hasKey ? 'ok' : 'empty', service.hasKey ? '已配置' : '未检测'),
+    tail: I('chevron-right', 'chev'),
+  })).join(''), { aside: `${services.length} 个服务`, cls: 'model-services' })
+}
+const modelsPage = () => `
+  ${phead('模型', '管理模型服务，设置 Fox 的默认模型。', btn('添加模型', { kind: 'primary lg', icon: 'plus', action: 'add-provider' }))}
+  ${group('默认', srow('默认模型', 'Fox 通用助手和未单独指定模型的专家使用；外部 Agent 在 Agent 页单独设置。', choose('default-model', modelOptions(), 0)))}
+  ${modelServiceList()}
+  `
+
+/* ---------- Add service sheet ---------- */
+const PRESETS = [
+  ['openai', 'OpenAI', 'https://api.openai.com/v1', ['gpt-4o-mini', 'gpt-4o']],
+  ['anthropic', 'Anthropic', 'https://api.anthropic.com', ['claude-sonnet-4-5']],
+  ['deepseek', 'DeepSeek 官方', 'https://api.deepseek.com', ['deepseek-chat', 'deepseek-reasoner']],
+  ['alibaba', 'DashScope', 'https://dashscope.aliyuncs.com/compatible-mode/v1', ['qwen-plus', 'qwen-turbo']],
+  ['zhipu', 'Zhipu', 'https://open.bigmodel.cn/api/paas/v4', ['glm-4-flash']],
+  ['moonshot', 'Moonshot', 'https://api.moonshot.cn/v1', ['moonshot-v1-8k']],
+  ['minimax', 'MiniMax', 'https://api.minimax.io/v1', ['MiniMax-M2']],
+  ['xiaomi', 'XiaomiMiMo', 'https://api.xiaomimimo.com/v1', ['mimo-v2-flash']],
+  ['openrouter', 'OpenRouter', 'https://openrouter.ai/api/v1', ['openai/gpt-4o-mini']],
+  ['siliconflow', 'SiliconFlow', 'https://api.siliconflow.cn/v1', ['Qwen/Qwen2.5-7B-Instruct']],
+  ['modelscope', 'ModelScope', 'https://api-inference.modelscope.cn/v1', ['Qwen/Qwen2.5-7B-Instruct']],
+  ['alibaba-cloud', 'Aliyun Coding', 'https://coding.dashscope.aliyuncs.com/v1', ['qwen3-coder-plus']],
+  ['alibaba-coding-plan', 'Aliyun Coding Plan (International)', 'https://coding-intl.dashscope.aliyuncs.com/v1', ['qwen3-coder-plus']],
+  ['zhipu-coding-plan', 'Zhipu Coding Plan (BigModel)', 'https://open.bigmodel.cn/api/coding/paas/v4', ['glm-4-flash']],
+  ['moonshot-intl', 'Moonshot (International)', 'https://api.moonshot.ai/v1', ['moonshot-v1-8k']],
+]
+const MODEL_PROTOCOLS = {
+  'openai-completions': 'OpenAI Chat Completions',
+  'openai-responses': 'OpenAI Responses',
+  'anthropic-messages': 'Anthropic Messages',
+}
+const PROVIDER_VARIANTS = {
+  'alibaba-coding-plan': { label: 'Aliyun · 国际', icon: 'alibaba-cloud', note: '使用国际站 Coding Plan 的 Key。' },
+  'zhipu-coding-plan': { label: 'Zhipu · Coding', icon: 'zhipu', note: '使用 BigModel Coding Plan 的 Key。' },
+  'moonshot-intl': { label: 'Moonshot · 国际', icon: 'moonshot', note: '使用 Moonshot 国际站的 Key。' },
+}
+const providerMark = id => id === 'anthropic' ? { letter: 'A' }
+  : PRESETS.some(entry => entry[0] === id) ? { img: P(PROVIDER_VARIANTS[id]?.icon || id) } : { icon: 'server' }
+function providerDirectory(filter) {
+  const query = filter.trim().toLowerCase()
+  const groups = [['模型厂商', PRESETS.slice(0, 8)], ['模型平台', PRESETS.slice(8, 12)], ['套餐与地区', PRESETS.slice(12)]]
+  return groups.map(([title, providers]) => {
+    const matches = providers.filter(([id, name, endpoint]) => [id, name, endpoint].some(value => value.toLowerCase().includes(query)) || (id === 'moonshot' && 'kimi'.includes(query)))
+    if (!matches.length) return ''
+    return `<section><h3>${title}</h3><div class="provider-grid">${matches.map(([id, name]) => `
+      <button type="button" class="provider-option" data-action="pick-provider" data-provider="${id}" title="${escapeHtml(name)}" aria-label="${escapeHtml(name)}">
+        ${mark(providerMark(id))}<span class="provider-name">${PROVIDER_VARIANTS[id]?.label || name}</span>${I('chevron-right')}
+      </button>`).join('')}</div></section>`
+  }).join('') || '<p class="provider-empty">没有找到匹配的供应商。可以试试名称、域名，或选择自定义。</p>'
+}
+const addSheet = (filter = '') => sheet({
+  kind: 'provider-catalog', m: { icon: 'plus' }, title: '添加模型', desc: '选择供应商，或连接自己的 API 地址。',
+  body: `<div class="provider-toolbar">
+    <input class="inp" type="search" name="provider-filter" aria-label="搜索供应商" placeholder="搜索名称或域名" value="${escapeHtml(filter)}" />
+    ${btn('自定义供应商', { icon: 'plus', action: 'custom-provider' })}
+  </div><div class="provider-directory" aria-live="polite">${providerDirectory(filter)}</div>`,
+  foot: btn('取消'),
+})
+function providerForm(id, filter = '', service) {
+  const preset = PRESETS.find(entry => entry[0] === id)
+  const fullForm = Boolean(service) || !preset
+  const startProtocol = service?.protocol || (id === 'anthropic' ? 'anthropic-messages' : 'openai-completions')
+  const urlField = (name, label, placeholder, value = '') => `<label class="fld"><span>${label}</span><input class="inp" type="url" name="${name}" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(value)}" /></label>`
+  const keyField = `<div class="fld"><span aria-hidden="true">API Key</span><div class="model-key-row"><input class="inp mono" type="password" name="model-key" aria-label="API Key" autocomplete="off" placeholder="${service?.hasKey ? '已配置，留空保留' : '例如 demo-key'}" />${btn('显示', { action: 'toggle-model-key' })}</div></div>`
+  const note = PROVIDER_VARIANTS[id]?.note
+  return sheet({
+    kind: 'model', m: providerMark(id), title: service ? '编辑模型服务' : preset?.[1] || '自定义供应商',
+    desc: service ? escapeHtml(service.name) : '',
+    body: `<div data-model-provider="${id}" data-catalog-filter="${escapeHtml(filter)}" ${service ? 'data-model-editing' : ''}>
+      ${sec(service ? '连接信息' : '', `${note ? `<p class="hint provider-note">${I('info')}${note}</p>` : ''}${fullForm ? `
+        <label class="fld"><span>服务名称</span><input class="inp" name="model-name" placeholder="例如 团队模型网关" value="${escapeHtml(service?.name || '')}" /></label>
+        <label class="fld"><span>API 协议</span><select class="sel" name="model-protocol">${Object.entries(MODEL_PROTOCOLS).map(([value, label]) => `<option value="${value}" ${value === startProtocol ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+        ${urlField('model-endpoint', 'API 地址', 'https://api.example.com/v1', service?.endpoint)}
+        ${keyField}
+        <label class="fld"><span>模型 ID</span><input class="inp" name="model-id" placeholder="多个 ID 用逗号分隔" value="${escapeHtml(service?.models.join(', ') || '')}" /></label>`
+        : `${keyField}<div class="model-baseline"><small>默认端点 · ${MODEL_PROTOCOLS[startProtocol]}</small><code>${preset[2]}</code></div>`}`)}
+      ${sec('', fullForm ? `<details class="model-options"><summary>更多端点</summary>
+        ${Object.entries(MODEL_PROTOCOLS).map(([value, label]) => `<div class="fld" data-alt-protocol="${value}" ${value === startProtocol ? 'hidden' : ''}>${urlField('extra-' + value, label + ' 地址', 'https://api.example.com', service?.endpoints?.[value])}</div>`).join('')}
+        ${urlField('model-list-url', '模型列表地址（选填）', 'https://api.example.com/v1/models', service?.endpoints?.['model-list-url'])}
+      </details>` : `<details class="model-options"><summary>高级</summary>${urlField('model-endpoint', '覆盖默认端点（选填）', preset[2])}</details>`)}
+      <div class="sh-sec" data-model-results hidden><div class="sh-sec-h"><h3>示例模型</h3></div><div class="tools"></div></div>
+    </div>`,
+    foot: `${feedback('')}${service ? btn('取消') : btn('返回列表', { kind: 'ghost', cls: 'model-return', action: 'back-to-providers' })}${btn('检查连接', { icon: 'zap', action: 'check-model' })}${btn(service ? '保存' : '添加', { kind: 'primary', action: 'save-model', disabled: !service })}`,
+  })
+}
+const connectSheet = (key = 'codex', failed = false) => {
+  const config = (!failed && demo.agents[key]) || { enabled: key !== 'deepseek', checked: key === 'pi', values: {} }
+  const enabled = failed || config.enabled
+  const checked = !failed && config.checked
+  const local = config.values['agent-source'] === '使用这台电脑上的登录'
+  const options = modelOptions()
+  const permissions = ['只读', '操作前询问', '目录内自动']
+  return sheet({
+    kind: 'agent', m: AG[key].m, title: `配置 ${AG[key].name}`, desc: '启用前请完成连接检查。',
+    body: `<div data-agent-settings="${key}" data-checked="${checked}" data-failed="${failed}">
+      ${sec('', srow('启用 Agent', '启用后可用于新对话。', sw(enabled)))}
+      ${sec('模型来源', `${choose('agent-source', ['使用我的模型服务', '使用这台电脑上的登录'], Number(local))}
+        <div class="source-service" ${local ? 'hidden' : ''}>${fld('使用的模型', choose('agent-model', options, Math.max(0, options.indexOf(config.values['agent-model']))))}</div>
+        <p class="source-local hint" ${local ? '' : 'hidden'}>使用本机登录与 Agent 的模型配置。</p>`)}
+      ${sec('默认权限', `${choose('agent-permission', permissions, Math.max(0, permissions.indexOf(config.values['agent-permission'] || '操作前询问')))}<p class="hint">仅影响新对话。目录内自动仍遵守全局禁止规则。</p>`)}
+    </div>`,
+    foot: `${feedback(failed ? '示例 401：模型服务的 Key 无效。请更新 Key，或切换模型来源后重试。' : checked ? '示例检查通过 · 连接和试跑正常。' : enabled ? '尚未检查。检查通过后可保存。' : '停用状态可以直接保存。', failed ? 'error' : checked ? 'success' : '')}
+      <span class="grow"></span>${btn('取消')}${btn(failed ? '重试检查' : '检查连接', { icon: 'zap', action: 'check-agent' })}${btn('保存 Agent', { kind: 'primary', action: 'save-agent', disabled: enabled && !checked })}`,
+  })
+}
+
+/* ---------- Search ---------- */
+const SEARCH = [
+  { k: 'auto', m: { icon: 'globe' }, name: '免 Key 搜索', desc: 'DuckDuckGo 被拦截或无结果时改用 Yahoo' },
+  { k: 'tavily', m: { letter: 'T' }, name: 'Tavily', desc: '为 AI 优化的搜索 · 需 API Key' },
+  { k: 'brave', m: { letter: 'B' }, name: 'Brave Search', desc: '使用独立索引 · 需 API Key' },
+  { k: 'exa', m: { letter: 'E' }, name: 'Exa', desc: '按语义检索网页 · 需 API Key' },
+  { k: 'searxng', m: { letter: 'S' }, name: 'SearXNG', desc: '使用自建搜索实例 · 需实例地址' },
+]
+
+/* ---------- Agent ---------- */
+const PROJECTS = [
+  { id: 'fox', name: 'Fox', path: 'D:\\python\\projects\\Fox\\Fox', mode: '询问', branch: 'main', conversations: 38, files: 112, recent: '整理伙伴协作状态', rules: ['npm run', 'git status'] },
+  { id: 'proposal', name: '2026 项目申报', path: 'D:\\work\\申报材料', mode: '自动', conversations: 6, files: 14, recent: '整理 2026 项目申报材料', rules: [] },
+  { id: 'website', name: '旧官网', path: 'E:\\sites\\old-site', mode: '只读', broken: true, conversations: 3, files: 0, recent: '检查旧站资源', rules: [] },
+]
+const PROJECT_MODES = ['只读', '询问', '自动']
+const projectMode = project => demo.projects[project.id] || project.mode
+
+const agentStatus = key => {
+  const config = demo.agents[key]
+  const enabled = config?.enabled ?? key === 'pi'
+  return enabled ? stat('ok', '已就绪') : stat('empty', config ? '已停用' : key === 'codex' ? '待连接' : '未启用')
+}
+const agentSummary = key => {
+  const values = demo.agents[key]?.values
+  if (!values) return `${{ pi: 'DeepSeek 官方 · deepseek-chat', codex: '选择模型服务或本机登录', deepseek: '本机登录' }[key]} · 默认权限：询问`
+  const source = values['agent-source'] === '使用我的模型服务' ? escapeHtml(values['agent-model']) : '本机登录'
+  return `${source} · 默认权限：${values['agent-permission']}`
+}
+const agentKeys = ['pi', 'codex', 'deepseek']
+const newAgentOptions = () => ['Fox', ...agentKeys.filter(key => demo.agents[key]?.enabled ?? key === 'pi').map(key => AG[key].name)]
+const agentPage = () => `
+  ${phead('Agent', '选择新对话使用的运行引擎，配置各自的工作方式。')}
+  ${group('新对话', srow('新会话使用的 Agent', '只列出已启用且可使用的 Agent；现有对话保持原设置。', choose('new-agent', newAgentOptions())))}
+  ${group('Fox 通用助手', irow({ m: { img: FOX, av: true }, name: 'Fox 通用助手', desc: '名称、介绍、工作要求和开场建议', tail: btn('编辑助手') }))}
+  ${group('外部 Agent', agentKeys.map(k => `<div data-agent="${k}">${irow({ m: AG[k].m, name: AG[k].name, desc: agentSummary(k), status: agentStatus(k), tail: btn('配置') })}</div>`).join(''))}
+  <p class="hint">专家的内容、技能和资料库在专家中心管理。</p>`
+
+const securityPage = () => `
+  ${phead('权限与安全', '管理项目权限和跨 Agent 的工具规则。')}
+  ${group('项目权限', srow('新项目权限', '只影响之后加入的新项目；建议「询问」，写入或运行命令前先确认', seg(PROJECT_MODES, 1))
+    + PROJECTS.map(p => irow({
+      m: { icon: 'folder-open' }, name: p.name, pills: p.broken ? pill('路径失效', 'err') : '', desc: p.path,
+      tail: `<select class="sel sm" data-project-mode="${p.id}" aria-label="${p.name}执行方式">${PROJECT_MODES.map(mode => `<option ${mode === projectMode(p) ? 'selected' : ''}>${mode}</option>`).join('')}</select>
+        <button type="button" class="btn ghost icon" data-project="${p.id}" aria-label="查看${p.name}权限">${I('ellipsis')}</button>`,
+    })).join(''), { aside: btn('刷新', { kind: 'ghost', icon: 'rotate-ccw' }) })}
+  ${group('已归档项目', srow('年会物料', 'D:\\work\\2026 年会', btn('取消归档', { icon: 'rotate-ccw' })), { aside: '1 个' })}
+  ${group('全局工具规则', srow('生命周期 Hook', '3 条，2 条启用。跨 Agent 的阻止、审批和附加说明规则。', btn('管理 Hook', { icon: 'shield-check' })))}
+  <p class="hint">Agent 的默认权限在 Agent 页设置；新伙伴的执行方式在伙伴页设置。自动执行不能绕过全局禁止规则。</p>`
+
+const projectSheet = (project = PROJECTS[0]) => sheet({
+  kind: 'project', m: { icon: 'folder-open' }, title: project.name,
+  pills: project.broken ? pill('路径失效', 'err') : project.branch ? pill(`${I('git-branch')}${project.branch}`, 'line') : '',
+  desc: project.path,
+  body: `${sec('执行方式', `<div data-project-settings="${project.id}">
+      ${choose('project-mode', PROJECT_MODES, PROJECT_MODES.indexOf(projectMode(project)))}
+      <p class="hint">只读模式禁止写入。自动执行仍遵守项目范围和全局禁止规则。</p></div>`)}
+    ${sec('命令规则', project.rules.length ? `<ul class="rules">
+      ${project.rules.map(rule => `<li><div><code>${rule}</code><small>总是允许</small></div>${btn('撤销', { kind: 'ghost' })}</li>`).join('')}
+      <li><div><code>git push</code><small>总是询问 · 内置规则</small></div></li></ul>` : '<p class="hint">此项目还没有单独保存的命令规则。</p>')}
+    ${sec('目录', `<dl class="facts">
+      <div><dt>目录状态</dt><dd>${project.broken ? '示例目录不可用' : project.branch ? `Git · ${project.branch}` : '可用'}</dd></div>
+      <div><dt>关联对话</dt><dd>${project.conversations}</dd></div><div><dt>生成文件</dt><dd>${project.files}</dd></div>
+      <div><dt>最近对话</dt><dd>${project.recent}</dd></div></dl>`)}
+    ${sec('', `<div class="disc">${I('chevron-right')}<span class="tx"><b>伙伴笔记授权</b><small>按伙伴设置它在这个项目里的笔记授权</small></span></div>`)}`,
+  foot: `${btn('归档项目', { kind: 'danger', icon: 'archive' })}${btn('打开目录', { icon: 'external-link', action: 'open-project', disabled: project.broken })}${btn('迁移目录', { icon: 'folder-open' })}<span class="grow"></span>${btn('取消')}${btn('保存权限', { kind: 'primary', action: 'save-project' })}`,
+})
+
+/* ---------- Plugins ---------- */
+const SKILLS = [
+  { name: 'docx', v: 'v1.2.0', desc: '读写 Word 文档，保留样式和修订', on: true },
+  { name: 'xlsx', v: 'v1.1.3', desc: '处理 Excel 表格、公式和图表', on: true },
+  { name: 'pdf', v: 'v0.9.0', desc: '提取 PDF 文本、表格和页面截图', on: true },
+  { name: 'meeting-minutes', v: 'v0.3.1', desc: '把录音转写整理成会议纪要', on: false },
+  { name: 'web-capture', bad: true, desc: 'SKILL.md 缺少 name 字段', on: false },
+]
+const CONNECTOR_TYPES = { stdio: 'stdio MCP', http: 'HTTP MCP', openapi: 'OpenAPI' }
+const CONNECTORS = [
+  { id: 'office', name: 'Fox Office', builtin: true, desc: '内置 CLI · fox-office', status: stat('ok', '可用', '18 个工具'), on: true },
+  { id: 'fs', name: 'Filesystem', type: 'stdio', command: 'npx.cmd', args: '-y\n@modelcontextprotocol/server-filesystem\nD:\\projects', status: stat('ok', '可用', '14 个工具'), on: true },
+  { id: 'gh', name: 'GitHub', type: 'http', endpoint: 'https://mcp.example.com/github', desc: '401 Unauthorized：请检查请求 Header', descCls: 'err', status: stat('err', '不可用'), on: true },
+  { id: 'pet', name: 'Pet API', type: 'openapi', endpoint: 'https://petstore.example.com/v3', on: false },
+]
+const connectorList = () => [
+  ...CONNECTORS.map(connector => demo.connectors[connector.id] || connector),
+  ...Object.values(demo.connectors).filter(connector => !CONNECTORS.some(seed => seed.id === connector.id)),
+]
+const connectorsGroup = () => {
+  const list = connectorList()
+  return group('连接器', list.map(connector => {
+    const address = connector.type === 'stdio' ? [connector.command, ...connector.args.split('\n')].filter(Boolean).join(' ') : connector.endpoint
+    return irow({
+      m: { icon: connector.builtin ? 'square-terminal' : 'cable' },
+      name: escapeHtml(connector.name), pills: connector.builtin ? pill('内置') : '',
+      desc: connector.desc || `${CONNECTOR_TYPES[connector.type]} · ${escapeHtml(address)}`, descCls: connector.descCls,
+      status: connector.on ? connector.status || stat('empty', '待检查') : stat('empty', '已停用'),
+      tail: `<span data-connector-toggle="${connector.id}">${sw(connector.on)}</span>` + (connector.builtin ? '' : `<button type="button" class="btn ghost icon" data-connector="${connector.id}" aria-label="配置 ${escapeHtml(connector.name)}">${I('ellipsis')}</button>`),
+    })
+  }).join(''), { aside: `${list.length} 个，${list.filter(connector => connector.on).length} 个已启用`, cls: 'connector-services' })
+}
+const pluginsPage = () => `
+  ${phead('插件', '配置内置工具，管理技能、连接器和已安装的工具插件。', btn('添加连接器', { kind: 'primary lg', icon: 'plus', action: 'add-connector' }))}
+  ${group('内置工具', irow({ m: { icon: 'globe' }, name: '网页搜索', desc: '用于 Fox 通用助手和专家；外部 Agent 使用各自的搜索能力。', status: stat('ok', SEARCH.find(provider => provider.k === demo.search.provider).name), tail: btn('配置搜索', { cls: 'configure-search' }) }))}
+  ${group('技能', SKILLS.map(s => irow({ m: { icon: 'puzzle' }, name: s.name, pills: s.bad ? pill('校验失败', 'err') : pill(s.v), desc: s.desc, descCls: s.bad ? 'err' : '', tail: sw(s.on, s.bad) })).join(''), { aside: `<span>5 个，3 个已启用</span>${btn('重新扫描', { kind: 'ghost', icon: 'refresh-cw' })}` })}
+  ${connectorsGroup()}
+  ${group('已安装的工具插件', srow('工具插件', '查看已安装工具插件的状态与兼容性', btn('插件中心', { kind: 'ghost', icon: 'wrench', trail: 'chevron-right' })))}`
+
+const connectorSheet = (connector = {}) => {
+  const { id = '', type = 'stdio', command = '', args = '', endpoint = '', on = true } = connector
+  return sheet({
+    kind: 'connector', m: { icon: 'cable' }, title: id ? escapeHtml(connector.name) : '添加连接器',
+    desc: '选择连接方式并填写示例配置。',
+    body: `${sec('', `<div data-connector-settings="${id}">
+      <label class="fld"><span>名称</span><input class="inp" name="connector-name" value="${escapeHtml(connector.name || '')}" placeholder="例如 团队资料" /></label>
+      <label class="fld"><span>类型</span><select class="sel" name="connector-type">
+        ${Object.entries(CONNECTOR_TYPES).map(([key, name]) => `<option value="${key}" ${key === type ? 'selected' : ''}>${name}</option>`).join('')}
+      </select></label>
+      <div class="source-service" data-connector-fields="stdio" ${type !== 'stdio' ? 'hidden' : ''}>
+        <label class="fld"><span>命令</span><input class="inp mono" name="connector-command" value="${escapeHtml(command)}" placeholder="例如 npx.cmd" /></label>
+        <label class="fld"><span>参数 · 每行一项</span><textarea class="ta mono" name="connector-args" rows="3">${escapeHtml(args)}</textarea></label>
+      </div>
+      <div class="source-service" data-connector-fields="remote" ${type === 'stdio' ? 'hidden' : ''}>
+        <label class="fld"><span data-connector-address>${type === 'openapi' ? 'OpenAPI 规范地址' : 'MCP 服务地址'}</span>
+          <input class="inp" type="url" name="connector-endpoint" value="${escapeHtml(endpoint)}" placeholder="https://example.com" />
+        </label>
+      </div>
+      ${srow('启用连接器', '', sw(on))}
+    </div>`)}
+    ${id === 'fs' && connector.status ? sec('工具', `<div class="tools">
+      <div><b>read_file</b><small>读取文件的完整内容</small></div>
+      <div><b>write_file</b><small>新建或覆盖文件</small></div>
+      <div><b>list_directory</b><small>列出目录里的文件和子目录</small></div>
+      <div><b>search_files</b><small>按文件名模式递归查找</small></div></div><p class="hint">上次示例检查 · 14 个工具</p>`) : ''}`,
+    foot: `${feedback('填写名称和连接地址或命令。')}<span class="grow"></span>${btn('取消')}${btn('保存连接器', { kind: 'primary', action: 'save-connector' })}`,
+  })
+}
+
+const HOOKS = [
+  { name: '高风险命令审批', desc: '工具调用前 · run_command, shell_* · 要求审批', act: pill('要求审批', 'warn'), on: true },
+  { name: '禁止删除系统目录', desc: '工具调用前 · delete_path · 阻止', act: pill('阻止', 'err'), on: true },
+  { name: '外部请求附加说明', desc: '工具调用后 · call_* · 附加说明', act: pill('附加说明'), on: false },
+]
+const hookSheet = () => sheet({
+  m: { icon: 'shield-check' }, title: '生命周期 Hook', desc: '匹配器支持精确名称、逗号分组和前后缀通配符，例如 call_*。',
+  body: `${sec('添加 Hook', `<div class="hook-form">
+      <div class="fld-row">${fld('名称', inp('外部写入审批', { cls: 'focus' }))}${fld('事件', sel('工具调用前', 200))}</div>
+      ${fld('匹配器', inp('write_*, http_post', { cls: 'mono' }))}
+      ${fld('动作', seg(['阻止', '要求审批', '附加说明'], 1, 'full'))}
+      ${fld('说明', ta('', { ph: '会展示在审批卡或模型上下文中', h: 56 }))}
+      <div class="acts">${btn('取消')}${btn('保存 Hook', { kind: 'primary' })}</div></div>`)}
+    ${sec('已添加', HOOKS.map((h) => irow({ m: { icon: 'shield' }, name: h.name, pills: h.act, desc: h.desc, tail: sw(h.on) + ibtn('ellipsis') })).join(''), '<small>3 条，2 条启用</small>')}`,
+  foot: `<span class="grow"></span>${btn('关闭')}`,
+})
+
+/* ---------- Library ---------- */
+const libraryPage = ({ broken = false } = {}) => `
+  ${phead('资料库', '配置本机存储与索引。使用本机资料库不需要连接远程服务。')}
+  ${broken ? `<div class="banner">${I('circle-alert')}<span class="tx"><b>存储位置不可写：E:\\FoxData\\knowledge</b><small>资料库暂时只读。选择一个可写的文件夹，或恢复默认位置。</small></span>${btn('修改存储位置')}</div>` : ''}
+  ${group('本机存储', srow('存储位置', `<code>${broken ? 'E:\\FoxData\\knowledge' : 'C:\\Users\\hury\\AppData\\Roaming\\Fox\\knowledge'}</code><br>${broken ? '<span style="color:var(--destructive)">目录不可写</span>' : '数据库 v12 · 目录可写'}`, btn('修改位置', { icon: 'folder-open' }))
+    + srow('向量模型', '本机检索使用的嵌入模型、完整性校验和向量后端', btn('管理', { kind: 'ghost strong', trail: 'chevron-right' }))
+    + srow('任务队列', '导入、解析和建索引任务的进度与失败记录', btn('查看', { kind: 'ghost strong', trail: 'chevron-right' })))}
+  <div class="grp-foot">${btn('管理本机资料库', { kind: 'ghost', trail: 'chevron-right' })}</div>
+  ${group('高级', `<details><summary>预览缓存</summary>${srow('文档预览缓存', '清理后按需重新生成，不删除原始文档。', btn('清理预览缓存'))}</details>`)}
+  ${group('远程资料库服务（可选）', broken
+    ? irow({ m: { icon: 'server' }, name: '本机资料库', desc: 'http://127.0.0.1:5050', status: stat('err', '不可用', '连接被拒绝'), tail: btn('测试') })
+    : irow({ m: { icon: 'server' }, name: '资料库服务', desc: 'http://127.0.0.1:5050 · 示例连接', status: stat('ok', '已连接', '24 ms'), tail: btn('测试') }), { aside: '可独立部署，也可连接团队服务' })}
+  ${group('远程账户', broken
+    ? srow('资料库账户', '登录后同步你有权访问的远程专家与资料库；Fox 与浏览器的登录态相互独立', btn('登录账户', { icon: 'log-in' }))
+    : irow({ m: { img: ME, av: true }, name: 'Hury', pills: pill('已登录', 'ok'), desc: 'u-10024 · 产品部 · 管理员' }))}`
+
+const choose = (name, values, selected = 0) => `<select class="sel" name="${name}" aria-label="${name}">${values.map((v, i) => `<option ${i === selected ? 'selected' : ''}>${escapeHtml(v)}</option>`).join('')}</select>`
+const edit = (name, value) => `<input class="inp" aria-label="${name}" name="${name}" value="${escapeHtml(value)}" />`
+const companionsPage = () => `
+  ${phead('伙伴', '设置新伙伴的工作默认值。已有伙伴的权限和文件位置保持不变。')}
+  ${group('工作目录', `<div class="directory-preview">
+    <div class="directory-head"><div class="st"><b>伙伴工作目录</b><small>每位伙伴有独立目录，工作文件和笔记分开保存。</small></div>${btn('选择总目录', { icon: 'folder-open' })}</div>
+    <div class="directory-path">${I('folder-open')}<code class="root-path">${escapeHtml(demo.companionRoot)}</code></div>
+    <ul class="directory-contents"><li><code>workspace/</code> 工作文件</li><li><code>notes/</code> 伙伴笔记</li></ul>
+  </div>`)}
+  ${group('新伙伴默认值', srow('默认执行方式', '只影响新建伙伴；目录内自动仍遵守授权范围和全局禁止规则。', choose('companion-permission', ['只读', '操作前询问', '目录内自动'], 1))
+    + srow('默认模型', '默认跟随模型页。选择「跟随默认设置」的伙伴会随此项更新。', choose('companion-model', ['跟随模型页', 'DeepSeek 官方 · deepseek-chat', 'DeepSeek 官方 · deepseek-reasoner']))
+    + srow('默认提醒方式', '选择「跟随默认设置」的伙伴会随此项更新。', choose('companion-notification', ['跟随全局通知', '仅在需要处理时提醒'])))}
+  <p class="hint">修改总目录只影响新建伙伴，不会搬迁已有文件。单个伙伴的设置仍在其资料页管理。</p>
+  <div class="grp-foot">${btn('保存伙伴默认值', { kind: 'primary' })}</div>`
+
+const generalPage = () => `
+  ${phead('通用', '本机个人资料、外观与通知。')}
+  ${group('本机个人资料', srow('显示名称', '仅用于这台电脑。远程资料库账户在资料库页登录。', edit('local-name', 'Hury')))}
+  ${group('外观', srow('主题', '此原型展示暖纸浅色主题。', '<span>暖纸 · 浅色</span>') + srow('文字大小', '', choose('font-size', ['小', '标准', '大'], 1)))}
+  ${group('通知', srow('桌面通知', '任务完成或需要处理时提醒。', sw(true)))}
+  <div class="grp-foot">${btn('保存偏好', { kind: 'primary' })}</div>`
+
+const conversationPage = () => `
+  ${phead('对话', '设置消息输入、过程显示与快捷键。')}
+  ${group('消息输入', srow('发送方式', '', choose('send-mode', ['Enter 发送', 'Ctrl + Enter 发送'])) + srow('拼写检查', '', sw(true)))}
+  ${group('消息显示', srow('过程详情', '控制工具调用与执行过程的显示方式。', choose('process-detail', ['默认收起', '默认展开'])))}
+  ${group('快捷键', srow('新建对话', '', '<kbd>Ctrl + N</kbd>') + srow('搜索对话', '', '<kbd>Ctrl + K</kbd>'))}
+  <div class="grp-foot">${btn('保存偏好', { kind: 'primary' })}</div>`
+
+const dataPage = () => `
+  ${phead('数据与关于', '查看使用情况，备份数据，排查问题。')}
+  ${group('使用情况', srow('对话、任务与 Token', '尚无使用记录。开始对话后在这里查看统计。', ''))}
+  ${group('数据管理', srow('备份数据', '将本机数据导出为 .foxbackup 文件。', btn('创建备份'))
+    + srow('恢复数据', '选择备份文件后，先查看恢复范围。', '<label class="btn outline">选择备份文件<input type="file" accept=".foxbackup" class="backup-file" /></label>')
+    + srow('清理数据', '先选择清理范围，再确认操作。', btn('选择清理范围'))
+    + srow('删除伙伴后保留的工作目录', '招聘助理 · D:\\Fox\\companions\\recruiting', btn('查看保留目录')))}
+  ${group('诊断', srow('数据检查', '检查未关联到对话的任务记录，说明可能影响和处理方式。', btn('运行诊断'))
+    + srow('诊断资料', '用于反馈问题。导出前可查看内容。', btn('复制摘要') + btn('导出诊断包')))}
+  ${group('关于', srow('Fox', '版本 0.1.0 · 原型示例', btn('检查更新')) + srow('开源许可', '', btn('查看许可')) + srow('初始设置', '重新查看首次使用设置。', btn('重新设置')))}
+  ${group('高级', srow('开发者模式', '显示运行追踪、性能指标和离线评测。', '<input type="checkbox" class="developer-mode" aria-label="开发者模式" />')
+    + '<div class="developer-details" hidden><p>Trace · P50 / P95 · Runtime 协议</p><p>Agent 固定回归集与离线评测</p><small>原型未接入诊断数据。</small></div>')}`
+
+
+/* ---------- Screens ---------- */
+
+const screens = [
+  { id: 'general', title: '通用', desc: '本机资料、外观与通知。', render: () => win('general', generalPage()) },
+  { id: 'conv', title: '对话', desc: '输入、显示与快捷键集中管理。', render: () => win('conv', conversationPage()) },
+  { id: 'companions', title: '伙伴 · 默认设置', desc: '一个总目录，每个新伙伴一个独立文件夹。', render: () => win('companions', companionsPage()) },
+  { id: 'models', title: '模型', desc: '默认模型和模型服务，不展示 Agent 绑定。', render: () => win('models', modelsPage()) },
+  { id: 'models-add', title: '模型 · 添加模型', render: () => win('models', modelsPage(), { overlay: addSheet() }) },
+  { id: 'models-edit', title: '模型 · 编辑服务', render: () => { const service = modelServices()[0]; return win('models', modelsPage(), { overlay: providerForm(service.id, '', service) }) } },
+  { id: 'agent', title: 'Agent', desc: '运行引擎与默认工作方式，专家由专家中心管理。', render: () => win('agent', agentPage()) },
+  { id: 'agent-connect', title: 'Agent · 统一配置', desc: '启用、模型来源、默认权限与检查集中到一个抽屉。', render: () => win('agent', agentPage(), { overlay: connectSheet() }) },
+  { id: 'agent-check', title: 'Agent · 检查失败', desc: '失败原因与重试操作留在同一个抽屉。', render: () => win('agent', agentPage(), { overlay: connectSheet('pi', true) }) },
+  { id: 'plugins', title: '插件', desc: '网页搜索收进内置工具。', render: () => win('plugins', pluginsPage(), { h: 1120 }) },
+  { id: 'plugins-search', title: '插件 · 网页搜索', desc: '服务商和 Key 只配置一次。', render: () => win('plugins', pluginsPage(), { overlay: searchSheet() }) },
+  { id: 'plugins-connector', title: '插件 · 连接器', desc: '配置连接类型和地址。', render: () => win('plugins', pluginsPage(), { overlay: connectorSheet(connectorList().find(connector => connector.id === 'fs')) }) },
+  { id: 'library', title: '资料库', desc: '本机存储与索引、可选的远程服务。', render: () => win('library', libraryPage(), { h: 1000 }) },
+  { id: 'library-broken', title: '资料库 · 异常状态', desc: '本机目录和远程连接分别显示问题。', render: () => win('library', libraryPage({ broken: true }), { h: 1080 }) },
+  { id: 'security', title: '权限与安全', desc: '项目、归档项目和全局 Hook。', render: () => win('security', securityPage()) },
+  { id: 'security-project', title: '权限与安全 · 项目', desc: '执行方式、命令规则与目录信息。', render: () => win('security', securityPage(), { overlay: projectSheet() }) },
+  { id: 'security-hooks', title: '权限与安全 · Hook', desc: '跨 Agent 的工具规则。', render: () => win('security', securityPage(), { overlay: hookSheet() }) },
+  { id: 'data', title: '数据与关于', desc: '使用情况、数据管理、诊断、关于。', render: () => win('data', dataPage(), { h: 1120 }) },
+]
+
+const searchSheet = () => sheet({
+  kind: 'search', m: { icon: 'globe' }, title: '网页搜索', desc: '用于 Fox 通用助手和专家。外部 Agent 使用各自的搜索能力。',
+  body: `<div class="sh-sec">
+    <form class="search-form" autocomplete="off">
+      <fieldset class="search-services">
+        <legend>搜索服务</legend>
+        <div class="search-options">${SEARCH.map(s => `
+          <label class="search-option">
+            <span aria-hidden="true">${mark(s.m)}</span>
+            <span><b>${s.name}</b><small>${s.desc}</small></span>
+            <input type="radio" name="search-provider" value="${s.k}" ${s.k === demo.search.provider ? 'checked' : ''} />
+          </label>`).join('')}</div>
+      </fieldset>
+      ${SEARCH.filter(s => s.k !== 'auto').map(s => `
+        <div class="search-fields" data-search-fields="${s.k}" ${s.k === demo.search.provider ? '' : 'hidden'}>
+          ${s.k === 'searxng' ? `<label class="fld"><span>SearXNG 实例地址</span>
+            <input class="inp" type="url" name="search-endpoint" value="${escapeHtml(demo.search.endpoint)}" placeholder="https://search.example.com" />
+            <small>请在实例中启用 JSON 格式的搜索结果。</small>
+          </label>` : `<label class="fld"><span>${s.name} API Key</span>
+            <input class="inp" type="password" placeholder="输入示例 Key" />
+            ${demo.search.keys.includes(s.k) ? '<small>已配置示例 Key。留空可保留已配置状态。</small>' : ''}
+          </label>`}
+        </div>`).join('')}
+    </form>
+  </div>`,
+  foot: feedback('') + '<span class="grow"></span>' + btn('取消') + btn('保存搜索', { kind: 'primary', action: 'save-search' }),
+})
+
+/* ---------- Render ---------- */
+const params = new URLSearchParams(location.search)
+function render() {
+  const only = params.get('frame')
+  const doc = document.getElementById('doc')
+  const aliases = { 'search': 'plugins-search', 'models-connect': 'agent-connect', 'models-check': 'agent-check', 'agent-project': 'security-project', 'plugins-hooks': 'security-hooks' }
+  if (only) {
+    document.body.classList.add('single')
+    doc.innerHTML = `<div class="prototype-bar"><a href="?">全部页面</a><span>交互原型 · 示例数据 · 不修改真实配置</span></div>${(screens.find((s) => s.id === (aliases[only] || only)) || screens[0]).render()}`
+    enhance()
+    doc.querySelector('.sheet .x')?.focus({ preventScroll: true })
+    return
+  }
+  doc.innerHTML = `
+  <header class="doc-hero"><h1>Fox 设置原型</h1>
+    <p>这里使用示例数据。检查连接、保存与切换只在预览中演示。</p></header>
+  <nav class="toc" aria-label="原型导航">
+    <select class="sel" name="jump-frame" aria-label="跳转到页面"><option value="">跳转到页面</option>
+      ${screens.map(s => `<option value="${s.id}">${s.title}</option>`).join('')}
+    </select>
+  </nav>
+  ${screens.map(s => `<section class="frame" id="${s.id}">
+    <div class="frame-head"><h2>${s.title}</h2><a href="?frame=${s.id}">单独预览</a></div>
+    ${s.render()}
+  </section>`).join('')}`
+  enhance()
+}
+let lastTrigger
+function replaceSheet(card, content, focus = '.sheet .x') {
+  card.querySelectorAll(':scope > .sheet, :scope > .scrim').forEach(el => el.remove())
+  card.insertAdjacentHTML('beforeend', content)
+  enhance(card)
+  card.querySelector(focus).focus({ preventScroll: true })
+}
+function openSheet(card, content, focus) {
+  document.querySelector('.prototype-notice')?.remove()
+  lastTrigger = document.activeElement
+  replaceSheet(card, content, focus)
+}
+function closeSheet(card) {
+  const isSearch = card.querySelector('.search-services')
+  const isProvider = card.querySelector('[data-sheet="provider-catalog"], [data-sheet="model"]')
+  const editingId = card.querySelector('[data-model-editing]')?.dataset.modelProvider
+  card.querySelectorAll(':scope > .sheet, :scope > .scrim').forEach(el => el.remove())
+  setSheetBackground(card, false)
+  const trigger = lastTrigger?.closest('.card') === card ? lastTrigger
+    : card.querySelector(editingId ? `[data-service="${editingId}"]` : isSearch ? '.configure-search' : isProvider ? '[data-action="add-provider"]' : '.spage')
+  trigger.focus({ preventScroll: true })
+  lastTrigger = undefined
+}
+function setSheetBackground(card, inert) {
+  card.querySelector('.spage').inert = inert
+  card.parentElement.querySelector('.side').inert = inert
+}
+function notice(message) {
+  let el = document.querySelector('.prototype-notice')
+  if (!el) { el = document.createElement('div'); el.className = 'prototype-notice'; el.setAttribute('role', 'status'); document.body.append(el) }
+  el.textContent = message
+  clearTimeout(notice.timer)
+  notice.timer = setTimeout(() => el.remove(), 4200)
+}
+function enhance(root = document) {
+  root.querySelectorAll('.btn, .x, .sw, .seg > span, .mi, .disc').forEach(el => {
+    if (el.matches('label, button')) return
+    el.tabIndex = el.classList.contains('dis') ? -1 : 0
+    el.setAttribute('role', el.classList.contains('sw') ? 'switch' : 'button')
+    if (el.classList.contains('dis')) el.setAttribute('aria-disabled', 'true')
+    if (el.classList.contains('sw')) { el.setAttribute('aria-checked', String(el.classList.contains('on'))); el.setAttribute('aria-label', el.closest('.srow, .irow')?.querySelector('b')?.textContent || '启用') }
+    if (el.classList.contains('x')) el.setAttribute('aria-label', '关闭抽屉')
+    if (el.classList.contains('icon')) el.setAttribute('aria-label', '更多操作')
+  })
+  root.querySelectorAll('span.inp, div.ta').forEach(el => { el.contentEditable = 'true'; el.setAttribute('role', 'textbox'); el.setAttribute('aria-label', el.closest('.fld')?.querySelector('label')?.textContent || '输入内容') })
+  root.querySelectorAll('span.sel').forEach(el => {
+    const value = el.querySelector('.v').textContent
+    const options = ['只读', '询问', '自动'].includes(value) ? ['只读', '询问', '自动'] : [value]
+    const select = document.createElement('select'); select.className = el.className; select.style.cssText = el.style.cssText; select.setAttribute('aria-label', value)
+    options.forEach(v => select.add(new Option(v, v, false, v === value))); el.replaceWith(select)
+  })
+  root.querySelectorAll('.sheet').forEach(el => {
+    el.setAttribute('role', 'dialog')
+    el.setAttribute('aria-label', el.querySelector('.tn')?.textContent || '配置')
+    el.setAttribute('aria-modal', 'true')
+    setSheetBackground(el.parentElement, true)
+  })
+}
+
+function showFeedback(dialog, message, tone = '') {
+  const node = dialog.querySelector('.drawer-feedback')
+  node.className = `drawer-feedback ${tone}`
+  node.textContent = message
+}
+function httpUrl(value) {
+  try {
+    const url = new URL(value)
+    if (['http:', 'https:'].includes(url.protocol) && !url.username && !url.password) return url
+  } catch {}
+  return null
+}
+function refreshGroup(selector, markup) {
+  document.querySelectorAll(selector).forEach(group => {
+    group.insertAdjacentHTML('afterend', markup)
+    enhance(group.nextElementSibling)
+    group.remove()
+  })
+}
+function setProjectMode(id, mode) {
+  demo.projects[id] = mode
+  document.querySelectorAll(`[data-project-mode="${id}"]`).forEach(select => { select.value = mode })
+  saveDemo()
+}
+function resetModelCheck(dialog) {
+  dialog.querySelector('[data-model-results]').hidden = true
+  const editing = Boolean(dialog.querySelector('[data-model-editing]'))
+  dialog.querySelector('[data-action="save-model"]').disabled = !editing
+  showFeedback(dialog, editing ? '' : '检查通过后可添加。')
+}
+function modelDetails(dialog) {
+  const form = dialog.querySelector('[data-model-provider]')
+  const id = form.dataset.modelProvider
+  const preset = PRESETS.find(entry => entry[0] === id)
+  const existing = form.hasAttribute('data-model-editing') ? modelServices().find(service => service.id === id) : null
+  const fullForm = Boolean(existing) || id === 'custom'
+  const value = name => dialog.querySelector(`[name="${name}"]`).value.trim()
+  const name = fullForm ? value('model-name') : preset[1]
+  const protocol = fullForm ? value('model-protocol') : id === 'anthropic' ? 'anthropic-messages' : 'openai-completions'
+  const endpoint = fullForm ? value('model-endpoint') : value('model-endpoint') || preset[2]
+  const url = httpUrl(endpoint)
+  const models = fullForm ? [...new Set(value('model-id').split(/[,，]/).map(id => id.trim()).filter(Boolean))] : preset[3]
+  const extra = fullForm ? [...dialog.querySelectorAll('[data-alt-protocol]:not([hidden]) input, [name="model-list-url"]')].filter(input => input.value.trim()) : []
+  const invalidExtra = extra.find(input => !httpUrl(input.value.trim()))
+  if (!name || !url || !models.length || invalidExtra) {
+    const message = !name ? '请输入供应商名称。' : !url ? '请输入有效的 HTTP 或 HTTPS 地址。'
+      : !models.length ? '请输入至少一个模型 ID。' : '请检查更多端点中的地址。'
+    showFeedback(dialog, message, 'error')
+    return null
+  }
+  const endpoints = Object.fromEntries(extra.map(input => [input.name.replace(/^extra-/, ''), input.value.trim()]))
+  const checked = !dialog.querySelector('[data-model-results]').hidden
+  const status = checked ? stat('ok', '已检查') : existing?.endpoint === endpoint ? existing.status : stat('empty', '未检测')
+  return { id, name, host: url.host, endpoint, protocol, endpoints, models, def: existing?.def, hasKey: Boolean(existing?.hasKey || value('model-key')), status }
+}
+function setAgentCheck(dialog, checked, message, tone = '') {
+  dialog.querySelector('[data-agent-settings]').dataset.checked = String(checked)
+  dialog.querySelector('[data-action="save-agent"]').disabled = dialog.querySelector('.sw.on') !== null && !checked
+  showFeedback(dialog, message, tone)
+}
+function drawerAction(card, target) {
+  const action = target.dataset.action
+  if (action === 'add-connector') { openSheet(card, connectorSheet()); return }
+  if (action === 'add-provider') { openSheet(card, addSheet(), '[name="provider-filter"]'); return }
+  if (action === 'edit-model') {
+    const service = modelServices().find(entry => entry.id === target.dataset.service)
+    openSheet(card, providerForm(service.id, '', service))
+    return
+  }
+  const dialog = target.closest('.sheet')
+  if (action === 'pick-provider' || action === 'custom-provider') {
+    const id = target.dataset.provider || 'custom'
+    replaceSheet(card, providerForm(id, dialog.querySelector('[name="provider-filter"]').value), id === 'custom' ? '[name="model-name"]' : '[name="model-key"]')
+    return
+  }
+  if (action === 'back-to-providers') {
+    const { catalogFilter, modelProvider } = dialog.querySelector('[data-model-provider]').dataset
+    const selection = modelProvider === 'custom' ? '[data-action="custom-provider"]' : `[data-provider="${modelProvider}"]`
+    replaceSheet(card, addSheet(catalogFilter), selection)
+    return
+  }
+  if (action === 'toggle-model-key') {
+    const key = dialog.querySelector('[name="model-key"]')
+    key.type = key.type === 'password' ? 'text' : 'password'
+    target.textContent = key.type === 'password' ? '显示' : '隐藏'
+    return
+  }
+  if (action === 'check-model') {
+    const details = modelDetails(dialog)
+    if (!details) return
+    const key = dialog.querySelector('[name="model-key"]')
+    const local = details.protocol === 'openai-completions'
+      && ['localhost', '127.0.0.1', '[::1]'].includes(new URL(details.endpoint).hostname)
+    if (!local && !details.hasKey) { showFeedback(dialog, '请输入示例 API Key。', 'error'); key.focus(); return }
+    const results = dialog.querySelector('[data-model-results]')
+    results.querySelector('.tools').innerHTML = details.models.map(model => `<div><b>${escapeHtml(model)}</b></div>`).join('')
+    results.hidden = false
+    dialog.querySelector('[data-action="save-model"]').disabled = false
+    showFeedback(dialog, `${details.name} 示例检查通过 · ${details.models.length} 个模型`, 'success')
+    return
+  }
+  if (action === 'save-model') {
+    const service = modelDetails(dialog)
+    if (!service) return
+    if (service.id === 'custom') service.id = `custom-${crypto.randomUUID()}`
+    demo.services = [...demo.services.filter(entry => entry.id !== service.id), service]
+    saveDemo()
+    closeSheet(card)
+    refreshGroup('.model-services', modelServiceList())
+    card.querySelector(`[data-service="${service.id}"]`)?.focus({ preventScroll: true })
+    document.querySelectorAll('[name="default-model"]').forEach(select => {
+      const selected = select.value
+      select.replaceChildren(...modelOptions().map(model => new Option(model, model, false, model === selected)))
+    })
+    notice(`已保存 ${service.name} 示例服务。`)
+    return
+  }
+  if (action === 'save-connector') {
+    const form = dialog.querySelector('[data-connector-settings]')
+    const name = form.querySelector('[name="connector-name"]').value.trim()
+    const type = form.querySelector('[name="connector-type"]').value
+    const command = form.querySelector('[name="connector-command"]').value.trim()
+    const endpoint = form.querySelector('[name="connector-endpoint"]').value.trim()
+    if (!name || (type === 'stdio' ? !command : !httpUrl(endpoint))) {
+      showFeedback(dialog, !name ? '请输入连接器名称。' : type === 'stdio' ? '请输入启动命令。' : '请输入有效的 HTTP 或 HTTPS 地址。', 'error')
+      return
+    }
+    const editingId = form.dataset.connectorSettings
+    const id = editingId || `demo-${Object.keys(demo.connectors).length + 1}`
+    const settings = type === 'stdio' ? { command, args: form.querySelector('[name="connector-args"]').value.trim() } : { endpoint }
+    demo.connectors[id] = { id, name, type, ...settings, on: form.querySelector('.sw.on') !== null }
+    saveDemo()
+    closeSheet(card)
+    refreshGroup('.connector-services', connectorsGroup())
+    if (editingId) card.querySelector(`[data-connector="${id}"]`)?.focus({ preventScroll: true })
+    notice(`${name} 已保存到连接器列表。`)
+    return
+  }
+  if (action === 'save-search') {
+    const provider = dialog.querySelector('[name="search-provider"]:checked').value
+    const visibleFields = dialog.querySelector(`[data-search-fields="${provider}"]`)
+    const input = visibleFields?.querySelector('input')
+    if (provider === 'searxng') {
+      const endpoint = input.value.trim()
+      if (!httpUrl(endpoint)) { showFeedback(dialog, '请输入有效的 SearXNG 实例地址。', 'error'); input.focus(); return }
+      demo.search.endpoint = endpoint
+    } else if (provider !== 'auto' && !demo.search.keys.includes(provider)) {
+      if (!input.value.trim()) { showFeedback(dialog, '请输入该供应商的示例 API Key。', 'error'); input.focus(); return }
+      demo.search.keys.push(provider)
+    }
+    demo.search.provider = provider
+    saveDemo()
+    document.querySelectorAll('.configure-search').forEach(button => {
+      button.closest('.irow').querySelector('.stat b').textContent = SEARCH.find(entry => entry.k === provider).name
+    })
+    closeSheet(card)
+    notice('已保存网页搜索的示例配置。')
+    return
+  }
+  if (action === 'check-agent' || action === 'save-agent') {
+    const form = dialog.querySelector('[data-agent-settings]')
+    const key = form.dataset.agentSettings
+    const values = Object.fromEntries([...form.querySelectorAll('select[name]')].map(select => [select.name, select.value]))
+    const enabled = form.querySelector('.sw.on') !== null
+    if (action === 'check-agent') {
+      const failed = form.dataset.failed === 'true' && values['agent-source'] === '使用我的模型服务' && values['agent-model'] === modelOptions()[0]
+      setAgentCheck(dialog, !failed, failed ? '示例 401：请选择其他模型或使用本机登录。' : '示例检查通过 · 连接和试跑正常。', failed ? 'error' : 'success')
+      return
+    }
+    demo.agents[key] = { enabled, values, checked: form.dataset.checked === 'true' }
+    saveDemo()
+    document.querySelectorAll(`[data-agent="${key}"]`).forEach(row => {
+      row.querySelector('.it small').innerHTML = agentSummary(key)
+      row.querySelector('.stat').outerHTML = agentStatus(key)
+    })
+    document.querySelectorAll('[name="new-agent"]').forEach(select => {
+      const active = select.value
+      select.replaceChildren(...newAgentOptions().map(name => new Option(name, name, false, name === active)))
+    })
+    closeSheet(card)
+    notice(`已保存 ${AG[key].name} 示例配置。`)
+    return
+  }
+  const project = PROJECTS.find(entry => entry.id === dialog.querySelector('[data-project-settings]').dataset.projectSettings)
+  if (action === 'open-project') { notice(`示例目录 ${project.path}`); return }
+  setProjectMode(project.id, dialog.querySelector('[name="project-mode"]').value)
+  closeSheet(card)
+  notice(`已保存 ${project.name} 的示例权限。`)
+}
+
+document.addEventListener('input', event => {
+  const input = event.target
+  if (input.name === 'provider-filter') {
+    input.closest('.sheet').querySelector('.provider-directory').innerHTML = providerDirectory(input.value)
+    return
+  }
+  const dialog = input.closest('[data-sheet="model"]')
+  if (dialog) {
+    if (input.name === 'model-protocol') dialog.querySelectorAll('[data-alt-protocol]').forEach(field => {
+      field.hidden = field.dataset.altProtocol === input.value
+    })
+    resetModelCheck(dialog)
+  }
+})
+document.addEventListener('submit', event => {
+  if (!event.target.matches('.search-form')) return
+  event.preventDefault()
+  event.target.closest('.sheet').querySelector('[data-action="save-search"]').click()
+})
+document.addEventListener('keydown', event => {
+  const sheet = event.target.closest('.sheet')
+  if (event.key === 'Escape' && sheet) { closeSheet(sheet.parentElement); return }
+  if (event.key === 'Tab' && sheet) {
+    const nodes = [...sheet.querySelectorAll('button, input, select, textarea, summary, [tabindex="0"], [contenteditable="true"]')].filter(el => !el.disabled && el.getClientRects().length)
+    const first = nodes[0], last = nodes.at(-1)
+    if (event.shiftKey && event.target === first) { event.preventDefault(); last.focus() }
+    else if (!event.shiftKey && event.target === last) { event.preventDefault(); first.focus() }
+  }
+  if (['Enter', ' '].includes(event.key) && ['button', 'switch'].includes(event.target.getAttribute('role'))) { event.preventDefault(); event.target.click() }
+})
+document.addEventListener('change', event => {
+  const el = event.target
+  if (el.name === 'settings-page') location.search = `?frame=${el.value}`
+  if (el.name === 'jump-frame' && el.value) location.hash = el.value
+  if (el.dataset.projectMode) setProjectMode(el.dataset.projectMode, el.value)
+  if (el.name === 'search-provider') {
+    el.form.querySelectorAll('[data-search-fields]').forEach(fields => {
+      fields.hidden = fields.dataset.searchFields !== el.value
+    })
+    showFeedback(el.closest('.sheet'), '')
+  }
+  if (el.name === 'connector-type') {
+    const form = el.closest('[data-connector-settings]')
+    form.querySelector('[data-connector-fields="stdio"]').hidden = el.value !== 'stdio'
+    form.querySelector('[data-connector-fields="remote"]').hidden = el.value === 'stdio'
+    form.querySelector('[data-connector-address]').textContent = el.value === 'openapi' ? 'OpenAPI 规范地址' : 'MCP 服务地址'
+    showFeedback(el.closest('.sheet'), '')
+  }
+  if (el.name === 'agent-source') {
+    const local = el.selectedIndex === 1
+    el.closest('.sh-sec').querySelector('.source-service').hidden = local
+    el.closest('.sh-sec').querySelector('.source-local').hidden = !local
+  }
+  if (['agent-source', 'agent-model'].includes(el.name)) setAgentCheck(el.closest('.sheet'), false, '模型来源已更改，请重新检查。')
+  if (el.classList.contains('developer-mode')) el.closest('.grp').querySelector('.developer-details').hidden = !el.checked
+  if (el.classList.contains('backup-file') && el.files.length) notice(`已选择 ${el.files[0].name}。原型仅演示选择文件，不执行恢复。`)
+})
+document.addEventListener('click', event => {
+  const target = event.target.closest('.btn, .provider-option, .model-service-open, .x, .scrim, .sw, .seg > span, .mi, .disc')
+  if (!target || target.disabled || target.classList.contains('dis') || target.tagName === 'LABEL') return
+  const card = target.closest('.card')
+  const text = target.textContent.trim()
+  if (target.matches('.x, .scrim') || ['取消', '关闭'].includes(text)) { closeSheet(card); return }
+  if (target.dataset.action) { drawerAction(card, target); return }
+  if (target.dataset.project) {
+    openSheet(card, projectSheet(PROJECTS.find(project => project.id === target.dataset.project)))
+    return
+  }
+  if (target.dataset.connector) {
+    openSheet(card, connectorSheet(connectorList().find(connector => connector.id === target.dataset.connector)))
+    return
+  }
+  if (target.matches('.sw')) {
+    const on = target.classList.toggle('on')
+    target.setAttribute('aria-checked', String(on))
+    const dialog = target.closest('[data-sheet="agent"]')
+    if (dialog) {
+      const checked = dialog.querySelector('[data-agent-settings]').dataset.checked === 'true'
+      setAgentCheck(dialog, checked, !on ? '停用状态可以直接保存。' : checked ? '示例检查通过 · 连接和试跑正常。' : '尚未检查。检查通过后可保存。', on && checked ? 'success' : '')
+    }
+    const connectorToggle = target.closest('[data-connector-toggle]')
+    if (connectorToggle) {
+      const id = connectorToggle.dataset.connectorToggle
+      const connector = connectorList().find(entry => entry.id === id)
+      demo.connectors[id] = { ...connector, on }
+      saveDemo()
+      refreshGroup('.connector-services', connectorsGroup())
+      card.querySelector(`[data-connector-toggle="${id}"] .sw`)?.focus({ preventScroll: true })
+    }
+    return
+  }
+  if (target.matches('.seg > span')) { [...target.parentElement.children].forEach(el => el.classList.remove('on')); target.classList.add('on'); return }
+  if (text === '配置' && target.closest('[data-agent]')) { openSheet(card, connectSheet(target.closest('[data-agent]').dataset.agent)); return }
+  if (target.matches('.configure-search')) { openSheet(card, searchSheet()); return }
+  if (text === '管理 Hook') { openSheet(card, hookSheet()); return }
+  if (text === '编辑助手') {
+    openSheet(card, sheet({ m: AG.fox.m, title: 'Fox 通用助手', body: fld('名称', edit('assistant-name', 'Fox')) + fld('介绍', edit('assistant-description', '日常工作助手')) + fld('工作要求', ta('清楚说明结果，需要时先询问。')) + fld('开场建议', ta('今天有什么需要一起完成？')), foot: btn('取消') + btn('保存助手', { kind: 'primary' }) })); return
+  }
+  if (text === '选择总目录') {
+    openSheet(card, sheet({ m: { icon: 'folder-open' }, title: '伙伴工作目录', desc: '原型用路径输入模拟系统文件夹选择器。', body: fld('总目录', edit('companion-root', card.querySelector('.root-path').textContent), '只影响新建伙伴，不会搬迁已有文件。'), foot: btn('取消') + btn('使用此目录', { kind: 'primary' }) })); return
+  }
+  if (text === '使用此目录') {
+    const input = card.querySelector('[name="companion-root"]')
+    if (!/^(?:[a-z]:[\\/]|\\\\)/i.test(input.value.trim())) { input.focus(); notice('请输入完整的 Windows 文件夹路径。'); return }
+    demo.companionRoot = input.value.trim()
+    saveDemo()
+    document.querySelectorAll('.root-path').forEach(path => { path.textContent = demo.companionRoot })
+    closeSheet(card)
+    notice('已更新新伙伴的示例总目录。')
+    return
+  }
+  if (target.classList.contains('icon') && target.closest('.irow')) {
+    const row = target.closest('.irow')
+    openSheet(card, sheet({ m: { icon: 'settings' }, title: escapeHtml(row.querySelector('b').textContent), desc: '原型操作预览，真实数据不受影响。', body: sec('操作', btn('编辑') + btn('设为默认') + btn('检查连接') + btn('删除', { kind: 'danger' })), foot: btn('关闭') })); return
+  }
+  if (text.startsWith('保存')) { notice('已保存本页演示选择；刷新后恢复示例，不写入真实配置。'); if (target.closest('.sheet')) closeSheet(card); return }
+  notice(`「${text || '更多操作'}」是原型展示入口，未接入应用服务。`)
+})
+render()
+</script>
+</body>
+</html>

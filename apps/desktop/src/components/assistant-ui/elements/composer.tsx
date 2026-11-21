@@ -1,5 +1,5 @@
 import { forwardRef, useRef, useState, type ComponentProps } from 'react'
-import { Check, ChevronDown, FileText, Image, X } from 'lucide-react'
+import { Cpu } from 'lucide-react'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { cn } from '@/lib/utils'
 import { Command, CommandGroup, CommandItem, CommandList } from '@/components/ui/command'
@@ -21,12 +21,18 @@ export function ComposerAttachmentChip({ name, mediaType, meta, onRemove }: { na
   return <UpstreamAttachment className="aui-composer-attachment rounded-[var(--fox-radius-card)]" attachment={{ name, meta: meta || '已添加', state: 'done', kind: mediaType?.startsWith('image/') ? 'image' : 'text' }} onRemove={onRemove} />
 }
 
-export type ComposerModelOption = { id: string; name: string; meta?: string; disabled?: boolean }
-export function Models({ value, options, disabled, onValueChange, fallbackLabel = '选择模型', note, onManage }: { value?: string; options: readonly ComposerModelOption[]; disabled?: boolean; onValueChange?: (value: string) => void; fallbackLabel?: string; note?: string; onManage?: () => void }) {
+export type ComposerModelOption = { id: string; name: string; meta?: string; icon?: string | null; disabled?: boolean }
+export function Models({ value, options, disabled, onValueChange, fallbackLabel = '选择模型', note, onManage, menuRow = false }: { value?: string; options: readonly ComposerModelOption[]; disabled?: boolean; onValueChange?: (value: string) => void; fallbackLabel?: string; note?: string; onManage?: () => void; menuRow?: boolean }) {
   const [open, setOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
   const selected = options.find(option => option.id === value)
-  return <Popover open={open} onOpenChange={setOpen}><PopoverTrigger asChild><ComposerModelTrigger model={selected?.name || fallbackLabel} open={open} className="aui-composer-model-trigger rounded-[var(--fox-radius-control)]" disabled={disabled} aria-label="选择模型" /></PopoverTrigger>
+  const label = selected?.name || fallbackLabel
+  return <Popover open={open} onOpenChange={setOpen}><PopoverTrigger asChild>{menuRow
+    ? <button type="button" className="fox-expert-chip fox-history-model-trigger" disabled={disabled} title={`切换模型，当前 ${label}`}>
+      <span className="fox-expert-icon" aria-hidden="true">{selected?.icon ? <img src={selected.icon} alt="" /> : <Cpu size={11} />}</span>
+      <span className="min-w-0 truncate">{label}</span>
+    </button>
+    : <ComposerModelTrigger model={label} open={open} className="aui-composer-model-trigger rounded-[var(--fox-radius-control)]" disabled={disabled} aria-label="选择模型" />}</PopoverTrigger>
     <PopoverContent data-slot="composer-menu" className="aui-model-menu fox-composer-picker-menu" side="top" align="end" onOpenAutoFocus={event => { event.preventDefault(); menuRef.current?.focus() }}>
       <p className="aui-model-menu-heading">选择模型</p>
       {note && <p className="fox-composer-model-note">{note}</p>}

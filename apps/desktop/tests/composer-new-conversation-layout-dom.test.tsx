@@ -1,4 +1,4 @@
-// 新对话输入框：模型还没开始回复时保持高内框和托盘；正文、工具消息或 toolCalls 出现后收成窄输入框。
+// 首条消息提交后切到已有对话的输入框。
 
 import { afterEach, describe, expect, test } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
@@ -7,11 +7,12 @@ if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register()
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const React = await import('react')
-const { cleanup, render } = await import('@testing-library/react')
+const { cleanup, fireEvent, render, waitFor, within } = await import('@testing-library/react')
+const { FoxDecisionCard } = await import('../src/features/chat/thread/composer/fox-decision-card')
 const { TooltipProvider } = await import('../src/components/ui/tooltip')
 const { MemoizedComposer, composerEntryFrozen, composerUsesNewConversation, conversationFirstReplyCompleted, conversationHasModelReply } = await import('../src/features/chat/composer/fox-composer')
 const { ComposerEntryContext } = await import('../src/features/chat/composer/composer-entry-context')
-import type { ProjectRecord } from '../src/features/conversations/model/types'
+import type { ApprovalRecord, ProjectRecord } from '../src/features/conversations/model/types'
 import type { AgentBackendId } from '../src/features/conversations/model/agent-backend'
 
 afterEach(cleanup)
@@ -24,11 +25,15 @@ const projects = [{
   permissionMode: 'ask',
 }] as ProjectRecord[]
 
-function Harness({ newConversation, entryFrozen = false, boundAgentBackend = null, projectRoot = null }: {
+function Harness({ newConversation, entryFrozen = false, boundAgentBackend = null, projectRoot = null, questionRequest, onSubmitQuestion, runtimeApprovals, onResolveApproval }: {
   newConversation: boolean
   entryFrozen?: boolean
   boundAgentBackend?: AgentBackendId | null
   projectRoot?: string | null
+  questionRequest?: React.ComponentProps<typeof MemoizedComposer>['questionRequest']
+  onSubmitQuestion?: React.ComponentProps<typeof MemoizedComposer>['onSubmitQuestion']
+  runtimeApprovals?: ApprovalRecord[]
+  onResolveApproval?: React.ComponentProps<typeof MemoizedComposer>['onResolveApproval']
 }) {
   const [draft, setDraft] = React.useState('')
   return (
@@ -51,6 +56,10 @@ function Harness({ newConversation, entryFrozen = false, boundAgentBackend = nul
           entryFrozen={entryFrozen}
           boundAgentBackend={boundAgentBackend}
           projectRoot={projectRoot}
+          questionRequest={questionRequest}
+          onSubmitQuestion={onSubmitQuestion}
+          runtimeApprovals={runtimeApprovals}
+          onResolveApproval={onResolveApproval}
         />
       </ComposerEntryContext.Provider>
     </TooltipProvider>
@@ -71,13 +80,10 @@ describe('新对话输入框形态', () => {
     expect(view.container.querySelector('[data-project-frozen]')).toBeNull()
   })
 
-  test('13.37：已选中但没有模型回复时仍是新对话托盘，项目和 Agent 都还能换（1103 的只读托盘已撤回）', () => {
+  test('已选中但未发送消息的空会话保留新对话托盘', () => {
     const detail = {
       conversation: { id: 'conv-empty' },
-      messages: [
-        { role: 'user', content: '你好' },
-        { role: 'assistant', content: '' },
-      ],
+      messages: [],
       toolCalls: [],
     }
     expect(conversationHasModelReply(detail)).toBe(false)
@@ -106,7 +112,7 @@ describe('新对话输入框形态', () => {
     expect(project.getAttribute('aria-haspopup')).toBe('dialog')
   })
 
-  test('13.37：模型回复以后才冻结项目和 Agent；未选中的草稿从不冻结', () => {
+  test('已有对话和草稿的项目、Agent 托盘使用各自状态', () => {
     expect(composerEntryFrozen({ desktopEnabled: true, selectedConversationId: 'conv', newConversation: false })).toBe(true)
     expect(composerEntryFrozen({ desktopEnabled: true, selectedConversationId: 'conv', newConversation: true })).toBe(false)
     expect(composerEntryFrozen({ desktopEnabled: true, selectedConversationId: null, newConversation: true })).toBe(false)
@@ -203,7 +209,7 @@ describe('conversationHasModelReply', () => {
   })
 })
 
-describe('13.38 R2-4：第一轮回复完成之前保留托盘', () => {
+describe('首条消息提交后的输入栏', () => {
   const cancelledFirstRound = {
     conversation: { id: 'conv-cancelled' },
     messages: [
@@ -215,33 +221,28 @@ describe('13.38 R2-4：第一轮回复完成之前保留托盘', () => {
     runs: [{ status: 'cancelled' }],
   }
 
-  test('第一轮被取消（已经调过工具、出过半截正文）仍是新对话托盘，项目和 Agent 能换', () => {
-    expect(conversationHasModelReply(cancelledFirstRound)).toBe(true)
-    expect(conversationFirstReplyCompleted(cancelledFirstRound)).toBe(false)
-    const newConversation = composerUsesNewConversation({ desktopEnabled: true, timelineEmpty: false, selectedConversationId: 'conv-cancelled', detail: cancelledFirstRound, running: false })
-    expect(newConversation).toBe(true)
-    const frozen = composerEntryFrozen({ desktopEnabled: true, selectedConversationId: 'conv-cancelled', newConversation })
-    expect(frozen).toBe(false)
-    const view = render(<Harness newConversation={newConversation} entryFrozen={frozen} boundAgentBackend="pi" projectRoot="D:/测试/项目甲" />)
+  test('首条消息刚提交、会话尚未创建时就收窄', () => {
+    const view = render(<Harness newConversation />)
     expect(view.container.querySelector('.fox-composer-draft-footer')).not.toBeNull()
-    expect(view.getByRole('button', { name: /选择 Agent，当前 Pi/ })).toBeTruthy()
-    expect(view.getByRole('button', { name: /项目甲/ })).toBeTruthy()
-    expect(view.container.querySelector('[data-agent-frozen]')).toBeNull()
+    const pending = composerUsesNewConversation({ desktopEnabled: true, timelineEmpty: false, detail: null })
+    view.rerender(<Harness newConversation={pending} />)
+    expect(view.container.querySelector('.fox-composer-wrap.is-history')).not.toBeNull()
+    expect(view.container.querySelector('.fox-composer-draft-footer')).toBeNull()
   })
 
-  test('失败、中断的第一轮同样不算完成；正在回复时收窄，完成后锁定', () => {
+  test('等待首响应、失败、中断或取消后仍保留窄样式', () => {
+    const state = { desktopEnabled: true, timelineEmpty: false, selectedConversationId: 'conv-cancelled' }
     for (const status of ['failed', 'interrupted', 'cancelled']) {
-      expect(conversationFirstReplyCompleted({ ...cancelledFirstRound, lastRun: { status }, runs: [{ status }] })).toBe(false)
+      const detail = { ...cancelledFirstRound, lastRun: { status }, runs: [{ status }] }
+      expect(conversationFirstReplyCompleted(detail)).toBe(false)
+      expect(composerUsesNewConversation({ ...state, detail })).toBe(false)
     }
     const running = { ...cancelledFirstRound, lastRun: { status: 'running' }, runs: [{ status: 'cancelled' }, { status: 'running' }] }
-    expect(composerUsesNewConversation({ desktopEnabled: true, timelineEmpty: false, selectedConversationId: 'conv-cancelled', detail: running, running: true })).toBe(false)
     const waiting = { ...running, toolCalls: [], messages: [{ role: 'user', content: '在吗' }] }
-    expect(composerUsesNewConversation({ desktopEnabled: true, timelineEmpty: false, selectedConversationId: 'conv-cancelled', detail: waiting, running: true })).toBe(true)
+    expect(composerUsesNewConversation({ ...state, detail: waiting })).toBe(false)
     const completed = { ...cancelledFirstRound, lastRun: { status: 'completed' }, runs: [{ status: 'cancelled' }, { status: 'completed' }] }
     expect(conversationFirstReplyCompleted(completed)).toBe(true)
-    const newConversation = composerUsesNewConversation({ desktopEnabled: true, timelineEmpty: false, selectedConversationId: 'conv-cancelled', detail: completed, running: false })
-    expect(newConversation).toBe(false)
-    expect(composerEntryFrozen({ desktopEnabled: true, selectedConversationId: 'conv-cancelled', newConversation })).toBe(true)
+    expect(composerUsesNewConversation({ ...state, detail: completed })).toBe(false)
   })
 
   test('没有 Run 记录的老会话按「模型是否回复过」；更早的消息没加载时按已完成', () => {
@@ -250,4 +251,85 @@ describe('13.38 R2-4：第一轮回复完成之前保留托盘', () => {
     expect(conversationFirstReplyCompleted({ messages: [], runs: [{ status: 'cancelled' }], hasEarlierMessages: true })).toBe(true)
     expect(conversationFirstReplyCompleted(null)).toBe(false)
   })
+})
+
+test.each(['输入框', '对话卡'])('%s的问题分页保留各题的选项和自定义答案', async surface => {
+  const submitted: Array<Record<string, string | string[]>> = []
+  const questionRequest = { runId: 'run-question', questions: [
+    { questionId: 'grouping', question: '按什么维度汇总？', options: [{ label: '按地区', value: 'region' }, { label: '按商品', value: 'product' }], multiSelect: false, allowOther: true },
+    { questionId: 'format', question: '需要什么交付格式？', options: [{ label: 'CSV', value: 'csv' }, { label: 'Excel', value: 'xlsx' }], multiSelect: true, allowOther: true },
+  ] }
+  const onSubmitQuestion = async (_text: string, answers: Record<string, string | string[]>) => { submitted.push(answers); return true }
+  const view = render(surface === '输入框' ? <Harness newConversation={false} questionRequest={questionRequest} onSubmitQuestion={onSubmitQuestion} />
+    : <FoxDecisionCard questionRequest={questionRequest} onSubmitQuestion={onSubmitQuestion} />)
+  const pages = within(view.getByRole('navigation', { name: '问题分页' }))
+  expect(pages.getByText('01/02')).toBeDefined()
+  expect((pages.getByRole('button', { name: '上一题' }) as HTMLButtonElement).disabled).toBe(true)
+  expect(view.queryByRole('heading', { name: '需要什么交付格式？' })).toBeNull()
+  const region = view.getByRole('button', { name: '按地区' })
+  fireEvent.click(region)
+  expect(region.getAttribute('aria-pressed')).toBe('true')
+  fireEvent.change(view.getByRole('textbox', { name: '按什么维度汇总？ 自定义答案' }), { target: { value: '按月份' } })
+  expect(region.getAttribute('aria-pressed')).toBe('false')
+  fireEvent.click(pages.getByRole('button', { name: '下一题' }))
+  expect(pages.getByText('02/02')).toBeDefined()
+  expect((pages.getByRole('button', { name: '下一题' }) as HTMLButtonElement).disabled).toBe(true)
+  expect(view.queryByRole('heading', { name: '按什么维度汇总？' })).toBeNull()
+  fireEvent.click(view.getByRole('button', { name: 'CSV' }))
+  fireEvent.click(view.getByRole('button', { name: 'Excel' }))
+  fireEvent.click(pages.getByRole('button', { name: '上一题' }))
+  expect((view.getByRole('textbox', { name: '按什么维度汇总？ 自定义答案' }) as HTMLInputElement).value).toBe('按月份')
+  fireEvent.click(pages.getByRole('button', { name: '下一题' }))
+  expect(view.getByRole('button', { name: 'CSV' }).getAttribute('aria-pressed')).toBe('true')
+  fireEvent.click(view.getByRole('button', { name: '确认并继续' }))
+  await waitFor(() => expect(submitted).toEqual([{ grouping: '按月份', format: ['csv', 'xlsx'] }]))
+})
+
+test('问题作为标题，三个预设选项和自定义输入占四行', async () => {
+  const submitted: Array<Record<string, string | string[]>> = []
+  const view = render(<Harness newConversation={false} questionRequest={{ runId: 'missing-file', questions: [
+    { questionId: 'file', question: '怎样处理缺失台账？', options: [{ label: '新建台账', value: 'create' }, { label: '提供文件', value: 'upload' }, { label: '先列字段', value: 'fields' }], multiSelect: false, allowOther: true },
+  ] }} onSubmitQuestion={async (_text, answers) => { submitted.push(answers); return true }} />)
+  expect(view.getByRole('heading', { name: '怎样处理缺失台账？' }).closest('.fox-question-field')?.firstElementChild?.tagName).toBe('HEADER')
+  expect(view.queryByText('需要你补充一点信息')).toBeNull()
+  expect(view.queryByRole('navigation', { name: '问题分页' })).toBeNull()
+  const rows = view.getAllByRole('listitem')
+  expect(rows.map(row => row.textContent)).toEqual(['1新建台账', '2提供文件', '3先列字段'])
+  const other = view.getByRole('textbox', { name: '怎样处理缺失台账？ 自定义答案' })
+  expect(other.closest('label')?.textContent).toBe('4')
+  expect(other.closest('.fox-question-decision-actions')).toBe(view.getByRole('button', { name: '确认并继续' }).parentElement)
+  expect(other.getAttribute('placeholder')).toBe('请输入其他选择')
+  fireEvent.change(other, { target: { value: '先检查归档目录' } })
+  fireEvent.click(view.getByRole('button', { name: '确认并继续' }))
+  await waitFor(() => expect(submitted).toEqual([{ file: '先检查归档目录' }]))
+})
+
+test('待审批卡在输入框位置按顺序显示，处理后恢复草稿', async () => {
+  const approval = (id: string, requestedAt: number) => ({
+    id, requestedAt, conversationId: 'chat', runId: 'run', toolCallId: id, toolName: 'write_file', status: 'pending',
+    request: { tool: 'write_file', input: { path: `D:/project/${id}.txt` }, availableDecisions: ['deny', 'allow_once'] },
+  } as ApprovalRecord)
+  const first = approval('first', 1)
+  const second = approval('second', 2)
+  const resolved: string[] = []
+  const resolve = async (id: string) => { resolved.push(id); return true }
+  const view = render(<Harness newConversation={false} />)
+  fireEvent.change(view.getByRole('textbox'), { target: { value: '还没发出的内容' } })
+  view.rerender(<Harness newConversation={false} runtimeApprovals={[second, first]} onResolveApproval={resolve} />)
+  const approve = await view.findByRole('button', { name: /允许.*一次/ })
+  expect(approve.closest('.fox-prompt-shell.is-approval')).not.toBeNull()
+  expect(view.queryByRole('textbox')).toBeNull()
+  expect(view.getByText('01/02')).toBeDefined()
+  expect(view.container.textContent).not.toContain('second.txt')
+  fireEvent.click(view.getByRole('button', { name: '下一项审批' }))
+  expect(view.getByText('02/02')).toBeDefined()
+  expect(view.container.textContent).not.toContain('first.txt')
+  fireEvent.click(view.getByRole('button', { name: '上一项审批' }))
+  fireEvent.click(view.getByRole('button', { name: /允许.*一次/ }))
+  await waitFor(() => expect(resolved).toEqual(['first']))
+  view.rerender(<Harness newConversation={false} runtimeApprovals={[second]} onResolveApproval={resolve} />)
+  fireEvent.click(await view.findByRole('button', { name: /允许.*一次/ }))
+  await waitFor(() => expect(resolved).toEqual(['first', 'second']))
+  view.rerender(<Harness newConversation={false} />)
+  expect((view.getByRole('textbox') as HTMLTextAreaElement).value).toBe('还没发出的内容')
 })

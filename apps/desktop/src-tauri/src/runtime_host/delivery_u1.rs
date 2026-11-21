@@ -42,9 +42,9 @@
 //! this package repairs: it made the version criterion dead code on one path
 //! shape and permanently ineffective on the other.
 
-use super::MAX_VERIFY_BYTES;
 use super::p2b_consumer::{self, StoredVerdict};
 use super::p2b_decision::{DecisionFact, DeliveryClass, FactClass, FactOrigin};
+use super::MAX_VERIFY_BYTES;
 use crate::database::{AcceptanceBinding, AcceptanceRow, AcceptanceWrite, Database};
 use crate::runtime_host::attachment_compute::{
     authorized_delivery_root_typed, read_authorized_delivery_bytes_typed,
@@ -153,9 +153,9 @@ impl AcceptanceIneffective {
     pub fn detail(&self) -> String {
         match self {
             AcceptanceIneffective::Absent => "该交付项没有当前有效的接受记录".to_owned(),
-            AcceptanceIneffective::RowNotPending { status } => format!(
-                "该交付行已由一次真实判决终结（状态 {status}），接受不能事后生效"
-            ),
+            AcceptanceIneffective::RowNotPending { status } => {
+                format!("该交付行已由一次真实判决终结（状态 {status}），接受不能事后生效")
+            }
             AcceptanceIneffective::NotAVerifiableRecord => {
                 "该行的耐久记录不是可核验的 v2 同一行信封，不能作为接受对象".to_owned()
             }
@@ -168,21 +168,20 @@ impl AcceptanceIneffective {
             AcceptanceIneffective::CandidateDrift { expected, actual } => format!(
                 "候选文件已偏离接受时核验的字节（期望 {expected}，当前 {actual}），接受失效"
             ),
-            AcceptanceIneffective::CandidateUnreadable { detail } => format!(
-                "候选文件当前无法在授权范围内读取（{detail}），接受有效性未确认"
-            ),
+            AcceptanceIneffective::CandidateUnreadable { detail } => {
+                format!("候选文件当前无法在授权范围内读取（{detail}），接受有效性未确认")
+            }
             AcceptanceIneffective::VersionDrift => {
                 "候选的受管版本已不是接受时登记的那一版，接受失效".to_owned()
             }
-            AcceptanceIneffective::ContractDrift { expected, actual } => format!(
-                "该行的冻结合同已改变（接受时 {expected}，当前 {actual}），接受失效"
-            ),
+            AcceptanceIneffective::ContractDrift { expected, actual } => {
+                format!("该行的冻结合同已改变（接受时 {expected}，当前 {actual}），接受失效")
+            }
             AcceptanceIneffective::AuthorizationWithdrawn => {
                 "项目授权已不在接受时的范围内，接受失效".to_owned()
             }
         }
     }
-
 }
 
 impl std::fmt::Display for AcceptanceIneffective {
@@ -817,7 +816,11 @@ fn plain_storage_path(path: &std::path::Path) -> std::path::PathBuf {
 fn spec_digest(requirements_json: &str) -> String {
     let value: serde_json::Value =
         serde_json::from_str(requirements_json).unwrap_or(serde_json::json!({}));
-    digest_hex(crate::canonical_json::to_vec(&value).unwrap_or_default().as_slice())
+    digest_hex(
+        crate::canonical_json::to_vec(&value)
+            .unwrap_or_default()
+            .as_slice(),
+    )
 }
 
 fn acceptance_snapshot(
@@ -865,9 +868,10 @@ fn blocking_fact_detail(facts: &[DecisionFact]) -> Option<String> {
             return Some("来源身份偏离".to_owned());
         }
     }
-    if facts.iter().any(|fact| {
-        fact.origin == FactOrigin::Spec && fact.class == FactClass::Invalid
-    }) {
+    if facts
+        .iter()
+        .any(|fact| fact.origin == FactOrigin::Spec && fact.class == FactClass::Invalid)
+    {
         return Some("合同规格不可用".to_owned());
     }
     None
@@ -881,4 +885,3 @@ fn digest_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 #[path = "delivery_u1_tests.rs"]
 mod tests;
-

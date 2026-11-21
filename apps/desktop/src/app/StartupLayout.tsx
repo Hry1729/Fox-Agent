@@ -1,6 +1,6 @@
 import { BlueFoxFallback } from '../features/chat/components/blue-fox/BlueFoxFallback'
 import type { ReactNode, Ref } from 'react'
-import { Minus, Square, X } from 'lucide-react'
+import { Minus, Maximize, X } from 'lucide-react'
 
 export type WindowAction = 'minimize' | 'toggleMaximize' | 'close'
 
@@ -17,8 +17,8 @@ export function StartupLayout({ avatar, surfaceRef, avatarRef, onWindowAction }:
       <span data-tauri-drag-region=""><img src="/app-icon.png" alt="" />Fox</span>
       <div>
         <button aria-label="最小化" disabled={!onWindowAction} onClick={() => onWindowAction?.('minimize')}><Minus /></button>
-        <button aria-label="最大化或还原" disabled={!onWindowAction} onClick={() => onWindowAction?.('toggleMaximize')}><Square /></button>
-        <button aria-label="关闭" disabled={!onWindowAction} onClick={() => onWindowAction?.('close')}><X /></button>
+        <button aria-label="最大化或还原" disabled={!onWindowAction} onClick={() => onWindowAction?.('toggleMaximize')}><Maximize /></button>
+        <button className="is-close" aria-label="关闭" disabled={!onWindowAction} onClick={() => onWindowAction?.('close')}><X /></button>
       </div>
     </header>
     <div className="fox-startup-body" ref={surfaceRef}>

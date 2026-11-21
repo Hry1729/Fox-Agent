@@ -69,7 +69,8 @@ fn required(value: &str, field: &str) -> Result<String, String> {
 }
 
 fn task_id(value: Option<&str>) -> Result<&str, String> {
-    value.filter(|value| !value.trim().is_empty())
+    value
+        .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "companion.task_id_required".to_owned())
 }
 
@@ -78,7 +79,11 @@ pub(crate) fn companion_task_list(
     state: State<'_, AppState>,
     request: CompanionTaskRequest,
 ) -> ApiResponse<Vec<OwnedCompanionTask>> {
-    response(state.database.list_owned_companion_tasks(&request.companion_id))
+    response(
+        state
+            .database
+            .list_owned_companion_tasks(&request.companion_id),
+    )
 }
 
 /// Recent run history for an owned task. `limit` bounds only the newest
@@ -121,26 +126,59 @@ pub(crate) fn companion_task_create(
         // The browser resolves its device zone on create. Keep the same Host
         // fallback for callers that explicitly persist an empty zone.
         let schedule = match request.schedule {
-            DigitalColleagueScheduleSpec::Once { at_ms, timezone } => DigitalColleagueScheduleSpec::Once {
-                at_ms,
-                timezone: if timezone.trim().is_empty() { resolved_device_timezone()? } else { canonical_timezone(&timezone)? },
-            },
-            DigitalColleagueScheduleSpec::Interval { interval_seconds, timezone } => DigitalColleagueScheduleSpec::Interval {
+            DigitalColleagueScheduleSpec::Once { at_ms, timezone } => {
+                DigitalColleagueScheduleSpec::Once {
+                    at_ms,
+                    timezone: if timezone.trim().is_empty() {
+                        resolved_device_timezone()?
+                    } else {
+                        canonical_timezone(&timezone)?
+                    },
+                }
+            }
+            DigitalColleagueScheduleSpec::Interval {
                 interval_seconds,
-                timezone: if timezone.trim().is_empty() { resolved_device_timezone()? } else { canonical_timezone(&timezone)? },
+                timezone,
+            } => DigitalColleagueScheduleSpec::Interval {
+                interval_seconds,
+                timezone: if timezone.trim().is_empty() {
+                    resolved_device_timezone()?
+                } else {
+                    canonical_timezone(&timezone)?
+                },
             },
-            DigitalColleagueScheduleSpec::Daily { weekdays, local_time, timezone } => DigitalColleagueScheduleSpec::Daily {
+            DigitalColleagueScheduleSpec::Daily {
                 weekdays,
                 local_time,
-                timezone: if timezone.trim().is_empty() { resolved_device_timezone()? } else { canonical_timezone(&timezone)? },
-            },
-            DigitalColleagueScheduleSpec::Weekly { weekdays, local_time, timezone } => DigitalColleagueScheduleSpec::Weekly {
+                timezone,
+            } => DigitalColleagueScheduleSpec::Daily {
                 weekdays,
                 local_time,
-                timezone: if timezone.trim().is_empty() { resolved_device_timezone()? } else { canonical_timezone(&timezone)? },
+                timezone: if timezone.trim().is_empty() {
+                    resolved_device_timezone()?
+                } else {
+                    canonical_timezone(&timezone)?
+                },
+            },
+            DigitalColleagueScheduleSpec::Weekly {
+                weekdays,
+                local_time,
+                timezone,
+            } => DigitalColleagueScheduleSpec::Weekly {
+                weekdays,
+                local_time,
+                timezone: if timezone.trim().is_empty() {
+                    resolved_device_timezone()?
+                } else {
+                    canonical_timezone(&timezone)?
+                },
             },
         };
-        state.database.create_owned_companion_task(&input, schedule, request.enabled.unwrap_or(true))
+        state.database.create_owned_companion_task(
+            &input,
+            schedule,
+            request.enabled.unwrap_or(true),
+        )
     })())
 }
 
@@ -171,7 +209,10 @@ pub(crate) fn companion_task_pause(
         state.database.update_owned_companion_task(
             &request.companion_id,
             task_id,
-            OwnedCompanionTaskUpdate { enabled: Some(false), ..Default::default() },
+            OwnedCompanionTaskUpdate {
+                enabled: Some(false),
+                ..Default::default()
+            },
         )
     }))
 }
@@ -185,7 +226,10 @@ pub(crate) fn companion_task_resume(
         state.database.update_owned_companion_task(
             &request.companion_id,
             task_id,
-            OwnedCompanionTaskUpdate { enabled: Some(true), ..Default::default() },
+            OwnedCompanionTaskUpdate {
+                enabled: Some(true),
+                ..Default::default()
+            },
         )
     }))
 }
@@ -198,7 +242,9 @@ pub(crate) fn companion_task_run_now(
 ) -> ApiResponse<CompanionTaskRunNow> {
     response((|| {
         let task_id = task_id(request.task_id.as_deref())?;
-        let before = state.database.owned_companion_task(&request.companion_id, task_id)?
+        let before = state
+            .database
+            .owned_companion_task(&request.companion_id, task_id)?
             .ok_or_else(|| "digital_colleague.not_found".to_owned())?;
         let acceptance = state.database.accept_digital_colleague_trigger(
             task_id,
@@ -211,11 +257,19 @@ pub(crate) fn companion_task_run_now(
         )?;
         let trigger = acceptance.trigger.clone();
         if let Some(prepared) = acceptance.prepared {
-            app.state::<AppState>().runtime_host.dispatch_digital_colleague_trigger(prepared)?;
+            app.state::<AppState>()
+                .runtime_host
+                .dispatch_digital_colleague_trigger(prepared)?;
         }
-        let task = state.database.owned_companion_task(&request.companion_id, task_id)?
+        let task = state
+            .database
+            .owned_companion_task(&request.companion_id, task_id)?
             .ok_or_else(|| "digital_colleague.not_found".to_owned())?;
-        Ok(CompanionTaskRunNow { task, trigger: trigger.clone(), run_id: trigger.run_id })
+        Ok(CompanionTaskRunNow {
+            task,
+            trigger: trigger.clone(),
+            run_id: trigger.run_id,
+        })
     })())
 }
 
@@ -225,9 +279,15 @@ pub(crate) fn companion_task_delete(
     request: CompanionTaskRequest,
 ) -> ApiResponse<Value> {
     response(task_id(request.task_id.as_deref()).and_then(|task_id| {
-        state.database.owned_companion_task(&request.companion_id, task_id)?
+        state
+            .database
+            .owned_companion_task(&request.companion_id, task_id)?
             .ok_or_else(|| "digital_colleague.not_found".to_owned())?;
-        serde_json::to_value(state.database.revoke_digital_colleague(task_id, "companion_task_delete")?)
-            .map_err(|error| error.to_string())
+        serde_json::to_value(
+            state
+                .database
+                .revoke_digital_colleague(task_id, "companion_task_delete")?,
+        )
+        .map_err(|error| error.to_string())
     }))
 }

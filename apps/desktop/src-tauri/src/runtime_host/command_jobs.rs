@@ -12,7 +12,7 @@ use crate::{
     tool_host::{PreparedToolAction, ToolPreview},
 };
 use base64::Engine;
-use fox_engine_protocol::{ExecutionCredential, ExecutionEvidence, CallOutcome, AttemptState};
+use fox_engine_protocol::{AttemptState, CallOutcome, ExecutionCredential, ExecutionEvidence};
 use serde_json::{json, Value};
 use std::{
     collections::HashSet,
@@ -50,13 +50,7 @@ pub(crate) fn prepare(input: &Value, root: &Path) -> Result<PreparedToolAction, 
     let fields: &[&str] = match action {
         // `risk` is the model's optional self-assessment; the approval policy
         // may use it only to raise the Host's own judgement.
-        "start" => &[
-            "action",
-            "command",
-            "cwd",
-            "timeoutSeconds",
-            "risk",
-        ],
+        "start" => &["action", "command", "cwd", "timeoutSeconds", "risk"],
         "status" | "cancel" => &["action", "jobId"],
         "output" => &["action", "jobId", "stream", "offset", "limit"],
         _ => return Err(invalid("unsupported command action")),
@@ -145,12 +139,7 @@ fn result(value: Value, failed: bool) -> Value {
 /// Model-facing allowlist. Internal checkpoints and result blobs never cross
 /// this boundary; only output explicitly returns a page of log bytes.
 fn public_status(database: &Database, row: &crate::database::JobSnapshot) -> Result<Value, String> {
-    let snapshot: Value = if row.result_ref.is_some() {
-        database.kernel_job_result_value(&row.conversation_id, &row.job_id)?
-    } else {
-        row.cursor.as_deref().map(serde_json::from_str).transpose()
-            .map_err(|e| format!("Invalid command checkpoint: {e}"))?.unwrap_or(json!({}))
-    };
+    let snapshot = command_snapshot(database, row)?;
     let stream = |key: &str| {
         let p = &snapshot[key];
         json!({"totalBytes":p["totalBytes"].as_u64().unwrap_or(0),
@@ -160,13 +149,30 @@ fn public_status(database: &Database, row: &crate::database::JobSnapshot) -> Res
             "streamClosed":p["streamClosed"].as_bool().unwrap_or(row.state.is_terminal())})
     };
     let (is_final, label, note) = final_state_note(row.state, &snapshot["exitCode"]);
-    Ok(json!({"jobId":row.job_id,"state":row.state,"exitCode":snapshot["exitCode"],
+    Ok(
+        json!({"jobId":row.job_id,"state":row.state,"exitCode":snapshot["exitCode"],
         "errorCode":row.error_code.as_deref().or(snapshot["errorCode"].as_str()),
         "stdout":stream("stdout"),"stderr":stream("stderr"),
         "cancelRequested":row.cancel_requested_at.is_some(),
         "cancelRequestedAt":row.cancel_requested_at,"cancelAcknowledgedAt":row.cancel_acknowledged_at,
         "resumable":row.resumable,
-        "final":is_final,"stateLabel":label,"note":note}))
+        "final":is_final,"stateLabel":label,"note":note}),
+    )
+}
+
+pub(crate) fn command_snapshot(
+    database: &Database,
+    row: &crate::database::JobSnapshot,
+) -> Result<Value, String> {
+    if row.result_ref.is_some() {
+        return database.kernel_job_result_value(&row.conversation_id, &row.job_id);
+    }
+    row.cursor
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map(|snapshot| snapshot.unwrap_or(json!({})))
+        .map_err(|e| format!("Invalid command checkpoint: {e}"))
 }
 
 /// 13.38（R1-4）：给模型看的明确终态说明。终态（已取消 / 已结束 / 失败）是 Host 记录的最终状态，
@@ -191,7 +197,11 @@ pub(crate) fn final_state_note(state: JobState, exit_code: &Value) -> (bool, Str
         let note = format!("这是 Host 记录的最终状态，不是抽样：该后台任务{label}，不会再变化，进程已不在运行。可以据此下结论。");
         (true, label, note)
     } else {
-        (false, label.clone(), format!("该后台任务目前{label}，这是此刻的状态，之后还会变化。"))
+        (
+            false,
+            label.clone(),
+            format!("该后台任务目前{label}，这是此刻的状态，之后还会变化。"),
+        )
     }
 }
 
@@ -249,17 +259,32 @@ pub(super) fn execute(
 /// Execute credential from its own durable decision and won the single
 /// execution claim for it; this adapter never claims a second time.
 pub(super) fn execute_with_credential(
-    database: &Database, run_id: &str, input: &Value, root: &Path,
-    token: &CancellationToken, budget: Duration,
+    database: &Database,
+    run_id: &str,
+    input: &Value,
+    root: &Path,
+    token: &CancellationToken,
+    budget: Duration,
     credential: &ExecutionCredential,
 ) -> (Result<Value, String>, ExecutionEvidence, CallOutcome) {
     let mut evidence = ExecutionEvidence::NotStarted;
     let mut outcome = CallOutcome::Completed;
-    let response = execute_inner(database, run_id, input, root, token, budget,
-        Arc::new(crate::process_jobs::FoxJobBackend), Some(credential),
-        &mut evidence, &mut outcome);
+    let response = execute_inner(
+        database,
+        run_id,
+        input,
+        root,
+        token,
+        budget,
+        Arc::new(crate::process_jobs::FoxJobBackend),
+        Some(credential),
+        &mut evidence,
+        &mut outcome,
+    );
     if let Err(error) = &response {
-        outcome = CallOutcome::Failed { code: error.clone() };
+        outcome = CallOutcome::Failed {
+            code: error.clone(),
+        };
     }
     (response, evidence, outcome)
 }
@@ -267,7 +292,9 @@ pub(super) fn execute_with_credential(
 /// Field equality against durable authority, not digest self-consistency.
 /// This runs both before job creation and at the manager reception boundary.
 fn verify_start(
-    database: &Database, run_id: &str, input: &Value,
+    database: &Database,
+    run_id: &str,
+    input: &Value,
     credential: &ExecutionCredential,
     proof: &dyn crate::process_jobs::BackendCapabilityProof,
 ) -> Result<(), String> {
@@ -277,30 +304,46 @@ fn verify_start(
     database.revalidate_execution_credential(credential)?;
     if credential.run_id != run_id
         || credential.action_class != fox_engine_protocol::ActionClass::Execute
-        || credential.intent_digest != crate::database::kernel_execution_admission::launch_params_hash(
-            "run_command", &input.canonical_string()) {
+        || credential.intent_digest
+            != crate::database::kernel_execution_admission::launch_params_hash(
+                "run_command",
+                &input.canonical_string(),
+            )
+    {
         return Err("credential_mismatch: command scope or input differs".into());
     }
-    let binding = database.run_control_binding(run_id)?.ok_or("command run binding missing")?;
+    let binding = database
+        .run_control_binding(run_id)?
+        .ok_or("command run binding missing")?;
     if credential.conversation_id != binding.conversation_id
         || credential.resolved_profile != binding.execution_profile_id
-        || credential.policy_snapshot_id != binding.permission_snapshot_id {
+        || credential.policy_snapshot_id != binding.permission_snapshot_id
+    {
         return Err("credential_mismatch: frozen run scope differs".into());
     }
     database.host_validate_resource_acquisition_for(run_id, Some("run_command"))?;
-    let row = database.read_execution_attempt(run_id, &credential.dispatch_id)?
+    let row = database
+        .read_execution_attempt(run_id, &credential.dispatch_id)?
         .ok_or("credential_mismatch: no Host claim exists")?;
-    if row.state != AttemptState::Claimed || row.params_hash != credential.intent_digest
-        || row.conversation_id != credential.conversation_id {
+    if row.state != AttemptState::Claimed
+        || row.params_hash != credential.intent_digest
+        || row.conversation_id != credential.conversation_id
+    {
         return Err("credential_mismatch: dispatch is not the Host's first claimed attempt".into());
     }
     match proof.availability() {
         crate::process_jobs::BackendAvailability::Available { digest, .. }
-            if credential.backend_requirement.evidence_digest.as_deref() == Some(digest.as_str()) => Ok(()),
-        crate::process_jobs::BackendAvailability::Available { .. } =>
-            Err("credential_mismatch: backend evidence changed".into()),
-        crate::process_jobs::BackendAvailability::Unavailable(_) =>
-            Err("sandbox_unavailable: no execution backend".into()),
+            if credential.backend_requirement.evidence_digest.as_deref()
+                == Some(digest.as_str()) =>
+        {
+            Ok(())
+        }
+        crate::process_jobs::BackendAvailability::Available { .. } => {
+            Err("credential_mismatch: backend evidence changed".into())
+        }
+        crate::process_jobs::BackendAvailability::Unavailable(_) => {
+            Err("sandbox_unavailable: no execution backend".into())
+        }
     }
 }
 
@@ -319,7 +362,8 @@ impl crate::process_jobs::BackendCapabilityProof for SnapshotBackendProof {
                     crate::process_jobs::BackendAvailability::Available { backend, digest }
                 } else {
                     crate::process_jobs::BackendAvailability::Unavailable(
-                        crate::process_jobs::BackendRefusal::CredentialMismatch)
+                        crate::process_jobs::BackendRefusal::CredentialMismatch,
+                    )
                 }
             }
             unavailable => unavailable,
@@ -363,19 +407,28 @@ fn execute_inner(
         }
         if let Some(credential) = credential {
             database.verify_execution_credential(run_id, credential)?;
-            if credential.intent_digest != crate::database::kernel_execution_admission::launch_params_hash(
-                "run_command", &input.canonical_string()) {
+            if credential.intent_digest
+                != crate::database::kernel_execution_admission::launch_params_hash(
+                    "run_command",
+                    &input.canonical_string(),
+                )
+            {
                 return Err("credential_mismatch: command input differs".into());
             }
         }
         // A refusal may follow durable admission/claim. Report only the
         // external-process fact; never claim that nothing was persisted.
         if let Err(refusal) = proof.availability().authorize() {
-            *outcome = CallOutcome::Refused { code: "sandbox_unavailable".into() };
-            return Ok(result(json!({"jobId":Value::Null,"state":"refused",
+            *outcome = CallOutcome::Refused {
+                code: "sandbox_unavailable".into(),
+            };
+            return Ok(result(
+                json!({"jobId":Value::Null,"state":"refused",
                 "errorCode":"sandbox_unavailable", "errorMessage":format!(
                     "{} No external process was started.", refusal.reason()),
-                "executionStarted":false,"sideEffectState":"none"}), true));
+                "executionStarted":false,"sideEffectState":"none"}),
+                true,
+            ));
         }
         let credential = credential.ok_or("credential_missing: Host first-claim token required")?;
         verify_start(database, run_id, input, credential, proof.as_ref())?;
@@ -396,7 +449,9 @@ fn execute_inner(
         }
         let requested = unsigned(input, "timeoutSeconds", 600, 3600)?;
         let duration = Duration::from_secs(requested)
-            .min(Duration::from_millis(credential.budget_ceiling_ms.max(0) as u64))
+            .min(Duration::from_millis(
+                credential.budget_ceiling_ms.max(0) as u64
+            ))
             .min(budget.saturating_sub(admitted.elapsed()));
         if duration.is_zero() {
             return Err(
@@ -425,7 +480,9 @@ fn execute_inner(
             )
             .min(budget.saturating_sub(admitted.elapsed()));
             if duration.is_zero() {
-                *outcome = CallOutcome::Failed { code: "tool.timed_out".into() };
+                *outcome = CallOutcome::Failed {
+                    code: "tool.timed_out".into(),
+                };
                 database.kernel_job_settle_attempt(
                     &row.job_id,
                     1,
@@ -441,7 +498,9 @@ fn execute_inner(
                 ));
             }
             if registry.len() >= 32 {
-                *outcome = CallOutcome::Failed { code: "tool.start_failed".into() };
+                *outcome = CallOutcome::Failed {
+                    code: "tool.start_failed".into(),
+                };
                 database.kernel_job_settle_attempt(
                     &row.job_id,
                     1,
@@ -467,22 +526,35 @@ fn execute_inner(
                 ManagerConfig::default(),
                 Arc::new(SnapshotBackendProof {
                     provider: Arc::clone(&proof),
-                    expected_digest: credential.backend_requirement.evidence_digest.clone()
+                    expected_digest: credential
+                        .backend_requirement
+                        .evidence_digest
+                        .clone()
                         .ok_or("credential_mismatch: backend evidence missing")?,
                 }),
             ));
-            let launch = manager.start_authorized(StartRequest {
-                run_id: run_id.into(),
-                idempotency_key: credential.dispatch_id.clone(),
-                spec: spawn_spec,
-                execution_budget: duration,
-            }, |_| {
-                token.check().map_err(crate::process_jobs::JobError::InvalidRequest)?;
-                verify_start(database, run_id, input, credential, proof.as_ref())
-                    .map_err(|error| if error.starts_with("sandbox_unavailable") {
-                        crate::process_jobs::JobError::SandboxUnavailable(error)
-                    } else { crate::process_jobs::JobError::CredentialMismatch(error) })
-            });
+            let launch = manager.start_authorized(
+                StartRequest {
+                    run_id: run_id.into(),
+                    idempotency_key: credential.dispatch_id.clone(),
+                    spec: spawn_spec,
+                    execution_budget: duration,
+                },
+                |_| {
+                    token
+                        .check()
+                        .map_err(crate::process_jobs::JobError::InvalidRequest)?;
+                    verify_start(database, run_id, input, credential, proof.as_ref()).map_err(
+                        |error| {
+                            if error.starts_with("sandbox_unavailable") {
+                                crate::process_jobs::JobError::SandboxUnavailable(error)
+                            } else {
+                                crate::process_jobs::JobError::CredentialMismatch(error)
+                            }
+                        },
+                    )
+                },
+            );
             match launch {
                 Err(e) => {
                     registry.remove(&row.job_id);
@@ -504,12 +576,23 @@ fn execute_inner(
                         // Spawn itself failed before a child identity existed.
                         // Publish this real terminal fact synchronously rather
                         // than briefly reporting an unstarted queued job as success.
-                        *outcome = CallOutcome::Failed { code: out.view().error_code.clone()
-                            .unwrap_or_else(|| "tool.start_failed".into()) };
-                        database.kernel_command_job_publish(&row.job_id, 1, &sample(&manager, &local)?)?;
+                        *outcome = CallOutcome::Failed {
+                            code: out
+                                .view()
+                                .error_code
+                                .clone()
+                                .unwrap_or_else(|| "tool.start_failed".into()),
+                        };
+                        database.kernel_command_job_publish(
+                            &row.job_id,
+                            1,
+                            &sample(&manager, &local)?,
+                        )?;
                         registry.remove(&row.job_id);
-                        return Ok(result(public_status(database,
-                            &database.kernel_job_snapshot(&row.job_id)?)?, true));
+                        return Ok(result(
+                            public_status(database, &database.kernel_job_snapshot(&row.job_id)?)?,
+                            true,
+                        ));
                     }
                     let db = database.clone();
                     let job = row.job_id.clone();
@@ -578,26 +661,20 @@ fn execute_inner(
     }
     let failed = !read_only && matches!(row.state, JobState::Failed | JobState::Cancelled);
     if failed {
-        *outcome = CallOutcome::Failed { code: row.error_code.clone().unwrap_or_else(|| "tool.unknown".into()) };
+        *outcome = CallOutcome::Failed {
+            code: row
+                .error_code
+                .clone()
+                .unwrap_or_else(|| "tool.unknown".into()),
+        };
     }
     if action == "output" {
-        let snapshot = if row.result_ref.is_some() {
-            database.kernel_job_result_value(&binding.conversation_id, &id)?
-        } else {
-            row.cursor
-                .as_deref()
-                .map(serde_json::from_str)
-                .transpose()
-                .map_err(|e| e.to_string())?
-                .unwrap_or(json!({}))
-        };
+        let snapshot = command_snapshot(database, &row)?;
         let stream = input["stream"].as_str().unwrap_or("stdout");
         let p = &snapshot[stream];
         let base = p["offset"].as_u64().unwrap_or(0);
         let requested = unsigned(input, "offset", 0, u64::MAX)?;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(p["data"].as_str().unwrap_or(""))
-            .map_err(|_| "Invalid stored command output")?;
+        let bytes = command_stream_bytes(p)?;
         let start = requested.saturating_sub(base).min(bytes.len() as u64) as usize;
         if requested > p["nextOffset"].as_u64().unwrap_or(0) {
             return Err(invalid("output offset is beyond available output"));
@@ -628,10 +705,13 @@ fn execute_inner(
             failed,
         ));
     }
-    Ok(result(
-        public_status(database, &row)?,
-        failed,
-    ))
+    Ok(result(public_status(database, &row)?, failed))
+}
+
+pub(crate) fn command_stream_bytes(stream: &Value) -> Result<Vec<u8>, String> {
+    base64::engine::general_purpose::STANDARD
+        .decode(stream["data"].as_str().unwrap_or(""))
+        .map_err(|_| "Invalid stored command output".into())
 }
 
 #[cfg(test)]

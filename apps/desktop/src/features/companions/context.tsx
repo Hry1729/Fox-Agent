@@ -47,11 +47,14 @@ export interface ContactsContextValue extends ReturnType<typeof useContactList> 
   privateChat: boolean
   projects: ProjectRecord[]
   model: string
+  userProfile?: { name: string; avatar: string }
   openSharedMemory: () => void
   askToOrganize: () => void
   permission: string
   setPermission: (mode: ProjectRecord['permissionMode']) => void
   open: (contact: Companion, profile?: boolean) => void
+  openCoordination?: (conversationId: string, view?: 'chat' | 'companions') => void
+  closeCoordination?: () => void
   showProfile: () => void
   leave: (contact: Companion) => void
   refreshConversation: () => Promise<void>
@@ -63,6 +66,8 @@ export interface ContactsContextValue extends ReturnType<typeof useContactList> 
   quoteDraft?: QuotePreview | null
   quoteBubble?: (bubbleId: string) => Promise<void>
   clearQuote?: () => void
+  /** The same Host-backed send path used by the composer, including optimistic UI. */
+  sendPrompt?: (text: string) => Promise<unknown>
   /** C07: the latest Host-confirmed mark per bubble, shared by every view of
    * this chat so a cancel on the favorites page reaches the bubble menu too. */
   bubbleMarkUpdates?: ReadonlyMap<string, ContactBubbleMarkRecord>

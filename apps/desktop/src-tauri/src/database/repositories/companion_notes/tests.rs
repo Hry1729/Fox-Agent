@@ -63,9 +63,17 @@ fn private_notes_are_owner_scoped_and_user_confirmations_check_versions() {
         let reopened = Database::open(root.join("fox.db")).unwrap();
         let saved = reopened.companion_notes_get(owner).unwrap();
         assert_eq!(saved["requests"], json!([]));
-        for (request, status, original) in [(&pending, "rejected", "私人报价"), (&second, "stale", "私人报价"), (&third, "approved", "刚刚修改")] {
-            let receipt = saved["requestHistory"].as_array().unwrap().iter()
-                .find(|row| row["id"] == request["requestId"]).unwrap();
+        for (request, status, original) in [
+            (&pending, "rejected", "私人报价"),
+            (&second, "stale", "私人报价"),
+            (&third, "approved", "刚刚修改"),
+        ] {
+            let receipt = saved["requestHistory"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == request["requestId"])
+                .unwrap();
             assert_eq!(receipt["status"], status);
             assert_eq!(receipt["content"], original);
             assert!(receipt["resolvedAt"].as_i64().is_some());
@@ -88,7 +96,10 @@ fn private_notes_are_owner_scoped_and_user_confirmations_check_versions() {
         assert_eq!(created["status"], "created");
         assert_eq!(write(db, chat, note.clone())["status"], "existing");
         let new_id = created["memoryId"].as_str().unwrap();
-        assert_eq!(db.companion_notes_get(owner).unwrap()["writeReceipts"][0]["status"], "created");
+        assert_eq!(
+            db.companion_notes_get(owner).unwrap()["writeReceipts"][0]["status"],
+            "created"
+        );
         assert!(db
             .companion_memory_undo(owner, new_id, "another-run")
             .is_err());
@@ -181,8 +192,12 @@ fn shared_confirmation_can_keep_both_reject_partial_evidence_and_replace_only_on
         let saved = reopened.companion_notes_get(owner).unwrap();
         assert_eq!(saved["sharedRequests"], json!([]));
         for (id, status) in [(&card["id"], "added"), (&pending["id"], "replaced")] {
-            let receipt = saved["sharedRequestHistory"].as_array().unwrap().iter()
-                .find(|row| &row["id"] == id).unwrap();
+            let receipt = saved["sharedRequestHistory"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| &row["id"] == id)
+                .unwrap();
             assert_eq!(receipt["status"], status);
             assert!(receipt["resolvedAt"].as_i64().is_some());
         }
@@ -220,8 +235,16 @@ fn reported_negative_temporary_and_rephrased_statements_require_confirmation() {
     ] {
         assert!(!shared::direct_statement(message, excerpt, text));
     }
-    assert!(shared::direct_statement("我喜欢先看结论。请记住这条长期偏好。", "我喜欢先看结论。", "我喜欢先看结论。"));
-    assert!(!shared::direct_statement("我喜欢先看结论。请记住这条长期偏好。", "我喜欢先看结论。", "我喜欢先看结论，再展开细节。"));
+    assert!(shared::direct_statement(
+        "我喜欢先看结论。请记住这条长期偏好。",
+        "我喜欢先看结论。",
+        "我喜欢先看结论。"
+    ));
+    assert!(!shared::direct_statement(
+        "我喜欢先看结论。请记住这条长期偏好。",
+        "我喜欢先看结论。",
+        "我喜欢先看结论，再展开细节。"
+    ));
     assert!(shared::direct_statement(
         "我喜欢先看结论。",
         "我喜欢先看结论",
@@ -306,7 +329,8 @@ fn project_reader_requires_an_explicit_granted_companion_reference_and_cannot_wr
         db.companion_grant_project(owner, "reader-project", true)
             .unwrap();
         assert!(db.companion_note_access("reader-chat").unwrap().is_none());
-        db.companion_project_note_reference_set("reader-chat", Some(owner)).unwrap();
+        db.companion_project_note_reference_set("reader-chat", Some(owner))
+            .unwrap();
         let view = db
             .companion_runtime_notes("reader-chat", "QTopic9854")
             .unwrap()
@@ -410,51 +434,97 @@ fn project_note_options_are_scoped_to_valid_grants_and_current_conversation() {
             )?;
             Ok(())
         }).unwrap();
-        db.companion_grant_project(owner, "options-project", true).unwrap();
-        db.companion_grant_project(&other_id, "options-project", true).unwrap();
+        db.companion_grant_project(owner, "options-project", true)
+            .unwrap();
+        db.companion_grant_project(&other_id, "options-project", true)
+            .unwrap();
 
         let initial = db.companion_project_note_options("options-chat").unwrap();
         assert_eq!(initial["selectedCompanionId"], Value::Null);
         assert_eq!(initial["options"].as_array().unwrap().len(), 2);
-        db.companion_project_note_reference_set("options-chat", Some(&other_id)).unwrap();
-        assert_eq!(db.companion_project_note_options("options-chat").unwrap()["selectedCompanionId"], other_id);
+        db.companion_project_note_reference_set("options-chat", Some(&other_id))
+            .unwrap();
+        assert_eq!(
+            db.companion_project_note_options("options-chat").unwrap()["selectedCompanionId"],
+            other_id
+        );
 
-        db.companion_grant_project(&other_id, "options-project", false).unwrap();
+        db.companion_grant_project(&other_id, "options-project", false)
+            .unwrap();
         let revoked = db.companion_project_note_options("options-chat").unwrap();
         assert_eq!(revoked["selectedCompanionId"], Value::Null);
         assert_eq!(revoked["options"].as_array().unwrap().len(), 1);
         assert_eq!(revoked["options"][0]["id"], owner);
 
         db.archive_companion(owner).unwrap();
-        assert_eq!(db.companion_project_note_options("options-chat").unwrap()["options"], json!([]));
+        assert_eq!(
+            db.companion_project_note_options("options-chat").unwrap()["options"],
+            json!([])
+        );
         db.restore_companion(owner).unwrap();
         db.with_connection(|connection| {
-            connection.execute("UPDATE companion_profiles SET deleting_at=1 WHERE id=?", [owner])?;
+            connection.execute(
+                "UPDATE companion_profiles SET deleting_at=1 WHERE id=?",
+                [owner],
+            )?;
             Ok(())
-        }).unwrap();
-        assert_eq!(db.companion_project_note_options("options-chat").unwrap()["options"], json!([]));
+        })
+        .unwrap();
+        assert_eq!(
+            db.companion_project_note_options("options-chat").unwrap()["options"],
+            json!([])
+        );
 
-        let task = db.create_digital_colleague(&crate::database::CreateDigitalColleagueInput {
-            name: "internal task".into(), expert_id: String::new(), objective: "private execution".into(),
-            project_id: None, project_root: None, knowledge_references: vec![],
-            max_runs_per_day: 8, max_tokens_per_day: 128_000, max_duration_ms: 300_000,
-            max_output_tokens: 4_096, max_tool_calls: 16, companion_id: Some(other_id.clone()),
-        }).unwrap();
+        let task = db
+            .create_digital_colleague(&crate::database::CreateDigitalColleagueInput {
+                name: "internal task".into(),
+                expert_id: String::new(),
+                objective: "private execution".into(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: vec![],
+                max_runs_per_day: 8,
+                max_tokens_per_day: 128_000,
+                max_duration_ms: 300_000,
+                max_output_tokens: 4_096,
+                max_tool_calls: 16,
+                companion_id: Some(other_id.clone()),
+            })
+            .unwrap();
         db.with_connection(|connection| {
-            connection.execute("UPDATE conversations SET project_id='options-project' WHERE id=?", [&task.conversation_id])?;
+            connection.execute(
+                "UPDATE conversations SET project_id='options-project' WHERE id=?",
+                [&task.conversation_id],
+            )?;
             Ok(())
-        }).unwrap();
-        let assigned_project: String = db.with_connection(|connection| {
-            connection.query_row("SELECT project_id FROM conversations WHERE id=?", [&task.conversation_id], |row| row.get(0))
-        }).unwrap();
-        assert_eq!(assigned_project, "options-project", "the rejection uses task ownership, not a NULL project");
-        assert!(db.companion_project_note_options(&task.conversation_id).unwrap_err()
+        })
+        .unwrap();
+        let assigned_project: String = db
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT project_id FROM conversations WHERE id=?",
+                    [&task.conversation_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            assigned_project, "options-project",
+            "the rejection uses task ownership, not a NULL project"
+        );
+        assert!(db
+            .companion_project_note_options(&task.conversation_id)
+            .unwrap_err()
             .contains("companion.project_note_reference_invalid_conversation"));
-        assert!(db.companion_project_note_reference_set(&task.conversation_id, Some(&other_id)).unwrap_err()
+        assert!(db
+            .companion_project_note_reference_set(&task.conversation_id, Some(&other_id))
+            .unwrap_err()
             .contains("companion.project_note_reference_invalid_conversation"));
 
         for conversation in [private_chat, "ordinary-chat", "child-chat"] {
-            assert!(db.companion_project_note_options(conversation).unwrap_err()
+            assert!(db
+                .companion_project_note_options(conversation)
+                .unwrap_err()
                 .contains("companion.project_note_reference_invalid_conversation"));
         }
     })
@@ -465,8 +535,10 @@ fn same_expert_project_companions_never_cross_read_notes() {
     with_notes(|db, root, owner, private_chat| {
         let other = db.add_companion(root, "fox-security").unwrap();
         let other_id = other.profile.id;
-        db.companion_note_save_user(owner, None, None, "only-alpha", None, None).unwrap();
-        db.companion_note_save_user(&other_id, None, None, "only-beta", None, None).unwrap();
+        db.companion_note_save_user(owner, None, None, "only-alpha", None, None)
+            .unwrap();
+        db.companion_note_save_user(&other_id, None, None, "only-beta", None, None)
+            .unwrap();
         db.with_connection(|connection| {
             connection.execute_batch(
                 "INSERT INTO projects(id,name,root_path,created_at,updated_at)
@@ -477,55 +549,108 @@ fn same_expert_project_companions_never_cross_read_notes() {
             )?;
             Ok(())
         }).unwrap();
-        db.companion_grant_project(owner, "scoped-project", true).unwrap();
-        db.companion_grant_project(&other_id, "scoped-project", true).unwrap();
+        db.companion_grant_project(owner, "scoped-project", true)
+            .unwrap();
+        db.companion_grant_project(&other_id, "scoped-project", true)
+            .unwrap();
 
-        assert!(db.companion_runtime_notes("scoped-chat", "").unwrap().is_none());
-        assert!(db.companion_project_note_reference_set("scoped-chat", Some(owner)).is_ok());
-        let alpha = db.companion_runtime_notes("scoped-chat", "").unwrap().unwrap();
+        assert!(db
+            .companion_runtime_notes("scoped-chat", "")
+            .unwrap()
+            .is_none());
+        assert!(db
+            .companion_project_note_reference_set("scoped-chat", Some(owner))
+            .is_ok());
+        let alpha = db
+            .companion_runtime_notes("scoped-chat", "")
+            .unwrap()
+            .unwrap();
         assert_eq!(alpha["companionId"], owner);
         assert_eq!(alpha["notes"].as_array().unwrap().len(), 1);
         assert!(alpha.to_string().contains("only-alpha"));
         assert!(!alpha.to_string().contains("only-beta"));
 
-        db.companion_project_note_reference_set("scoped-chat", Some(&other_id)).unwrap();
-        let beta = db.companion_runtime_notes("scoped-chat", "").unwrap().unwrap();
+        db.companion_project_note_reference_set("scoped-chat", Some(&other_id))
+            .unwrap();
+        let beta = db
+            .companion_runtime_notes("scoped-chat", "")
+            .unwrap()
+            .unwrap();
         assert_eq!(beta["companionId"], other_id);
         assert!(!beta.to_string().contains("only-alpha"));
         assert!(beta.to_string().contains("only-beta"));
 
-        assert_eq!(db.companion_runtime_notes(private_chat, "").unwrap().unwrap()["companionId"], owner);
-        assert_eq!(db.companion_runtime_notes(&other.conversation_id, "").unwrap().unwrap()["companionId"], other_id);
+        assert_eq!(
+            db.companion_runtime_notes(private_chat, "")
+                .unwrap()
+                .unwrap()["companionId"],
+            owner
+        );
+        assert_eq!(
+            db.companion_runtime_notes(&other.conversation_id, "")
+                .unwrap()
+                .unwrap()["companionId"],
+            other_id
+        );
 
-        db.companion_grant_project(&other_id, "scoped-project", false).unwrap();
-        assert!(db.companion_runtime_notes("scoped-chat", "").unwrap().is_none());
-        assert!(db.companion_project_note_reference_set("scoped-chat", Some(&other_id)).is_err());
-        assert!(db.companion_notes_tool("scoped-chat", "scoped-run", "note_search", &json!({"query":"only"})).is_err());
+        db.companion_grant_project(&other_id, "scoped-project", false)
+            .unwrap();
+        assert!(db
+            .companion_runtime_notes("scoped-chat", "")
+            .unwrap()
+            .is_none());
+        assert!(db
+            .companion_project_note_reference_set("scoped-chat", Some(&other_id))
+            .is_err());
+        assert!(db
+            .companion_notes_tool(
+                "scoped-chat",
+                "scoped-run",
+                "note_search",
+                &json!({"query":"only"})
+            )
+            .is_err());
 
-        db.companion_project_note_reference_set("scoped-chat", Some(owner)).unwrap();
+        db.companion_project_note_reference_set("scoped-chat", Some(owner))
+            .unwrap();
         db.archive_companion(owner).unwrap();
-        assert!(db.companion_runtime_notes("scoped-chat", "").unwrap().is_none());
+        assert!(db
+            .companion_runtime_notes("scoped-chat", "")
+            .unwrap()
+            .is_none());
         db.restore_companion(owner).unwrap();
-        assert!(db.companion_runtime_notes("scoped-chat", "").unwrap().is_some());
+        assert!(db
+            .companion_runtime_notes("scoped-chat", "")
+            .unwrap()
+            .is_some());
 
-        db.companion_project_note_reference_set("scoped-chat", None).unwrap();
-        assert!(db.companion_runtime_notes("scoped-chat", "").unwrap().is_none());
+        db.companion_project_note_reference_set("scoped-chat", None)
+            .unwrap();
+        assert!(db
+            .companion_runtime_notes("scoped-chat", "")
+            .unwrap()
+            .is_none());
 
-        let colleague = db.create_digital_colleague(&crate::database::CreateDigitalColleagueInput {
-            name: "Background reader".into(),
-            expert_id: "fox-security".into(),
-            objective: "Read owned background notes".into(),
-            project_id: None,
-            project_root: None,
-            knowledge_references: Vec::<crate::database::KnowledgeReference>::new(),
-            max_runs_per_day: 1,
-            max_tokens_per_day: 1000,
-            max_duration_ms: 1000,
-            max_output_tokens: 100,
-            max_tool_calls: 1,
-            companion_id: Some(other_id.clone()),
-        }).unwrap();
-        let background = db.companion_runtime_notes(&colleague.conversation_id, "").unwrap().unwrap();
+        let colleague = db
+            .create_digital_colleague(&crate::database::CreateDigitalColleagueInput {
+                name: "Background reader".into(),
+                expert_id: "fox-security".into(),
+                objective: "Read owned background notes".into(),
+                project_id: None,
+                project_root: None,
+                knowledge_references: Vec::<crate::database::KnowledgeReference>::new(),
+                max_runs_per_day: 1,
+                max_tokens_per_day: 1000,
+                max_duration_ms: 1000,
+                max_output_tokens: 100,
+                max_tool_calls: 1,
+                companion_id: Some(other_id.clone()),
+            })
+            .unwrap();
+        let background = db
+            .companion_runtime_notes(&colleague.conversation_id, "")
+            .unwrap()
+            .unwrap();
         assert_eq!(background["role"], "owner");
         assert_eq!(background["companionId"], other_id);
         assert!(background.to_string().contains("only-beta"));

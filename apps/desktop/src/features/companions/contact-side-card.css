@@ -1,7 +1,7 @@
 /* The private-chat contact card (SPEC item 3): an independent sibling card,
    matching the content card's chrome (same margins, radii, shadow). Only the
    corners that face the window edge keep the plain window radius; the corners
-   facing a 5px gap are inflated by 4px exactly like `.fox-content-card` and
+   facing a 3px gap are inflated by 4px exactly like `.fox-content-card` and
    `.fox-workbench > .fox-context-panel`. */
 .fox-contact-side-card {
   flex: none;

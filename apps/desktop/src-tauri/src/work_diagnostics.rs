@@ -866,7 +866,8 @@ mod tests {
             .unwrap()
             .iter()
             .all(|event| event.get("event").is_none()));
-        let serialized = crate::canonical_json::to_string(&value).expect("serialize exported trace");
+        let serialized =
+            crate::canonical_json::to_string(&value).expect("serialize exported trace");
         for private_content in [
             "诊断 A0",
             "确认工作状态与事件可导出",

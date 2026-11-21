@@ -3,6 +3,7 @@ export type WorkspaceView =
   | 'model-service'
   | 'login'
   | 'chat'
+  | 'companions'
   | 'plugins'
   | 'agents'
   | 'agent-detail'
@@ -30,6 +31,8 @@ export type WorkspaceView =
   | 'settings-yuxi'
   | 'settings-projects'
   | 'settings-conversation'
+  | 'settings-companions'
+  | 'settings-security'
   | 'settings-shortcuts'
   | 'settings-usage'
   | 'settings-extensions'
@@ -37,6 +40,7 @@ export type WorkspaceView =
   | 'settings-data'
 
 export interface WorkspaceNavigationContext {
+  conversationId?: string
   documentId?: string
   sourceLocator?: KnowledgeSourceLocator
 }

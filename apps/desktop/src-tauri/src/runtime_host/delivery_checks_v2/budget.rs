@@ -320,12 +320,7 @@ impl<'a> Budget<'a> {
     }
 
     /// Read one pair of bytes known to exist on both sides (two logical bytes).
-    fn pair_at(
-        &mut self,
-        left: &[u8],
-        right: &[u8],
-        i: usize,
-    ) -> Result<(u8, u8), BudgetStop> {
+    fn pair_at(&mut self, left: &[u8], right: &[u8], i: usize) -> Result<(u8, u8), BudgetStop> {
         let permit = self.pre_read_pair()?;
         let pair = (left[i], right[i]);
         self.commit(permit);
@@ -334,11 +329,7 @@ impl<'a> Budget<'a> {
 
     /// Length is metadata (free). Equality then proceeds pair by pair: actual
     /// comparisons are charged and the scan stops at the first differing pair.
-    pub(crate) fn slices_equal(
-        &mut self,
-        left: &[u8],
-        right: &[u8],
-    ) -> Result<bool, BudgetStop> {
+    pub(crate) fn slices_equal(&mut self, left: &[u8], right: &[u8]) -> Result<bool, BudgetStop> {
         if left.len() != right.len() {
             return Ok(false);
         }
@@ -525,8 +516,8 @@ fn encoding_error(byte_offset: usize, detail: String) -> TableError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::{failed, passed, CandidateBinding, CheckLimits, CheckState, LimitKind};
+    use super::*;
 
     fn binding() -> CandidateBinding {
         CandidateBinding::new("o/r", "s".repeat(64), 1)
@@ -755,8 +746,7 @@ mod tests {
         let mut budget = Budget::new(&limits, &clock);
         clock.advance(9);
         let complete = passed("rule", "check", &binding());
-        let observation =
-            budget.finalize(Outcome::Complete(complete), "rule", "check", &binding());
+        let observation = budget.finalize(Outcome::Complete(complete), "rule", "check", &binding());
         assert_eq!(observation.state, CheckState::Passed);
 
         // Budget created at elapsed 0, then advanced to C: the terminal check
@@ -765,8 +755,7 @@ mod tests {
         let mut budget = Budget::new(&limits, &clock);
         clock.set(10);
         let complete = passed("rule", "check", &binding());
-        let observation =
-            budget.finalize(Outcome::Complete(complete), "rule", "check", &binding());
+        let observation = budget.finalize(Outcome::Complete(complete), "rule", "check", &binding());
         assert_eq!(observation.state, CheckState::Unverified);
         assert_eq!(observation.limit, Some(LimitKind::Millis));
     }

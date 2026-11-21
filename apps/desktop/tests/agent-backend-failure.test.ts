@@ -61,7 +61,7 @@ describe('agentBackendFailureHint', () => {
   })
 
   test('every Host failure_codes constant has a hint', () => {
-    const source = readFileSync(join(repoRoot, 'crates/fox-agent-backend/src/external.rs'), 'utf8')
+    const source = readFileSync(join(repoRoot, 'crates/fox-agent-backend/src/external.rs'), 'utf8').replace(/\r\n/g, '\n')
     const block = source.slice(source.indexOf('pub mod failure_codes'))
     const codes = [...block.slice(0, block.indexOf('\n}\n')).matchAll(/"(agent_backend_[a-z_]+)"/g)].map((match) => match[1])
     expect(codes.length).toBeGreaterThan(5)

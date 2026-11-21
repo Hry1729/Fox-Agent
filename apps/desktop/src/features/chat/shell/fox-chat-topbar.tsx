@@ -2,83 +2,15 @@ import { activeModelWaiting, modelWaitingTitle } from '../run-status-facts'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger, runAfterMenuClose } from '@/components/ui/dropdown-menu'
-import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import { Toggle } from '@/components/animate-ui/components/radix/toggle'
-import { AnimatedIconTrigger, PanelRight } from '@/components/fox-ui/animated-icons'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
 import { conversationRunState } from '@/features/conversations/model/kernel-snapshot'
 import { type ConversationDetail, type ConversationSummary, type ProjectRecord } from '@/features/conversations/model/types'
 import { notify as toast } from '@/features/notifications'
-import { Activity, AlertTriangle, Archive, BookOpen, Bot, Check, ChevronRight, CircleHelp, CircleStop, FileEdit, FileText, Folder, FolderInput, FolderOpen, FolderPlus, FolderX, ListTodo, MoreHorizontal, Pin, PinOff, RotateCcw, Settings, ShieldCheck, Terminal } from 'lucide-react'
-import { type ReactNode, useId, useRef, useState } from 'react'
+import { AlertTriangle, Archive, Check, CircleHelp, CircleStop, FileEdit, ListCollapse, PanelRight, Folder, FolderInput, FolderOpen, FolderPlus, FolderX, MoreHorizontal, Pin, PinOff, RotateCcw, Settings, ShieldCheck } from 'lucide-react'
+import { useState } from 'react'
 import { type ChatState, type RightMode } from '../fox-shared'
-import { runtimeProcess } from '../timeline/fox-runtime-process-model'
-
-function ConversationSummaryPopover({ detail, modelName, onOpenRightMode }: { detail: ConversationDetail | null; modelName: string; onOpenRightMode: (mode: RightMode) => void }) {
-  const [open, setOpen] = useState(false)
-  const summaryId = useId()
-  const anchorRootRef = useRef<HTMLSpanElement>(null)
-  // The chat pane is display:none when the right panel is maximized. Anchor
-  // to its visible surface instead of letting the hidden button report 0,0.
-  // Read geometry on every position update so resize/sidebar changes follow.
-  const summaryAnchor = useRef({
-    getBoundingClientRect: () => {
-      const toggle = anchorRootRef.current
-      const surface = toggle?.closest('.fox-content-surface')
-      const pane = toggle?.closest('.fox-chat-pane')
-      const paneRect = pane?.getBoundingClientRect()
-      const rect = paneRect?.width ? paneRect : surface?.getBoundingClientRect()
-      return rect ? new DOMRect(rect.right - 12, rect.top + 49, 0, 0) : new DOMRect()
-    },
-  })
-  const artifacts = detail?.artifacts ?? []
-  const tasks = detail?.tasks ?? []
-  const activeProcesses = (detail?.toolCalls ?? []).filter((tool) => !['completed', 'failed', 'denied', 'cancelled'].includes(tool.status))
-  const subAgents = detail?.childRuns ?? []
-  const sources = runtimeProcess(detail?.runtimeEvents ?? []).sources
-  // Only things a person recognises: produced files, the plan, running
-  // processes, sub-agents and sources. Context-window accounting (percent used,
-  // remaining room, the usage track), token counts, provider identity,
-  // phase/retry/compaction counters and tool-call counts are internal facts:
-  // they stay in the durable records, not in an ordinary chat header.
-  const summaryItems: Array<{ icon: ReactNode; label: string; count: number; detail: string; mode: RightMode }> = [
-    { icon: <FileText size={15} />, label: '生成文件', count: artifacts.length, detail: artifacts.slice(0, 2).map((item) => item.displayName).join('、'), mode: 'files' },
-    { icon: <ListTodo size={15} />, label: '任务计划', count: tasks.length, detail: tasks.slice(0, 2).map((item) => item.title).join('、'), mode: 'activity' },
-    { icon: <Terminal size={15} />, label: '后台程序', count: activeProcesses.length, detail: activeProcesses.slice(0, 2).map((item) => item.toolName).join('、'), mode: 'activity' },
-    { icon: <Bot size={15} />, label: '协作助手', count: subAgents.length, detail: subAgents.slice(-2).map((item) => `${item.workerAgentName} · ${item.status}`).join('、'), mode: 'agents' },
-    { icon: <BookOpen size={15} />, label: '资料来源', count: sources.length, detail: sources.slice(0, 2).map((item) => item.title).join('、'), mode: 'knowledge' },
-  ]
-  return (
-    // Only the summary toggles close this controlled, non-modal popover.
-    // Keep a toggle inside the portal too: a maximized right panel hides the
-    // chat header, but outside clicks, Escape and item actions must not close it.
-    <Popover open={open} modal={false}>
-      <PopoverAnchor virtualRef={summaryAnchor} />
-      <span ref={anchorRootRef} className="inline-flex">
-        <Tooltip>
-          <TooltipTrigger asChild><Toggle size="icon" className="fox-topbar-toggle fox-icon-button" pressed={open} onPressedChange={setOpen} aria-label="对话摘要" aria-expanded={open} aria-controls={summaryId}><Activity size={16} /></Toggle></TooltipTrigger>
-          <TooltipContent side="bottom"><p>对话摘要</p></TooltipContent>
-        </Tooltip>
-      </span>
-      <PopoverContent id={summaryId} aria-label="对话摘要" align="end" sideOffset={8} updatePositionStrategy="always" className="fox-conversation-summary"
-        onOpenAutoFocus={(event) => event.preventDefault()} onCloseAutoFocus={(event) => event.preventDefault()}
-        onInteractOutside={(event) => event.preventDefault()} onEscapeKeyDown={(event) => event.preventDefault()}>
-        <div className="fox-summary-model">
-          <div><span>模型</span><strong title={modelName}>{modelName}</strong></div>
-          <Toggle size="icon" className="fox-topbar-toggle fox-icon-button" pressed={open} onPressedChange={setOpen} aria-label="收起对话摘要" aria-expanded={open} aria-controls={summaryId}><Activity size={16} /></Toggle>
-        </div>
-        <div className="fox-summary-list">
-          {summaryItems.map((item) => <button type="button" key={item.label} className="fox-summary-item" aria-label={`打开${item.label}侧边栏`} onClick={() => onOpenRightMode(item.mode)}>
-            <span className="fox-summary-icon">{item.icon}</span>
-            <span><strong>{item.label}</strong><small>{item.detail || '暂无'}</small></span>
-            <span className="fox-summary-item-tail"><b>{item.count}</b><ChevronRight /></span>
-          </button>)}
-        </div>
-      </PopoverContent>
-    </Popover>
-  )
-}
 
 /**
  * Where the "重置上下文" item is offered.
@@ -125,7 +57,7 @@ export function changeProjectEntries(projects: readonly ProjectRecord[], current
   return projects.map((project) => ({ project, current: sameRoot(project.rootPath, currentRoot) }))
 }
 
-export function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onRightSidebarCollapse, onOpenRightMode, conversation, detail, modelName, state, onPinConversation, onRenameConversation, onResetContext, onArchiveConversation, projects = [], onChangeProject, onPickProjectFolder }: { rightSidebarCollapsed: boolean; onRightSidebarExpand: () => void; onRightSidebarCollapse: () => void; onOpenRightMode: (mode: RightMode) => void; conversation?: ConversationSummary | null; detail: ConversationDetail | null; modelName: string; state: ChatState; onPinConversation: (conversation: ConversationSummary) => void; onRenameConversation: (conversation: ConversationSummary) => void; onResetContext: (conversation: ConversationSummary) => void; onArchiveConversation: (conversation: ConversationSummary) => void; /** 「更换项目」子菜单里列出的项目。 */ projects?: readonly ProjectRecord[]; onChangeProject?: (conversation: ConversationSummary, projectRoot: string | null, permissionMode?: ProjectRecord['permissionMode']) => void; onPickProjectFolder?: (conversation: ConversationSummary) => void }) {
+export function ChatTopbar({ summaryOpen = false, rightSidebarCollapsed, onRightSidebarExpand, onRightSidebarCollapse, onOpenSummary, conversation, detail, state, onPinConversation, onRenameConversation, onResetContext, onArchiveConversation, projects = [], onChangeProject, onPickProjectFolder }: { summaryOpen?: boolean; rightSidebarCollapsed: boolean; onRightSidebarExpand: () => void; onOpenSummary?: () => void; onRightSidebarCollapse: () => void; onOpenRightMode: (mode: RightMode) => void; conversation?: ConversationSummary | null; detail: ConversationDetail | null; modelName: string; state: ChatState; onPinConversation: (conversation: ConversationSummary) => void; onRenameConversation: (conversation: ConversationSummary) => void; onResetContext: (conversation: ConversationSummary) => void; onArchiveConversation: (conversation: ConversationSummary) => void; /** 「更换项目」子菜单里列出的项目。 */ projects?: readonly ProjectRecord[]; onChangeProject?: (conversation: ConversationSummary, projectRoot: string | null, permissionMode?: ProjectRecord['permissionMode']) => void; onPickProjectFolder?: (conversation: ConversationSummary) => void }) {
   const [projectPopoverOpen, setProjectPopoverOpen] = useState(false)
   const waiting = detail && detail.conversation.id === conversation?.id
     ? activeModelWaiting(detail.runtimeEvents, { runId: detail.lastRun?.id, runState: conversationRunState(detail) }) : null
@@ -200,13 +132,13 @@ export function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onRigh
         </div>
       </div>
       <div className="fox-chat-top-actions">
-        <ConversationSummaryPopover detail={detail} modelName={modelName} onOpenRightMode={onOpenRightMode} />
         {state === 'running' && <Badge className="fox-running-badge" title={waiting ? modelWaitingTitle(waiting) : undefined}><span />{waiting ? modelWaitingTitle(waiting) : '运行中'}</Badge>}
         {state === 'question' && <Badge className="fox-question-badge"><CircleHelp size={12} />需要你回答</Badge>}
         {state === 'approval' && <Badge className="fox-approval-badge"><ShieldCheck size={12} />需要你批准</Badge>}
         {state === 'error' && <Badge className="fox-error-badge"><AlertTriangle size={12} />处理失败</Badge>}
         {state === 'denied' && <Badge className="fox-denied-badge"><CircleStop size={12} />已取消</Badge>}
-        <Tooltip><TooltipTrigger asChild><AnimatedIconTrigger><Toggle size="icon" className="fox-topbar-toggle fox-right-sidebar-expand" aria-label={rightSidebarCollapsed ? "展开右侧边栏" : "收起右侧边栏"} aria-expanded={!rightSidebarCollapsed} pressed={!rightSidebarCollapsed} onPressedChange={(pressed) => pressed ? onRightSidebarExpand() : onRightSidebarCollapse()}><PanelRight size={16} /></Toggle></AnimatedIconTrigger></TooltipTrigger><TooltipContent side="bottom">{rightSidebarCollapsed ? "展开右侧边栏" : "收起右侧边栏"}</TooltipContent></Tooltip>
+        <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="fox-topbar-toggle" aria-label="对话摘要" aria-pressed={summaryOpen} onClick={onOpenSummary ?? onRightSidebarExpand}><ListCollapse size={16} strokeWidth={1.5} /></Button></TooltipTrigger><TooltipContent side="bottom">对话摘要</TooltipContent></Tooltip>
+        <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="fox-topbar-toggle fox-right-sidebar-expand" aria-label={rightSidebarCollapsed ? "展开右侧边栏" : "收起右侧边栏"} aria-expanded={!rightSidebarCollapsed} aria-pressed={!rightSidebarCollapsed} onClick={() => rightSidebarCollapsed ? onRightSidebarExpand() : onRightSidebarCollapse()}><PanelRight size={16} strokeWidth={1.5} /></Button></TooltipTrigger><TooltipContent side="bottom">{rightSidebarCollapsed ? "展开右侧边栏" : "收起右侧边栏"}</TooltipContent></Tooltip>
       </div>
     </header>
   )

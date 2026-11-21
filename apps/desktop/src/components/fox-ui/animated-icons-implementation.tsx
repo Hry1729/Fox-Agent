@@ -28,6 +28,8 @@ export { Library, Library as LibraryIcon } from '@/components/animate-ui/icons/l
 export { Orbit, Orbit as OrbitIcon } from '@/components/animate-ui/icons/orbit'
 export { ListTodo, ListTodo as ListTodoIcon } from '@/components/animate-ui/icons/list-todo'
 export { BookCopy, BookCopy as BookCopyIcon } from '@/components/animate-ui/icons/book-copy'
+export { SquareKanban, SquareKanban as SquareKanbanIcon } from '@/components/animate-ui/icons/square-kanban'
+export { CatPaw, CatPaw as CatPawIcon } from '@/components/animate-ui/icons/cat-paw'
 export { Home, Home as HomeIcon } from '@/components/animate-ui/icons/home'
 export { Sparkles, Sparkles as SparklesIcon } from '@/components/animate-ui/icons/sparkles'
 export { AlignLeft, AlignLeft as AlignLeftIcon } from '@/components/animate-ui/icons/align-left'

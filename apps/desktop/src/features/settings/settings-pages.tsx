@@ -58,6 +58,8 @@ import { connectionTypeLabel, knowledgeServiceName, useStoredPreference } from '
 import { developerUiFromBuild, persistDeveloperUi, useDeveloperUi } from '@/features/chat/developer-ui'
 // Batch 3 (能力 / 系统): Agent, 插件, 资料库, 数据与关于 live in their own files.
 export { AgentSettingsPage } from './settings-agent-page'
+export { CompanionsSettingsPage } from './settings-companions-page'
+export { SecuritySettingsPage } from './settings-security-page'
 export { ExtensionsSettingsPage } from './settings-plugins-page'
 export { YuxiSettingsPage } from './settings-library-page'
 export { DataAboutSettingsPage } from './settings-data-page'

@@ -207,7 +207,7 @@ describe('starting a fresh draft', () => {
       'clearWorkflowTimer', 'setChatState', 'setActivePrompt', 'setPendingUserMessage',
       'setEmptyConversation', 'setComposerDraft', 'setComposerResetKey', 'setActiveEntityId',
       'setActiveDocumentId', 'setActiveSourceLocator', 'setAssistantMode', 'setActiveView',
-      'cancelDocumentAsk', 'setComposerInitialAttachments',
+      'cancelDocumentAsk', 'setComposerInitialAttachments', 'setRightPanelMaximized', 'setRightMode', 'setContactCardConversationId',
       `${compiled}; return beginNewDraft`,
     )(
       () => { calls.clearWorkflowTimer = true },
@@ -215,7 +215,7 @@ describe('starting a fresh draft', () => {
       setter('emptyConversation'), setter('composerDraft'), setter('composerResetKey'),
       setter('activeEntityId'), setter('activeDocumentId'), setter('activeSourceLocator'),
       setter('assistantMode'), setter('activeView'),
-      () => { calls.cancelDocumentAsk = true }, setter('composerInitialAttachments'),
+      () => { calls.cancelDocumentAsk = true }, setter('composerInitialAttachments'), setter('rightPanelMaximized'), setter('rightMode'), setter('contactCardConversationId'),
     )
     return { beginNewDraft, calls }
   }
@@ -226,6 +226,9 @@ describe('starting a fresh draft', () => {
     // The previous conversation's run state must not survive: a draft that keeps
     // "running" shows the stop button over an empty composer.
     expect(calls.chatState).toBe('complete')
+    expect(calls.rightMode).toBeNull()
+    expect(calls.rightPanelMaximized).toBe(false)
+    expect(calls.contactCardConversationId).toBeNull()
     expect(calls.pendingUserMessage).toBeNull()
     expect(calls.composerDraft).toBe('')
     expect(calls.activePrompt).toBe('')
@@ -290,20 +293,66 @@ describe('composable conversation draft selections', () => {
     expect(oldConversation.knowledgeReferences).toEqual([{ source: 'local', id: 'existing-kb' }])
     expect(h.submitted().savedReferences).toBeUndefined()
   })
-  test('returning to chat does not create a draft, but New conversation does', () => {
+  test('工作标签进入新对话草稿，不恢复之前的伙伴；伙伴标签仍恢复上次位置', async () => {
     const workbench = readFileSync(new URL('../src/features/chat/workbench.tsx', import.meta.url), 'utf8')
     const selection = workbench.slice(workbench.indexOf('  const switchAssistantMode ='), workbench.indexOf('  const createProjectDraft ='))
     const compiled = new Bun.Transpiler({ loader: 'ts' }).transformSync(selection)
     const routes: string[] = []
     const drafts: string[] = []
-    const change = new Function('setAssistantMode', 'navigate', 'agentResource', 'prepareDraft', `${compiled}; return switchAssistantMode`)(
-      () => {}, (view: string) => routes.push(view), { agents: [{ id: 'fox-general' }] }, (id: string) => drafts.push(id),
-    )
-    change('assistant')
-    expect(routes).toEqual(['chat'])
-    expect(drafts).toEqual([])
-    change('assistant', true)
+    const opened: string[] = []
+    window.localStorage.setItem('fox.workspace.workConversation', 'work-private')
+    window.localStorage.setItem('fox.workspace.companionConversation', 'companion-chat')
+    const change = new Function(
+      'setAssistantMode', 'navigate', 'agentResource', 'prepareDraft', 'contactList',
+      'desktopConversation', 'showContactError', 'layoutStorage',
+      `${compiled}; return switchAssistantMode`,
+    )(
+      () => {}, (view: string) => routes.push(view), { agents: [{ id: 'fox-general' }] },
+      (id: string) => drafts.push(id),
+      { list: { companions: [
+        { id: 'default', conversationId: 'default-chat', isDefault: true, archivedAt: null, deletingAt: null },
+        { id: 'work-contact', conversationId: 'work-private', isDefault: false, archivedAt: null, deletingAt: null },
+        { id: 'remembered', conversationId: 'companion-chat', isDefault: false, archivedAt: null, deletingAt: null },
+      ] } },
+      {
+        conversations: [{ id: 'ordinary-work' }],
+        openConversation: async (id: string) => { opened.push(id) },
+        createConversation: async () => { throw new Error('不应新建工作对话') },
+      },
+      (cause: unknown) => { throw cause },
+      { workConversation: 'fox.workspace.workConversation', companionConversation: 'fox.workspace.companionConversation' },
+    ) as (mode: 'work' | 'companions' | 'knowledge') => void
+
+    change('work')
+    await new Promise(resolve => setTimeout(resolve, 0))
     expect(drafts).toEqual(['fox-general'])
+    expect(routes).toEqual([])
+    expect(opened).toEqual([])
+    change('companions')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(routes).toEqual(['companions'])
+    expect(opened).toEqual(['companion-chat'])
+    change('knowledge')
+    expect(routes).toEqual(['companions', 'local-knowledge-home'])
+    change('work')
+    expect(drafts).toEqual(['fox-general', 'fox-general'])
+  })
+  test('打开非默认伙伴保留当前工作区，不把伙伴侧栏切回工作', () => {
+    const workbench = readFileSync(new URL('../src/features/chat/workbench.tsx', import.meta.url), 'utf8')
+    const selection = workbench.slice(workbench.indexOf('  const openContact ='), workbench.indexOf('  const coordinationOrigin ='))
+    const compiled = new Bun.Transpiler({ loader: 'tsx' }).transformSync(selection)
+    for (const activeView of ['companions', 'chat']) {
+      const routes: unknown[][] = []
+      const profiles: string[] = []
+      const open = new Function('useStableCallback', 'activeView', 'navigate', 'setContactCardConversationId', `${compiled}; return openContact`)(
+        (callback: unknown) => callback, activeView, (...args: unknown[]) => routes.push(args), (id: string) => profiles.push(id),
+      )
+      open({ id: 'specialist', isDefault: false, conversationId: 'specialist-chat' })
+      expect(routes).toEqual([[activeView, undefined, { conversationId: 'specialist-chat' }]])
+      expect(profiles).toEqual([])
+      open({ id: 'specialist', isDefault: false, conversationId: 'specialist-chat' }, true)
+      expect(profiles).toEqual(['specialist-chat'])
+    }
   })
   for (const order of ['pek', 'pke', 'epk', 'ekp', 'kpe', 'kep']) {
     test(`preserves project, expert and mixed knowledge in order ${order}`, async () => {

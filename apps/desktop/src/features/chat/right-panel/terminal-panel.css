@@ -1,0 +1,12 @@
+.fox-terminal-page { min-height: 0; min-width: 0; display: grid; grid-template-rows: minmax(0, 1fr); }
+.fox-terminal-page[hidden] { display: none; }
+.fox-project-terminal { min-width: 0; min-height: 0; display: flex; flex-direction: column; margin: var(--fox-panel-block-inset) var(--fox-panel-inset); border: 1px solid var(--fox-border); border-radius: var(--fox-radius-control); overflow: hidden; background: var(--fox-card); }
+.fox-project-terminal-bar { display: flex; align-items: center; gap: var(--fox-space-s); min-height: var(--fox-panel-row-height); padding: 0 var(--fox-panel-inset); border-bottom: 1px solid var(--fox-border); background: var(--fox-hover); color: var(--fox-muted); font-size: var(--fox-type-meta); }
+.fox-project-terminal-bar > svg { flex: none; width: var(--fox-icon-size-small); height: var(--fox-icon-size-small); }
+.fox-project-terminal-bar > strong { flex: none; color: var(--fox-text); font-size: inherit; font-weight: 500; }
+.fox-project-terminal-path { flex: 1; min-width: 0; text-align: right; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-family: var(--fox-font-mono); }
+.fox-project-terminal-status { flex: none; }
+.fox-project-terminal-error { flex: none; margin: 0; padding: var(--fox-space-s) var(--fox-panel-inset); color: var(--fox-danger); font-size: var(--fox-type-meta); overflow-wrap: anywhere; }
+.fox-project-terminal-host { min-height: 0; min-width: 0; flex: 1; margin: var(--fox-space-s) var(--fox-space-s) var(--fox-space-xs) var(--fox-panel-inset); font-size: var(--fox-type-meta); font-family: var(--fox-font-mono); }
+.fox-project-terminal-host > .xterm { height: 100%; }
+.fox-project-terminal-host .xterm-viewport { background-color: var(--fox-card); }

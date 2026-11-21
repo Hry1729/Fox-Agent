@@ -2,7 +2,7 @@
   "kind": "fox-offline-eval-manifest",
   "schemaVersion": 1,
   "id": "phase-0b-full-baseline",
-  "version": "2026-11-06.1",
+  "version": "2026-11-16.2",
   "description": "Phase 0B full deterministic baseline covering every current Runtime tool plus failure, permission, injection, completion, and recovery boundaries.",
   "scorerVersion": "fox-deterministic-contract-v2",
   "runPolicy": {
@@ -92,10 +92,10 @@
   ],
   "expectedCaseCounts": {
     "simple": 10,
-    "medium": 102,
+    "medium": 113,
     "complex": 25,
     "recovery": 5,
-    "total": 142
+    "total": 153
   },
   "cases": [
     {
@@ -696,6 +696,61 @@
     {
       "suiteId": "runtime-tool-catalog",
       "caseId": "companion_task_delete",
+      "category": "medium"
+    },
+    {
+      "suiteId": "runtime-tool-catalog",
+      "caseId": "companion_list",
+      "category": "medium"
+    },
+    {
+      "suiteId": "runtime-tool-catalog",
+      "caseId": "companion_create",
+      "category": "medium"
+    },
+    {
+      "suiteId": "runtime-tool-catalog",
+      "caseId": "companion_propose_profile",
+      "category": "medium"
+    },
+    {
+      "suiteId": "runtime-tool-catalog",
+      "caseId": "companion_propose_model",
+      "category": "medium"
+    },
+    {
+      "suiteId": "runtime-tool-catalog",
+      "caseId": "companion_propose_deletion",
+      "category": "medium"
+    },
+    {
+      "suiteId": "runtime-tool-catalog",
+      "caseId": "companion_propose_archive",
+      "category": "medium"
+    },
+    {
+      "suiteId": "runtime-tool-catalog",
+      "caseId": "companion_coordinate",
+      "category": "medium"
+    },
+    {
+      "suiteId": "runtime-tool-catalog",
+      "caseId": "companion_assignment_status",
+      "category": "medium"
+    },
+    {
+      "suiteId": "runtime-tool-catalog",
+      "caseId": "companion_list_unread_notifications",
+      "category": "medium"
+    },
+    {
+      "suiteId": "runtime-tool-catalog",
+      "caseId": "companion_mark_notifications_read",
+      "category": "medium"
+    },
+    {
+      "suiteId": "runtime-tool-catalog",
+      "caseId": "companion_retry_failed_task",
       "category": "medium"
     },
     {

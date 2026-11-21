@@ -58,9 +58,12 @@ struct SourceMessage {
 }
 
 pub(crate) fn fingerprint(text: &str) -> String {
-    let hash = text.as_bytes().iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
-    });
+    let hash = text
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
     format!("{hash:016x}")
 }
 
@@ -77,7 +80,10 @@ pub(crate) fn visible_answer(content: &str) -> String {
         if open > 0 {
             out.push_str(&content[cursor..open_at]);
         }
-        let Some(close) = lower[open_at..].find('>').map(|offset| open_at + offset + 1) else {
+        let Some(close) = lower[open_at..]
+            .find('>')
+            .map(|offset| open_at + offset + 1)
+        else {
             // Not a tag we understand: keep the byte and advance.
             out.push_str(&content[open_at..open_at + 1]);
             cursor = open_at + 1;
@@ -136,10 +142,7 @@ fn boundary_event(event_type: &str, payload: &Value, retried: bool) -> bool {
 }
 
 /// Port of `projectRuntimeGroups`, verified against the committed content.
-fn delta_segments(
-    content: &str,
-    events: &[(i64, String, Value, i64)],
-) -> Option<Vec<Segment>> {
+fn delta_segments(content: &str, events: &[(i64, String, Value, i64)]) -> Option<Vec<Segment>> {
     let mut segments: Vec<Segment> = Vec::new();
     let mut current: Option<usize> = None;
     let mut pending = String::new();
@@ -153,7 +156,10 @@ fn delta_segments(
             retried = true;
         }
         if event_type == "message.delta" {
-            let delta = payload.get("delta").and_then(Value::as_str).unwrap_or_default();
+            let delta = payload
+                .get("delta")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             assembled.push_str(delta);
             if delta.is_empty() {
                 continue;
@@ -168,7 +174,12 @@ fn delta_segments(
             } else {
                 let text = format!("{pending}{delta}");
                 pending.clear();
-                segments.push(Segment { start: *seq, end: *seq, text, delivered_at: *created_at });
+                segments.push(Segment {
+                    start: *seq,
+                    end: *seq,
+                    text,
+                    delivered_at: *created_at,
+                });
                 current = Some(segments.len() - 1);
             }
         }
@@ -241,7 +252,12 @@ fn kernel_segments(connection: &Connection, run_id: &str, content: &str) -> Opti
             continue;
         }
         assembled.push_str(&text);
-        segments.push(Segment { start: checkpoint, end: checkpoint, text, delivered_at: created_at });
+        segments.push(Segment {
+            start: checkpoint,
+            end: checkpoint,
+            text,
+            delivered_at: created_at,
+        });
     }
     (assembled == content && !segments.is_empty()).then_some(segments)
 }
@@ -296,7 +312,10 @@ fn insert_bubble(
             projection.as_str(),
             segment.map(|(start, _)| start),
             segment.map(|(_, end)| end),
-            source.ordinal.saturating_mul(1000).saturating_add(index as i64),
+            source
+                .ordinal
+                .saturating_mul(1000)
+                .saturating_add(index as i64),
             delivered_at,
             text,
             fingerprint(text),
@@ -316,7 +335,18 @@ fn project_assistant(
         if answer.is_empty() {
             return Ok(());
         }
-        return insert_bubble(connection, conversation_id, source, "companion", Projection::Message, &source.id, None, 0, &answer, source.updated_at);
+        return insert_bubble(
+            connection,
+            conversation_id,
+            source,
+            "companion",
+            Projection::Message,
+            &source.id,
+            None,
+            0,
+            &answer,
+            source.updated_at,
+        );
     };
     let existing: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM contact_bubbles WHERE conversation_id = ?1 AND source_message_id = ?2)",
@@ -329,7 +359,10 @@ fn project_assistant(
     let raw = source.content.as_str();
     let events = run_events(connection, run_id)?;
     let kernel = kernel_segments(connection, run_id, raw);
-    let segmented = kernel.is_none().then(|| delta_segments(raw, &events)).flatten();
+    let segmented = kernel
+        .is_none()
+        .then(|| delta_segments(raw, &events))
+        .flatten();
     if let Some(segments) = kernel {
         for (index, segment) in segments.into_iter().enumerate() {
             let text = visible_answer(&segment.text);
@@ -337,7 +370,18 @@ fn project_assistant(
                 continue;
             }
             let id = format!("{run_id}:kernel:{}:response", segment.start);
-            insert_bubble(connection, conversation_id, source, "companion", Projection::Kernel, &id, Some((segment.start, segment.end)), index, &text, segment.delivered_at)?;
+            insert_bubble(
+                connection,
+                conversation_id,
+                source,
+                "companion",
+                Projection::Kernel,
+                &id,
+                Some((segment.start, segment.end)),
+                index,
+                &text,
+                segment.delivered_at,
+            )?;
         }
         return Ok(());
     }
@@ -348,7 +392,18 @@ fn project_assistant(
                 continue;
             }
             let id = format!("{run_id}:response:{}", segment.start);
-            insert_bubble(connection, conversation_id, source, "companion", Projection::Segmented, &id, Some((segment.start, segment.end)), index, &text, segment.delivered_at)?;
+            insert_bubble(
+                connection,
+                conversation_id,
+                source,
+                "companion",
+                Projection::Segmented,
+                &id,
+                Some((segment.start, segment.end)),
+                index,
+                &text,
+                segment.delivered_at,
+            )?;
         }
         return Ok(());
     }
@@ -356,7 +411,18 @@ fn project_assistant(
     if answer.is_empty() {
         return Ok(());
     }
-    insert_bubble(connection, conversation_id, source, "companion", Projection::Message, &source.id, None, 0, &answer, source.updated_at)
+    insert_bubble(
+        connection,
+        conversation_id,
+        source,
+        "companion",
+        Projection::Message,
+        &source.id,
+        None,
+        0,
+        &answer,
+        source.updated_at,
+    )
 }
 
 fn is_companion_chat(connection: &Connection, conversation_id: &str) -> rusqlite::Result<bool> {
@@ -388,16 +454,19 @@ fn unprojected_messages(
          ORDER BY m.ordinal ASC",
     )?;
     let rows = statement
-        .query_map(params![conversation_id, from_ordinal, before_ordinal], |row| {
-            Ok(SourceMessage {
-                id: row.get(0)?,
-                run_id: row.get(1)?,
-                role: row.get(2)?,
-                content: row.get(3)?,
-                ordinal: row.get(4)?,
-                updated_at: row.get(5)?,
-            })
-        })?
+        .query_map(
+            params![conversation_id, from_ordinal, before_ordinal],
+            |row| {
+                Ok(SourceMessage {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    role: row.get(2)?,
+                    content: row.get(3)?,
+                    ordinal: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            },
+        )?
         .collect();
     rows
 }
@@ -424,7 +493,18 @@ fn project_source(
         if existing {
             return Ok(());
         }
-        return insert_bubble(connection, conversation_id, message, "user", Projection::Message, &message.id, None, 0, &message.content, message.updated_at);
+        return insert_bubble(
+            connection,
+            conversation_id,
+            message,
+            "user",
+            Projection::Message,
+            &message.id,
+            None,
+            0,
+            &message.content,
+            message.updated_at,
+        );
     }
     project_assistant(connection, conversation_id, message)
 }
@@ -474,9 +554,11 @@ pub(crate) fn project_run_in_transaction(
     run_id: &str,
 ) -> rusqlite::Result<()> {
     let Some(conversation_id) = connection
-        .query_row("SELECT conversation_id FROM runs WHERE id = ?1", [run_id], |row| {
-            row.get::<_, String>(0)
-        })
+        .query_row(
+            "SELECT conversation_id FROM runs WHERE id = ?1",
+            [run_id],
+            |row| row.get::<_, String>(0),
+        )
         .ok()
     else {
         return Ok(());
@@ -484,13 +566,15 @@ pub(crate) fn project_run_in_transaction(
     if !is_companion_chat(connection, &conversation_id)? {
         return Ok(());
     }
-    let message_id: Option<String> = connection.query_row(
-        "SELECT id FROM messages
+    let message_id: Option<String> = connection
+        .query_row(
+            "SELECT id FROM messages
          WHERE run_id = ?1 AND role = 'assistant' AND status NOT IN ('streaming', 'superseded')
          ORDER BY ordinal DESC LIMIT 1",
-        [run_id],
-        |row| row.get(0),
-    ).ok();
+            [run_id],
+            |row| row.get(0),
+        )
+        .ok();
     let Some(message_id) = message_id else {
         return Ok(());
     };
@@ -514,7 +598,9 @@ pub(crate) fn project_interrupted_in_transaction(connection: &Connection) -> rus
            )",
     )?;
     let rows = statement
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (conversation_id, message_id) in rows {
         project_message_in_transaction(connection, &conversation_id, &message_id)?;
@@ -547,7 +633,8 @@ pub(crate) fn ensure_window(
     if !is_companion_chat(connection, conversation_id)? {
         return Ok(());
     }
-    for message in unprojected_messages(connection, conversation_id, from_ordinal, before_ordinal)? {
+    for message in unprojected_messages(connection, conversation_id, from_ordinal, before_ordinal)?
+    {
         let transaction = connection.unchecked_transaction()?;
         project_source(&transaction, conversation_id, &message)?;
         transaction.commit()?;
@@ -562,33 +649,39 @@ pub(crate) fn query_window(
     before_ordinal: Option<i64>,
 ) -> rusqlite::Result<Vec<ContactBubbleRecord>> {
     let mut statement = connection.prepare(
-        "SELECT bubble_id, conversation_id, run_id, source_message_id, source_ordinal,
-                author, projection, segment_start, segment_end, delivery_order,
-                delivered_at, content, fingerprint
-         FROM contact_bubbles
-         WHERE conversation_id = ?1
-           AND source_ordinal >= ?2
-           AND (?3 IS NULL OR source_ordinal < ?3)
-         ORDER BY delivery_order ASC",
+        "SELECT b.bubble_id, b.conversation_id, b.run_id, b.source_message_id, b.source_ordinal,
+                b.author, b.projection, b.segment_start, b.segment_end, b.delivery_order,
+                b.delivered_at, b.content, b.fingerprint, coalesce(m.metadata_json, '{}')
+         FROM contact_bubbles b
+         LEFT JOIN messages m ON m.id = b.source_message_id
+         WHERE b.conversation_id = ?1
+           AND b.source_ordinal >= ?2
+           AND (?3 IS NULL OR b.source_ordinal < ?3)
+         ORDER BY b.delivery_order ASC",
     )?;
     let rows = statement
-        .query_map(params![conversation_id, from_ordinal, before_ordinal], |row| {
-            Ok(ContactBubbleRecord {
-                id: row.get(0)?,
-                conversation_id: row.get(1)?,
-                run_id: row.get(2)?,
-                message_id: row.get(3)?,
-                source_ordinal: row.get(4)?,
-                author: row.get(5)?,
-                projection: row.get(6)?,
-                segment_start: row.get(7)?,
-                segment_end: row.get(8)?,
-                delivery_order: row.get(9)?,
-                delivered_at: row.get(10)?,
-                content: row.get(11)?,
-                fingerprint: row.get(12)?,
-            })
-        })?
+        .query_map(
+            params![conversation_id, from_ordinal, before_ordinal],
+            |row| {
+                Ok(ContactBubbleRecord {
+                    id: row.get(0)?,
+                    conversation_id: row.get(1)?,
+                    run_id: row.get(2)?,
+                    message_id: row.get(3)?,
+                    source_ordinal: row.get(4)?,
+                    author: row.get(5)?,
+                    projection: row.get(6)?,
+                    segment_start: row.get(7)?,
+                    segment_end: row.get(8)?,
+                    delivery_order: row.get(9)?,
+                    delivered_at: row.get(10)?,
+                    content: row.get(11)?,
+                    fingerprint: row.get(12)?,
+                    metadata: serde_json::from_str(&row.get::<_, String>(13)?)
+                        .unwrap_or_else(|_| Value::Object(Default::default())),
+                })
+            },
+        )?
         .collect();
     rows
 }
@@ -608,13 +701,25 @@ pub(crate) fn search_bubbles(
     offset: usize,
 ) -> rusqlite::Result<ContactBubbleSearchPage> {
     let query = query.trim();
-    let empty = ContactBubbleSearchPage { total: 0, results: Vec::new() };
-    if query.is_empty() || query.chars().count() > 200 || !is_companion_chat(connection, conversation_id)? {
+    let empty = ContactBubbleSearchPage {
+        total: 0,
+        results: Vec::new(),
+    };
+    if query.is_empty()
+        || query.chars().count() > 200
+        || !is_companion_chat(connection, conversation_id)?
+    {
         return Ok(empty);
     }
     let limit = limit.clamp(1, 100) as i64;
     let offset = offset.min(10_000) as i64;
-    let pattern = format!("%{}%", query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+    let pattern = format!(
+        "%{}%",
+        query
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    );
     let total: i64 = connection.query_row(
         "SELECT COUNT(*) FROM contact_bubbles
          WHERE conversation_id = ?1 AND content LIKE ?2 ESCAPE '\\'
@@ -633,23 +738,29 @@ pub(crate) fn search_bubbles(
          LIMIT ?5 OFFSET ?6",
     )?;
     let results = statement
-        .query_map(params![conversation_id, pattern, since, until, limit, offset], |row| {
-            let content: String = row.get(2)?;
-            let (snippet, match_start, match_end) = search_snippet(&content, query);
-            Ok(ContactBubbleSearchHit {
-                id: row.get(0)?,
-                author: row.get(1)?,
-                snippet,
-                match_start,
-                match_end,
-                delivered_at: row.get(3)?,
-                source_ordinal: row.get(4)?,
-                run_id: row.get(5)?,
-                message_id: row.get(6)?,
-            })
-        })?
+        .query_map(
+            params![conversation_id, pattern, since, until, limit, offset],
+            |row| {
+                let content: String = row.get(2)?;
+                let (snippet, match_start, match_end) = search_snippet(&content, query);
+                Ok(ContactBubbleSearchHit {
+                    id: row.get(0)?,
+                    author: row.get(1)?,
+                    snippet,
+                    match_start,
+                    match_end,
+                    delivered_at: row.get(3)?,
+                    source_ordinal: row.get(4)?,
+                    run_id: row.get(5)?,
+                    message_id: row.get(6)?,
+                })
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(ContactBubbleSearchPage { total: total as usize, results })
+    Ok(ContactBubbleSearchPage {
+        total: total as usize,
+        results,
+    })
 }
 
 /// A window around the first ASCII-case-insensitive match (the same folding
@@ -681,7 +792,11 @@ fn search_snippet(content: &str, query: &str) -> (String, usize, usize) {
         snippet.push('…');
     }
     let lead = usize::from(start > 0);
-    (snippet, position - start + lead, position - start + lead + needle.len())
+    (
+        snippet,
+        position - start + lead,
+        position - start + lead + needle.len(),
+    )
 }
 
 #[cfg(test)]
@@ -689,19 +804,36 @@ mod tests {
     use super::*;
     use rusqlite::Connection;
 
-    fn event(seq: i64, event_type: &str, payload: Value, created_at: i64) -> (i64, String, Value, i64) {
+    fn event(
+        seq: i64,
+        event_type: &str,
+        payload: Value,
+        created_at: i64,
+    ) -> (i64, String, Value, i64) {
         (seq, event_type.to_owned(), payload, created_at)
     }
 
     fn delta(seq: i64, text: &str, created_at: i64) -> (i64, String, Value, i64) {
-        event(seq, "message.delta", serde_json::json!({ "type": "message.delta", "delta": text }), created_at)
+        event(
+            seq,
+            "message.delta",
+            serde_json::json!({ "type": "message.delta", "delta": text }),
+            created_at,
+        )
     }
 
     #[test]
     fn leading_whitespace_does_not_decide_identity() {
         let content = "\n第一条\n第二条";
-        let segments = delta_segments(content, &[delta(1, "\n", 100), delta(2, "第一条\n", 200), delta(3, "第二条", 300)])
-            .expect("segments");
+        let segments = delta_segments(
+            content,
+            &[
+                delta(1, "\n", 100),
+                delta(2, "第一条\n", 200),
+                delta(3, "第二条", 300),
+            ],
+        )
+        .expect("segments");
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].start, 2);
         assert_eq!(segments[0].text, content);
@@ -713,10 +845,25 @@ mod tests {
         let segments = delta_segments(
             content,
             &[
-                event(1, "message.delta", serde_json::json!({"delta": "第一段"}), 100),
-                event(2, "tool.started", serde_json::json!({"toolCallId": "t"}), 200),
+                event(
+                    1,
+                    "message.delta",
+                    serde_json::json!({"delta": "第一段"}),
+                    100,
+                ),
+                event(
+                    2,
+                    "tool.started",
+                    serde_json::json!({"toolCallId": "t"}),
+                    200,
+                ),
                 event(3, "message.delta", serde_json::json!({"delta": "\n"}), 300),
-                event(4, "message.delta", serde_json::json!({"delta": "第二段"}), 400),
+                event(
+                    4,
+                    "message.delta",
+                    serde_json::json!({"delta": "第二段"}),
+                    400,
+                ),
             ],
         )
         .expect("segments");
@@ -734,7 +881,8 @@ mod tests {
 
     #[test]
     fn trailing_whitespace_joins_the_last_response() {
-        let segments = delta_segments("正文\n", &[delta(1, "正文", 100), delta(2, "\n", 200)]).expect("segments");
+        let segments = delta_segments("正文\n", &[delta(1, "正文", 100), delta(2, "\n", 200)])
+            .expect("segments");
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].text, "正文\n");
     }
@@ -750,7 +898,12 @@ mod tests {
             &[
                 delta(1, "废弃的回答", 100),
                 event(2, "run.retrying", serde_json::json!({"attempt": 1}), 200),
-                event(3, "run.phase", serde_json::json!({"phase": "request_sent"}), 300),
+                event(
+                    3,
+                    "run.phase",
+                    serde_json::json!({"phase": "request_sent"}),
+                    300,
+                ),
                 delta(4, "正确的回答", 400),
             ],
         )
@@ -771,7 +924,12 @@ mod tests {
             content,
             &[
                 delta(1, "第一段", 100),
-                event(2, "run.phase", serde_json::json!({"phase": "request_sent"}), 200),
+                event(
+                    2,
+                    "run.phase",
+                    serde_json::json!({"phase": "request_sent"}),
+                    200,
+                ),
                 delta(3, "第二段", 300),
             ],
         )
@@ -798,7 +956,12 @@ mod tests {
             &[
                 delta(1, "\n", 100),
                 delta(2, "第一段", 200),
-                event(4, "tool.completed", serde_json::json!({"toolCallId": "t"}), 400),
+                event(
+                    4,
+                    "tool.completed",
+                    serde_json::json!({"toolCallId": "t"}),
+                    400,
+                ),
                 delta(5, "\n", 500),
                 delta(6, "第二段", 600),
                 delta(7, "", 700),
@@ -807,7 +970,10 @@ mod tests {
         )
         .expect("segments");
         assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0].delivered_at, 200, "leading whitespace at seq 1 does not own the time");
+        assert_eq!(
+            segments[0].delivered_at, 200,
+            "leading whitespace at seq 1 does not own the time"
+        );
         assert_eq!(segments[1].delivered_at, 600);
     }
 
@@ -827,7 +993,7 @@ mod tests {
         connection.execute_batch(
             "CREATE TABLE conversations(id TEXT PRIMARY KEY, companion_id TEXT);
              CREATE TABLE messages(id TEXT PRIMARY KEY, conversation_id TEXT, run_id TEXT, role TEXT,
-                 content TEXT, status TEXT, ordinal INTEGER, updated_at INTEGER);
+                 content TEXT, status TEXT, ordinal INTEGER, updated_at INTEGER, metadata_json TEXT NOT NULL DEFAULT '{}');
              CREATE TABLE contact_bubbles(
                  bubble_id TEXT PRIMARY KEY, conversation_id TEXT, run_id TEXT, source_message_id TEXT,
                  source_ordinal INTEGER, author TEXT, projection TEXT, segment_start INTEGER,
@@ -835,7 +1001,7 @@ mod tests {
                  content TEXT, fingerprint TEXT, created_at INTEGER);
              CREATE TABLE run_events(run_id TEXT, seq INTEGER, event_type TEXT, event_json TEXT, created_at INTEGER);
              INSERT INTO conversations VALUES('chat', 'cmp_contact');
-             INSERT INTO messages VALUES('assistant-run', 'chat', 'run', 'assistant', '第一段第二段', 'completed', 1, 900);
+             INSERT INTO messages VALUES('assistant-run', 'chat', 'run', 'assistant', '第一段第二段', 'completed', 1, 900, '{}');
              INSERT INTO run_events VALUES('run', 1, 'message.delta', '{\"delta\":\"第一段\"}', 100);
              INSERT INTO run_events VALUES('run', 2, 'tool.started', '{\"toolCallId\":\"t\"}', 200);
              INSERT INTO run_events VALUES('run', 3, 'message.delta', '{\"delta\":\"第二段\"}', 300);
@@ -852,8 +1018,13 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("count");
-        assert_eq!(rows, 0, "the first segment must roll back with the failed one");
-        connection.execute_batch("DROP TRIGGER fail_second_segment;").expect("drop");
+        assert_eq!(
+            rows, 0,
+            "the first segment must roll back with the failed one"
+        );
+        connection
+            .execute_batch("DROP TRIGGER fail_second_segment;")
+            .expect("drop");
         ensure_window(&connection, "chat", 0, None).expect("retry after rollback");
         let bubbles = query_window(&connection, "chat", 0, None).expect("read");
         assert_eq!(bubbles.len(), 2);
@@ -867,18 +1038,20 @@ mod tests {
         connection.execute_batch(
             "CREATE TABLE conversations(id TEXT PRIMARY KEY, companion_id TEXT);
              CREATE TABLE messages(id TEXT PRIMARY KEY, conversation_id TEXT, run_id TEXT, role TEXT,
-                 content TEXT, status TEXT, ordinal INTEGER, updated_at INTEGER);
+                 content TEXT, status TEXT, ordinal INTEGER, updated_at INTEGER, metadata_json TEXT NOT NULL DEFAULT '{}');
              CREATE TABLE contact_bubbles(
                  bubble_id TEXT PRIMARY KEY, conversation_id TEXT, run_id TEXT, source_message_id TEXT,
                  source_ordinal INTEGER, author TEXT, projection TEXT, segment_start INTEGER,
                  segment_end INTEGER, delivery_order INTEGER, delivered_at INTEGER,
                  content TEXT, fingerprint TEXT, created_at INTEGER);
              INSERT INTO conversations VALUES('chat', 'cmp_contact');
-             INSERT INTO messages VALUES('user-files', 'chat', NULL, 'user', '  ', 'completed', 1, 10);",
+             INSERT INTO messages VALUES('user-files', 'chat', NULL, 'user', '  ', 'completed', 1, 10, '{}');",
         )
         .expect("seed");
         ensure_window(&connection, "chat", 0, None).expect("project");
-        assert!(query_window(&connection, "chat", 0, None).expect("read").is_empty());
+        assert!(query_window(&connection, "chat", 0, None)
+            .expect("read")
+            .is_empty());
     }
 
     #[test]
@@ -927,7 +1100,7 @@ mod tests {
             connection.execute_batch(
                 "CREATE TABLE conversations(id TEXT PRIMARY KEY, companion_id TEXT);
                  CREATE TABLE messages(id TEXT PRIMARY KEY, conversation_id TEXT, run_id TEXT, role TEXT,
-                     content TEXT, status TEXT, ordinal INTEGER, updated_at INTEGER);
+                     content TEXT, status TEXT, ordinal INTEGER, updated_at INTEGER, metadata_json TEXT NOT NULL DEFAULT '{}');
                  CREATE TABLE contact_bubbles(
                      bubble_id TEXT PRIMARY KEY, conversation_id TEXT, run_id TEXT, source_message_id TEXT,
                      source_ordinal INTEGER, author TEXT, projection TEXT, segment_start INTEGER,
@@ -940,20 +1113,32 @@ mod tests {
             )
             .expect("schema");
             connection.execute(
-                "INSERT INTO messages VALUES('assistant-run', 'chat', ?1, 'assistant', ?2, 'completed', 1, 999)",
+                "INSERT INTO messages VALUES('assistant-run', 'chat', ?1, 'assistant', ?2, 'completed', 1, 999, '{}')",
                 params![case.run_id, case.content],
             )
             .expect("message");
             for event in &case.events {
                 let mut payload = event.payload.clone();
                 payload["type"] = Value::String(event.event_type.clone());
-                connection.execute(
-                    "INSERT INTO run_events VALUES(?1, ?2, ?3, ?4, ?5)",
-                    params![case.run_id, event.seq, event.event_type, payload.to_string(), event.created_at],
-                )
-                .expect("event");
+                connection
+                    .execute(
+                        "INSERT INTO run_events VALUES(?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            case.run_id,
+                            event.seq,
+                            event.event_type,
+                            payload.to_string(),
+                            event.created_at
+                        ],
+                    )
+                    .expect("event");
             }
-            for (index, checkpoint) in case.kernel_checkpoints.unwrap_or_default().iter().enumerate() {
+            for (index, checkpoint) in case
+                .kernel_checkpoints
+                .unwrap_or_default()
+                .iter()
+                .enumerate()
+            {
                 // Real kernel payloads carry content as a JSON block array;
                 // json_extract returns it as a JSON string for re-parsing.
                 let payload = serde_json::json!({
@@ -962,17 +1147,24 @@ mod tests {
                         "assistantMessage": { "content": [{ "type": "text", "text": checkpoint.content }] },
                     }
                 });
-                connection.execute(
-                    "INSERT INTO kernel_events VALUES(?1, ?2, 'engine.batch_response', ?3, ?4)",
-                    params![case.run_id, index as i64 + 1, payload.to_string(), checkpoint.created_at],
-                )
-                .expect("kernel event");
+                connection
+                    .execute(
+                        "INSERT INTO kernel_events VALUES(?1, ?2, 'engine.batch_response', ?3, ?4)",
+                        params![
+                            case.run_id,
+                            index as i64 + 1,
+                            payload.to_string(),
+                            checkpoint.created_at
+                        ],
+                    )
+                    .expect("kernel event");
             }
-            connection.execute(
-                "INSERT INTO run_control_bindings VALUES(?1, 'authoritative')",
-                [&case.run_id],
-            )
-            .expect("binding");
+            connection
+                .execute(
+                    "INSERT INTO run_control_bindings VALUES(?1, 'authoritative')",
+                    [&case.run_id],
+                )
+                .expect("binding");
             let source = load_source_message(&connection, "assistant-run")
                 .expect("load")
                 .expect("message exists");
@@ -989,9 +1181,19 @@ mod tests {
                 .collect();
             assert_eq!(actual, expected, "case '{}'", case.name);
             if case.mode == "kernel" {
-                assert!(bubbles.iter().all(|bubble| bubble.projection == "kernel"), "case '{}'", case.name);
+                assert!(
+                    bubbles.iter().all(|bubble| bubble.projection == "kernel"),
+                    "case '{}'",
+                    case.name
+                );
             } else {
-                assert!(bubbles.iter().all(|bubble| bubble.projection == "segmented"), "case '{}' must fall back to delta segments", case.name);
+                assert!(
+                    bubbles
+                        .iter()
+                        .all(|bubble| bubble.projection == "segmented"),
+                    "case '{}' must fall back to delta segments",
+                    case.name
+                );
             }
         }
     }
@@ -1002,7 +1204,7 @@ mod tests {
         connection.execute_batch(
             "CREATE TABLE conversations(id TEXT PRIMARY KEY, companion_id TEXT);
              CREATE TABLE messages(id TEXT PRIMARY KEY, conversation_id TEXT, run_id TEXT, role TEXT,
-                 content TEXT, status TEXT, ordinal INTEGER, updated_at INTEGER);
+                 content TEXT, status TEXT, ordinal INTEGER, updated_at INTEGER, metadata_json TEXT NOT NULL DEFAULT '{}');
              CREATE TABLE contact_bubbles(
                  bubble_id TEXT PRIMARY KEY, conversation_id TEXT, run_id TEXT, source_message_id TEXT,
                  source_ordinal INTEGER, author TEXT, projection TEXT, segment_start INTEGER,
@@ -1010,8 +1212,8 @@ mod tests {
                  content TEXT, fingerprint TEXT, created_at INTEGER);
              CREATE TABLE run_events(run_id TEXT, seq INTEGER, event_type TEXT, event_json TEXT, created_at INTEGER);
              INSERT INTO conversations VALUES('chat', 'cmp_contact');
-             INSERT INTO messages VALUES('user-1', 'chat', NULL, 'user', '问题', 'completed', 1, 10);
-             INSERT INTO messages VALUES('assistant-run', 'chat', 'run', 'assistant', '回答', 'completed', 2, 20);
+             INSERT INTO messages VALUES('user-1', 'chat', NULL, 'user', '问题', 'completed', 1, 10, '{}');
+             INSERT INTO messages VALUES('assistant-run', 'chat', 'run', 'assistant', '回答', 'completed', 2, 20, '{}');
              INSERT INTO run_events VALUES('run', 1, 'message.delta', '{\"delta\":\"回答\"}', 15);",
         )
         .expect("seed");
@@ -1021,7 +1223,10 @@ mod tests {
         assert_eq!(first[1].id, "run:response:1");
         ensure_window(&connection, "chat", 0, None).expect("repeat");
         let second = query_window(&connection, "chat", 0, None).expect("read again");
-        assert_eq!(first.iter().map(|bubble| &bubble.id).collect::<Vec<_>>(), second.iter().map(|bubble| &bubble.id).collect::<Vec<_>>());
+        assert_eq!(
+            first.iter().map(|bubble| &bubble.id).collect::<Vec<_>>(),
+            second.iter().map(|bubble| &bubble.id).collect::<Vec<_>>()
+        );
         assert_eq!(second[1].content, "回答");
     }
 
@@ -1029,6 +1234,7 @@ mod tests {
         let connection = Connection::open_in_memory().expect("open");
         connection.execute_batch(
             "CREATE TABLE conversations(id TEXT PRIMARY KEY, companion_id TEXT);
+             CREATE TABLE messages(id TEXT PRIMARY KEY, metadata_json TEXT NOT NULL DEFAULT '{}');
              CREATE TABLE contact_bubbles(
                  bubble_id TEXT PRIMARY KEY, conversation_id TEXT, run_id TEXT, source_message_id TEXT,
                  source_ordinal INTEGER, author TEXT, projection TEXT, segment_start INTEGER,
@@ -1040,26 +1246,67 @@ mod tests {
         connection
     }
 
-    fn seed_bubble(connection: &Connection, id: &str, chat: &str, author: &str, order: i64, delivered_at: i64, ordinal: i64, content: &str) {
-        connection.execute(
-            "INSERT INTO contact_bubbles(bubble_id, conversation_id, run_id, source_message_id,
+    fn seed_bubble(
+        connection: &Connection,
+        id: &str,
+        chat: &str,
+        author: &str,
+        order: i64,
+        delivered_at: i64,
+        ordinal: i64,
+        content: &str,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO contact_bubbles(bubble_id, conversation_id, run_id, source_message_id,
                  source_ordinal, author, projection, segment_start, segment_end,
                  delivery_order, delivered_at, content, fingerprint, created_at)
              VALUES(?1, ?2, 'run', ?3, ?4, ?5, 'segmented', NULL, NULL, ?6, ?7, ?8, '', 0)",
-            params![id, chat, format!("msg-{id}"), ordinal, author, order, delivered_at, content],
-        )
-        .expect("bubble");
+                params![
+                    id,
+                    chat,
+                    format!("msg-{id}"),
+                    ordinal,
+                    author,
+                    order,
+                    delivered_at,
+                    content
+                ],
+            )
+            .expect("bubble");
     }
 
     fn matched_text(hit: &ContactBubbleSearchHit) -> String {
-        hit.snippet.chars().skip(hit.match_start).take(hit.match_end - hit.match_start).collect()
+        hit.snippet
+            .chars()
+            .skip(hit.match_start)
+            .take(hit.match_end - hit.match_start)
+            .collect()
     }
 
     #[test]
     fn search_finds_chinese_substring_and_reports_snippet_offsets() {
         let connection = search_db();
-        seed_bubble(&connection, "run:response:1", "chat", "companion", 1000, 500, 2, "整理好了。含税价最低的是华东机电，12,800 元。");
-        seed_bubble(&connection, "user-1", "chat", "user", 0, 100, 1, "帮我把这三家供应商的报价整理成对比表。");
+        seed_bubble(
+            &connection,
+            "run:response:1",
+            "chat",
+            "companion",
+            1000,
+            500,
+            2,
+            "整理好了。含税价最低的是华东机电，12,800 元。",
+        );
+        seed_bubble(
+            &connection,
+            "user-1",
+            "chat",
+            "user",
+            0,
+            100,
+            1,
+            "帮我把这三家供应商的报价整理成对比表。",
+        );
         let page = search_bubbles(&connection, "chat", "报价", None, None, 50, 0).expect("search");
         assert_eq!(page.total, 1);
         let hit = &page.results[0];
@@ -1069,9 +1316,22 @@ mod tests {
         assert_eq!(hit.snippet, "帮我把这三家供应商的报价整理成对比表。");
 
         let long = format!("{}报价{}", "前".repeat(50), "后".repeat(80));
-        seed_bubble(&connection, "long", "chat", "companion", 2000, 600, 3, &long);
+        seed_bubble(
+            &connection,
+            "long",
+            "chat",
+            "companion",
+            2000,
+            600,
+            3,
+            &long,
+        );
         let page = search_bubbles(&connection, "chat", "报价", None, None, 50, 0).expect("search");
-        let hit = page.results.iter().find(|hit| hit.id == "long").expect("hit");
+        let hit = page
+            .results
+            .iter()
+            .find(|hit| hit.id == "long")
+            .expect("hit");
         assert!(hit.snippet.starts_with('…'));
         assert!(hit.snippet.ends_with('…'));
         assert_eq!(matched_text(hit), "报价");
@@ -1080,7 +1340,16 @@ mod tests {
     #[test]
     fn search_folds_ascii_case_but_keeps_original_text() {
         let connection = search_db();
-        seed_bubble(&connection, "case", "chat", "companion", 1, 100, 1, "ABC Quote def");
+        seed_bubble(
+            &connection,
+            "case",
+            "chat",
+            "companion",
+            1,
+            100,
+            1,
+            "ABC Quote def",
+        );
         let page = search_bubbles(&connection, "chat", "quote", None, None, 50, 0).expect("search");
         assert_eq!(page.total, 1);
         assert_eq!(matched_text(&page.results[0]), "Quote");
@@ -1089,36 +1358,139 @@ mod tests {
     #[test]
     fn search_treats_like_metacharacters_as_literals() {
         let connection = search_db();
-        seed_bubble(&connection, "b1", "chat", "companion", 1, 100, 1, "折扣 50% 活动");
-        seed_bubble(&connection, "b2", "chat", "companion", 2, 200, 2, "折扣 50X 活动");
-        seed_bubble(&connection, "b3", "chat", "companion", 3, 300, 3, "字段 a_b 的值");
-        seed_bubble(&connection, "b4", "chat", "companion", 4, 400, 4, "字段 aXb 的值");
-        let percent = search_bubbles(&connection, "chat", "50%", None, None, 50, 0).expect("search");
-        assert_eq!(percent.results.iter().map(|hit| hit.id.as_str()).collect::<Vec<_>>(), vec!["b1"]);
-        let underscore = search_bubbles(&connection, "chat", "a_b", None, None, 50, 0).expect("search");
-        assert_eq!(underscore.results.iter().map(|hit| hit.id.as_str()).collect::<Vec<_>>(), vec!["b3"]);
-        let backslash = search_bubbles(&connection, "chat", "\\", None, None, 50, 0).expect("search");
+        seed_bubble(
+            &connection,
+            "b1",
+            "chat",
+            "companion",
+            1,
+            100,
+            1,
+            "折扣 50% 活动",
+        );
+        seed_bubble(
+            &connection,
+            "b2",
+            "chat",
+            "companion",
+            2,
+            200,
+            2,
+            "折扣 50X 活动",
+        );
+        seed_bubble(
+            &connection,
+            "b3",
+            "chat",
+            "companion",
+            3,
+            300,
+            3,
+            "字段 a_b 的值",
+        );
+        seed_bubble(
+            &connection,
+            "b4",
+            "chat",
+            "companion",
+            4,
+            400,
+            4,
+            "字段 aXb 的值",
+        );
+        let percent =
+            search_bubbles(&connection, "chat", "50%", None, None, 50, 0).expect("search");
+        assert_eq!(
+            percent
+                .results
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b1"]
+        );
+        let underscore =
+            search_bubbles(&connection, "chat", "a_b", None, None, 50, 0).expect("search");
+        assert_eq!(
+            underscore
+                .results
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b3"]
+        );
+        let backslash =
+            search_bubbles(&connection, "chat", "\\", None, None, 50, 0).expect("search");
         assert_eq!(backslash.total, 0);
     }
 
     #[test]
     fn search_stays_inside_one_private_chat() {
         let connection = search_db();
-        connection.execute_batch(
-            "INSERT INTO conversations VALUES('other', 'cmp_other');
+        connection
+            .execute_batch(
+                "INSERT INTO conversations VALUES('other', 'cmp_other');
              INSERT INTO conversations VALUES('normal', NULL);",
-        )
-        .expect("chats");
-        seed_bubble(&connection, "mine", "chat", "companion", 1, 100, 1, "报价单");
-        seed_bubble(&connection, "theirs", "other", "companion", 1, 100, 1, "报价单");
-        seed_bubble(&connection, "normal-bubble", "normal", "companion", 1, 100, 1, "报价单");
+            )
+            .expect("chats");
+        seed_bubble(
+            &connection,
+            "mine",
+            "chat",
+            "companion",
+            1,
+            100,
+            1,
+            "报价单",
+        );
+        seed_bubble(
+            &connection,
+            "theirs",
+            "other",
+            "companion",
+            1,
+            100,
+            1,
+            "报价单",
+        );
+        seed_bubble(
+            &connection,
+            "normal-bubble",
+            "normal",
+            "companion",
+            1,
+            100,
+            1,
+            "报价单",
+        );
         for (chat, expected) in [("chat", "mine"), ("other", "theirs")] {
-            let page = search_bubbles(&connection, chat, "报价", None, None, 50, 0).expect("search");
-            assert_eq!(page.results.iter().map(|hit| hit.id.as_str()).collect::<Vec<_>>(), vec![expected]);
+            let page =
+                search_bubbles(&connection, chat, "报价", None, None, 50, 0).expect("search");
+            assert_eq!(
+                page.results
+                    .iter()
+                    .map(|hit| hit.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec![expected]
+            );
         }
-        assert_eq!(search_bubbles(&connection, "normal", "报价", None, None, 50, 0).expect("search").total, 0);
-        assert_eq!(search_bubbles(&connection, "missing", "报价", None, None, 50, 0).expect("search").total, 0);
-        assert_eq!(search_bubbles(&connection, "chat", "  ", None, None, 50, 0).expect("search").total, 0);
+        assert_eq!(
+            search_bubbles(&connection, "normal", "报价", None, None, 50, 0)
+                .expect("search")
+                .total,
+            0
+        );
+        assert_eq!(
+            search_bubbles(&connection, "missing", "报价", None, None, 50, 0)
+                .expect("search")
+                .total,
+            0
+        );
+        assert_eq!(
+            search_bubbles(&connection, "chat", "  ", None, None, 50, 0)
+                .expect("search")
+                .total,
+            0
+        );
     }
 
     #[test]
@@ -1129,8 +1501,15 @@ mod tests {
         seed_bubble(&connection, "b3", "chat", "companion", 3, 300, 3, "报价三");
         let all = search_bubbles(&connection, "chat", "报价", None, None, 50, 0).expect("search");
         assert_eq!(all.total, 3);
-        assert_eq!(all.results.iter().map(|hit| hit.id.as_str()).collect::<Vec<_>>(), vec!["b3", "b2", "b1"]);
-        let ranged = search_bubbles(&connection, "chat", "报价", Some(150), Some(250), 50, 0).expect("search");
+        assert_eq!(
+            all.results
+                .iter()
+                .map(|hit| hit.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b3", "b2", "b1"]
+        );
+        let ranged = search_bubbles(&connection, "chat", "报价", Some(150), Some(250), 50, 0)
+            .expect("search");
         assert_eq!(ranged.total, 1);
         assert_eq!(ranged.results[0].id, "b2");
         let paged = search_bubbles(&connection, "chat", "报价", None, None, 1, 1).expect("search");
@@ -1141,9 +1520,28 @@ mod tests {
     #[test]
     fn search_hit_locates_a_reply_whose_user_row_is_outside_the_window() {
         let connection = search_db();
-        seed_bubble(&connection, "user-1", "chat", "user", 1000, 100, 1, "上次那台投影仪的价格还有效吗？");
-        seed_bubble(&connection, "run:response:3", "chat", "companion", 2000, 200, 2, "上次的投影仪报价我存在工作目录里了。");
-        let page = search_bubbles(&connection, "chat", "投影仪报价", None, None, 50, 0).expect("search");
+        seed_bubble(
+            &connection,
+            "user-1",
+            "chat",
+            "user",
+            1000,
+            100,
+            1,
+            "上次那台投影仪的价格还有效吗？",
+        );
+        seed_bubble(
+            &connection,
+            "run:response:3",
+            "chat",
+            "companion",
+            2000,
+            200,
+            2,
+            "上次的投影仪报价我存在工作目录里了。",
+        );
+        let page =
+            search_bubbles(&connection, "chat", "投影仪报价", None, None, 50, 0).expect("search");
         assert_eq!(page.total, 1);
         let hit = &page.results[0];
         assert_eq!(hit.id, "run:response:3");

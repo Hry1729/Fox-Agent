@@ -6,8 +6,8 @@
 //! has no filesystem, process, module, or network bindings.  Files are
 //! validated and written by Rust after the interpreter has finished.
 
-use calamine::{open_workbook_auto_from_rs, Data, Reader, Sheets};
 use crate::database::Database;
+use calamine::{open_workbook_auto_from_rs, Data, Reader, Sheets};
 use rquickjs::{Coerced, Context, Ctx, Error as JsError, Exception, FromJs, Runtime};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -217,7 +217,8 @@ where
     let result = envelope.get("result").cloned().unwrap_or(Value::Null);
     let result_bytes = crate::canonical_json::to_vec(&result)
         .map_err(|error| format!("Unable to serialize JavaScript result: {error}"))?;
-    let output_specs = parse_output_specs_with_limits(envelope.get("files"), &*cancelled, deadline)?;
+    let output_specs =
+        parse_output_specs_with_limits(envelope.get("files"), &*cancelled, deadline)?;
     let mut files = write_outputs(output_root, output_specs)?;
     let output_bytes = files
         .iter()
@@ -269,17 +270,28 @@ fn requested_timeout(input: &Value) -> Result<Duration, String> {
     Ok(Duration::from_millis(requested))
 }
 
-pub(crate) fn check_load_limits(cancelled: &dyn Fn() -> bool, deadline: Instant) -> Result<(), String> {
+pub(crate) fn check_load_limits(
+    cancelled: &dyn Fn() -> bool,
+    deadline: Instant,
+) -> Result<(), String> {
     if cancelled() {
         return Err("data-compute was cancelled".to_owned());
     }
     if Instant::now() >= deadline {
-        return Err("[tool.computation_timed_out] data-compute timed out while loading attachments".to_owned());
+        return Err(
+            "[tool.computation_timed_out] data-compute timed out while loading attachments"
+                .to_owned(),
+        );
     }
     Ok(())
 }
 
-pub(crate) fn format_js_error<'js>(ctx: Ctx<'js>, error: JsError, code: &str, line_offset: usize) -> String {
+pub(crate) fn format_js_error<'js>(
+    ctx: Ctx<'js>,
+    error: JsError,
+    code: &str,
+    line_offset: usize,
+) -> String {
     const MAX_ERROR_BYTES: usize = 2 * 1024;
     if !matches!(error, JsError::Exception) {
         return format!(
@@ -294,7 +306,12 @@ pub(crate) fn format_js_error<'js>(ctx: Ctx<'js>, error: JsError, code: &str, li
             .message()
             .unwrap_or_else(|| "JavaScript exception".to_owned());
         let stack = exception.stack().unwrap_or_default();
-        let syntax_error = exception.as_object().get::<_, String>("name").ok().as_deref() == Some("SyntaxError");
+        let syntax_error = exception
+            .as_object()
+            .get::<_, String>("name")
+            .ok()
+            .as_deref()
+            == Some("SyntaxError");
         let location = script_error_location(&stack, code, line_offset, syntax_error);
         let detail = if stack.is_empty() {
             message
@@ -306,7 +323,11 @@ pub(crate) fn format_js_error<'js>(ctx: Ctx<'js>, error: JsError, code: &str, li
         } else {
             "Check the selected input IDs, actual row/column structure and the failing expression; correct the code in a NEW attachment_compute call."
         };
-        let error_code = if syntax_error { "tool.computation_syntax" } else { "tool.computation_runtime" };
+        let error_code = if syntax_error {
+            "tool.computation_syntax"
+        } else {
+            "tool.computation_runtime"
+        };
         return format!("[{error_code}] JavaScript execution failed: {}{}\nNo output files from this failed call were written. {recovery}",
             truncate_text(&detail, MAX_ERROR_BYTES), location);
     }
@@ -315,23 +336,44 @@ pub(crate) fn format_js_error<'js>(ctx: Ctx<'js>, error: JsError, code: &str, li
             "[tool.computation_runtime] JavaScript execution failed: {}",
             truncate_text(&value.0, MAX_ERROR_BYTES)
         ),
-        Err(_) => "[tool.computation_runtime] JavaScript execution failed with a non-error exception".to_owned(),
+        Err(_) => {
+            "[tool.computation_runtime] JavaScript execution failed with a non-error exception"
+                .to_owned()
+        }
     }
 }
 
 // QuickJS reports locations inside our wrapper. Translate only frames that
 // actually fall within the supplied code; runtime/helper frames are not guesses.
-fn script_error_location(stack: &str, code: &str, line_offset: usize, syntax_error: bool) -> String {
+fn script_error_location(
+    stack: &str,
+    code: &str,
+    line_offset: usize,
+    syntax_error: bool,
+) -> String {
     let lines = code.lines().collect::<Vec<_>>();
     let line = stack.split("eval_script:").skip(1).find_map(|part| {
-        let digits = part.chars().take_while(char::is_ascii_digit).collect::<String>();
-        digits.parse::<usize>().ok()?.checked_sub(line_offset)
+        let digits = part
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>();
+        digits
+            .parse::<usize>()
+            .ok()?
+            .checked_sub(line_offset)
             .filter(|line| *line > 0 && *line <= lines.len())
     });
-    let Some(line) = line else { return String::new() };
-    let excerpt = lines.iter().enumerate().skip(line.saturating_sub(2)).take(3)
+    let Some(line) = line else {
+        return String::new();
+    };
+    let excerpt = lines
+        .iter()
+        .enumerate()
+        .skip(line.saturating_sub(2))
+        .take(3)
         .map(|(index, text)| format!("{}: {}", index + 1, truncate_text(text, 240)))
-        .collect::<Vec<_>>().join("\n");
+        .collect::<Vec<_>>()
+        .join("\n");
     // Runtime frames can point at the start of an expression/function. Syntax
     // locations come from the parser and are exact within the submitted code.
     let qualifier = if syntax_error { "" } else { "near " };
@@ -408,10 +450,7 @@ impl LoadBudget {
             .checked_add(count)
             .ok_or_else(|| "attachment cell count overflowed".to_owned())?;
         if self.cells > cap {
-            return Err(format!(
-                "attachments contain more than {} cells",
-                cap
-            ));
+            return Err(format!("attachments contain more than {} cells", cap));
         }
         Ok(())
     }
@@ -1011,15 +1050,32 @@ pub(crate) fn cell_to_value_capped(
             // prints only the serial number, so use explicit calendar components
             // without inventing a timezone for an Excel cell.
             if !value.as_f64().is_finite() || !(0.0..=3_000_000.0).contains(&value.as_f64()) {
-                return Err("[tool.invalid_input] workbook date is outside supported calendar bounds".into());
+                return Err(
+                    "[tool.invalid_input] workbook date is outside supported calendar bounds"
+                        .into(),
+                );
             }
-            let (year,month,day,hour,minute,second,millis)=value.to_ymd_hms_milli();
-            if !(1..=9999).contains(&year) || chrono::NaiveDate::from_ymd_opt(year as i32,month as u32,day as u32)
-                .and_then(|date|date.and_hms_milli_opt(hour as u32,minute as u32,second as u32,millis as u32)).is_none() {
-                return Err("[tool.invalid_input] workbook date is not a valid calendar value".into());
+            let (year, month, day, hour, minute, second, millis) = value.to_ymd_hms_milli();
+            if !(1..=9999).contains(&year)
+                || chrono::NaiveDate::from_ymd_opt(year as i32, month as u32, day as u32)
+                    .and_then(|date| {
+                        date.and_hms_milli_opt(
+                            hour as u32,
+                            minute as u32,
+                            second as u32,
+                            millis as u32,
+                        )
+                    })
+                    .is_none()
+            {
+                return Err(
+                    "[tool.invalid_input] workbook date is not a valid calendar value".into(),
+                );
             }
-            let text=format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}");
-            budget.add_text_capped(text.len(),text_cap)?;
+            let text = format!(
+                "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}"
+            );
+            budget.add_text_capped(text.len(), text_cap)?;
             Value::String(text)
         }
         Data::DateTime(value) => {
@@ -1137,114 +1193,284 @@ pub(crate) struct OutputSpec {
 /// epochs and arbitrary text are not guessed as dates. Calendar timestamps
 /// retain their day; explicit offsets use UTC. Excel cells have no timezone.
 pub(crate) fn normalize_date_key(value: &Value) -> Result<String, String> {
-    let value = if let Some(object)=value.as_object() {
-        if object.len()!=2 || object.get("type").and_then(Value::as_str)!=Some("date") {
+    let value = if let Some(object) = value.as_object() {
+        if object.len() != 2 || object.get("type").and_then(Value::as_str) != Some("date") {
             return Err("[tool.invalid_input] dateKey rejects ordinary objects".into());
         }
-        object.get("value").ok_or("[tool.invalid_input] explicit date value is missing")?
-    } else {value};
-    let text=value.as_str().ok_or("[tool.invalid_input] dateKey requires an explicit ISO date, not a number/object")?;
-    let bytes=text.as_bytes();
-    if bytes.len()<10 || bytes[4]!=b'-' || bytes[7]!=b'-' || !bytes[..4].iter().chain(bytes[5..7].iter()).chain(bytes[8..10].iter()).all(u8::is_ascii_digit) {
+        object
+            .get("value")
+            .ok_or("[tool.invalid_input] explicit date value is missing")?
+    } else {
+        value
+    };
+    let text = value
+        .as_str()
+        .ok_or("[tool.invalid_input] dateKey requires an explicit ISO date, not a number/object")?;
+    let bytes = text.as_bytes();
+    if bytes.len() < 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes[..4]
+            .iter()
+            .chain(bytes[5..7].iter())
+            .chain(bytes[8..10].iter())
+            .all(u8::is_ascii_digit)
+    {
         return Err("[tool.invalid_input] dateKey requires YYYY-MM-DD or an ISO timestamp".into());
     }
-    let date=chrono::NaiveDate::parse_from_str(&text[..10],"%Y-%m-%d").map_err(|_|"[tool.invalid_input] dateKey received an invalid calendar date")?;
-    if &text[..4]=="0000" {return Err("[tool.invalid_input] dateKey year must be 0001..9999".into());}
-    if text.len()==10 {return Ok(date.format("%Y-%m-%d").to_string());}
-    if bytes.len()<19 || !bytes.iter().all(u8::is_ascii) || bytes[10]!=b'T' || bytes[13]!=b':' || bytes[16]!=b':'
-        || !bytes[11..13].iter().chain(bytes[14..16].iter()).chain(bytes[17..19].iter()).all(u8::is_ascii_digit)
-        || text[11..13].parse::<u8>().unwrap_or(255)>23 || text[14..16].parse::<u8>().unwrap_or(255)>59 || text[17..19].parse::<u8>().unwrap_or(255)>59 {
-        return Err("[tool.invalid_input] dateKey timestamp must use a valid explicit ISO calendar time".into());
+    let date = chrono::NaiveDate::parse_from_str(&text[..10], "%Y-%m-%d")
+        .map_err(|_| "[tool.invalid_input] dateKey received an invalid calendar date")?;
+    if &text[..4] == "0000" {
+        return Err("[tool.invalid_input] dateKey year must be 0001..9999".into());
     }
-    let mut suffix=&text[19..];
-    if let Some(fraction)=suffix.strip_prefix('.') {
-        let digits=fraction.bytes().take_while(u8::is_ascii_digit).count();
-        if !(1..=9).contains(&digits) {return Err("[tool.invalid_input] dateKey fractional seconds must have 1..9 digits".into());}
-        suffix=&fraction[digits..];
+    if text.len() == 10 {
+        return Ok(date.format("%Y-%m-%d").to_string());
     }
-    if suffix.is_empty() {return Ok(date.format("%Y-%m-%d").to_string());}
-    if suffix!="Z" && !(suffix.len()==6 && matches!(suffix.as_bytes()[0],b'+'|b'-') && suffix.as_bytes()[3]==b':'
-        && suffix.as_bytes()[1..3].iter().chain(suffix.as_bytes()[4..6].iter()).all(u8::is_ascii_digit)) {
+    if bytes.len() < 19
+        || !bytes.iter().all(u8::is_ascii)
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || !bytes[11..13]
+            .iter()
+            .chain(bytes[14..16].iter())
+            .chain(bytes[17..19].iter())
+            .all(u8::is_ascii_digit)
+        || text[11..13].parse::<u8>().unwrap_or(255) > 23
+        || text[14..16].parse::<u8>().unwrap_or(255) > 59
+        || text[17..19].parse::<u8>().unwrap_or(255) > 59
+    {
+        return Err(
+            "[tool.invalid_input] dateKey timestamp must use a valid explicit ISO calendar time"
+                .into(),
+        );
+    }
+    let mut suffix = &text[19..];
+    if let Some(fraction) = suffix.strip_prefix('.') {
+        let digits = fraction.bytes().take_while(u8::is_ascii_digit).count();
+        if !(1..=9).contains(&digits) {
+            return Err(
+                "[tool.invalid_input] dateKey fractional seconds must have 1..9 digits".into(),
+            );
+        }
+        suffix = &fraction[digits..];
+    }
+    if suffix.is_empty() {
+        return Ok(date.format("%Y-%m-%d").to_string());
+    }
+    if suffix != "Z"
+        && !(suffix.len() == 6
+            && matches!(suffix.as_bytes()[0], b'+' | b'-')
+            && suffix.as_bytes()[3] == b':'
+            && suffix.as_bytes()[1..3]
+                .iter()
+                .chain(suffix.as_bytes()[4..6].iter())
+                .all(u8::is_ascii_digit))
+    {
         return Err("[tool.invalid_input] dateKey timestamp needs an explicit ISO offset".into());
     }
-    let timestamp=chrono::DateTime::parse_from_rfc3339(text).map_err(|_|"[tool.invalid_input] dateKey received an invalid ISO timestamp")?;
-    let normalized=timestamp.with_timezone(&chrono::Utc).date_naive().format("%Y-%m-%d").to_string();
-    if normalized.len()!=10 || normalized.starts_with("0000") {return Err("[tool.invalid_input] normalized date is outside 0001..9999".into());}
+    let timestamp = chrono::DateTime::parse_from_rfc3339(text)
+        .map_err(|_| "[tool.invalid_input] dateKey received an invalid ISO timestamp")?;
+    let normalized = timestamp
+        .with_timezone(&chrono::Utc)
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    if normalized.len() != 10 || normalized.starts_with("0000") {
+        return Err("[tool.invalid_input] normalized date is outside 0001..9999".into());
+    }
     Ok(normalized)
 }
 
-fn table_columns(value: Option<&Value>, label: &str, allow_empty: bool) -> Result<Vec<String>,String> {
-    let Some(value)=value else {return if allow_empty {Ok(Vec::new())}else{Err(format!("[tool.invalid_input] saveTable {label} is missing"))};};
-    let values=value.as_array().ok_or_else(||format!("[tool.invalid_input] saveTable {label} must be an array"))?;
-    if values.len()>MAX_SHEET_COLUMNS || !allow_empty && values.is_empty() {return Err(format!("[tool.invalid_input] saveTable {label} exceeds column limits"));}
-    let mut seen=HashSet::new();
-    values.iter().map(|value| {
-        let text=value.as_str().ok_or_else(||format!("[tool.invalid_input] saveTable {label} must contain names"))?;
-        if text.trim().is_empty() || text.len()>256 || text.chars().any(char::is_control) || !seen.insert(text.to_owned()) {
-            return Err(format!("[tool.invalid_input] saveTable {label} has an invalid/duplicate name"));
-        }
-        Ok(text.to_owned())
-    }).collect()
+fn table_columns(
+    value: Option<&Value>,
+    label: &str,
+    allow_empty: bool,
+) -> Result<Vec<String>, String> {
+    let Some(value) = value else {
+        return if allow_empty {
+            Ok(Vec::new())
+        } else {
+            Err(format!("[tool.invalid_input] saveTable {label} is missing"))
+        };
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| format!("[tool.invalid_input] saveTable {label} must be an array"))?;
+    if values.len() > MAX_SHEET_COLUMNS || !allow_empty && values.is_empty() {
+        return Err(format!(
+            "[tool.invalid_input] saveTable {label} exceeds column limits"
+        ));
+    }
+    let mut seen = HashSet::new();
+    values
+        .iter()
+        .map(|value| {
+            let text = value.as_str().ok_or_else(|| {
+                format!("[tool.invalid_input] saveTable {label} must contain names")
+            })?;
+            if text.trim().is_empty()
+                || text.len() > 256
+                || text.chars().any(char::is_control)
+                || !seen.insert(text.to_owned())
+            {
+                return Err(format!(
+                    "[tool.invalid_input] saveTable {label} has an invalid/duplicate name"
+                ));
+            }
+            Ok(text.to_owned())
+        })
+        .collect()
 }
 
-fn table_source(value: Option<&Value>, columns: &[String]) -> Result<Value,String> {
-    let Some(value)=value.filter(|value|!value.is_null()) else {return Ok(Value::Null);};
-    let object=value.as_object().ok_or("[tool.invalid_input] saveTable source must be a binding request object")?;
-    if object.keys().any(|key|!matches!(key.as_str(),"inputId"|"sheet"|"columnMapping")) {return Err("[tool.invalid_input] saveTable source has unsupported fields".into());}
-    let bounded=|key:&str| -> Result<String,String> {
-        let text=object.get(key).and_then(Value::as_str).ok_or_else(||format!("[tool.invalid_input] saveTable source needs {key}"))?;
-        if text.trim().is_empty() || text.len()>256 || text.chars().any(char::is_control) {return Err(format!("[tool.invalid_input] invalid source {key}"));}
+fn table_source(value: Option<&Value>, columns: &[String]) -> Result<Value, String> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(Value::Null);
+    };
+    let object = value
+        .as_object()
+        .ok_or("[tool.invalid_input] saveTable source must be a binding request object")?;
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "inputId" | "sheet" | "columnMapping"))
+    {
+        return Err("[tool.invalid_input] saveTable source has unsupported fields".into());
+    }
+    let bounded = |key: &str| -> Result<String, String> {
+        let text = object
+            .get(key)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("[tool.invalid_input] saveTable source needs {key}"))?;
+        if text.trim().is_empty() || text.len() > 256 || text.chars().any(char::is_control) {
+            return Err(format!("[tool.invalid_input] invalid source {key}"));
+        }
         Ok(text.to_owned())
     };
-    let mut source=json!({"inputId":bounded("inputId")?,"sheet":bounded("sheet")?});
-    if let Some(mapping)=object.get("columnMapping") {
-        let mapping=mapping.as_array().ok_or("[tool.invalid_input] columnMapping must be an array")?;
-        if mapping.len()>columns.len() {return Err("[tool.invalid_input] too many column mappings".into());}
-        let mut selected=HashSet::new();let mut actual=Vec::new();
+    let mut source = json!({"inputId":bounded("inputId")?,"sheet":bounded("sheet")?});
+    if let Some(mapping) = object.get("columnMapping") {
+        let mapping = mapping
+            .as_array()
+            .ok_or("[tool.invalid_input] columnMapping must be an array")?;
+        if mapping.len() > columns.len() {
+            return Err("[tool.invalid_input] too many column mappings".into());
+        }
+        let mut selected = HashSet::new();
+        let mut actual = Vec::new();
         for entry in mapping {
-            let entry=entry.as_object().ok_or("[tool.invalid_input] columnMapping entries must be objects")?;
-            if entry.len()!=2 {return Err("[tool.invalid_input] columnMapping only accepts outputColumn/inputColumn".into());}
-            let output=entry.get("outputColumn").and_then(Value::as_str).ok_or("[tool.invalid_input] columnMapping outputColumn is missing")?;
-            let input=entry.get("inputColumn").and_then(Value::as_str).ok_or("[tool.invalid_input] columnMapping inputColumn is missing")?;
-            if !columns.iter().any(|column|column==output) || !selected.insert(output.to_owned()) || input.trim().is_empty() || input.len()>256 || input.chars().any(char::is_control) {
-                return Err("[tool.invalid_input] columnMapping has invalid or ambiguous names".into());
+            let entry = entry
+                .as_object()
+                .ok_or("[tool.invalid_input] columnMapping entries must be objects")?;
+            if entry.len() != 2 {
+                return Err(
+                    "[tool.invalid_input] columnMapping only accepts outputColumn/inputColumn"
+                        .into(),
+                );
+            }
+            let output = entry
+                .get("outputColumn")
+                .and_then(Value::as_str)
+                .ok_or("[tool.invalid_input] columnMapping outputColumn is missing")?;
+            let input = entry
+                .get("inputColumn")
+                .and_then(Value::as_str)
+                .ok_or("[tool.invalid_input] columnMapping inputColumn is missing")?;
+            if !columns.iter().any(|column| column == output)
+                || !selected.insert(output.to_owned())
+                || input.trim().is_empty()
+                || input.len() > 256
+                || input.chars().any(char::is_control)
+            {
+                return Err(
+                    "[tool.invalid_input] columnMapping has invalid or ambiguous names".into(),
+                );
             }
             actual.push(json!({"outputColumn":output,"inputColumn":input}));
         }
-        source["columnMapping"]=json!(actual);
+        source["columnMapping"] = json!(actual);
     }
     Ok(source)
 }
 
-fn render_table(value: &Value, cancelled: &dyn Fn()->bool, deadline: Instant) -> Result<(Vec<u8>,Value),String> {
-    let object=value.as_object().ok_or("[tool.invalid_input] saveTable needs a table specification")?;
-    if object.keys().any(|key|!matches!(key.as_str(),"columns"|"rows"|"keyColumns"|"dateColumns"|"source")) {return Err("[tool.invalid_input] unsupported saveTable field".into());}
-    let columns=table_columns(object.get("columns"),"columns",false)?;
-    let keys=table_columns(object.get("keyColumns"),"keyColumns",true)?;
-    let dates=table_columns(object.get("dateColumns"),"dateColumns",true)?;
-    if keys.iter().chain(dates.iter()).any(|column|!columns.contains(column)) {return Err("[tool.invalid_input] key/date column is not declared".into());}
-    let rows=object.get("rows").and_then(Value::as_array).ok_or("[tool.invalid_input] saveTable rows must be an array")?;
-    if rows.len()>MAX_SHEET_ROWS || rows.len().checked_mul(columns.len()).is_none_or(|cells|cells>MAX_TOTAL_CELLS) {return Err("[tool.invalid_input] saveTable exceeds row/cell limits".into());}
-    let source=table_source(object.get("source"),&columns)?;
-    let key_names=keys.iter().map(String::as_str).collect::<HashSet<_>>();
-    let date_names=dates.iter().map(String::as_str).collect::<HashSet<_>>();
-    let key_indices=keys.iter().map(|key|columns.iter().position(|column|column==key)
-        .ok_or("[tool.invalid_input] key column is missing")).collect::<Result<Vec<_>,_>>()?;
-    let mut seen_keys=HashSet::new();
-    let mut csv=String::new();
-    let append=|csv:&mut String,cells:Vec<String>| -> Result<(),String> {
-        for (index,cell) in cells.iter().enumerate() {
-            if index>0 {csv.push(',');}
-            if cell.contains([',','"','\n','\r']) {csv.push('"');csv.push_str(&cell.replace('"',"\"\""));csv.push('"');}else{csv.push_str(cell);}
-            if csv.len()>MAX_FILE_BYTES {return Err("[tool.invalid_input] saveTable CSV exceeds output byte limit".into());}
+fn render_table(
+    value: &Value,
+    cancelled: &dyn Fn() -> bool,
+    deadline: Instant,
+) -> Result<(Vec<u8>, Value), String> {
+    let object = value
+        .as_object()
+        .ok_or("[tool.invalid_input] saveTable needs a table specification")?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "columns" | "rows" | "keyColumns" | "dateColumns" | "source"
+        )
+    }) {
+        return Err("[tool.invalid_input] unsupported saveTable field".into());
+    }
+    let columns = table_columns(object.get("columns"), "columns", false)?;
+    let keys = table_columns(object.get("keyColumns"), "keyColumns", true)?;
+    let dates = table_columns(object.get("dateColumns"), "dateColumns", true)?;
+    if keys
+        .iter()
+        .chain(dates.iter())
+        .any(|column| !columns.contains(column))
+    {
+        return Err("[tool.invalid_input] key/date column is not declared".into());
+    }
+    let rows = object
+        .get("rows")
+        .and_then(Value::as_array)
+        .ok_or("[tool.invalid_input] saveTable rows must be an array")?;
+    if rows.len() > MAX_SHEET_ROWS
+        || rows
+            .len()
+            .checked_mul(columns.len())
+            .is_none_or(|cells| cells > MAX_TOTAL_CELLS)
+    {
+        return Err("[tool.invalid_input] saveTable exceeds row/cell limits".into());
+    }
+    let source = table_source(object.get("source"), &columns)?;
+    let key_names = keys.iter().map(String::as_str).collect::<HashSet<_>>();
+    let date_names = dates.iter().map(String::as_str).collect::<HashSet<_>>();
+    let key_indices = keys
+        .iter()
+        .map(|key| {
+            columns
+                .iter()
+                .position(|column| column == key)
+                .ok_or("[tool.invalid_input] key column is missing")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut seen_keys = HashSet::new();
+    let mut csv = String::new();
+    let append = |csv: &mut String, cells: Vec<String>| -> Result<(), String> {
+        for (index, cell) in cells.iter().enumerate() {
+            if index > 0 {
+                csv.push(',');
+            }
+            if cell.contains([',', '"', '\n', '\r']) {
+                csv.push('"');
+                csv.push_str(&cell.replace('"', "\"\""));
+                csv.push('"');
+            } else {
+                csv.push_str(cell);
+            }
+            if csv.len() > MAX_FILE_BYTES {
+                return Err("[tool.invalid_input] saveTable CSV exceeds output byte limit".into());
+            }
         }
-        csv.push('\n');Ok(())
+        csv.push('\n');
+        Ok(())
     };
-    append(&mut csv,columns.clone())?;
+    append(&mut csv, columns.clone())?;
     for row in rows {
-        check_load_limits(cancelled,deadline)?;
-        let values=row.as_array().ok_or("[tool.invalid_input] saveTable rows must contain arrays")?;
-        if values.len()!=columns.len() {return Err("[tool.invalid_input] saveTable row width differs from columns".into());}
+        check_load_limits(cancelled, deadline)?;
+        let values = row
+            .as_array()
+            .ok_or("[tool.invalid_input] saveTable rows must contain arrays")?;
+        if values.len() != columns.len() {
+            return Err("[tool.invalid_input] saveTable row width differs from columns".into());
+        }
         let cells=values.iter().zip(columns.iter()).map(|(value,column)| {
             let cell=if value.is_null() {String::new()}else if date_names.contains(column.as_str()) {normalize_date_key(value)?}else {match value {
                 Value::String(text)=>text.clone(),Value::Bool(value)=>value.to_string(),
@@ -1255,17 +1481,29 @@ fn render_table(value: &Value, cancelled: &dyn Fn()->bool, deadline: Instant) ->
             Ok(cell)
         }).collect::<Result<Vec<_>,String>>()?;
         if !key_indices.is_empty() {
-            let key=crate::canonical_json::to_string(&key_indices.iter().map(|index|&cells[*index]).collect::<Vec<_>>()).map_err(|_|"[tool.invalid_input] key encoding failed")?;
-            if !seen_keys.insert(key) {return Err("[tool.invalid_input] saveTable has a duplicate key tuple".into());}
+            let key = crate::canonical_json::to_string(
+                &key_indices
+                    .iter()
+                    .map(|index| &cells[*index])
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|_| "[tool.invalid_input] key encoding failed")?;
+            if !seen_keys.insert(key) {
+                return Err("[tool.invalid_input] saveTable has a duplicate key tuple".into());
+            }
         }
-        append(&mut csv,cells)?;
+        append(&mut csv, cells)?;
     }
-    let contract=json!({"schemaVersion":1,"kind":"table","columns":columns,"keyColumns":keys,"dateColumns":dates,
+    let contract = json!({"schemaVersion":1,"kind":"table","columns":columns,"keyColumns":keys,"dateColumns":dates,
         "rowCount":rows.len(),"nullPolicy":"empty","dateNormalization":"calendar_day_or_utc_offset","source":source,"sourceVerified":false});
-    Ok((csv.into_bytes(),contract))
+    Ok((csv.into_bytes(), contract))
 }
 
-pub(crate) fn parse_output_specs_with_limits(value: Option<&Value>, cancelled: &dyn Fn() -> bool, deadline: Instant) -> Result<Vec<OutputSpec>, String> {
+pub(crate) fn parse_output_specs_with_limits(
+    value: Option<&Value>,
+    cancelled: &dyn Fn() -> bool,
+    deadline: Instant,
+) -> Result<Vec<OutputSpec>, String> {
     let values = value
         .and_then(Value::as_array)
         .ok_or_else(|| "JavaScript output files must be an array".to_owned())?;
@@ -1278,7 +1516,7 @@ pub(crate) fn parse_output_specs_with_limits(value: Option<&Value>, cancelled: &
     let mut seen = HashSet::new();
     let mut total = 0usize;
     let mut specs = Vec::with_capacity(values.len());
-    let mut contract_bytes=0usize;
+    let mut contract_bytes = 0usize;
     for value in values {
         check_load_limits(cancelled, deadline)?;
         let object = value
@@ -1292,29 +1530,74 @@ pub(crate) fn parse_output_specs_with_limits(value: Option<&Value>, cancelled: &
         if !seen.insert(name.to_ascii_lowercase()) {
             return Err(format!("duplicate output file name '{name}'"));
         }
-        let (content, generated_media_type, data_contract) = match object.get("format").and_then(Value::as_str) {
+        let (content, generated_media_type, data_contract) = match object
+            .get("format")
+            .and_then(Value::as_str)
+        {
             Some("table") => {
-                if !name.to_ascii_lowercase().ends_with(".csv") {return Err("[tool.invalid_input] saveTable requires a .csv filename".into());}
-                let (bytes,contract)=render_table(object.get("spec").ok_or("[tool.invalid_input] missing table spec")?,cancelled,deadline)?;
-                (bytes,Some("text/csv"),Some(contract))
+                if !name.to_ascii_lowercase().ends_with(".csv") {
+                    return Err("[tool.invalid_input] saveTable requires a .csv filename".into());
+                }
+                let (bytes, contract) = render_table(
+                    object
+                        .get("spec")
+                        .ok_or("[tool.invalid_input] missing table spec")?,
+                    cancelled,
+                    deadline,
+                )?;
+                (bytes, Some("text/csv"), Some(contract))
             }
             Some("pdf") => {
-                if !name.to_ascii_lowercase().ends_with(".pdf") { return Err("[tool.invalid_input] savePdf requires a .pdf filename".into()); }
-                let pdf = crate::report_pdf::render_pdf(object.get("spec").ok_or("[tool.invalid_input] missing PDF spec")?, cancelled, deadline)?;
-                (pdf.bytes, Some("application/pdf"),Some(pdf.data_contract))
+                if !name.to_ascii_lowercase().ends_with(".pdf") {
+                    return Err("[tool.invalid_input] savePdf requires a .pdf filename".into());
+                }
+                let pdf = crate::report_pdf::render_pdf(
+                    object
+                        .get("spec")
+                        .ok_or("[tool.invalid_input] missing PDF spec")?,
+                    cancelled,
+                    deadline,
+                )?;
+                (pdf.bytes, Some("application/pdf"), Some(pdf.data_contract))
             }
             Some("chart") => {
-                if !name.to_ascii_lowercase().ends_with(".svg") { return Err("[tool.invalid_input] saveChart requires a .svg filename".into()); }
-                let chart=crate::report_pdf::render_chart_output(object.get("spec").ok_or("[tool.invalid_input] missing chart spec")?)?;
-                (chart.bytes,Some("image/svg+xml"),Some(chart.data_contract))
+                if !name.to_ascii_lowercase().ends_with(".svg") {
+                    return Err("[tool.invalid_input] saveChart requires a .svg filename".into());
+                }
+                let chart = crate::report_pdf::render_chart_output(
+                    object
+                        .get("spec")
+                        .ok_or("[tool.invalid_input] missing chart spec")?,
+                )?;
+                (
+                    chart.bytes,
+                    Some("image/svg+xml"),
+                    Some(chart.data_contract),
+                )
             }
             Some(_) => return Err("[tool.invalid_input] unknown generated file format".into()),
-            None => (object.get("content").and_then(Value::as_str).ok_or_else(|| "saved file content must be a string or JSON value".to_owned())?.as_bytes().to_vec(), None,None),
+            None => (
+                object
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "saved file content must be a string or JSON value".to_owned())?
+                    .as_bytes()
+                    .to_vec(),
+                None,
+                None,
+            ),
         };
-        if let Some(contract)=data_contract.as_ref() {
-            let size=crate::canonical_json::to_vec(contract).map_err(|_|"[tool.invalid_input] dataContract encoding failed")?.len().saturating_add(128);
-            contract_bytes=contract_bytes.saturating_add(size);
-            if size>512*1024 || contract_bytes>1024*1024 {return Err("[tool.invalid_input] dataContract exceeds 512 KiB/file or 1 MiB/call".into());}
+        if let Some(contract) = data_contract.as_ref() {
+            let size = crate::canonical_json::to_vec(contract)
+                .map_err(|_| "[tool.invalid_input] dataContract encoding failed")?
+                .len()
+                .saturating_add(128);
+            contract_bytes = contract_bytes.saturating_add(size);
+            if size > 512 * 1024 || contract_bytes > 1024 * 1024 {
+                return Err(
+                    "[tool.invalid_input] dataContract exceeds 512 KiB/file or 1 MiB/call".into(),
+                );
+            }
         }
         if content.len() > MAX_FILE_BYTES {
             return Err(format!(
@@ -1331,13 +1614,15 @@ pub(crate) fn parse_output_specs_with_limits(value: Option<&Value>, cancelled: &
                 MAX_TOTAL_OUTPUT_BYTES
             ));
         }
-        let media_type = generated_media_type.map(str::to_owned).unwrap_or_else(|| object
-            .get("mediaType")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| default_media_type(&name).to_owned()));
+        let media_type = generated_media_type.map(str::to_owned).unwrap_or_else(|| {
+            object
+                .get("mediaType")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| default_media_type(&name).to_owned())
+        });
         if media_type.len() > MAX_FILE_MEDIA_TYPE_BYTES
             || media_type.chars().any(|character| character.is_control())
         {
@@ -1353,7 +1638,10 @@ pub(crate) fn parse_output_specs_with_limits(value: Option<&Value>, cancelled: &
     Ok(specs)
 }
 
-pub(crate) fn write_outputs(output_root: &Path, specs: Vec<OutputSpec>) -> Result<Vec<Value>, String> {
+pub(crate) fn write_outputs(
+    output_root: &Path,
+    specs: Vec<OutputSpec>,
+) -> Result<Vec<Value>, String> {
     if specs.is_empty() {
         return Ok(Vec::new());
     }
@@ -1378,8 +1666,10 @@ pub(crate) fn write_outputs(output_root: &Path, specs: Vec<OutputSpec>) -> Resul
         write_file(&mut file, &spec.content, &spec.name)?;
         let bytes = spec.content.len();
         let sha256 = hex::encode(Sha256::digest(&spec.content));
-        let mut data_contract=spec.data_contract;
-        if let Some(contract)=data_contract.as_mut() {contract["renderedHash"]=json!(sha256);}
+        let mut data_contract = spec.data_contract;
+        if let Some(contract) = data_contract.as_mut() {
+            contract["renderedHash"] = json!(sha256);
+        }
         files.push(json!({
             "path": path.to_string_lossy().into_owned(),
             "displayName": spec.name,
@@ -1486,7 +1776,9 @@ fn spill_large_result(
         .as_str()
         .filter(|path| !path.is_empty())
         .map(Database::computed_artifact_id)
-        .ok_or_else(|| "data-compute stored the large result without a resolvable path".to_string())?;
+        .ok_or_else(|| {
+            "data-compute stored the large result without a resolvable path".to_string()
+        })?;
 
     // Build the bounded summary, shrinking the sample byte budget until the
     // ENTIRE envelope (not just one field) fits the inline result limit. An
@@ -1512,7 +1804,9 @@ fn spill_large_result(
             "resultBytes": result_bytes.len(),
             "resultLimitBytes": MAX_RESULT_BYTES,
         });
-        let envelope_len = crate::canonical_json::to_vec(&candidate).map(|b| b.len()).unwrap_or(usize::MAX);
+        let envelope_len = crate::canonical_json::to_vec(&candidate)
+            .map(|b| b.len())
+            .unwrap_or(usize::MAX);
         if envelope_len <= MAX_RESULT_BYTES || sample_budget == 0 {
             if envelope_len > MAX_RESULT_BYTES {
                 return Err(
@@ -1762,7 +2056,13 @@ fn truncate_sample_string(text: &str, budget: usize) -> String {
         let previous = text[..end].char_indices().next_back().map(|(i, _)| i);
         match previous {
             Some(index) if index < end => end = index,
-            _ => return if budget >= 2 + TAIL.len() { TAIL.to_owned() } else { String::new() },
+            _ => {
+                return if budget >= 2 + TAIL.len() {
+                    TAIL.to_owned()
+                } else {
+                    String::new()
+                }
+            }
         }
     }
 }
@@ -1958,45 +2258,110 @@ mod tests {
     // R3B behavior cases are authored only; this card does not run them.
     #[test]
     fn r3b_explicit_dates_reject_objects_and_invalid_calendar_values() {
-        assert_eq!(normalize_date_key(&json!("2024-02-29")).unwrap(),"2024-02-29");
-        assert_eq!(normalize_date_key(&json!({"type":"date","value":"2024-03-01T00:30:00+02:00"})).unwrap(),"2024-02-29");
-        assert_eq!(normalize_date_key(&json!("2024-03-01T00:30:00.000")).unwrap(),"2024-03-01");
-        for value in [json!({"day":"2024-02-29"}),json!("2023-02-29"),json!(45351),json!("tomorrow"),Value::Null] {
+        assert_eq!(
+            normalize_date_key(&json!("2024-02-29")).unwrap(),
+            "2024-02-29"
+        );
+        assert_eq!(
+            normalize_date_key(&json!({"type":"date","value":"2024-03-01T00:30:00+02:00"}))
+                .unwrap(),
+            "2024-02-29"
+        );
+        assert_eq!(
+            normalize_date_key(&json!("2024-03-01T00:30:00.000")).unwrap(),
+            "2024-03-01"
+        );
+        for value in [
+            json!({"day":"2024-02-29"}),
+            json!("2023-02-29"),
+            json!(45351),
+            json!("tomorrow"),
+            Value::Null,
+        ] {
             assert!(normalize_date_key(&value).is_err());
         }
     }
 
     #[test]
     fn r3b_native_excel_dates_use_actual_epoch_and_leave_duration_and_text_unchanged() {
-        use calamine::{ExcelDateTime,ExcelDateTimeType};
-        let mut budget=LoadBudget::default();
-        let epoch1900=cell_to_value(&Data::DateTime(ExcelDateTime::new(25569.0,ExcelDateTimeType::DateTime,false)),&mut budget).unwrap();
-        let epoch1904=cell_to_value(&Data::DateTime(ExcelDateTime::new(0.0,ExcelDateTimeType::DateTime,true)),&mut budget).unwrap();
-        assert_eq!(epoch1900,"1970-01-01T00:00:00.000");
-        assert_eq!(epoch1904,"1904-01-01T00:00:00.000");
-        assert_eq!(cell_to_value(&Data::DateTime(ExcelDateTime::new(0.5,ExcelDateTimeType::TimeDelta,false)),&mut budget).unwrap(),"0.5");
-        assert_eq!(cell_to_value(&Data::String("25569".into()),&mut budget).unwrap(),"25569");
-        assert!(cell_to_value(&Data::DateTime(ExcelDateTime::new(-1.0,ExcelDateTimeType::DateTime,true)),&mut budget).is_err());
-        assert_eq!(cell_to_value(&Data::DateTime(ExcelDateTime::new(-1.0,ExcelDateTimeType::TimeDelta,true)),&mut budget).unwrap(),"-1");
-        assert_eq!(cell_to_value(&Data::Float(-1.0),&mut budget).unwrap(),json!(-1.0));
-        assert!(cell_to_value(&Data::DateTime(ExcelDateTime::new(60.0,ExcelDateTimeType::DateTime,false)),&mut budget).is_err());
+        use calamine::{ExcelDateTime, ExcelDateTimeType};
+        let mut budget = LoadBudget::default();
+        let epoch1900 = cell_to_value(
+            &Data::DateTime(ExcelDateTime::new(
+                25569.0,
+                ExcelDateTimeType::DateTime,
+                false,
+            )),
+            &mut budget,
+        )
+        .unwrap();
+        let epoch1904 = cell_to_value(
+            &Data::DateTime(ExcelDateTime::new(0.0, ExcelDateTimeType::DateTime, true)),
+            &mut budget,
+        )
+        .unwrap();
+        assert_eq!(epoch1900, "1970-01-01T00:00:00.000");
+        assert_eq!(epoch1904, "1904-01-01T00:00:00.000");
+        assert_eq!(
+            cell_to_value(
+                &Data::DateTime(ExcelDateTime::new(0.5, ExcelDateTimeType::TimeDelta, false)),
+                &mut budget
+            )
+            .unwrap(),
+            "0.5"
+        );
+        assert_eq!(
+            cell_to_value(&Data::String("25569".into()), &mut budget).unwrap(),
+            "25569"
+        );
+        assert!(cell_to_value(
+            &Data::DateTime(ExcelDateTime::new(-1.0, ExcelDateTimeType::DateTime, true)),
+            &mut budget
+        )
+        .is_err());
+        assert_eq!(
+            cell_to_value(
+                &Data::DateTime(ExcelDateTime::new(-1.0, ExcelDateTimeType::TimeDelta, true)),
+                &mut budget
+            )
+            .unwrap(),
+            "-1"
+        );
+        assert_eq!(
+            cell_to_value(&Data::Float(-1.0), &mut budget).unwrap(),
+            json!(-1.0)
+        );
+        assert!(cell_to_value(
+            &Data::DateTime(ExcelDateTime::new(60.0, ExcelDateTimeType::DateTime, false)),
+            &mut budget
+        )
+        .is_err());
     }
 
     #[test]
     fn r3b_table_export_rejects_object_keys_duplicates_and_allows_nonkey_null() {
-        let deadline=Instant::now()+Duration::from_secs(1);
-        for rows in [json!([[{"day":"2024-02-29"},2]]),json!([[null,2]]),json!([["a",2],["a",3]])] {
-            assert!(render_table(&json!({"columns":["key","amount"],"keyColumns":["key"],"rows":rows}),&||false,deadline).is_err());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        for rows in [
+            json!([[{"day":"2024-02-29"},2]]),
+            json!([[null, 2]]),
+            json!([["a", 2], ["a", 3]]),
+        ] {
+            assert!(render_table(
+                &json!({"columns":["key","amount"],"keyColumns":["key"],"rows":rows}),
+                &|| false,
+                deadline
+            )
+            .is_err());
         }
         let (bytes,contract)=render_table(&json!({"columns":["day","note"],"keyColumns":["day"],"dateColumns":["day"],"rows":[["2024-02-29",null]]}),&||false,deadline).unwrap();
-        assert_eq!(String::from_utf8(bytes).unwrap(),"day,note\n2024-02-29,\n");
-        assert_eq!(contract["sourceVerified"],false);
-        assert_eq!(contract["nullPolicy"],"empty");
+        assert_eq!(String::from_utf8(bytes).unwrap(), "day,note\n2024-02-29,\n");
+        assert_eq!(contract["sourceVerified"], false);
+        assert_eq!(contract["nullPolicy"], "empty");
     }
 
     #[test]
     fn r3b_whole_table_helpers_hash_actual_csv_and_preserve_plain_text() {
-        let (root,paths)=super::execution_tests::fixture();
+        let (root, paths) = super::execution_tests::fixture();
         let response=execute(&paths,&root.join("table"),&json!({"code":r#"
             let rejected=false; try {scalarKey({day:'2024-02-29'});} catch {rejected=true;}
             if(!rejected) throw new Error('object key was accepted');
@@ -2004,12 +2369,23 @@ mod tests {
             saveFile('literal.txt','[object Object] is valid literal text');
             return {key:dateKey({type:'date',value:'2024-02-29'})};
         "#}),||false).unwrap();
-        let csv=&response["files"][0];let bytes=fs::read(csv["path"].as_str().unwrap()).unwrap();
-        assert_eq!(hex::encode(Sha256::digest(&bytes)),csv["renderedHash"].as_str().unwrap());
-        assert_eq!(csv["dataContract"]["renderedHash"],csv["sha256"]);
-        assert_eq!(csv["dataContract"]["dateColumns"],json!(["day"]));
-        assert_eq!(String::from_utf8(bytes).unwrap(),"day,note\n2024-02-29,\"a,b\"\n");
-        assert!(fs::read_to_string(response["files"][1]["path"].as_str().unwrap()).unwrap().contains("[object Object]"));
+        let csv = &response["files"][0];
+        let bytes = fs::read(csv["path"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            hex::encode(Sha256::digest(&bytes)),
+            csv["renderedHash"].as_str().unwrap()
+        );
+        assert_eq!(csv["dataContract"]["renderedHash"], csv["sha256"]);
+        assert_eq!(csv["dataContract"]["dateColumns"], json!(["day"]));
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "day,note\n2024-02-29,\"a,b\"\n"
+        );
+        assert!(
+            fs::read_to_string(response["files"][1]["path"].as_str().unwrap())
+                .unwrap()
+                .contains("[object Object]")
+        );
     }
 
     #[test]
@@ -2128,20 +2504,36 @@ mod execution_tests {
     fn compute_exec_reports_user_code_line_and_accepts_quoted_key_correction() {
         let (root, paths) = fixture();
         let code = "\nconst rows = attachments[0].sheets[0].rows;\nreturn {\n  含\"为\"字样异常条数: rows.length - 1\n};";
-        let error = execute(&paths, &root.join("bad"), &json!({"code": code}), || false).unwrap_err();
+        let error =
+            execute(&paths, &root.join("bad"), &json!({"code": code}), || false).unwrap_err();
         assert!(error.contains("Syntax error"), "{error}");
         assert!(error.contains("code line 4 (1-based"), "{error}");
         assert!(error.contains("4:   含\"为\"字样异常条数:"), "{error}");
         assert!(error.contains("NEW attachment_compute call"), "{error}");
         assert!(!root.join("bad").exists());
         let corrected = code.replace("含\"为\"字样异常条数:", "'含\"为\"字样异常条数':");
-        let result = execute(&paths, &root.join("good"), &json!({"code": corrected}), || false).unwrap();
+        let result = execute(
+            &paths,
+            &root.join("good"),
+            &json!({"code": corrected}),
+            || false,
+        )
+        .unwrap();
         assert_eq!(result["result"]["含\"为\"字样异常条数"], 2);
 
-        let error = execute(&paths, &root.join("runtime-error"), &json!({"code":
-            "saveFile('partial.json', '{}');\nconst count = missing_column;\nreturn count;"}), || false).unwrap_err();
+        let error = execute(
+            &paths,
+            &root.join("runtime-error"),
+            &json!({"code":
+            "saveFile('partial.json', '{}');\nconst count = missing_column;\nreturn count;"}),
+            || false,
+        )
+        .unwrap_err();
         assert!(error.contains("near code line"), "{error}");
-        assert!(error.contains("2: const count = missing_column;"), "{error}");
+        assert!(
+            error.contains("2: const count = missing_column;"),
+            "{error}"
+        );
         assert!(!error.contains("Syntax error"), "{error}");
         assert!(!root.join("runtime-error").exists());
     }
@@ -2184,10 +2576,16 @@ mod execution_tests {
         let artifact_id = summary["artifactId"]
             .as_str()
             .expect("a stable compute-artifact reference");
-        assert!(artifact_id.starts_with("compute-artifact:"), "{artifact_id}");
+        assert!(
+            artifact_id.starts_with("compute-artifact:"),
+            "{artifact_id}"
+        );
         assert_eq!(summary["artifactName"], "large-result.json");
         assert!(
-            summary["note"].as_str().unwrap().contains("office_import_data"),
+            summary["note"]
+                .as_str()
+                .unwrap()
+                .contains("office_import_data"),
             "the note must name the executable next step"
         );
         assert_eq!(spilled["files"].as_array().unwrap().len(), 1);
@@ -2221,10 +2619,7 @@ mod execution_tests {
         )
         .unwrap();
         let other_summary = &other["result"]["summary"];
-        assert_ne!(
-            other_summary["artifactId"].as_str().unwrap(),
-            artifact_id
-        );
+        assert_ne!(other_summary["artifactId"].as_str().unwrap(), artifact_id);
         // Both references resolve to real, distinct, complete payloads.
         let other_stored = &other["files"][0];
         let other_path = std::path::Path::new(other_stored["path"].as_str().unwrap());
@@ -2274,13 +2669,21 @@ mod execution_tests {
         .unwrap();
         // One serialized byte over: full value stored, bounded summary inline.
         assert_eq!(over["result"]["summary"]["complete"], false);
-        assert_eq!(over["result"]["summary"]["storedBytes"], MAX_RESULT_BYTES + 1);
+        assert_eq!(
+            over["result"]["summary"]["storedBytes"],
+            MAX_RESULT_BYTES + 1
+        );
         let stored = &over["files"][0];
         assert_eq!(stored["displayName"], "large-result.json");
         assert_eq!(stored["bytes"], MAX_RESULT_BYTES + 1);
         // The bounded summary itself never exceeds the inline limit.
-        let summary_len = crate::canonical_json::to_vec(&over["result"]).unwrap().len();
-        assert!(summary_len <= MAX_RESULT_BYTES, "summary is {summary_len} bytes");
+        let summary_len = crate::canonical_json::to_vec(&over["result"])
+            .unwrap()
+            .len();
+        assert!(
+            summary_len <= MAX_RESULT_BYTES,
+            "summary is {summary_len} bytes"
+        );
         // The whole value is really on disk, untruncated.
         let on_disk = fs::read(stored["path"].as_str().unwrap()).unwrap();
         assert_eq!(on_disk.len(), MAX_RESULT_BYTES + 1);
@@ -2313,11 +2716,20 @@ mod execution_tests {
         // The inline result is the small object — no spill summary.
         assert_eq!(response["result"]["rows"], 6000);
         assert!(response["result"].get("summary").is_none());
-        assert_eq!(crate::canonical_json::to_vec(&response["result"]).unwrap().len() < MAX_RESULT_BYTES, true);
+        assert_eq!(
+            crate::canonical_json::to_vec(&response["result"])
+                .unwrap()
+                .len()
+                < MAX_RESULT_BYTES,
+            true
+        );
 
         let file = &response["files"][0];
         let bytes = file["bytes"].as_u64().unwrap();
-        assert!(bytes > MAX_RESULT_BYTES as u64, "the saved CSV ({bytes} B) far exceeds the result cap");
+        assert!(
+            bytes > MAX_RESULT_BYTES as u64,
+            "the saved CSV ({bytes} B) far exceeds the result cap"
+        );
         let path = std::path::Path::new(file["path"].as_str().unwrap());
         let on_disk = fs::read(path).unwrap();
         assert_eq!(on_disk.len() as u64, bytes, "the full artifact is on disk");
@@ -2349,13 +2761,8 @@ mod execution_tests {
         // A reusable assertion: the complete value stays on disk with a
         // matching hash, while the returned envelope is byte-bounded.
         let check = |code: &str, name: &str| {
-            let response = execute(
-                &paths,
-                &root.join(name),
-                &json!({ "code": code }),
-                || false,
-            )
-            .unwrap_or_else(|error| panic!("{name} failed: {error}"));
+            let response = execute(&paths, &root.join(name), &json!({ "code": code }), || false)
+                .unwrap_or_else(|error| panic!("{name} failed: {error}"));
             let envelope = crate::canonical_json::to_vec(&response["result"]).unwrap();
             assert!(
                 envelope.len() <= MAX_RESULT_BYTES,
@@ -2365,9 +2772,15 @@ mod execution_tests {
             let summary = &response["result"]["summary"];
             assert_eq!(summary["complete"], false, "{name}");
             assert_eq!(summary["storedAs"], "compute-artifact", "{name}");
-            assert_eq!(summary["sampleTruncated"], true, "{name}: a huge first row must flag the sample as truncated");
+            assert_eq!(
+                summary["sampleTruncated"], true,
+                "{name}: a huge first row must flag the sample as truncated"
+            );
             assert!(
-                crate::canonical_json::to_vec(&summary["sampleRows"]).unwrap().len() <= SAMPLE_MAX_BYTES + 4,
+                crate::canonical_json::to_vec(&summary["sampleRows"])
+                    .unwrap()
+                    .len()
+                    <= SAMPLE_MAX_BYTES + 4,
                 "{name}: sample rows exceed the sample budget"
             );
             let stored = &response["files"][0];
@@ -2391,17 +2804,20 @@ mod execution_tests {
         assert_eq!(array.as_array().unwrap().len(), 1);
         assert_eq!(array[0].as_str().unwrap().len(), 70_000);
         // 2) A huge value nested inside an object cell.
-        let object = check(
-            "return [{a:{b:'y'.repeat(70000)}}];",
-            "huge-object-cell",
-        );
+        let object = check("return [{a:{b:'y'.repeat(70000)}}];", "huge-object-cell");
         assert_eq!(object[0]["a"]["b"].as_str().unwrap().len(), 70_000);
         // 3) An oversized object KEY (not just a long value).
-        let long_key_object = check(
-            "return [{['k'.repeat(70000)]: 1}];",
-            "huge-object-key",
+        let long_key_object = check("return [{['k'.repeat(70000)]: 1}];", "huge-object-key");
+        assert!(
+            long_key_object[0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .next()
+                .unwrap()
+                .len()
+                >= 70_000
         );
-        assert!(long_key_object[0].as_object().unwrap().keys().next().unwrap().len() >= 70_000);
         // 4) CJK: each character is 3 UTF-8 bytes.
         let cjk = check("return ['中'.repeat(30000)];", "cjk");
         assert_eq!(cjk[0].as_str().unwrap().chars().count(), 30_000);
@@ -2420,7 +2836,10 @@ mod execution_tests {
         // and not contain a replacement from a split codepoint.
         for row in emoji_summary["sampleRows"].as_array().unwrap() {
             let serialized = crate::canonical_json::to_string(row).unwrap();
-            assert!(!serialized.contains('\u{FFFD}'), "emoji must not be split into replacement chars");
+            assert!(
+                !serialized.contains('\u{FFFD}'),
+                "emoji must not be split into replacement chars"
+            );
         }
         let emoji_stored = &emoji_response["files"][0];
         let emoji_complete: Value =
@@ -2448,7 +2867,10 @@ mod execution_tests {
             || false,
         )
         .unwrap_err();
-        assert!(error.contains("at most") || error.contains("files"), "{error}");
+        assert!(
+            error.contains("at most") || error.contains("files"),
+            "{error}"
+        );
         assert!(!root.join("too-many").join("large-result.json").exists());
         // 31 ordinary files + the spill = 32 files: within the cap, succeeds.
         let few: String = (0..MAX_FILES - 1)
@@ -2470,9 +2892,11 @@ mod execution_tests {
             .map(|file| file["bytes"].as_u64().unwrap())
             .sum();
         assert!(total_bytes <= MAX_TOTAL_OUTPUT_BYTES as u64);
-        assert!(response["files"].as_array().unwrap().iter().any(
-            |file| file["displayName"] == "large-result.json"
-        ));
+        assert!(response["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file["displayName"] == "large-result.json"));
         // A case-insensitive name collision with the reserved spill file is
         // moved to a new name, never overwritten.
         let response = execute(
@@ -2499,9 +2923,8 @@ mod execution_tests {
         let (root, paths) = fixture();
         // Leave only 32 KiB of headroom; the 70 KB spill pushes past the cap.
         let ordinary_len = MAX_TOTAL_OUTPUT_BYTES - 32 * 1024;
-        let code = format!(
-            "saveFile('big.bin', 'a'.repeat({ordinary_len})); return 'z'.repeat(70000);"
-        );
+        let code =
+            format!("saveFile('big.bin', 'a'.repeat({ordinary_len})); return 'z'.repeat(70000);");
         let error = execute(
             &paths,
             &root.join("bytes-overflow"),
@@ -2509,9 +2932,15 @@ mod execution_tests {
             || false,
         )
         .unwrap_err();
-        assert!(error.contains("exceeding") || error.contains("bytes"), "{error}");
         assert!(
-            !root.join("bytes-overflow").join("large-result.json").exists(),
+            error.contains("exceeding") || error.contains("bytes"),
+            "{error}"
+        );
+        assert!(
+            !root
+                .join("bytes-overflow")
+                .join("large-result.json")
+                .exists(),
             "no spill reference may be published when the budget is exceeded"
         );
     }
@@ -2535,9 +2964,11 @@ mod execution_tests {
             "storage failure must be an explicit, bounded error: {error}"
         );
         // Nothing is claimed complete: no large-result artifact was written.
-        assert!(
-            !root.join("blocker").join("out").join("large-result.json").exists()
-        );
+        assert!(!root
+            .join("blocker")
+            .join("out")
+            .join("large-result.json")
+            .exists());
     }
     #[test]
     fn compute_exec_saves_utf8_files_and_rejects_path_escape() {
@@ -2630,7 +3061,11 @@ mod sparse_allocation_tests {
     fn real_agv_workbook_loads_in_compute() {
         let xlsx = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../tests/execl-ceshi/AGV长时间任务汇总统计表.xlsx");
-        assert!(xlsx.exists(), "real AGV fixture present: {}", xlsx.display());
+        assert!(
+            xlsx.exists(),
+            "real AGV fixture present: {}",
+            xlsx.display()
+        );
         let root = std::env::temp_dir().join(format!("fox-real-agv-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
         let response = execute(
@@ -2647,12 +3082,16 @@ mod sparse_allocation_tests {
         )
         .unwrap_or_else(|e| panic!("COMPUTE_ERR::{e}"));
         let res = &response["result"];
-        println!("real AGV workbook -> {}", crate::canonical_json::to_string(res).unwrap());
+        println!(
+            "real AGV workbook -> {}",
+            crate::canonical_json::to_string(res).unwrap()
+        );
         assert_eq!(res["sheetCount"].as_u64().unwrap() >= 1, true);
         // 2,213 data rows (+ header row in the parsed grid) per 2026-09 history.
         assert!(
             res["rows"].as_u64().unwrap() >= 2_213,
-            "expected at least 2,213 source rows, got {}", res["rows"]
+            "expected at least 2,213 source rows, got {}",
+            res["rows"]
         );
         assert!(res["cols"].as_u64().unwrap() >= 1);
         // No files: read-only inspection does not spill.

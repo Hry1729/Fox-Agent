@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Archive, ChevronRight, FolderOpen, MoreHorizontal, Pencil, Pin, PinOff, Plus, Search, Trash2, UserRound } from 'lucide-react'
+import { Archive, ChevronRight, FolderOpen, MoreHorizontal, Pencil, Pin, PinOff, Plus, RotateCcw, Search, Trash2, UserRound } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger, runAfterMenuClose } from '@/components/ui/dropdown-menu'
 import { notify as toast } from '@/features/notifications'
@@ -7,16 +7,28 @@ import type { AgentRecord, ConversationDetail } from '@/features/conversations/m
 import { desktopClient } from '@/features/conversations/api/desktop-client'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { contacts, type Companion } from './api'
+import { applyCompanionDefaults } from './defaults'
 import { useContacts, showContactError } from './context'
 import { ContactDelete } from './delete'
 import { ContactSearchBar, ContactSearchChip, ContactSearchPanel, type ContactChatSearch, useContactChatSearch } from './chat-search'
 import './contacts.css'
 
-export function ContactAvatar({ contact }: { contact: Companion }) {
+export function ContactAvatar({ contact }: { contact: Pick<Companion, 'avatarRef' | 'displayName'> }) {
   const avatar = contact.avatarRef
   return avatar && /^(\/|data:image\/)/.test(avatar)
     ? <img className="fox-contact-avatar" src={avatar} alt="" />
     : <span className="fox-contact-avatar is-letter" aria-hidden="true">{avatar && [...avatar].length <= 2 ? avatar : [...contact.displayName][0]}</span>
+}
+
+export function ArchivedCompanionComposer({ contact }: { contact: Companion }) {
+  const context = useContacts()
+  return <div className="fox-composer-wrap">
+    <div className="fox-archived-composer"><Archive size={15} aria-hidden /><span>已归档</span>
+      <Button type="button" variant="ghost" size="sm" onClick={() => void contacts.restore(contact.id).then(() => context?.refresh()).catch(showContactError)}>
+        <RotateCcw size={14} aria-hidden />恢复
+      </Button>
+    </div>
+  </div>
 }
 
 export function ContactSidebar({ activeId, collapsed = false }: { activeId?: string; collapsed?: boolean }) {
@@ -37,9 +49,11 @@ export function ContactSidebar({ activeId, collapsed = false }: { activeId?: str
     setCreating(true)
     try {
       const created = expertId ? await contacts.add(expertId) : await contacts.createBlank()
-      const opened = await contacts.open(created.id)
+      const initialized = await applyCompanionDefaults(created)
+      const opened = await contacts.open(initialized.contact.id)
       await refresh()
       ctx.open(opened)
+      if (initialized.errors.length) toast.error('伙伴已创建，部分默认值未应用', { description: initialized.errors.join('；') })
       setExpertOpen(false)
       setSelectedExpertId('')
     } catch (error) { showContactError(error) } finally { setCreating(false) }
@@ -58,13 +72,13 @@ export function ContactSidebar({ activeId, collapsed = false }: { activeId?: str
   if (collapsed) return <DropdownMenu><DropdownMenuTrigger asChild><Button type="button" variant="ghost" size="icon" className="fox-sidebar-command" aria-label="Fox"><UserRound size={18} /></Button></DropdownMenuTrigger>
     <DropdownMenuContent side="right" className="fox-conversation-menu">{list.companions.filter(item => !item.archivedAt && !item.deletingAt).map(item => <DropdownMenuItem key={item.id} onSelect={() => void open(item)}><ContactAvatar contact={item} />{item.displayName}</DropdownMenuItem>)}</DropdownMenuContent></DropdownMenu>
   return <section className="fox-contact-sidebar" aria-label="Fox">
-    <div className="fox-section-head fox-sidebar-group-head"><span>小 Fox</span><DropdownMenu><DropdownMenuTrigger asChild><Button type="button" variant="ghost" size="icon" className="fox-icon-button" aria-label="新建小 Fox" disabled={creating}><Plus size={14} /></Button></DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="fox-conversation-menu"><DropdownMenuItem disabled={creating} onSelect={() => void create()}>新建小 Fox</DropdownMenuItem><DropdownMenuItem disabled={creating} onSelect={() => runAfterMenuClose(() => void chooseExpert())}>从专家创建</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
+    <div className="fox-section-head fox-sidebar-group-head"><span>Fox</span><span><DropdownMenu><DropdownMenuTrigger asChild><Button type="button" variant="ghost" size="icon" className="fox-icon-button" aria-label="新建 Fox" disabled={creating}><Plus size={14} /></Button></DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="fox-conversation-menu"><DropdownMenuItem disabled={creating} onSelect={() => void create()}>新建 Fox</DropdownMenuItem><DropdownMenuItem disabled={creating} onSelect={() => runAfterMenuClose(() => void chooseExpert())}>从专家创建</DropdownMenuItem></DropdownMenuContent></DropdownMenu></span></div>
     {ctx.error && <button type="button" title={ctx.error} onClick={() => void refresh()}>重新加载联系人</button>}
     {list.companions.filter(item => !item.archivedAt && !item.deletingAt).map(item => {
       const preview = item.latestMessagePreview?.replace(/\s+/g, ' ').trim()
       const previewId = preview ? `fox-contact-preview-${item.id}` : undefined
-      return <div className={'fox-contact-row' + (activeId === item.conversationId ? ' is-active' : '')} key={item.id}>
+      return <div className={'fox-contact-row' + (activeId === item.conversationId ? ' is-active' : '')} key={item.id} data-sidebar-motion-item data-highlight="true">
         <ContactAvatar contact={item} />
         <div className="fox-contact-row-copy">
           <div className="fox-contact-row-head">

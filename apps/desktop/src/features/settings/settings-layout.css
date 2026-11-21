@@ -432,12 +432,10 @@
 }
 
 .fox-settings-provider-text small {
-  overflow: hidden;
   color: var(--muted-foreground);
   font-size: var(--fox-type-caption);
   line-height: 1.5;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .fox-settings-pill[data-slot='badge'] {
@@ -510,8 +508,150 @@
   font-size: var(--fox-type-chrome);
 }
 
+/* ---------- Built-in web search: stable radio list, fields below ---------- */
+.fox-settings-search-sheet {
+  container: fox-search-sheet / inline-size;
+}
+
+.fox-settings-search-sheet .fox-settings-sheet-foot {
+  flex: none;
+}
+
+.fox-settings-search-section {
+  padding-top: var(--fox-space-2xl);
+}
+
+.fox-settings-search-services {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.fox-settings-search-services legend {
+  margin: 0 0 var(--fox-space-s);
+  padding: 0;
+  color: var(--foreground);
+  font-size: var(--fox-type-chrome);
+  font-weight: var(--fox-weight-semibold);
+}
+
+.fox-settings-search-options {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--fox-radius-card);
+  background: var(--card);
+}
+
+.fox-settings-search-option {
+  position: relative;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 10px;
+  min-height: 54px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.fox-settings-search-option + .fox-settings-search-option {
+  border-top: 1px solid var(--fox-settings-hairline, var(--border));
+}
+
+.fox-settings-search-option:hover {
+  background: var(--fox-hover);
+}
+
+.fox-settings-search-option:has(input:checked) {
+  background: color-mix(in oklch, var(--brand-soft) 52%, var(--card));
+}
+
+.fox-settings-search-option:has(input:focus-visible) {
+  z-index: 1;
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.fox-settings-search-option:has(input:disabled) {
+  cursor: default;
+}
+
+.fox-settings-search-mark {
+  width: 28px;
+  height: 28px;
+  font-size: var(--fox-type-chrome);
+  font-weight: var(--fox-weight-semibold);
+}
+
+.fox-settings-search-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.fox-settings-search-copy b {
+  font-size: var(--fox-type-chrome);
+  font-weight: var(--fox-weight-medium);
+  line-height: 1.4;
+}
+
+.fox-settings-search-copy small {
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.fox-settings-search-option > input[type='radio'] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--primary);
+  cursor: inherit;
+}
+
+.fox-settings-search-fields {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--fox-settings-hairline, var(--border));
+}
+
+.fox-settings-search-direct {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+  line-height: 1.5;
+}
+
+.fox-settings-search-message {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 14px 0 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.fox-settings-search-message > span {
+  min-width: 0;
+  flex: 1;
+}
+
+.fox-settings-search-message > [data-slot='button'] {
+  flex: none;
+}
+
+@container fox-search-sheet (max-width: 360px) {
+  .fox-settings-search-option {
+    gap: 8px;
+    padding-inline: 8px;
+  }
+}
+
 /* ---------- Provider sheet (Sheet, 480px) ---------- */
 .fox-settings-sheet[data-slot='sheet-content'] {
+  --fox-settings-sheet-gutter: var(--fox-space-3xl);
   width: 480px;
   max-width: 100vw;
   gap: 0;
@@ -525,16 +665,16 @@
 }
 
 .fox-settings-sheet > [data-slot='sheet-close'] {
-  top: 16px;
-  right: 16px;
+  top: var(--fox-space-xl);
+  right: var(--fox-space-xl);
 }
 
 .fox-settings-sheet .fox-settings-sheet-head {
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 12px;
-  padding: 24px 56px 20px 24px;
+  gap: var(--fox-space-l);
+  padding: var(--fox-space-3xl) calc(var(--fox-action-height) + var(--fox-space-3xl)) var(--fox-space-2xl) var(--fox-settings-sheet-gutter);
   border-bottom: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
 }
 
@@ -569,7 +709,7 @@
   min-height: 0;
   flex: 1;
   overflow-y: auto;
-  padding: 4px 24px 24px;
+  padding: var(--fox-space-xs) var(--fox-settings-sheet-gutter) var(--fox-space-3xl);
   scrollbar-gutter: stable;
 }
 
@@ -833,9 +973,10 @@
 
 .fox-settings-sheet-foot {
   display: flex;
+  flex: none;
   align-items: center;
-  gap: 8px;
-  padding: 14px 24px;
+  gap: var(--fox-space-m);
+  padding: var(--fox-space-l) var(--fox-settings-sheet-gutter);
   border-top: 1px solid var(--border);
 }
 
@@ -936,8 +1077,14 @@
   top: var(--fox-titlebar-height, 0px);
   height: auto;
   bottom: 0;
-  border-top-left-radius: 12px;
+  border-top-left-radius: var(--fox-radius-card);
   overflow: hidden;
+}
+
+@media (max-width: 400px) {
+  .fox-settings-sheet[data-slot='sheet-content'] {
+    --fox-settings-sheet-gutter: var(--fox-space-xl);
+  }
 }
 
 .fox-settings-sheet [data-slot='select-trigger'],
@@ -1147,12 +1294,10 @@
 }
 
 .fox-settings-page .fox-settings-path-row code {
-  overflow: hidden;
   color: var(--foreground);
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: var(--fox-type-caption);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .fox-settings-page .fox-settings-account-row {
@@ -1550,7 +1695,92 @@
 
 .fox-settings-facts dd code {
   display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- 伙伴：新伙伴默认值与目录预览 ---------- */
+.fox-settings-page .fox-companion-defaults + .fox-settings-group,
+.fox-settings-page .fox-companion-defaults .fox-settings-group + .fox-settings-group {
+  margin-top: var(--fox-section-gap);
+}
+
+.fox-companion-directory {
+  display: grid;
+  gap: var(--fox-space-l);
+  padding-block: var(--fox-space-xl);
+}
+
+.fox-companion-directory-path {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: var(--fox-space-m);
+  min-width: 0;
+  padding: var(--fox-space-m) var(--fox-space-l);
+  border: 1px solid var(--fox-settings-hairline);
+  border-radius: var(--fox-radius-control);
+  background: var(--muted);
+}
+
+.fox-companion-directory-path > svg {
+  width: var(--fox-icon-size);
+  height: var(--fox-icon-size);
+  margin-top: var(--fox-space-micro);
+  color: var(--muted-foreground);
+}
+
+.fox-companion-directory code {
+  overflow-wrap: anywhere;
+  font-size: var(--fox-type-caption);
+  line-height: 1.5;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.fox-companion-directory-folders {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--fox-space-xs) var(--fox-space-xl);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fox-type-caption);
+  color: var(--muted-foreground);
+}
+
+.fox-companion-directory-folders code {
+  color: var(--foreground);
+  margin-inline-end: var(--fox-space-xs);
+}
+
+.fox-companion-defaults-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: var(--fox-space-l) 0;
+}
+
+.fox-companion-defaults-actions > span {
+  color: var(--muted-foreground);
+  font-size: var(--fox-type-caption);
+}
+
+.fox-settings-page .fox-settings-group-body > .fox-contact-panel {
+  padding-block: var(--fox-space-l);
+}
+
+.fox-settings-page .fox-contact-panel > h3:first-child {
+  margin: 0 0 var(--fox-space-m);
+  font-size: var(--fox-type-body);
+  font-weight: var(--fox-weight-medium);
+}
+
+.fox-settings-page .fox-contact-panel p,
+.fox-settings-page .fox-contact-section p {
+  overflow-wrap: anywhere;
+}
+
+.fox-settings-page-link {
+  margin-top: var(--fox-space-m);
+  padding-inline: 0;
 }

@@ -85,7 +85,9 @@ pub fn shutdown_connections() {
 
 pub fn list_tools(server: &McpServerRecord) -> Result<Vec<Value>, String> {
     if server.id == crate::office::SERVER_ID {
-        if !server.enabled { return Err("Office 连接器已停用".to_owned()); }
+        if !server.enabled {
+            return Err("Office 连接器已停用".to_owned());
+        }
         crate::office::verify_binary(std::path::Path::new(&server.command))?;
         return Ok(crate::office::tool_definitions());
     }
@@ -471,9 +473,19 @@ impl HttpMcpSession {
     }
 
     fn send(&mut self, body: &Value) -> Result<Response, String> {
-        if let Some(token) = &self.cancellation { token.check()?; }
-        let timeout = self.execution_deadline.map(|deadline| deadline.checked_duration_since(std::time::Instant::now())
-            .ok_or_else(|| "MCP execution budget exceeded".to_owned())).transpose()?.unwrap_or(TIMEOUT).min(TIMEOUT);
+        if let Some(token) = &self.cancellation {
+            token.check()?;
+        }
+        let timeout = self
+            .execution_deadline
+            .map(|deadline| {
+                deadline
+                    .checked_duration_since(std::time::Instant::now())
+                    .ok_or_else(|| "MCP execution budget exceeded".to_owned())
+            })
+            .transpose()?
+            .unwrap_or(TIMEOUT)
+            .min(TIMEOUT);
         let mut request = self
             .client
             .post(self.endpoint.clone())
@@ -807,13 +819,32 @@ mod tests {
 
     #[test]
     fn reconciliation_connector_queries_require_live_explicit_readonly_schema() {
-        let registry=crate::kernel::CancellationRegistry::default();
-        registry.register_run("query").unwrap();let token=registry.run_token("query").unwrap();
-        let result=execute_owned_readonly(&server("readonly"),Some(("echo",&json!({"text":"receipt-46"}))),&token,Duration::from_secs(5)).unwrap();
-        assert_eq!(result["content"][0]["text"],"receipt-46");
-        let error=execute_owned_readonly(&server("valid"),Some(("echo",&json!({"text":"must-not-execute"}))),&token,Duration::from_secs(5)).unwrap_err();
+        let registry = crate::kernel::CancellationRegistry::default();
+        registry.register_run("query").unwrap();
+        let token = registry.run_token("query").unwrap();
+        let result = execute_owned_readonly(
+            &server("readonly"),
+            Some(("echo", &json!({"text":"receipt-46"}))),
+            &token,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(result["content"][0]["text"], "receipt-46");
+        let error = execute_owned_readonly(
+            &server("valid"),
+            Some(("echo", &json!({"text":"must-not-execute"}))),
+            &token,
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
         assert!(error.contains("只读查询"));
-        assert!(execute_owned_readonly(&server("readonly"),Some(("echo",&json!({"text":42}))),&token,Duration::from_secs(5)).is_err());
+        assert!(execute_owned_readonly(
+            &server("readonly"),
+            Some(("echo", &json!({"text":42}))),
+            &token,
+            Duration::from_secs(5)
+        )
+        .is_err());
     }
 
     #[test]

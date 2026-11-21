@@ -44,7 +44,11 @@ pub(crate) struct OpenApiConnector {
 }
 
 impl OpenApiConnector {
-    pub(crate) fn start_bounded(server: &McpServerRecord, deadline: std::time::Instant, token: crate::kernel::CancellationToken) -> Result<Self,String> {
+    pub(crate) fn start_bounded(
+        server: &McpServerRecord,
+        deadline: std::time::Instant,
+        token: crate::kernel::CancellationToken,
+    ) -> Result<Self, String> {
         token.check()?;
         let mut connector = Self::start(server)?;
         connector.execution_deadline = Some(deadline);
@@ -127,7 +131,9 @@ impl OpenApiConnector {
     }
 
     pub(crate) fn call_tool(&self, tool: &str, arguments: &Value) -> Result<Value, String> {
-        if let Some(token) = &self.cancellation { token.check()?; }
+        if let Some(token) = &self.cancellation {
+            token.check()?;
+        }
         let operation = self
             .operations
             .iter()
@@ -188,8 +194,12 @@ impl OpenApiConnector {
             return Err("OpenAPI 请求体 body 为必填项".to_owned());
         }
         if let Some(deadline) = self.execution_deadline {
-            request = request.timeout(deadline.checked_duration_since(std::time::Instant::now()).ok_or("OpenAPI execution budget exceeded")?
-                .min(std::time::Duration::from_secs(15)));
+            request = request.timeout(
+                deadline
+                    .checked_duration_since(std::time::Instant::now())
+                    .ok_or("OpenAPI execution budget exceeded")?
+                    .min(std::time::Duration::from_secs(15)),
+            );
         }
         let response = request.send().map_err(|error| error.to_string())?;
         if response.status().is_redirection() {

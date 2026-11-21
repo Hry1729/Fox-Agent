@@ -23,11 +23,11 @@ use serde_json::{json, Value};
 use crate::database::{Database, DeliveryChecklistSeed, DeliveryRequirement, RequirementKind};
 use crate::runtime_host::attachment_compute::DeliveryReadFailure;
 use crate::runtime_host::delivery_checks_v2::{
-    CandidateBinding, CheckOutcome, CheckState, SecurityVeto, budget_exceeded, equivalence, failed,
-    not_implemented, passed, passed_with_equivalence, reason_code, unverified,
+    budget_exceeded, equivalence, failed, not_implemented, passed, passed_with_equivalence,
+    reason_code, unverified, CandidateBinding, CheckOutcome, CheckState, SecurityVeto,
 };
 
-use super::super::content_requirements::{DecodedSpec, decode_spec};
+use super::super::content_requirements::{decode_spec, DecodedSpec};
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -112,7 +112,12 @@ fn database_with_run(_label: &str, root: &std::path::Path) -> (Database, String)
         .expect("run")
         .run
         .id;
-    freeze_binding(&database, &run, &conversation.id, Some(root.to_str().expect("root")));
+    freeze_binding(
+        &database,
+        &run,
+        &conversation.id,
+        Some(root.to_str().expect("root")),
+    );
     (database, run)
 }
 
@@ -140,7 +145,9 @@ fn freeze_binding(database: &Database, run: &str, conversation: &str, project_ro
         permission,
         budgets: TimeBudgets::default(),
     };
-    database.freeze_run_control(&binding).expect("freeze binding");
+    database
+        .freeze_run_control(&binding)
+        .expect("freeze binding");
 }
 
 /// A finding shaped like the ones `apply` persists, with a real `checkedHash`.
@@ -164,10 +171,26 @@ fn p2b_decision_order_truth_table() {
     let refused = DecisionFact::refused(cand.clone(), "path_denied", "escaped");
     // A refusal against a *source* is attributed to that source, and it refuses
     // just as hard as a candidate refusal.
-    let source_refused = DecisionFact::refused(src.clone(), reason_code::security::SOURCE_IDENTITY_MISMATCH, "source changed");
+    let source_refused = DecisionFact::refused(
+        src.clone(),
+        reason_code::security::SOURCE_IDENTITY_MISMATCH,
+        "source changed",
+    );
     let invalid = DecisionFact::invalid("内容契约 schemaVersion 不受支持");
-    let blocking_failed = DecisionFact::failed(cand.clone(), reason_code::TEXT_CONTENT_MISMATCH, "mismatch", true, None);
-    let nonblocking_failed = DecisionFact::failed(cand.clone(), reason_code::BUDGET_EXCEEDED, "soft", false, None);
+    let blocking_failed = DecisionFact::failed(
+        cand.clone(),
+        reason_code::TEXT_CONTENT_MISMATCH,
+        "mismatch",
+        true,
+        None,
+    );
+    let nonblocking_failed = DecisionFact::failed(
+        cand.clone(),
+        reason_code::BUDGET_EXCEEDED,
+        "soft",
+        false,
+        None,
+    );
     let unconfirmed = DecisionFact::unconfirmed(
         cand.clone(),
         Some(reason_code::EVIDENCE_UNAVAILABLE),
@@ -196,7 +219,11 @@ fn p2b_decision_order_truth_table() {
     }
 
     // 2. Spec Invalid wins over repair and over every content fact.
-    let with_invalid = vec![invalid.clone(), blocking_failed.clone(), unconfirmed.clone()];
+    let with_invalid = vec![
+        invalid.clone(),
+        blocking_failed.clone(),
+        unconfirmed.clone(),
+    ];
     assert_eq!(decide(&with_invalid, true).class, DeliveryClass::Invalid);
     assert_eq!(decide(&with_invalid, false).class, DeliveryClass::Invalid);
 
@@ -209,7 +236,11 @@ fn p2b_decision_order_truth_table() {
     ];
     let repair = decide(&mixed, true);
     assert_eq!(repair.class, DeliveryClass::RepairNeeded);
-    assert_eq!(repair.facts.len(), 3, "no fact may be dropped by the aggregate");
+    assert_eq!(
+        repair.facts.len(),
+        3,
+        "no fact may be dropped by the aggregate"
+    );
     assert!(repair.has_class(FactClass::Failed));
     assert!(repair.has_class(FactClass::Unconfirmed));
 
@@ -228,15 +259,27 @@ fn p2b_decision_order_truth_table() {
 
     // 5. Unverified / resource / IO / missing evidence -> Unconfirmed, and the
     //    byte limit is retained.
-    assert_eq!(decide(&[unconfirmed.clone()], true).class, DeliveryClass::Unconfirmed);
+    assert_eq!(
+        decide(&[unconfirmed.clone()], true).class,
+        DeliveryClass::Unconfirmed
+    );
     let limited = decide(&[resource.clone()], true);
     assert_eq!(limited.class, DeliveryClass::Unconfirmed);
     assert_eq!(limited.facts[0].limit, Some(4096));
-    assert_eq!(limited.facts[0].reason_code.as_deref(), Some(reason_code::BUDGET_EXCEEDED));
+    assert_eq!(
+        limited.facts[0].reason_code.as_deref(),
+        Some(reason_code::BUDGET_EXCEEDED)
+    );
 
     // 6. Only exclusively-Passed facts confirm.
-    assert_eq!(decide(&[pass.clone()], false).class, DeliveryClass::Confirmed);
-    assert_eq!(decide(&[pass.clone(), pass], false).class, DeliveryClass::Confirmed);
+    assert_eq!(
+        decide(&[pass.clone()], false).class,
+        DeliveryClass::Confirmed
+    );
+    assert_eq!(
+        decide(&[pass.clone(), pass], false).class,
+        DeliveryClass::Confirmed
+    );
 
     // Source-role refusal: same class, and the retained fact keeps its role.
     let source_case = decide(&[source_refused], true);
@@ -262,12 +305,18 @@ fn p2b_unconfirmed_is_never_swallowed_by_all_passed() {
     );
 
     // Single unconfirmed item.
-    assert_eq!(decide(&[unconfirmed.clone()], false).class, DeliveryClass::Unconfirmed);
+    assert_eq!(
+        decide(&[unconfirmed.clone()], false).class,
+        DeliveryClass::Unconfirmed
+    );
     // Passed + Unconfirmed must not pass.
     let mixed = decide(&[pass.clone(), unconfirmed.clone()], true);
     assert_eq!(mixed.class, DeliveryClass::Unconfirmed);
     assert_ne!(mixed.class, DeliveryClass::Confirmed);
-    assert!(mixed.has_class(FactClass::Passed), "the pass fact is retained");
+    assert!(
+        mixed.has_class(FactClass::Passed),
+        "the pass fact is retained"
+    );
     assert!(mixed.has_class(FactClass::Unconfirmed));
 }
 
@@ -297,7 +346,10 @@ fn p2b_empty_observations_are_unconfirmed_not_confirmed() {
     // coverage gate's own, which is exactly why this cannot confirm: no leaf
     // proved anything, so nothing proves the contract was covered either.
     assert_eq!(result.facts.len(), 1, "{:?}", result.facts);
-    assert_eq!(result.facts[0].check.as_deref(), Some(super::COVERAGE_CHECK));
+    assert_eq!(
+        result.facts[0].check.as_deref(),
+        Some(super::COVERAGE_CHECK)
+    );
     assert!(result.facts[0].rule_id.is_none(), "no rule id is invented");
 }
 
@@ -313,7 +365,10 @@ fn p2b_class_vocabulary_stays_distinct() {
         DeliveryClass::Unconfirmed,
         DeliveryClass::DefiniteFailure,
     ];
-    let names = classes.iter().map(|class| class.as_str()).collect::<Vec<_>>();
+    let names = classes
+        .iter()
+        .map(|class| class.as_str())
+        .collect::<Vec<_>>();
     assert_eq!(
         names,
         vec![
@@ -368,14 +423,20 @@ fn p2b_real_leaf_outcomes_classify_and_preserve_repair_semantics() {
     };
     let result = classify_and_decide(&input, true);
     assert_eq!(result.class, DeliveryClass::RepairNeeded);
-    assert_eq!(result.facts[0].reason_code.as_deref(), Some(reason_code::TEXT_CONTENT_MISMATCH));
+    assert_eq!(
+        result.facts[0].reason_code.as_deref(),
+        Some(reason_code::TEXT_CONTENT_MISMATCH)
+    );
     // The candidate binding's identity travels with the fact, not by inference.
     assert_eq!(
         result.facts[0].origin,
         FactOrigin::candidate("out/report.txt", &"b".repeat(64))
     );
     // Budget exhausted: same facts, definite non-pass.
-    assert_eq!(classify_and_decide(&input, false).class, DeliveryClass::DefiniteFailure);
+    assert_eq!(
+        classify_and_decide(&input, false).class,
+        DeliveryClass::DefiniteFailure
+    );
 
     let passing = CheckOutcome::single(passed("content:concat", "text_concat", &binding()));
     let input = FactInput {
@@ -389,13 +450,19 @@ fn p2b_real_leaf_outcomes_classify_and_preserve_repair_semantics() {
     };
     // With no declared obligation set the entry stays Unconfirmed even though the
     // leaf passed: an all-Passed leaf is a local reading, not contract coverage.
-    assert_eq!(classify_and_decide(&input, false).class, DeliveryClass::Unconfirmed);
+    assert_eq!(
+        classify_and_decide(&input, false).class,
+        DeliveryClass::Unconfirmed
+    );
     // Declaring the obligation discharged is what lets the pass confirm.
     let input = FactInput {
         coverage: Coverage::single_check("text_concat", true),
         ..input
     };
-    assert_eq!(classify_and_decide(&input, false).class, DeliveryClass::Confirmed);
+    assert_eq!(
+        classify_and_decide(&input, false).class,
+        DeliveryClass::Confirmed
+    );
 }
 
 /// A real `unverified()` / `budget_exceeded()` / `not_implemented()` observation
@@ -405,15 +472,31 @@ fn p2b_real_leaf_outcomes_classify_and_preserve_repair_semantics() {
 fn p2b_real_unverified_and_budget_and_not_implemented_are_unconfirmed() {
     let spec = v2_spec(v1_concat_rule(vec![]));
     let cases = [
-        unverified("content:concat", "text_concat", reason_code::EVIDENCE_UNAVAILABLE, &binding(), "证据不足"),
-        budget_exceeded("content:concat", "text_concat", &binding(), crate::runtime_host::delivery_checks_v2::LimitKind::Records, 100, 101),
+        unverified(
+            "content:concat",
+            "text_concat",
+            reason_code::EVIDENCE_UNAVAILABLE,
+            &binding(),
+            "证据不足",
+        ),
+        budget_exceeded(
+            "content:concat",
+            "text_concat",
+            &binding(),
+            crate::runtime_host::delivery_checks_v2::LimitKind::Records,
+            100,
+            101,
+        ),
         not_implemented("content:concat", "text_concat", &binding()),
     ];
     for observation in cases {
         assert_eq!(observation.state, CheckState::Unverified);
         assert!(!observation.blocking, "unverified never blocks");
         let outcome = CheckOutcome::single(observation);
-        assert!(!outcome.needs_repair(), "a resource/unverified result must not repair");
+        assert!(
+            !outcome.needs_repair(),
+            "a resource/unverified result must not repair"
+        );
         let input = FactInput {
             spec: &spec,
             read_facts: vec![],
@@ -424,7 +507,10 @@ fn p2b_real_unverified_and_budget_and_not_implemented_are_unconfirmed() {
             context: None,
         };
         // Even with a fresh repair budget, this stays Unconfirmed.
-        assert_eq!(classify_and_decide(&input, true).class, DeliveryClass::Unconfirmed);
+        assert_eq!(
+            classify_and_decide(&input, true).class,
+            DeliveryClass::Unconfirmed
+        );
     }
 }
 
@@ -490,7 +576,10 @@ fn p2b_invalid_spec_is_invalid_with_its_concrete_reason() {
         let result = classify_and_decide(&input, true);
         assert_eq!(result.class, DeliveryClass::Invalid, "{spec}");
         let detail = result.facts[0].detail.clone().unwrap_or_default();
-        assert!(!detail.is_empty(), "the concrete decode reason is preserved");
+        assert!(
+            !detail.is_empty(),
+            "the concrete decode reason is preserved"
+        );
         assert_eq!(result.facts[0].origin, FactOrigin::Spec);
         assert_eq!(
             result.facts[0].reason_code.as_deref(),
@@ -537,7 +626,10 @@ fn p2b_v1_spec_is_not_classified_as_v2() {
         context: None,
     };
     // No facts at all: unconfirmed, never confirmed.
-    assert_eq!(classify_and_decide(&input, true).class, DeliveryClass::Unconfirmed);
+    assert_eq!(
+        classify_and_decide(&input, true).class,
+        DeliveryClass::Unconfirmed
+    );
 }
 
 // ===========================================================================
@@ -551,7 +643,10 @@ fn p2b_v1_spec_is_not_classified_as_v2() {
 fn p2b_hash_drift_by_role_reuses_frozen_codes_and_keeps_attribution() {
     let candidate = candidate_hash_drift_fact("sha256:aaaa", "bbbb", "out/report.txt");
     assert_eq!(candidate.class, FactClass::Refused);
-    assert_eq!(candidate.reason_code.as_deref(), Some(reason_code::CANDIDATE_HASH_DRIFT));
+    assert_eq!(
+        candidate.reason_code.as_deref(),
+        Some(reason_code::CANDIDATE_HASH_DRIFT)
+    );
     assert_eq!(
         candidate.origin,
         FactOrigin::candidate("out/report.txt", "bbbb"),
@@ -559,7 +654,10 @@ fn p2b_hash_drift_by_role_reuses_frozen_codes_and_keeps_attribution() {
     );
 
     let source = source_hash_drift_fact(&"a".repeat(64), &"b".repeat(64), "in/a.txt");
-    assert_eq!(source.reason_code.as_deref(), Some(reason_code::security::SOURCE_IDENTITY_MISMATCH));
+    assert_eq!(
+        source.reason_code.as_deref(),
+        Some(reason_code::security::SOURCE_IDENTITY_MISMATCH)
+    );
     assert_eq!(
         source.origin,
         FactOrigin::source("in/a.txt", &"b".repeat(64)),
@@ -581,7 +679,10 @@ fn p2b_hash_drift_by_role_reuses_frozen_codes_and_keeps_attribution() {
         coverage: Coverage::Unstated,
         context: None,
     };
-    assert_eq!(classify_and_decide(&input, true).class, DeliveryClass::Refused);
+    assert_eq!(
+        classify_and_decide(&input, true).class,
+        DeliveryClass::Refused
+    );
 }
 
 // ===========================================================================
@@ -625,7 +726,8 @@ fn p2b_typed_read_failures_classify_by_variant() {
         Some(reason_code::EVIDENCE_UNAVAILABLE)
     );
 
-    let resource = classify_read_failure(origin.clone(), &DeliveryReadFailure::Resource { limit: 64 });
+    let resource =
+        classify_read_failure(origin.clone(), &DeliveryReadFailure::Resource { limit: 64 });
     assert_eq!(resource.class, FactClass::Unconfirmed);
     assert_eq!(resource.limit, Some(64), "the byte ceiling is preserved");
 
@@ -653,7 +755,11 @@ fn p2b_root_failure_is_attributed_to_the_binding() {
     let io = classify_root_failure(&DeliveryReadFailure::Io("db locked".to_owned()));
     assert_eq!(io.class, FactClass::Unconfirmed);
     assert_eq!(io.origin, FactOrigin::ProjectBinding);
-    assert_ne!(io.class, FactClass::Refused, "an OS/DB error is not a refusal");
+    assert_ne!(
+        io.class,
+        FactClass::Refused,
+        "an OS/DB error is not a refusal"
+    );
 }
 
 /// An empty-but-readable candidate is missing evidence, not a silent agreement.
@@ -685,10 +791,17 @@ fn p2b_real_context_os_denial_stays_io_not_authorization() {
         64 * 1024 * 1024,
     )
     .expect_err("a directory must never read as bytes");
-    assert!(!matches!(failure, DeliveryReadFailure::AuthorizationRefused { .. }));
+    assert!(!matches!(
+        failure,
+        DeliveryReadFailure::AuthorizationRefused { .. }
+    ));
     let fact = classify_read_failure(FactOrigin::candidate("adir", ""), &failure);
     assert_eq!(fact.class, FactClass::Unconfirmed);
-    assert_ne!(fact.class, FactClass::Refused, "an OS denial is not a project refusal");
+    assert_ne!(
+        fact.class,
+        FactClass::Refused,
+        "an OS denial is not a project refusal"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -797,7 +910,10 @@ fn p2b_f2_limit_kind_is_separate_from_the_byte_ceiling() {
         &DeliveryReadFailure::Resource { limit: 64 },
     );
     assert_eq!(byte_fact.limit, Some(64));
-    assert_eq!(byte_fact.limit_kind, None, "the typed unit is Bytes, not a kind");
+    assert_eq!(
+        byte_fact.limit_kind, None,
+        "the typed unit is Bytes, not a kind"
+    );
 }
 
 /// F3: an equivalence pass and a byte-exact pass must not classify to equal
@@ -831,7 +947,10 @@ fn p2b_f3_equivalence_pass_is_distinguishable_from_a_byte_pass() {
     let plain = classify(&byte_exact);
     let equivalent = classify(&by_equivalence);
 
-    assert_eq!(plain[0].equivalence, None, "a byte match records no equivalence");
+    assert_eq!(
+        plain[0].equivalence, None,
+        "a byte match records no equivalence"
+    );
     assert_eq!(
         equivalent[0].equivalence.as_deref(),
         Some(equivalence::OPTIONAL_FINAL_LF)
@@ -926,7 +1045,11 @@ fn p2b_f4_veto_origin_is_never_empty_and_its_check_is_kept() {
         "with two candidates the fact must not borrow either identity"
     );
     assert_ne!(fact.origin, FactOrigin::candidate("", ""));
-    assert_eq!(fact.check.as_deref(), Some("text_concat"), "the check survives");
+    assert_eq!(
+        fact.check.as_deref(),
+        Some("text_concat"),
+        "the check survives"
+    );
 
     // (c) An explicit caller context wins over the sole-candidate inference.
     let explicit = FactContext::Source {
@@ -1018,9 +1141,15 @@ fn p2b_f5_authorization_facts_are_project_bound_and_share_one_constructor() {
         },
     );
     assert_eq!(from_root.origin, FactOrigin::ProjectBinding);
-    assert_eq!(from_read.origin, FactOrigin::candidate("out/report.txt", ""));
+    assert_eq!(
+        from_read.origin,
+        FactOrigin::candidate("out/report.txt", "")
+    );
     assert_eq!(from_root.reason_code, from_read.reason_code);
-    assert_eq!(from_root.reason_code.as_deref(), Some("authorization_refused"));
+    assert_eq!(
+        from_root.reason_code.as_deref(),
+        Some("authorization_refused")
+    );
     assert_eq!(from_root.class, FactClass::Refused);
     assert_eq!(from_read.class, FactClass::Refused);
 
@@ -1059,7 +1188,10 @@ fn p2b_f6_checked_hash_input_categories_are_explicit() {
         json!({"checkedHash": &"z".repeat(64)}),
     ] {
         assert!(
-            matches!(classify_checked_hash(&finding), CheckedHash::Malformed { .. }),
+            matches!(
+                classify_checked_hash(&finding),
+                CheckedHash::Malformed { .. }
+            ),
             "{finding} must not be treated as a match"
         );
     }
@@ -1115,11 +1247,22 @@ fn p2b_f7_unknown_or_partial_coverage_forbids_confirmed() {
     // Only an explicitly discharged obligation set confirms. This is the
     // positive case, and it is reachable only by declaring the discharge.
     let complete = classify(Coverage::single_check("text_concat", true));
-    assert_eq!(complete.class, DeliveryClass::Confirmed, "{:?}", complete.facts);
+    assert_eq!(
+        complete.class,
+        DeliveryClass::Confirmed,
+        "{:?}",
+        complete.facts
+    );
 
     // The pure local fold keeps its capability: `decide` over an all-Passed set
     // still reports the local reading, and the docs/entry carry the distinction.
-    let local = decide(&[DecisionFact::passed(FactOrigin::candidate("out/report.txt", "b"))], true);
+    let local = decide(
+        &[DecisionFact::passed(FactOrigin::candidate(
+            "out/report.txt",
+            "b",
+        ))],
+        true,
+    );
     assert_eq!(local.class, DeliveryClass::Confirmed);
 }
 
@@ -1165,12 +1308,21 @@ fn p2b_two_sources_refusal_and_resource_shortfall_are_all_retained() {
         result.facts[0].origin, result.facts[1].origin,
         "the two sources stay distinguishable"
     );
-    assert_eq!(result.facts[0].origin, FactOrigin::source(source_a, &hash_a));
-    assert_eq!(result.facts[1].origin, FactOrigin::source(source_b, &hash_b));
+    assert_eq!(
+        result.facts[0].origin,
+        FactOrigin::source(source_a, &hash_a)
+    );
+    assert_eq!(
+        result.facts[1].origin,
+        FactOrigin::source(source_b, &hash_b)
+    );
 
     // The locator survives whole, and the byte ceiling is not confused with the
     // visible ceiling kind.
-    let locator = result.facts[0].locator.clone().expect("the locator survives");
+    let locator = result.facts[0]
+        .locator
+        .clone()
+        .expect("the locator survives");
     assert_eq!(locator.record, Some(3));
     assert_eq!(locator.line, Some(7));
     assert_eq!(locator.field, Some(2));
@@ -1180,4 +1332,3 @@ fn p2b_two_sources_refusal_and_resource_shortfall_are_all_retained() {
     assert_eq!(result.facts[1].limit_kind, Some(LimitKind::ScanBytes));
     assert_eq!(result.facts[1].class, FactClass::Unconfirmed);
 }
-

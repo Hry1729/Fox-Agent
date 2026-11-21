@@ -97,8 +97,7 @@ pub(crate) mod reason_code {
     pub(crate) const TEXT_EOF_MISMATCH: &str = "delivery.check.text.eof_mismatch";
     /// The bytes contradict a line-ending declaration the frozen contract
     /// actually made. A declared policy is enforced, so this is `failed`.
-    pub(crate) const TEXT_LINE_ENDING_VIOLATION: &str =
-        "delivery.check.text.line_ending_violation";
+    pub(crate) const TEXT_LINE_ENDING_VIOLATION: &str = "delivery.check.text.line_ending_violation";
     /// Nothing in the declaration decides these line endings, so no faithful
     /// comparison exists. Reported as `unverified`: "we cannot compare this" is
     /// not evidence that the content is wrong, and converting silently is
@@ -107,8 +106,7 @@ pub(crate) mod reason_code {
         "delivery.check.text.line_ending_unsupported";
 
     // Delimited tables (F02).
-    pub(crate) const TABLE_ENCODING_UNSUPPORTED: &str =
-        "delivery.check.table.encoding_unsupported";
+    pub(crate) const TABLE_ENCODING_UNSUPPORTED: &str = "delivery.check.table.encoding_unsupported";
     pub(crate) const TABLE_UNTERMINATED_QUOTE: &str = "delivery.check.table.unterminated_quote";
     pub(crate) const TABLE_CHARACTER_AFTER_QUOTE: &str =
         "delivery.check.table.character_after_quote";
@@ -1291,11 +1289,7 @@ impl TableError {
 
     /// A definite violation of a declared/syntactic rule under a supported
     /// contract. Carries no limit and maps to a blocking failed observation.
-    pub(crate) fn violation(
-        code: &str,
-        locator: RecordLocator,
-        detail: impl Into<String>,
-    ) -> Self {
+    pub(crate) fn violation(code: &str, locator: RecordLocator, detail: impl Into<String>) -> Self {
         Self {
             code: code.to_owned(),
             locator,
@@ -1426,8 +1420,14 @@ mod tests {
         assert_eq!(CheckState::Passed.as_str(), "passed");
         assert_eq!(CheckState::Failed.as_str(), "failed");
         assert_eq!(CheckState::Unverified.as_str(), "unverified");
-        assert_eq!(serde_json::to_value(CheckState::Passed).unwrap(), json!("passed"));
-        assert_eq!(serde_json::to_value(CheckState::Failed).unwrap(), json!("failed"));
+        assert_eq!(
+            serde_json::to_value(CheckState::Passed).unwrap(),
+            json!("passed")
+        );
+        assert_eq!(
+            serde_json::to_value(CheckState::Failed).unwrap(),
+            json!("failed")
+        );
         assert_eq!(
             serde_json::to_value(CheckState::Unverified).unwrap(),
             json!("unverified")
@@ -1441,7 +1441,11 @@ mod tests {
             RequirementVerdict::Unmet("x".into()),
             RequirementVerdict::Unverified("y".into()),
         ];
-        let states = [CheckState::Passed, CheckState::Failed, CheckState::Unverified];
+        let states = [
+            CheckState::Passed,
+            CheckState::Failed,
+            CheckState::Unverified,
+        ];
         for (verdict, state) in verdicts.iter().zip(states) {
             assert_eq!(CheckState::from(verdict), state);
             let round_tripped = state.to_verdict(Some("r".into()));
@@ -1553,32 +1557,110 @@ mod tests {
     #[test]
     fn reason_codes_and_check_names_are_frozen_literals() {
         let expected = [
-            (reason_code::TEXT_SOURCE_MISSING, "delivery.check.text.source_missing"),
-            (reason_code::TEXT_ORDER_MISMATCH, "delivery.check.text.order_mismatch"),
-            (reason_code::TEXT_SEPARATOR_MISMATCH, "delivery.check.text.separator_mismatch"),
-            (reason_code::TEXT_CONTENT_MISMATCH, "delivery.check.text.content_mismatch"),
-            (reason_code::TEXT_EOF_MISMATCH, "delivery.check.text.eof_mismatch"),
-            (reason_code::TABLE_ENCODING_UNSUPPORTED, "delivery.check.table.encoding_unsupported"),
-            (reason_code::TABLE_UNTERMINATED_QUOTE, "delivery.check.table.unterminated_quote"),
-            (reason_code::TABLE_CHARACTER_AFTER_QUOTE, "delivery.check.table.character_after_quote"),
-            (reason_code::TABLE_UNESCAPED_QUOTE, "delivery.check.table.unescaped_quote"),
-            (reason_code::TABLE_HEADER_EMPTY, "delivery.check.table.header_empty"),
-            (reason_code::TABLE_HEADER_DUPLICATE, "delivery.check.table.header_duplicate"),
-            (reason_code::TABLE_WIDTH_MISMATCH, "delivery.check.table.width_mismatch"),
-            (reason_code::TABLE_ZERO_RECORDS, "delivery.check.table.zero_records"),
-            (reason_code::TABLE_DIALECT_UNSUPPORTED, "delivery.check.table.dialect_unsupported"),
-            (reason_code::BUDGET_EXCEEDED, "delivery.check.budget_exceeded"),
-            (reason_code::CONTRACT_UNREADABLE, "delivery.check.contract_unreadable"),
-            (reason_code::CONTRACT_VERSION_UNSUPPORTED, "delivery.check.contract_version_unsupported"),
-            (reason_code::EVIDENCE_UNAVAILABLE, "delivery.check.evidence_unavailable"),
-            (reason_code::CANDIDATE_HASH_DRIFT, "delivery.check.candidate_hash_drift"),
-            (reason_code::CHECKER_NOT_IMPLEMENTED, "delivery.check.checker_not_implemented"),
-            (reason_code::security::PATH_OUTSIDE_AUTHORIZED_ROOT, "delivery.security.path_outside_authorized_root"),
-            (reason_code::security::READONLY_INPUT_WRITE, "delivery.security.readonly_input_write"),
-            (reason_code::security::SOURCE_IDENTITY_MISMATCH, "delivery.security.source_identity_mismatch"),
-            (reason_code::security::VERSION_CREDENTIAL_INVALID, "delivery.security.version_credential_invalid"),
-            (reason_code::security::LOCK_RACE_VERSION_CHANGED, "delivery.security.lock_race_version_changed"),
-            (reason_code::security::APPROVAL_MISSING, "delivery.security.approval_missing"),
+            (
+                reason_code::TEXT_SOURCE_MISSING,
+                "delivery.check.text.source_missing",
+            ),
+            (
+                reason_code::TEXT_ORDER_MISMATCH,
+                "delivery.check.text.order_mismatch",
+            ),
+            (
+                reason_code::TEXT_SEPARATOR_MISMATCH,
+                "delivery.check.text.separator_mismatch",
+            ),
+            (
+                reason_code::TEXT_CONTENT_MISMATCH,
+                "delivery.check.text.content_mismatch",
+            ),
+            (
+                reason_code::TEXT_EOF_MISMATCH,
+                "delivery.check.text.eof_mismatch",
+            ),
+            (
+                reason_code::TABLE_ENCODING_UNSUPPORTED,
+                "delivery.check.table.encoding_unsupported",
+            ),
+            (
+                reason_code::TABLE_UNTERMINATED_QUOTE,
+                "delivery.check.table.unterminated_quote",
+            ),
+            (
+                reason_code::TABLE_CHARACTER_AFTER_QUOTE,
+                "delivery.check.table.character_after_quote",
+            ),
+            (
+                reason_code::TABLE_UNESCAPED_QUOTE,
+                "delivery.check.table.unescaped_quote",
+            ),
+            (
+                reason_code::TABLE_HEADER_EMPTY,
+                "delivery.check.table.header_empty",
+            ),
+            (
+                reason_code::TABLE_HEADER_DUPLICATE,
+                "delivery.check.table.header_duplicate",
+            ),
+            (
+                reason_code::TABLE_WIDTH_MISMATCH,
+                "delivery.check.table.width_mismatch",
+            ),
+            (
+                reason_code::TABLE_ZERO_RECORDS,
+                "delivery.check.table.zero_records",
+            ),
+            (
+                reason_code::TABLE_DIALECT_UNSUPPORTED,
+                "delivery.check.table.dialect_unsupported",
+            ),
+            (
+                reason_code::BUDGET_EXCEEDED,
+                "delivery.check.budget_exceeded",
+            ),
+            (
+                reason_code::CONTRACT_UNREADABLE,
+                "delivery.check.contract_unreadable",
+            ),
+            (
+                reason_code::CONTRACT_VERSION_UNSUPPORTED,
+                "delivery.check.contract_version_unsupported",
+            ),
+            (
+                reason_code::EVIDENCE_UNAVAILABLE,
+                "delivery.check.evidence_unavailable",
+            ),
+            (
+                reason_code::CANDIDATE_HASH_DRIFT,
+                "delivery.check.candidate_hash_drift",
+            ),
+            (
+                reason_code::CHECKER_NOT_IMPLEMENTED,
+                "delivery.check.checker_not_implemented",
+            ),
+            (
+                reason_code::security::PATH_OUTSIDE_AUTHORIZED_ROOT,
+                "delivery.security.path_outside_authorized_root",
+            ),
+            (
+                reason_code::security::READONLY_INPUT_WRITE,
+                "delivery.security.readonly_input_write",
+            ),
+            (
+                reason_code::security::SOURCE_IDENTITY_MISMATCH,
+                "delivery.security.source_identity_mismatch",
+            ),
+            (
+                reason_code::security::VERSION_CREDENTIAL_INVALID,
+                "delivery.security.version_credential_invalid",
+            ),
+            (
+                reason_code::security::LOCK_RACE_VERSION_CHANGED,
+                "delivery.security.lock_race_version_changed",
+            ),
+            (
+                reason_code::security::APPROVAL_MISSING,
+                "delivery.security.approval_missing",
+            ),
         ];
         for (actual, frozen) in expected {
             assert_eq!(actual, frozen, "reason code text is a contract");
@@ -1615,7 +1697,9 @@ mod tests {
 
     #[test]
     fn locator_reports_both_the_record_and_the_physical_line() {
-        let locator = RecordLocator::cell(3, 2, Some("amount")).at_line(5).at_byte(120);
+        let locator = RecordLocator::cell(3, 2, Some("amount"))
+            .at_line(5)
+            .at_byte(120);
         assert_eq!(locator.record, Some(3));
         assert_eq!(locator.line, Some(5));
         assert_eq!(locator.column.as_deref(), Some("amount"));

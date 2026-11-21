@@ -17,9 +17,9 @@
 //! database, a real file and a real `managed_file_versions` binding — not an
 //! in-memory schema and not an internal helper.
 
+use super::Database;
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::Database;
 use crate::database::now_ms;
 
 /// A task whose checklist seeds exactly one promised artifact.
@@ -62,11 +62,7 @@ fn world(tag: &str) -> World {
             None,
         )
         .unwrap();
-    let run_id = db
-        .create_run(&conversation.id, TASK, None)
-        .unwrap()
-        .run
-        .id;
+    let run_id = db.create_run(&conversation.id, TASK, None).unwrap().run.id;
 
     // Seed the checklist from the task, so the promised item is the real one the
     // delivery lane would have produced.
@@ -671,7 +667,12 @@ fn h4f_the_two_views_agree_across_every_recorded_status() {
             Some(legitimate_pass(&key, &path, &version)),
             false,
         ),
-        ("passed", "legacy", Some(legacy_finding(&path, &version)), true),
+        (
+            "passed",
+            "legacy",
+            Some(legacy_finding(&path, &version)),
+            true,
+        ),
     ];
     for (stored, label, finding, should_pass) in &cases {
         world.store(stored, finding.clone());

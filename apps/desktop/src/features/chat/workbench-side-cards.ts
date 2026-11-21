@@ -65,7 +65,7 @@ export function sideCardGrowthRollback(refusals: SidebarGrowthRefusal[]): SideCa
  *  `onLeaveChat` is read through a ref, so the clearing effect fires exactly on the
  *  chat / not-chat transition and never on a re-render of the same view. */
 export function useChatWorkspaceSideCard(activeView: WorkspaceView, onLeaveChat: () => void): boolean {
-  const insideChat = activeView === 'chat'
+  const insideChat = activeView === 'chat' || activeView === 'companions'
   const leaveRef = useRef(onLeaveChat)
   useEffect(() => { leaveRef.current = onLeaveChat })
   useEffect(() => { if (!insideChat) leaveRef.current() }, [insideChat])

@@ -1,15 +1,9 @@
-// SPEC item 4（缺口 A）：右侧栏与联系人卡都是**独立的同级圆角卡片**，
-// 默认 1060 宽也走原生增长，不再有 1180px 覆盖层抽屉，也没有断点震荡。
-//
-// Workbench 需要整套 Tauri IPC 才能挂载，所以这里断言的是**真实源码与真实 CSS**
-// 里的合同：渲染层级（卡片是同级的）、增长声明的条件（没有断点排除项）、CSS 里
-// 同级卡片的外边距/圆角一致性，以及能力声明与 tauri.conf.json 的默认几何。
-// 可执行的行为（1060 增长、最大化不叠加）在 sidebar-window-growth.test.ts 与
-// sidebar-window-growth-hook.test.tsx 里用假原生窗口跑真数字。
+// Workbench 依赖原生 IPC，这里检查生产 JSX/CSS 的布局合同。
+// 原生窗口增长行为由 sidebar-window-growth 的行为测试覆盖。
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 
-const read = (relative: string) => readFileSync(new URL(relative, import.meta.url), 'utf8')
+const read = (relative: string) => readFileSync(new URL(relative, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 const collapse = (source: string) => source.replace(/\s+/g, ' ')
 
 const workbench = read('../src/features/chat/workbench.tsx')
@@ -56,38 +50,39 @@ describe('同级侧栏卡片（缺口 A）', () => {
     expect((workbench.match(/<CompactRightPanel/g) ?? []).length).toBe(0)
   })
 
-  test('普通右侧栏与联系人卡都是 fox-workbench 的同级子节点，不再是 content-card 的覆盖层', () => {
+  test('右侧栏并进 content-card，联系人卡仍是兄弟卡片', () => {
     const cardOpen = flatWorkbench.indexOf('<div className="fox-content-card">')
-    const cardClosed = flatWorkbench.indexOf('</section> </div> </div>')
+    const surfaceClosed = flatWorkbench.indexOf('</section> </div>')
     const panelRender = flatWorkbench.indexOf('{showConversationRightSidebar && !rightSidebarCollapsed && <>')
     const sideCardRender = flatWorkbench.indexOf('{contactCardOpen && contact && <ContactSideCard')
     expect(cardOpen).toBeGreaterThan(-1)
-    expect(cardClosed).toBeGreaterThan(cardOpen)
-    expect(panelRender).toBeGreaterThan(cardClosed)
+    expect(surfaceClosed).toBeGreaterThan(cardOpen)
+    expect(panelRender).toBeGreaterThan(surfaceClosed)
+    expect(flatWorkbench.slice(surfaceClosed, panelRender).trim()).toBe('</section> </div>')
     expect(sideCardRender).toBeGreaterThan(panelRender)
-    // 分隔条与面板成对出现在同级位置（分隔条占住既有的 5px 间隙）。
+    expect(flatWorkbench.slice(panelRender, sideCardRender).trim().endsWith('</>} </div>')).toBe(true)
     expect(flatWorkbench.slice(panelRender, panelRender + 220)).toContain('<ResizeDivider')
   })
 
-  test('增长声明只看卡片是否开着：默认 1060 宽也长，最大化面板只是压缩聊天', () => {
-    const memo = workbench.slice(workbench.indexOf('const sidebarGrowthEntries = useMemo'), workbench.indexOf('const handleSidebarGrowthRefused'))
-    expect(memo).toContain("if (showConversationRightSidebar && !rightSidebarCollapsed && !rightPanelMaximized) entries.push({ id: 'right-panel', width: rightWidth })")
-    expect(memo).toContain("if (contactCardOpen) entries.push({ id: 'contact-card', width: CONTACT_SIDE_CARD_WIDTH })")
-    // 没有任何视口断点或覆盖层条件参与增长判断。
-    expect(/compact|matchMedia|1180|innerWidth/.test(memo)).toBe(false)
-    expect(workbench).toContain('useSidebarWindowGrowth(sidebarGrowthEntries, handleSidebarGrowthRefused, sidebarLayoutRef)')
+  test('右侧栏和小 Fox 侧边栏均在窗口内压缩聊天，不声明原生增长', () => {
+    expect(workbench).not.toContain('useRightPanelGrowthWidth')
+    expect(workbench).not.toContain('useSidebarWindowGrowth')
+    expect(workbench).not.toContain('sidebarGrowthEntries')
+    expect(workbench).not.toContain('handleSidebarGrowthRefused')
     expect(workbench).toContain('<div className="fox-workbench" ref={sidebarLayoutRef}>')
   })
 
-  test('CSS：同级卡片共享 content-card 的外边距与圆角，5px 间隙等宽', () => {
-    expect(flatCss).toContain('.fox-workbench > .fox-context-panel { flex: none; margin: 2px 5px 5px 0;')
-    expect(flatCss).toContain('.fox-workbench > .fox-resize-divider { margin: 0 -5px 0 0; }')
+  test('CSS：合并侧栏无独立圆角阴影，联系人保留圆角与间隙', () => {
+    expect(flatCss).toContain('.fox-content-card > .fox-context-panel { flex: none; margin: 0; border: 0; border-radius: 0; box-shadow: none; background: var(--fox-canvas); }')
+    expect(flatCss).toContain('.fox-content-card > .fox-resize-divider { flex: 0 0 1px; width: 1px; margin: 0; background: var(--fox-border); }')
+    expect(flatCss).toContain('inset: 0 -2px; cursor: col-resize;')
+    expect(flatCss).toContain('.fox-workbench > .fox-content-card:has(~ .fox-contact-side-card) { margin-right: 3px; }')
     // content-card 与同级面板的 radius 声明完全一致。
     const radius = 'border-radius: calc(var(--fox-radius-window) + 4px) calc(var(--fox-radius-window) + 4px) var(--fox-radius-window) calc(var(--fox-radius-window) + 4px);'
     expect(css).toContain(radius)
     expect(sideCardCss).toContain(radius)
     // 两张卡同时开着时，面板的右边缘面对间隙而不是窗口边缘。
-    expect(sideCardCss).toContain('.fox-workbench:has(.fox-contact-side-card) > .fox-context-panel:not(.is-maximized)')
+    expect(flatCss.includes('.fox-workbench > .fox-context-panel {')).toBe(false)
     // 底边左侧角曾经过小（缺口 A 的圆角不一致）：侧栏卡片不再用裸窗口半径收尾。
     expect(sideCardCss.includes('var(--fox-radius-window) var(--fox-radius-window);')).toBe(false)
   })
@@ -96,7 +91,7 @@ describe('同级侧栏卡片（缺口 A）', () => {
     expect(css).toContain('@media (max-width: 1180px) {\n  .fox-chat-top-actions { margin-right: 0; }\n}')
     // 分隔条与同级面板都是默认可见的：样式确实存在，而且只给内部占位 span 让路。
     expect(flatCss).toContain('.fox-resize-divider { position: relative; z-index: 30; width: 5px;')
-    expect(flatCss).toContain('.fox-workbench > .fox-resize-divider { margin: 0 -5px 0 0; }')
+    expect(flatCss).toContain('.fox-content-card > .fox-resize-divider { flex: 0 0 1px; width: 1px;')
     // 任何地方都不再把同级卡片或分隔条本身藏起来（断点震荡的根源）。
     expect(hidesItself(css, 'fox-context-panel')).toBe(false)
     expect(hidesItself(css, 'fox-resize-divider')).toBe(false)
@@ -116,8 +111,8 @@ describe('同级侧栏卡片（缺口 A）', () => {
     expect(lanyardCss.includes('.fox-compact-context-layer')).toBe(false)
   })
 
-  test('面板最大化仍是同级卡片：靠 flex 抢宽度，不用覆盖层，也不声明增长', () => {
-    expect(flatCss).toContain('.fox-workbench > .fox-context-panel.is-maximized { flex: 1 1 auto; width: auto; max-width: none; }')
+  test('面板最大化在卡片内靠 flex 分配宽度，不声明窗口增长', () => {
+    expect(flatCss).toContain('.fox-content-card > .fox-context-panel.is-maximized { flex: 1 1 auto; width: auto; max-width: none; border-left: 1px solid var(--fox-border); }')
     expect(rightPanel).toContain('${maximized ? \'is-maximized\' : \'\'}')
     expect(rightPanel).toContain('onToggleMaximized')
     expect(rightPanel).toContain('onCollapse')
@@ -136,7 +131,7 @@ describe('同级侧栏卡片（缺口 A）', () => {
       'core:window:allow-is-maximized',
       'core:window:allow-is-fullscreen',
     ]) expect(capabilities.permissions).toContain(permission)
-    expect(tauriConfig.app.windows[0]!.width).toBe(1060)
+    expect(tauriConfig.app.windows[0]!.width).toBe(1190)
     expect(tauriConfig.app.windows[0]!.minWidth).toBe(600)
     expect(controller).toContain('export const BASE_MIN_WIDTH = 600')
     expect(controller).toContain('export const SIDEBAR_CARD_GAP = 5')

@@ -32,11 +32,16 @@ pub(super) enum RunRoute {
 /// other combination is one this build cannot honour, and is refused rather
 /// than guessed at.
 pub(super) fn resolve_run_route(binding: Option<&RunControlBinding>) -> RunRoute {
-    let Some(binding) = binding else { return RunRoute::Kernel };
+    let Some(binding) = binding else {
+        return RunRoute::Kernel;
+    };
     match (binding.authority, binding.executor_route) {
         (_, None) => RunRoute::Kernel,
         (ExecutionAuthority::Authoritative, Some(ExecutorRoute::PiNative))
-            if binding.engine_id == "pi" => RunRoute::PiNative,
+            if binding.engine_id == "pi" =>
+        {
+            RunRoute::PiNative
+        }
         _ => RunRoute::Reject,
     }
 }
@@ -62,8 +67,7 @@ pub(super) fn retired_route_error() -> String {
     )
 }
 
-impl RunRoute {
-}
+impl RunRoute {}
 
 /// The binding a child Run freezes (A0).
 ///
@@ -86,10 +90,16 @@ pub(super) fn child_run_binding(
     inherited.run_id = child_run_id.into();
     inherited.conversation_id = child_conversation_id.into();
     inherited.engine_id = "pi".into();
-    inherited.executor_route = crate::database::Database::new_run_executor_route(ExecutionAuthority::Authoritative);
-    if read_only { inherited.permission.mode = fox_engine_protocol::PermissionMode::ReadOnly; }
-    if let Some(profile) = execution_profile { inherited.execution_profile_id = profile.into(); }
-    inherited.permission_snapshot_id = crate::database::Database::run_control_permission_hash(&inherited.permission)?;
+    inherited.executor_route =
+        crate::database::Database::new_run_executor_route(ExecutionAuthority::Authoritative);
+    if read_only {
+        inherited.permission.mode = fox_engine_protocol::PermissionMode::ReadOnly;
+    }
+    if let Some(profile) = execution_profile {
+        inherited.execution_profile_id = profile.into();
+    }
+    inherited.permission_snapshot_id =
+        crate::database::Database::run_control_permission_hash(&inherited.permission)?;
     inherited.budgets.restrict_execution_ms(max_duration_ms);
     inherited.validate()?;
     Ok(inherited)
@@ -103,14 +113,36 @@ mod tests {
     fn a0_child_runs_always_freeze_pi_native_whatever_the_parent_route() {
         for parent_route in [None, Some(ExecutorRoute::PiNative)] {
             for parent_engine in ["pi", "codex"] {
-                let parent = binding(ExecutionAuthority::Authoritative, parent_route, parent_engine);
-                let child = child_run_binding(&parent, "child-run", "child-conversation", false, None, 30_000).unwrap();
-                assert_eq!(child.executor_route, Some(ExecutorRoute::PiNative), "{parent_route:?} {parent_engine}");
+                let parent = binding(
+                    ExecutionAuthority::Authoritative,
+                    parent_route,
+                    parent_engine,
+                );
+                let child = child_run_binding(
+                    &parent,
+                    "child-run",
+                    "child-conversation",
+                    false,
+                    None,
+                    30_000,
+                )
+                .unwrap();
+                assert_eq!(
+                    child.executor_route,
+                    Some(ExecutorRoute::PiNative),
+                    "{parent_route:?} {parent_engine}"
+                );
                 assert_eq!(child.engine_id, "pi");
                 assert_eq!(child.authority, ExecutionAuthority::Authoritative);
-                assert_eq!((child.run_id.as_str(), child.conversation_id.as_str()), ("child-run", "child-conversation"));
+                assert_eq!(
+                    (child.run_id.as_str(), child.conversation_id.as_str()),
+                    ("child-run", "child-conversation")
+                );
                 // The single resolver routes it to the PiNative path, never Kernel.
-                assert!(matches!(resolve_run_route(Some(&child)), RunRoute::PiNative), "{parent_route:?} {parent_engine}");
+                assert!(
+                    matches!(resolve_run_route(Some(&child)), RunRoute::PiNative),
+                    "{parent_route:?} {parent_engine}"
+                );
                 assert!(child.budgets.run_execution_limited);
                 assert!(child.budgets.run_execution_ms <= 30_000);
             }
@@ -120,17 +152,42 @@ mod tests {
     #[test]
     fn a0_child_binding_keeps_the_parent_permission_and_narrows_it_when_asked() {
         let parent = binding(ExecutionAuthority::Authoritative, None, "pi");
-        let inherited = child_run_binding(&parent, "child", "child-conversation", false, None, 1_000).unwrap();
+        let inherited =
+            child_run_binding(&parent, "child", "child-conversation", false, None, 1_000).unwrap();
         assert_eq!(inherited.permission, parent.permission);
         assert_eq!(inherited.execution_profile_id, parent.execution_profile_id);
-        let reviewer = child_run_binding(&parent, "child", "child-conversation", true, Some("graph_reviewer_v1"), 1_000).unwrap();
-        assert_eq!(reviewer.permission.mode, fox_engine_protocol::PermissionMode::ReadOnly);
+        let reviewer = child_run_binding(
+            &parent,
+            "child",
+            "child-conversation",
+            true,
+            Some("graph_reviewer_v1"),
+            1_000,
+        )
+        .unwrap();
+        assert_eq!(
+            reviewer.permission.mode,
+            fox_engine_protocol::PermissionMode::ReadOnly
+        );
         assert_eq!(reviewer.execution_profile_id, "graph_reviewer_v1");
-        assert_eq!(reviewer.permission_snapshot_id,
-            crate::database::Database::run_control_permission_hash(&reviewer.permission).unwrap());
-        assert_ne!(reviewer.permission_snapshot_id, inherited.permission_snapshot_id);
+        assert_eq!(
+            reviewer.permission_snapshot_id,
+            crate::database::Database::run_control_permission_hash(&reviewer.permission).unwrap()
+        );
+        assert_ne!(
+            reviewer.permission_snapshot_id,
+            inherited.permission_snapshot_id
+        );
         // A Legacy parent never hands its control to a child.
-        assert!(child_run_binding(&binding(ExecutionAuthority::Legacy, None, "pi"), "child", "c", false, None, 1_000).is_err());
+        assert!(child_run_binding(
+            &binding(ExecutionAuthority::Legacy, None, "pi"),
+            "child",
+            "c",
+            false,
+            None,
+            1_000
+        )
+        .is_err());
     }
 
     #[test]
@@ -140,7 +197,10 @@ mod tests {
 
     #[test]
     fn existing_authority_is_not_reinterpreted_by_a_new_default() {
-        for authority in [ExecutionAuthority::Legacy, ExecutionAuthority::Authoritative] {
+        for authority in [
+            ExecutionAuthority::Legacy,
+            ExecutionAuthority::Authoritative,
+        ] {
             assert_eq!(select(Some(authority)).unwrap(), authority);
         }
     }
@@ -173,10 +233,16 @@ mod tests {
     #[test]
     fn an_unrouted_binding_keeps_its_authority_derived_meaning() {
         assert!(matches!(resolve_run_route(None), RunRoute::Kernel));
-        for authority in [ExecutionAuthority::Legacy, ExecutionAuthority::Authoritative] {
+        for authority in [
+            ExecutionAuthority::Legacy,
+            ExecutionAuthority::Authoritative,
+        ] {
             for engine in ["pi", "codex", "deepseek_harness"] {
                 assert!(
-                    matches!(resolve_run_route(Some(&binding(authority, None, engine))), RunRoute::Kernel),
+                    matches!(
+                        resolve_run_route(Some(&binding(authority, None, engine))),
+                        RunRoute::Kernel
+                    ),
                     "an unrouted {engine} binding under {authority:?} must not change executor"
                 );
             }
@@ -185,18 +251,33 @@ mod tests {
 
     #[test]
     fn only_the_authoritative_pi_combination_routes_to_the_single_path() {
-        let routed = binding(ExecutionAuthority::Authoritative, Some(ExecutorRoute::PiNative), "pi");
-        assert!(matches!(resolve_run_route(Some(&routed)), RunRoute::PiNative));
+        let routed = binding(
+            ExecutionAuthority::Authoritative,
+            Some(ExecutorRoute::PiNative),
+            "pi",
+        );
+        assert!(matches!(
+            resolve_run_route(Some(&routed)),
+            RunRoute::PiNative
+        ));
     }
 
     #[test]
     fn every_other_route_combination_is_refused_rather_than_guessed() {
         // A route never describes the legacy contract.
-        let legacy = binding(ExecutionAuthority::Legacy, Some(ExecutorRoute::PiNative), "pi");
+        let legacy = binding(
+            ExecutionAuthority::Legacy,
+            Some(ExecutorRoute::PiNative),
+            "pi",
+        );
         assert!(matches!(resolve_run_route(Some(&legacy)), RunRoute::Reject));
         // It never describes a retired or unknown engine either.
         for engine in ["codex", "deepseek_harness", "unknown_engine"] {
-            let foreign = binding(ExecutionAuthority::Authoritative, Some(ExecutorRoute::PiNative), engine);
+            let foreign = binding(
+                ExecutionAuthority::Authoritative,
+                Some(ExecutorRoute::PiNative),
+                engine,
+            );
             assert!(
                 matches!(resolve_run_route(Some(&foreign)), RunRoute::Reject),
                 "{engine} must not reach the single path"

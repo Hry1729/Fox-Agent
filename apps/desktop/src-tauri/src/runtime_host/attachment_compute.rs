@@ -48,10 +48,7 @@ impl Drop for WorkspaceGuard {
     }
 }
 
-fn check_snapshot_progress(
-    cancelled: &dyn Fn() -> bool,
-    deadline: Instant,
-) -> Result<(), String> {
+fn check_snapshot_progress(cancelled: &dyn Fn() -> bool, deadline: Instant) -> Result<(), String> {
     if cancelled() {
         return Err("Attachment computation cancelled".into());
     }
@@ -75,31 +72,58 @@ fn stream_snapshot(
     total_bytes: &mut u64,
     total_limit: usize,
 ) -> Result<(String, u64), String> {
-    stream_snapshot_with_root(source, destination, per_file_limit, cancelled, deadline, total_bytes, total_limit, None)
+    stream_snapshot_with_root(
+        source,
+        destination,
+        per_file_limit,
+        cancelled,
+        deadline,
+        total_bytes,
+        total_limit,
+        None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
 fn stream_snapshot_with_root(
-    source: &Path, destination: &Path, per_file_limit: u64, cancelled: &dyn Fn() -> bool,
-    deadline: Instant, total_bytes: &mut u64, total_limit: usize, authorized_root: Option<&Path>,
+    source: &Path,
+    destination: &Path,
+    per_file_limit: u64,
+    cancelled: &dyn Fn() -> bool,
+    deadline: Instant,
+    total_bytes: &mut u64,
+    total_limit: usize,
+    authorized_root: Option<&Path>,
 ) -> Result<(String, u64), String> {
     crate::data_compute::validate_input_path(source)?;
     let mut reader = open_input_handle(source)?;
-    let before = reader.metadata().map_err(|error| format!("Unable to inspect opened input: {error}"))?;
+    let before = reader
+        .metadata()
+        .map_err(|error| format!("Unable to inspect opened input: {error}"))?;
     #[cfg(windows)]
     let before_identity = opened_file_identity(&reader)?;
     #[cfg(windows)]
-    { use std::os::windows::fs::MetadataExt;
-      if before.file_attributes() & 0x400 != 0 { return Err("[tool.path_denied] Opened input is a reparse point".into()); }
-      let final_path = opened_final_path(&reader)?;
-      if final_path != fs::canonicalize(source).map_err(|e| e.to_string())?
-          || authorized_root.is_some_and(|root| !final_path.starts_with(root)) {
-          return Err("[tool.path_denied] Input identity changed or escaped the authorized project".into());
-      }
+    {
+        use std::os::windows::fs::MetadataExt;
+        if before.file_attributes() & 0x400 != 0 {
+            return Err("[tool.path_denied] Opened input is a reparse point".into());
+        }
+        let final_path = opened_final_path(&reader)?;
+        if final_path != fs::canonicalize(source).map_err(|e| e.to_string())?
+            || authorized_root.is_some_and(|root| !final_path.starts_with(root))
+        {
+            return Err(
+                "[tool.path_denied] Input identity changed or escaped the authorized project"
+                    .into(),
+            );
+        }
     }
     #[cfg(not(windows))]
     if let Some(root) = authorized_root {
-        if !fs::canonicalize(source).map_err(|e|e.to_string())?.starts_with(root) {
+        if !fs::canonicalize(source)
+            .map_err(|e| e.to_string())?
+            .starts_with(root)
+        {
             return Err("[tool.path_denied] Input escaped the authorized project".into());
         }
     }
@@ -156,8 +180,8 @@ fn stream_snapshot_with_root(
     // matches no recorded state: reject instead of computing on mixed bytes.
     #[cfg(test)]
     run_post_copy_hook();
-    let after = fs::metadata(source)
-        .map_err(|error| format!("Unable to re-inspect input: {error}"))?;
+    let after =
+        fs::metadata(source).map_err(|error| format!("Unable to re-inspect input: {error}"))?;
     #[cfg(windows)]
     {
         let after_file = open_input_handle(source)?;
@@ -169,21 +193,28 @@ fn stream_snapshot_with_root(
         return Err("输入在快照期间发生变化；请在文件稳定后重试".into());
     }
     crate::data_compute::validate_input_path(source)?;
-    if authorized_root.is_some_and(|root| !fs::canonicalize(source).map(|p|p.starts_with(root)).unwrap_or(false)) {
+    if authorized_root.is_some_and(|root| {
+        !fs::canonicalize(source)
+            .map(|p| p.starts_with(root))
+            .unwrap_or(false)
+    }) {
         return Err("[tool.path_denied] Input authorization changed while snapshotting".into());
     }
     Ok((hex::encode(hasher.finalize()), copied))
 }
 
-fn open_input_handle(source:&Path)->Result<fs::File,String> {
-    let mut open=fs::OpenOptions::new();open.read(true);
+fn open_input_handle(source: &Path) -> Result<fs::File, String> {
+    let mut open = fs::OpenOptions::new();
+    open.read(true);
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        use windows::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT,FILE_SHARE_READ};
-        open.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0).share_mode(FILE_SHARE_READ.0);
+        use windows::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ};
+        open.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+            .share_mode(FILE_SHARE_READ.0);
     }
-    open.open(source).map_err(|error|format!("Unable to read input: {error}"))
+    open.open(source)
+        .map_err(|error| format!("Unable to read input: {error}"))
 }
 
 // ===========================================================================
@@ -200,7 +231,10 @@ pub(crate) enum DeliveryReadFailure {
     /// The bytes cannot be authenticated as an in-project deliverable:
     /// path escape, or a non-regular object. Not a claim of malicious
     /// tampering.
-    TrustRefusal { reason: &'static str, detail: String },
+    TrustRefusal {
+        reason: &'static str,
+        detail: String,
+    },
     /// A **project-level authorization fact**: the project access that
     /// existed at freeze time has been removed, or the authorization root no
     /// longer matches the frozen one. Only these belong here — see `Io` for
@@ -304,7 +338,8 @@ pub(crate) fn read_authorized_delivery_bytes_typed(
                 detail: "Opened delivery source escaped its project".to_owned(),
             });
         }
-        let canonical = fs::canonicalize(&source).map_err(|error| DeliveryReadFailure::Io(error.to_string()))?;
+        let canonical = fs::canonicalize(&source)
+            .map_err(|error| DeliveryReadFailure::Io(error.to_string()))?;
         if opened != canonical {
             return Err(DeliveryReadFailure::TrustRefusal {
                 reason: "path_denied",
@@ -379,20 +414,15 @@ pub(crate) fn authorized_delivery_root_typed(
         .ok_or(DeliveryReadFailure::EvidenceUnavailable {
             detail: "Delivery source needs a frozen Run binding".to_owned(),
         })?;
-    let root =
-        super::capability_tools::canonical_directory(
-            Path::new(
-                binding
-                    .permission
-                    .project_root
-                    .as_deref()
-                    .ok_or(DeliveryReadFailure::EvidenceUnavailable {
-                        detail: "No frozen project root".to_owned(),
-                    })?,
-            ),
-            "project folder",
-        )
-        .map_err(DeliveryReadFailure::Io)?;
+    let root = super::capability_tools::canonical_directory(
+        Path::new(binding.permission.project_root.as_deref().ok_or(
+            DeliveryReadFailure::EvidenceUnavailable {
+                detail: "No frozen project root".to_owned(),
+            },
+        )?),
+        "project folder",
+    )
+    .map_err(DeliveryReadFailure::Io)?;
     let live = database
         .conversation_project_access(&binding.conversation_id)
         .map_err(DeliveryReadFailure::Io)?
@@ -401,8 +431,9 @@ pub(crate) fn authorized_delivery_root_typed(
         .ok_or(DeliveryReadFailure::AuthorizationRefused {
             detail: "Project access was removed".to_owned(),
         })?;
-    let live_root = super::capability_tools::canonical_directory(Path::new(&live.0), "project folder")
-        .map_err(DeliveryReadFailure::Io)?;
+    let live_root =
+        super::capability_tools::canonical_directory(Path::new(&live.0), "project folder")
+            .map_err(DeliveryReadFailure::Io)?;
     if live_root != root {
         return Err(DeliveryReadFailure::AuthorizationRefused {
             detail: "Project authorization changed".to_owned(),
@@ -413,21 +444,42 @@ pub(crate) fn authorized_delivery_root_typed(
 
 #[cfg(windows)]
 pub(crate) fn opened_final_path(file: &fs::File) -> Result<PathBuf, String> {
-    use std::os::windows::{io::AsRawHandle, ffi::OsStringExt};
-    use windows::Win32::{Foundation::HANDLE, Storage::FileSystem::{GetFinalPathNameByHandleW, GETFINALPATHNAMEBYHANDLE_FLAGS}};
-    let mut buffer=vec![0u16;32768];
-    let size=unsafe {GetFinalPathNameByHandleW(HANDLE(file.as_raw_handle()), &mut buffer, GETFINALPATHNAMEBYHANDLE_FLAGS(0))} as usize;
-    if size==0 || size>=buffer.len() {return Err("[tool.path_denied] Unable to verify opened input identity".into());}
-    Ok(PathBuf::from(std::ffi::OsString::from_wide(&buffer[..size])))
+    use std::os::windows::{ffi::OsStringExt, io::AsRawHandle};
+    use windows::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{GetFinalPathNameByHandleW, GETFINALPATHNAMEBYHANDLE_FLAGS},
+    };
+    let mut buffer = vec![0u16; 32768];
+    let size = unsafe {
+        GetFinalPathNameByHandleW(
+            HANDLE(file.as_raw_handle()),
+            &mut buffer,
+            GETFINALPATHNAMEBYHANDLE_FLAGS(0),
+        )
+    } as usize;
+    if size == 0 || size >= buffer.len() {
+        return Err("[tool.path_denied] Unable to verify opened input identity".into());
+    }
+    Ok(PathBuf::from(std::ffi::OsString::from_wide(
+        &buffer[..size],
+    )))
 }
 
 #[cfg(windows)]
-fn opened_file_identity(file:&fs::File)->Result<(u32,u32,u32),String> {
+fn opened_file_identity(file: &fs::File) -> Result<(u32, u32, u32), String> {
     use std::os::windows::io::AsRawHandle;
-    use windows::Win32::{Foundation::HANDLE, Storage::FileSystem::{GetFileInformationByHandle,BY_HANDLE_FILE_INFORMATION}};
-    let mut info=BY_HANDLE_FILE_INFORMATION::default();
-    unsafe{GetFileInformationByHandle(HANDLE(file.as_raw_handle()),&mut info)}.map_err(|_|"[tool.path_denied] Unable to verify input file identity")?;
-    Ok((info.dwVolumeSerialNumber,info.nFileIndexHigh,info.nFileIndexLow))
+    use windows::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION},
+    };
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }
+        .map_err(|_| "[tool.path_denied] Unable to verify input file identity")?;
+    Ok((
+        info.dwVolumeSerialNumber,
+        info.nFileIndexHigh,
+        info.nFileIndexLow,
+    ))
 }
 
 /// Deterministic seam for the "source changed while snapshotting" test: the
@@ -472,8 +524,7 @@ pub(crate) mod alloc_probe {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             let pointer = unsafe { System.alloc(layout) };
             if !pointer.is_null() {
-                let current =
-                    CURRENT.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
+                let current = CURRENT.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
                 PEAK.fetch_max(current, Ordering::Relaxed);
             }
             pointer
@@ -484,12 +535,7 @@ pub(crate) mod alloc_probe {
             unsafe { System.dealloc(pointer, layout) }
         }
 
-        unsafe fn realloc(
-            &self,
-            pointer: *mut u8,
-            layout: Layout,
-            new_size: usize,
-        ) -> *mut u8 {
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
             let new_pointer = unsafe { System.realloc(pointer, layout, new_size) };
             if !new_pointer.is_null() {
                 if new_size >= layout.size() {
@@ -647,16 +693,36 @@ pub(crate) fn execute(
 /// Project authorization belongs to the Host, before the compute engine. The
 /// engine receives private snapshots only; it never receives a project root.
 pub(crate) fn execute_for_run(
-    database:&Database, attachments_dir:&Path, sessions_dir:&Path, conversation_id:&str, run_id:&str,
-    input:&Value, cancelled:impl Fn()->bool+'static,
-) -> Result<Value,String> {
-    let project_inputs=authorize_project_inputs(database,conversation_id,run_id,input)?;
-    execute_with_options(database,attachments_dir,sessions_dir,conversation_id,run_id,input,cancelled,
-        ComputeOptions {project_inputs:Some(&project_inputs),..Default::default()})
+    database: &Database,
+    attachments_dir: &Path,
+    sessions_dir: &Path,
+    conversation_id: &str,
+    run_id: &str,
+    input: &Value,
+    cancelled: impl Fn() -> bool + 'static,
+) -> Result<Value, String> {
+    let project_inputs = authorize_project_inputs(database, conversation_id, run_id, input)?;
+    execute_with_options(
+        database,
+        attachments_dir,
+        sessions_dir,
+        conversation_id,
+        run_id,
+        input,
+        cancelled,
+        ComputeOptions {
+            project_inputs: Some(&project_inputs),
+            ..Default::default()
+        },
+    )
 }
 
 #[derive(Clone)]
-pub(crate) struct ProjectInput {relative:String, source:PathBuf, root:PathBuf}
+pub(crate) struct ProjectInput {
+    relative: String,
+    source: PathBuf,
+    root: PathBuf,
+}
 
 /// Whether `id` names an existing file inside the conversation's project folder.
 ///
@@ -664,16 +730,25 @@ pub(crate) struct ProjectInput {relative:String, source:PathBuf, root:PathBuf}
 /// nothing, accepts no absolute path and no `..` segment, and requires the
 /// canonical target to stay inside the canonical root.
 fn project_file_exists(project_root: Option<&str>, id: &str) -> bool {
-    let Some(root) = project_root else { return false };
+    let Some(root) = project_root else {
+        return false;
+    };
     let normalized = id.replace('\\', "/");
     if normalized.is_empty() || normalized.starts_with('/') || normalized.contains(':') {
         return false;
     }
-    if normalized.split('/').any(|part| part.is_empty() || part == ".." || part == ".") {
+    if normalized
+        .split('/')
+        .any(|part| part.is_empty() || part == ".." || part == ".")
+    {
         return false;
     }
-    let Ok(root) = Path::new(root).canonicalize() else { return false };
-    let Ok(candidate) = root.join(&normalized).canonicalize() else { return false };
+    let Ok(root) = Path::new(root).canonicalize() else {
+        return false;
+    };
+    let Ok(candidate) = root.join(&normalized).canonicalize() else {
+        return false;
+    };
     candidate.starts_with(&root) && candidate.is_file()
 }
 
@@ -726,42 +801,100 @@ pub(crate) fn missing_attachment_message(
     }
 }
 
-pub(crate) fn authorize_project_inputs(database:&Database,conversation_id:&str,run_id:&str,input:&Value)->Result<Vec<ProjectInput>,String> {
-    let Some(values)=input.get("projectPaths") else {return Ok(Vec::new())};
-    let values=values.as_array().ok_or("[tool.invalid_input] projectPaths must be an array")?;
-    if values.is_empty(){return Err("[tool.invalid_input] projectPaths must not be empty".into());}
-    let binding=database.run_control_binding(run_id)?.ok_or("[tool.permission_denied] Project computation needs a frozen Run binding")?;
-    if binding.conversation_id!=conversation_id{return Err("[tool.permission_denied] Compute conversation does not own this Run".into());}
-    binding.validate()?;
-    let expected=binding.permission.project_root.as_deref().ok_or("[tool.permission_denied] No project is authorized for this Run")?;
-    let root=super::capability_tools::canonical_directory(Path::new(expected),"project folder")?;
-    let live=database.conversation_project_access(conversation_id)?.ok_or("[tool.permission_denied] Project access was removed")?;
-    if super::capability_tools::canonical_directory(Path::new(&live.0),"project folder")?!=root {
-        return Err("[tool.permission_denied] Project authorization changed; start a new Run".into());
+pub(crate) fn authorize_project_inputs(
+    database: &Database,
+    conversation_id: &str,
+    run_id: &str,
+    input: &Value,
+) -> Result<Vec<ProjectInput>, String> {
+    let Some(values) = input.get("projectPaths") else {
+        return Ok(Vec::new());
+    };
+    let values = values
+        .as_array()
+        .ok_or("[tool.invalid_input] projectPaths must be an array")?;
+    if values.is_empty() {
+        return Err("[tool.invalid_input] projectPaths must not be empty".into());
     }
-    let mut seen=std::collections::HashSet::new();let mut inputs=Vec::new();
+    let binding = database
+        .run_control_binding(run_id)?
+        .ok_or("[tool.permission_denied] Project computation needs a frozen Run binding")?;
+    if binding.conversation_id != conversation_id {
+        return Err("[tool.permission_denied] Compute conversation does not own this Run".into());
+    }
+    binding.validate()?;
+    let expected = binding
+        .permission
+        .project_root
+        .as_deref()
+        .ok_or("[tool.permission_denied] No project is authorized for this Run")?;
+    let root = super::capability_tools::canonical_directory(Path::new(expected), "project folder")?;
+    let live = database
+        .conversation_project_access(conversation_id)?
+        .ok_or("[tool.permission_denied] Project access was removed")?;
+    if super::capability_tools::canonical_directory(Path::new(&live.0), "project folder")? != root {
+        return Err(
+            "[tool.permission_denied] Project authorization changed; start a new Run".into(),
+        );
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut inputs = Vec::new();
     for value in values {
-        let relative=value.as_str().filter(|s|!s.trim().is_empty()).ok_or("[tool.invalid_input] projectPaths entries must be nonempty relative paths")?;
-        if relative.len()>1024 {return Err("[tool.invalid_input] Project input path exceeds 1024 bytes".into());}
+        let relative = value
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or("[tool.invalid_input] projectPaths entries must be nonempty relative paths")?;
+        if relative.len() > 1024 {
+            return Err("[tool.invalid_input] Project input path exceeds 1024 bytes".into());
+        }
         // Resolve with the same project policy as read/office. Reject Windows
         // reserved device/ADS names on every component before opening anything.
         for part in relative.split(['/', '\\']) {
-            let stem=part.split('.').next().unwrap_or_default().trim_end_matches([' ','.']).to_ascii_uppercase();
-            let numbered=stem.len()==4 && (stem.starts_with("COM")||stem.starts_with("LPT")) && matches!(stem.as_bytes()[3],b'1'..=b'9');
-            if part.contains(':') || matches!(stem.as_str(),"CON"|"PRN"|"AUX"|"NUL") || numbered || part.ends_with([' ','.']) {
-                return Err("[tool.path_denied] Project input uses a reserved device or ambiguous path".into());
+            let stem = part
+                .split('.')
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches([' ', '.'])
+                .to_ascii_uppercase();
+            let numbered = stem.len() == 4
+                && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                && matches!(stem.as_bytes()[3], b'1'..=b'9');
+            if part.contains(':')
+                || matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                || numbered
+                || part.ends_with([' ', '.'])
+            {
+                return Err(
+                    "[tool.path_denied] Project input uses a reserved device or ambiguous path"
+                        .into(),
+                );
             }
         }
-        let joined=root.join(relative);
+        let joined = root.join(relative);
         crate::data_compute::validate_input_path(&joined)?;
-        let source=super::capability_tools::resolve_project_path(&root,relative,true)?;
-        let extension=source.extension().and_then(|x|x.to_str()).unwrap_or("").to_ascii_lowercase();
-        if !matches!(extension.as_str(),"xlsx"|"xls"|"xlsb"|"xlsm"|"ods"|"csv"|"tsv"|"json"|"txt"){
+        let source = super::capability_tools::resolve_project_path(&root, relative, true)?;
+        let extension = source
+            .extension()
+            .and_then(|x| x.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !matches!(
+            extension.as_str(),
+            "xlsx" | "xls" | "xlsb" | "xlsm" | "ods" | "csv" | "tsv" | "json" | "txt"
+        ) {
             return Err("[tool.invalid_input] Project inputs must be XLSX, XLS, XLSB, XLSM, ODS, CSV, TSV, JSON or TXT".into());
         }
-        if !fs::metadata(&source).map_err(|e|e.to_string())?.is_file(){return Err("[tool.invalid_input] Project input must be a regular file".into());}
-        if !seen.insert(source.clone()){return Err("[tool.invalid_input] Duplicate project input".into());}
-        inputs.push(ProjectInput{relative:relative.into(),source,root:root.clone()});
+        if !fs::metadata(&source).map_err(|e| e.to_string())?.is_file() {
+            return Err("[tool.invalid_input] Project input must be a regular file".into());
+        }
+        if !seen.insert(source.clone()) {
+            return Err("[tool.invalid_input] Duplicate project input".into());
+        }
+        inputs.push(ProjectInput {
+            relative: relative.into(),
+            source,
+            root: root.clone(),
+        });
     }
     Ok(inputs)
 }
@@ -837,13 +970,21 @@ pub(crate) fn execute_with_options(
         .map(|v| v.as_array().ok_or("artifactIds must be an array"))
         .transpose()?
         .unwrap_or(&empty);
-    let project_inputs=options.project_inputs.unwrap_or(&[]);
-    let requested_project_count=input.get("projectPaths").and_then(Value::as_array).map(Vec::len).unwrap_or(0);
-    if requested_project_count!=project_inputs.len(){return Err("[tool.permission_denied] Project inputs must be authorized by the Host".into());}
-    if ids.len() + artifacts.len()+project_inputs.len() > tier.max_inputs {
+    let project_inputs = options.project_inputs.unwrap_or(&[]);
+    let requested_project_count = input
+        .get("projectPaths")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    if requested_project_count != project_inputs.len() {
+        return Err(
+            "[tool.permission_denied] Project inputs must be authorized by the Host".into(),
+        );
+    }
+    if ids.len() + artifacts.len() + project_inputs.len() > tier.max_inputs {
         return Err(format!(
             "选择了 {} 个输入，超过 {} 档位的 {} 个上限；请减少附件或分批计算",
-            ids.len() + artifacts.len()+project_inputs.len(),
+            ids.len() + artifacts.len() + project_inputs.len(),
             tier.name,
             tier.max_inputs,
         ));
@@ -908,7 +1049,10 @@ pub(crate) fn execute_with_options(
         let a = database
             .attachment_for_conversation(conversation_id, id)?
             .ok_or_else(|| {
-                let project_root = database.conversation_project_root(conversation_id).ok().flatten();
+                let project_root = database
+                    .conversation_project_root(conversation_id)
+                    .ok()
+                    .flatten();
                 missing_attachment_message(id, project_inputs, project_root.as_deref())
             })?;
         let path = fs::canonicalize(&a.storage_path).map_err(|e| e.to_string())?;
@@ -984,30 +1128,64 @@ pub(crate) fn execute_with_options(
             ) {
                 return Err("Computed input is not a supported text or data file".into());
             }
-            snapshot(id, &extension, &path, tier.max_artifact_bytes as u64, &mut paths)?;
+            snapshot(
+                id,
+                &extension,
+                &path,
+                tier.max_artifact_bytes as u64,
+                &mut paths,
+            )?;
         }
     }
     // The closure above accounts attachment/artifact bytes. Release its borrow
     // before copying the separately authorized project files through the same
     // cumulative budget and bounded streaming copier.
     drop(snapshot);
-    let mut input_sources=Vec::new();
+    let mut input_sources = Vec::new();
     for project in project_inputs {
-        check_snapshot_progress(&cancelled,snapshot_deadline)?;
-        let extension=project.source.extension().and_then(|x|x.to_str()).unwrap_or("txt").to_ascii_lowercase();
-        let id=format!("project:{}",project.relative.replace('\\',"/"));
-        let destination=input_root.join(format!("{}.{}",hex::encode(Sha256::digest(id.as_bytes())),extension));
+        check_snapshot_progress(&cancelled, snapshot_deadline)?;
+        let extension = project
+            .source
+            .extension()
+            .and_then(|x| x.to_str())
+            .unwrap_or("txt")
+            .to_ascii_lowercase();
+        let id = format!("project:{}", project.relative.replace('\\', "/"));
+        let destination = input_root.join(format!(
+            "{}.{}",
+            hex::encode(Sha256::digest(id.as_bytes())),
+            extension
+        ));
         // Re-resolve the original spelling immediately before opening. The open
         // handle is then verified and write/delete sharing denied on Windows.
         crate::data_compute::validate_input_path(&project.root.join(&project.relative))?;
-        if super::capability_tools::resolve_project_path(&project.root,&project.relative,true)?!=project.source {
-            return Err("[tool.path_denied] Project input identity changed before snapshotting".into());
+        if super::capability_tools::resolve_project_path(&project.root, &project.relative, true)?
+            != project.source
+        {
+            return Err(
+                "[tool.path_denied] Project input identity changed before snapshotting".into(),
+            );
         }
-        let (digest,copied)=stream_snapshot_with_root(&project.source,&destination,tier.max_attachment_bytes,&cancelled,snapshot_deadline,&mut total,tier.max_total_input_bytes,Some(&project.root))?;
-        let live=authorize_project_inputs(database,conversation_id,run_id,input)?;
-        if !live.iter().any(|p|p.relative==project.relative && p.source==project.source && p.root==project.root){return Err("[tool.permission_denied] Project authorization changed while snapshotting".into());}
+        let (digest, copied) = stream_snapshot_with_root(
+            &project.source,
+            &destination,
+            tier.max_attachment_bytes,
+            &cancelled,
+            snapshot_deadline,
+            &mut total,
+            tier.max_total_input_bytes,
+            Some(&project.root),
+        )?;
+        let live = authorize_project_inputs(database, conversation_id, run_id, input)?;
+        if !live.iter().any(|p| {
+            p.relative == project.relative && p.source == project.source && p.root == project.root
+        }) {
+            return Err(
+                "[tool.permission_denied] Project authorization changed while snapshotting".into(),
+            );
+        }
         input_sources.push(json!({"id":id,"kind":"project_snapshot","projectPath":project.relative,"sha256":digest,"bytes":copied}));
-        paths.push((id,destination));
+        paths.push((id, destination));
     }
     let mut normalized = input.clone();
     normalized["attachmentIds"] = json!(paths.iter().map(|(id, _)| id).collect::<Vec<_>>());
@@ -1040,7 +1218,7 @@ pub(crate) fn execute_with_options(
     }
     result["computedBy"] = json!("fox-quickjs");
     result["attachmentIds"] = json!(ids);
-    result["inputSources"]=json!(input_sources);
+    result["inputSources"] = json!(input_sources);
     // Only a completed computation keeps its workspace: outputs referenced by
     // the result live there. Any earlier failure, cancellation or limit breach
     // dropped the guard and removed the partial snapshot set.
@@ -1069,8 +1247,8 @@ mod tests {
 
     impl Fixture {
         fn new(tag: &str) -> Self {
-            let root = std::env::temp_dir()
-                .join(format!("fox-snapshot-{tag}-{}", uuid::Uuid::new_v4()));
+            let root =
+                std::env::temp_dir().join(format!("fox-snapshot-{tag}-{}", uuid::Uuid::new_v4()));
             let storage = root.join("storage");
             let sessions = root.join("sessions");
             fs::create_dir_all(&storage).unwrap();
@@ -1153,7 +1331,9 @@ mod tests {
         })
     }
 
-    fn options(progress: Option<&dyn Fn(crate::data_compute::chunked::ChunkProgress)>) -> ComputeOptions<'_> {
+    fn options(
+        progress: Option<&dyn Fn(crate::data_compute::chunked::ChunkProgress)>,
+    ) -> ComputeOptions<'_> {
         ComputeOptions {
             deadline: Some(Instant::now() + Duration::from_secs(300)),
             progress,
@@ -1445,9 +1625,13 @@ mod tests {
             || false,
         )
         .unwrap();
-        let first_result_bytes =
-            crate::canonical_json::to_vec(&first["result"]).unwrap().len();
-        assert!(first_result_bytes <= 64 * 1024, "the inline result stays bounded");
+        let first_result_bytes = crate::canonical_json::to_vec(&first["result"])
+            .unwrap()
+            .len();
+        assert!(
+            first_result_bytes <= 64 * 1024,
+            "the inline result stays bounded"
+        );
         let summary = &first["result"]["summary"];
         assert_eq!(summary["complete"], false);
         let spill_file = first["files"]
@@ -1514,7 +1698,11 @@ mod tests {
         let csv_path = csv_file["path"].as_str().unwrap();
         let csv_bytes = fs::read(csv_path).unwrap();
         let csv_text = String::from_utf8(csv_bytes.clone()).unwrap();
-        assert_eq!(csv_text.lines().count(), 6001, "header plus every source row");
+        assert_eq!(
+            csv_text.lines().count(),
+            6001,
+            "header plus every source row"
+        );
         assert!(csv_text.starts_with("id,name,qty\n"));
         assert!(csv_text.contains("\n5999,task-5999,99\n"));
         assert_eq!(
@@ -1629,10 +1817,14 @@ mod tests {
         let message = missing_attachment_message("6-1.xlsx", std::slice::from_ref(&project), None);
         assert!(message.contains("6-1.xlsx"), "{message}");
         assert!(message.contains("projectPaths"), "{message}");
-        assert!(message.contains("已作为本次运行的项目输入授权"), "{message}");
+        assert!(
+            message.contains("已作为本次运行的项目输入授权"),
+            "{message}"
+        );
 
         // A longer spelling of the same authorized file still matches by leaf name.
-        let nested = missing_attachment_message("in\\6-1.xlsx", std::slice::from_ref(&project), None);
+        let nested =
+            missing_attachment_message("in\\6-1.xlsx", std::slice::from_ref(&project), None);
         assert!(nested.contains("已作为本次运行的项目输入授权"), "{nested}");
 
         // An unknown id gets the generic hint without claiming the Host authorized it.
@@ -1649,7 +1841,10 @@ mod tests {
         let root_text = root.to_str().unwrap();
         assert!(project_file_exists(Some(root_text), "inside/report.csv"));
         assert!(!project_file_exists(Some(root_text), "../outside.csv"));
-        assert!(!project_file_exists(Some(root_text), root.join("inside/report.csv").to_str().unwrap()));
+        assert!(!project_file_exists(
+            Some(root_text),
+            root.join("inside/report.csv").to_str().unwrap()
+        ));
         assert!(!project_file_exists(None, "inside/report.csv"));
         let _ = fs::remove_dir_all(&root);
     }

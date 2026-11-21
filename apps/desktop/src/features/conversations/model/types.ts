@@ -292,7 +292,7 @@ export interface MessageFeedbackRecord {
 
 export interface GlobalSearchRecord {
   id: string
-  kind: 'conversation' | 'project' | 'agent' | 'knowledge_base' | 'knowledge_document' | 'task' | 'artifact'
+  kind: 'conversation' | 'companion' | 'project' | 'agent' | 'knowledge_base' | 'knowledge_document' | 'task' | 'artifact'
   title: string
   subtitle: string
   workspaceView: string
@@ -364,6 +364,7 @@ export interface ProjectFileEntry {
   name: string
   parent: string
   isDirectory: boolean
+  hasChildren?: boolean
   byteSize: number
   modifiedAt: number | null
 }
@@ -584,7 +585,42 @@ export interface ContextResetAvailability {
   reason: string | null
 }
 
+export interface CompanionCoordinationThread {
+  sourceConversationId?: string | null
+  sourceCompanionId?: string | null
+  sourceName: string
+  recipientCompanionId: string
+}
+
+export interface CompanionAssignment {
+  messages?: { id: string; direction: 'sent' | 'received'; text: string; createdAt: number }[]
+  id: string
+  rootRunId: string
+  sourceConversationId: string
+  sourceRunId: string
+  sourceName: string
+  sourceCompanionId?: string | null
+  recipientConversationId: string
+  recipientCompanionId: string
+  recipientName: string
+  recipientRunId?: string | null
+  resumeRunId?: string | null
+  title: string
+  instructions?: string
+  reply?: 'resume' | 'none'
+  consult?: boolean
+  doneWhen?: string | null
+  status: 'queued' | 'running' | 'needs_input' | 'waiting' | 'resume' | 'completed' | 'failed' | 'cancelled'
+  deliveryStatus: 'queued' | 'delivered' | 'failed'
+  result?: string | null
+  resumeError?: string | null
+  question?: { prompt: string; defaultAnswer?: string | null } | null
+  createdAt: number
+  updatedAt: number
+}
+
 export interface ConversationDetail {
+  coordination?: CompanionCoordinationThread | null
   companionId?: string | null
   contextRepair?: {available: boolean; reason?: string | null}
   /** Authoritative-only, independently versioned read model; never a Legacy sequence. */
@@ -703,6 +739,19 @@ export interface ConversationHistoryPage {
   hasEarlierMessages: boolean
 }
 
+export interface CompanionGuideOption {
+  label: string
+  message: string
+}
+
+export interface CompanionGuide {
+  title: string
+  options: CompanionGuideOption[]
+}
+
+/** Read-only structured presentation data; it never changes message identity. */
+export type ContactBubbleMetadata = Record<string, unknown> & { companionGuide?: CompanionGuide }
+
 /** A committed contact bubble (plan C00/K1). Identity and delivery order are
  * durable; text and fingerprint may be recomputed from the source message. */
 export interface ContactBubbleRecord {
@@ -719,6 +768,7 @@ export interface ContactBubbleRecord {
   deliveredAt: number
   content: string
   fingerprint: string
+  metadata: ContactBubbleMetadata
 }
 
 /** C07: the user's own favorite / reaction on one committed bubble. A bubble

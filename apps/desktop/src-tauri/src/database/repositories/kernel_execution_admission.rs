@@ -229,10 +229,12 @@ pub fn issue_dispatch_credential_with_resolver_in_tx(
         // A binding that cannot be decoded is not an absent binding: falling back
         // to 0 would silently strip this Run's whole tool budget instead of
         // refusing to dispatch it.
-        Some(json) => serde_json::from_str::<fox_engine_protocol::RunControlBinding>(&json)
-            .map_err(|error| format!("corrupt frozen control binding: {error}"))?
-            .budgets
-            .tool_execution_ms,
+        Some(json) => {
+            serde_json::from_str::<fox_engine_protocol::RunControlBinding>(&json)
+                .map_err(|error| format!("corrupt frozen control binding: {error}"))?
+                .budgets
+                .tool_execution_ms
+        }
         None => 0,
     };
     let policy_version: Option<u64> = transaction
@@ -257,24 +259,27 @@ pub fn issue_dispatch_credential_with_resolver_in_tx(
     // REV-01: the dispatch's declared `expectedVersion` selects the observation
     // it was based on. It is never replaced by the newest observation of the
     // same target, so a stale candidate cannot ride a later read.
-    let declared_version: Option<String> = serde_json::from_str::<serde_json::Value>(canonical_input_json)
-        .ok()
-        .and_then(|input| {
-            input
-                .get("expectedVersion")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-        });
-    let file_baseline: Option<HostObservation> = match file_target_resolver
-        .resolve(action_class, canonical_input_json)
-    {
-        Some(target_identity) => {
-            host_observation_for_version_in_tx(transaction, run_id, &target_identity, declared_version.as_deref())?
-        }
-        None => None,
-    };
+    let declared_version: Option<String> =
+        serde_json::from_str::<serde_json::Value>(canonical_input_json)
+            .ok()
+            .and_then(|input| {
+                input
+                    .get("expectedVersion")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+            });
+    let file_baseline: Option<HostObservation> =
+        match file_target_resolver.resolve(action_class, canonical_input_json) {
+            Some(target_identity) => host_observation_for_version_in_tx(
+                transaction,
+                run_id,
+                &target_identity,
+                declared_version.as_deref(),
+            )?,
+            None => None,
+        };
     let mut credential = ExecutionCredential::new(
         encode_dispatch_id(run_id, tool_call_id)?,
         run_id.to_owned(),
@@ -303,7 +308,8 @@ pub fn issue_dispatch_credential_with_resolver_in_tx(
                     .get("content")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default();
-                let candidate = format!("sha256:{}", hex::encode(Sha256::digest(content.as_bytes())));
+                let candidate =
+                    format!("sha256:{}", hex::encode(Sha256::digest(content.as_bytes())));
                 let request = fox_engine_protocol::canonical_digest(&[
                     ("conversation", &conversation_id),
                     ("run", run_id),
@@ -515,7 +521,11 @@ pub fn replace_authorization_required_in_tx(
     if write_operation_kind(Some(observation)) != Some(WriteOperationKind::ReplaceExisting) {
         return Ok(false);
     }
-    Ok(!model_delivery_covered_whole_file_in_tx(transaction, run_id, observation)?)
+    Ok(!model_delivery_covered_whole_file_in_tx(
+        transaction,
+        run_id,
+        observation,
+    )?)
 }
 
 /// Whether the model view of the observation's durable result kept every byte.
@@ -574,12 +584,16 @@ pub fn model_delivery_covered_whole_file_in_tx(
     let (tool_name, status, result_json, input_json) = match (kernel_row, legacy_row) {
         (Some(canonical), Some(projected)) if canonical == projected => canonical,
         (None, Some(legacy)) => {
-            let is_kernel_run: bool = transaction.query_row(
-                "SELECT EXISTS(SELECT 1 FROM kernel_runs WHERE run_id=?1)",
-                [run_id],
-                |row| row.get(0),
-            ).map_err(|error| error.to_string())?;
-            if is_kernel_run { return Ok(false); }
+            let is_kernel_run: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM kernel_runs WHERE run_id=?1)",
+                    [run_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if is_kernel_run {
+                return Ok(false);
+            }
             legacy
         }
         _ => return Ok(false),
@@ -700,12 +714,20 @@ pub fn approve_replace_grant_in_tx(
         )
         .optional()
         .map_err(|e| e.to_string())?;
-    let Some((state, stored_conversation, stored_target, stored_version, stored_candidate, stored_request)) =
-        row
+    let Some((
+        state,
+        stored_conversation,
+        stored_target,
+        stored_version,
+        stored_candidate,
+        stored_request,
+    )) = row
     else {
-        return Err("replace_grant_required: no whole-file replacement request exists for \
+        return Err(
+            "replace_grant_required: no whole-file replacement request exists for \
                     this dispatch"
-            .into());
+                .into(),
+        );
     };
     if state != "pending" {
         return Err(format!(
@@ -768,12 +790,20 @@ pub fn consume_replace_grant_in_tx(
         )
         .optional()
         .map_err(|e| e.to_string())?;
-    let Some((state, stored_conversation, stored_target, stored_version, stored_candidate, stored_request)) =
-        row
+    let Some((
+        state,
+        stored_conversation,
+        stored_target,
+        stored_version,
+        stored_candidate,
+        stored_request,
+    )) = row
     else {
-        return Err("replace_grant_required: no whole-file replacement authorization exists \
+        return Err(
+            "replace_grant_required: no whole-file replacement authorization exists \
                     for this dispatch"
-            .into());
+                .into(),
+        );
     };
     if state != "approved" {
         return Err(format!(
@@ -786,9 +816,11 @@ pub fn consume_replace_grant_in_tx(
         || stored_candidate != candidate_digest
         || stored_request != request_digest
     {
-        return Err("replace_grant_mismatch: the authorization does not match this exact \
+        return Err(
+            "replace_grant_mismatch: the authorization does not match this exact \
                     conversation, target, version, candidate and request"
-            .into());
+                .into(),
+        );
     }
     transaction
         .execute(
@@ -945,9 +977,8 @@ impl Database {
         let dispatch_id = fox_engine_protocol::encode_dispatch_id(run_id, tool_call_id)
             .map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
-            let transaction = connection.transaction_with_behavior(
-                rusqlite::TransactionBehavior::Immediate,
-            )?;
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             propose_replace_grant_in_tx(
                 &transaction,
                 &format!("replace:{dispatch_id}"),
@@ -978,9 +1009,8 @@ impl Database {
         request_digest: &str,
     ) -> Result<(), String> {
         self.with_connection(|connection| {
-            let transaction = connection.transaction_with_behavior(
-                rusqlite::TransactionBehavior::Immediate,
-            )?;
+            let transaction =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             approve_replace_grant_in_tx(
                 &transaction,
                 run_id,
@@ -1857,10 +1887,13 @@ fn issue_legacy_file_credential_in_tx(
     }
     binding.validate()?;
     let expected_authority = match super::native_route::writer_route(transaction, run_id)
-        .map_err(|error| error.to_string())? {
+        .map_err(|error| error.to_string())?
+    {
         super::native_route::WriterRoute::Legacy => "legacy",
         super::native_route::WriterRoute::PiNative => "authoritative",
-        super::native_route::WriterRoute::Kernel => return Err("legacy file credential cannot admit an unrouted Kernel Run".into()),
+        super::native_route::WriterRoute::Kernel => {
+            return Err("legacy file credential cannot admit an unrouted Kernel Run".into())
+        }
     };
     if binding_authority != expected_authority
         || binding.run_id != run_id
@@ -1927,19 +1960,24 @@ fn issue_legacy_file_credential_in_tx(
     let target_identity = resolver
         .resolve(action_class, &canonical_input_json)
         .ok_or_else(|| "legacy file credential target is invalid".to_owned())?;
-    let declared_version: Option<String> = serde_json::from_str::<serde_json::Value>(&canonical_input_json)
-        .ok()
-        .and_then(|input| {
-            input
-                .get("expectedVersion")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-        });
-    let file_baseline =
-        host_observation_for_version_in_tx(transaction, run_id, &target_identity, declared_version.as_deref())?
-            .ok_or_else(|| "observation_incomplete".to_owned())?;
+    let declared_version: Option<String> =
+        serde_json::from_str::<serde_json::Value>(&canonical_input_json)
+            .ok()
+            .and_then(|input| {
+                input
+                    .get("expectedVersion")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+            });
+    let file_baseline = host_observation_for_version_in_tx(
+        transaction,
+        run_id,
+        &target_identity,
+        declared_version.as_deref(),
+    )?
+    .ok_or_else(|| "observation_incomplete".to_owned())?;
     if file_baseline.observed_by_tool_call_id.trim().is_empty() {
         return Err("observation_incomplete".into());
     }
@@ -1971,7 +2009,9 @@ fn issue_legacy_file_credential_in_tx(
     )?;
     // REV-05: same purpose-specific authorization as the Kernel path, recorded
     // in the same transaction so credential and grant can never disagree.
-    if tool == "write_file" && replace_authorization_required_in_tx(transaction, run_id, &file_baseline)? {
+    if tool == "write_file"
+        && replace_authorization_required_in_tx(transaction, run_id, &file_baseline)?
+    {
         let input: serde_json::Value = serde_json::from_str(&canonical_input_json)
             .map_err(|error| format!("invalid file input: {error}"))?;
         let content = input
@@ -2017,27 +2057,50 @@ fn issue_legacy_command_credential_in_tx(
     if backend_evidence_digest.trim().is_empty() {
         return Err("sandbox_unavailable: command credential needs backend evidence".into());
     }
-    let row: Option<(String, String, String, String, String, bool, String, String, String, String, String, String, String)> =
-        transaction
-            .query_row(
-                "SELECT t.conversation_id,t.tool_name,t.input_json,t.status,
+    let row: Option<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        bool,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    )> = transaction
+        .query_row(
+            "SELECT t.conversation_id,t.tool_name,t.input_json,t.status,
                         t.execution_location,t.requires_approval,r.status,b.binding_json,
                         r.conversation_id,b.conversation_id,b.authority,b.engine_id,b.binding_hash
                    FROM tool_calls t
                    JOIN runs r ON r.id=t.run_id
                    JOIN run_control_bindings b ON b.run_id=t.run_id
                   WHERE t.run_id=?1 AND t.runtime_tool_call_id=?2",
-                params![run_id, runtime_tool_call_id],
-                |row| {
-                    Ok((
-                        row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
-                        row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?,
-                        row.get(10)?, row.get(11)?, row.get(12)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|error| error.to_string())?;
+            params![run_id, runtime_tool_call_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
     let Some((
         conversation_id,
         tool,
@@ -2077,10 +2140,13 @@ fn issue_legacy_command_credential_in_tx(
     }
     binding.validate()?;
     let expected_authority = match super::native_route::writer_route(transaction, run_id)
-        .map_err(|error| error.to_string())? {
+        .map_err(|error| error.to_string())?
+    {
         super::native_route::WriterRoute::Legacy => "legacy",
         super::native_route::WriterRoute::PiNative => "authoritative",
-        super::native_route::WriterRoute::Kernel => return Err("legacy command credential cannot admit an unrouted Kernel Run".into()),
+        super::native_route::WriterRoute::Kernel => {
+            return Err("legacy command credential cannot admit an unrouted Kernel Run".into())
+        }
     };
     if binding_authority != expected_authority
         || binding.run_id != run_id
@@ -2496,15 +2562,31 @@ mod tests {
     fn settled_read_fixture(body: &str) -> (Database, String, HostObservation) {
         let (db, _, _conversation, run) = fixture();
         db.with_connection(|connection| {
-            connection.execute("UPDATE runs SET status='running',started_at=?2 WHERE id=?1",
-                params![run, now_ms()])?;
+            connection.execute(
+                "UPDATE runs SET status='running',started_at=?2 WHERE id=?1",
+                params![run, now_ms()],
+            )?;
             Ok(())
-        }).unwrap();
-        db.freeze_legacy_run_control(&run, "delivery-replay-test").unwrap();
-        db.create_host_tool_call(&run, "read-1", "read",
-            &serde_json::json!({"path":"document.txt"}), "running", false).unwrap();
-        db.complete_host_tool_call(&run, "read-1",
-            Some(&serde_json::json!({"content":[{"type":"text","text":body}]})), None).unwrap();
+        })
+        .unwrap();
+        db.freeze_legacy_run_control(&run, "delivery-replay-test")
+            .unwrap();
+        db.create_host_tool_call(
+            &run,
+            "read-1",
+            "read",
+            &serde_json::json!({"path":"document.txt"}),
+            "running",
+            false,
+        )
+        .unwrap();
+        db.complete_host_tool_call(
+            &run,
+            "read-1",
+            Some(&serde_json::json!({"content":[{"type":"text","text":body}]})),
+            None,
+        )
+        .unwrap();
         let observation = HostObservation {
             target_identity: "document.txt".into(),
             version: "sha256:fixture".into(),
@@ -2519,10 +2601,16 @@ mod tests {
     #[test]
     fn f1_small_settled_read_retains_whole_file_eligibility() {
         let (empty_db, empty_run, empty_observation) = settled_read_fixture("");
-        assert!(empty_db.model_delivery_covered_whole_file(&empty_run, &empty_observation).unwrap(),
-            "an actual empty file is still a complete file");
+        assert!(
+            empty_db
+                .model_delivery_covered_whole_file(&empty_run, &empty_observation)
+                .unwrap(),
+            "an actual empty file is still a complete file"
+        );
         let (db, run, observation) = settled_read_fixture("short complete file");
-        assert!(db.model_delivery_covered_whole_file(&run, &observation).unwrap());
+        assert!(db
+            .model_delivery_covered_whole_file(&run, &observation)
+            .unwrap());
         db.with_connection(|connection| {
             connection.execute("INSERT INTO kernel_tool_calls
                 (run_id,tool_call_id,batch_id,tool,source_order,canonical_input_json,state,result_json,created_at,settled_at)
@@ -2530,15 +2618,25 @@ mod tests {
                   FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id='read-1'", [&run])?;
             Ok(())
         }).unwrap();
-        assert!(db.model_delivery_covered_whole_file(&run, &observation).unwrap(),
-            "matching canonical and compatibility rows preserve the small positive case");
+        assert!(
+            db.model_delivery_covered_whole_file(&run, &observation)
+                .unwrap(),
+            "matching canonical and compatibility rows preserve the small positive case"
+        );
         db.with_connection(|connection| {
-            connection.execute("UPDATE tool_calls SET result_json='null'
-                WHERE run_id=?1 AND runtime_tool_call_id='read-1'", [&run])?;
+            connection.execute(
+                "UPDATE tool_calls SET result_json='null'
+                WHERE run_id=?1 AND runtime_tool_call_id='read-1'",
+                [&run],
+            )?;
             Ok(())
-        }).unwrap();
-        assert!(!db.model_delivery_covered_whole_file(&run, &observation).unwrap(),
-            "a diverged compatibility row cannot supply the canonical row's storage fact");
+        })
+        .unwrap();
+        assert!(
+            !db.model_delivery_covered_whole_file(&run, &observation)
+                .unwrap(),
+            "a diverged compatibility row cannot supply the canonical row's storage fact"
+        );
     }
 
     #[test]
@@ -2553,34 +2651,58 @@ mod tests {
                   FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id='read-1'", [&run])?;
             Ok(())
         }).unwrap();
-        assert!(!db.model_delivery_covered_whole_file(&run, &observation).unwrap(),
-            "the original fully stored result was clipped by the model view");
+        assert!(
+            !db.model_delivery_covered_whole_file(&run, &observation)
+                .unwrap(),
+            "the original fully stored result was clipped by the model view"
+        );
         db.with_connection(|connection| {
-            connection.execute("DELETE FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id='read-1'", [&run])?;
+            connection.execute(
+                "DELETE FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id='read-1'",
+                [&run],
+            )?;
             Ok(())
-        }).unwrap();
-        assert!(!db.model_delivery_covered_whole_file(&run, &observation).unwrap(),
-            "losing storage evidence cannot reclassify the same clipped read as complete");
+        })
+        .unwrap();
+        assert!(
+            !db.model_delivery_covered_whole_file(&run, &observation)
+                .unwrap(),
+            "losing storage evidence cannot reclassify the same clipped read as complete"
+        );
     }
 
     #[test]
     fn f1_failed_malformed_and_unrelated_result_rows_never_authorize_replacement() {
         let (db, run, observation) = settled_read_fixture("short complete file");
         for (status, tool, result) in [
-            ("failed", "read", r#"{"content":[{"type":"text","text":"short complete file"}]}"#),
+            (
+                "failed",
+                "read",
+                r#"{"content":[{"type":"text","text":"short complete file"}]}"#,
+            ),
             ("completed", "read", "null"),
             ("completed", "read", r#"{"content":null}"#),
             ("completed", "read", "{broken"),
-            ("completed", "unknown_reader", r#"{"content":[{"type":"text","text":"short complete file"}]}"#),
+            (
+                "completed",
+                "unknown_reader",
+                r#"{"content":[{"type":"text","text":"short complete file"}]}"#,
+            ),
         ] {
             db.with_connection(|connection| {
-                connection.execute("UPDATE tool_calls SET status=?2,tool_name=?3,result_json=?4
+                connection.execute(
+                    "UPDATE tool_calls SET status=?2,tool_name=?3,result_json=?4
                     WHERE run_id=?1 AND runtime_tool_call_id='read-1'",
-                    params![run,status,tool,result])?;
+                    params![run, status, tool, result],
+                )?;
                 Ok(())
-            }).unwrap();
-            assert!(!db.model_delivery_covered_whole_file(&run, &observation).unwrap(),
-                "{status}/{tool}/{result} must not establish delivery");
+            })
+            .unwrap();
+            assert!(
+                !db.model_delivery_covered_whole_file(&run, &observation)
+                    .unwrap(),
+                "{status}/{tool}/{result} must not establish delivery"
+            );
         }
     }
 
@@ -2589,7 +2711,12 @@ mod tests {
         tool_call_id: &str,
         requires_approval: bool,
     ) -> (Database, String, String, u64) {
-        host_file_fixture(mode, tool_call_id, requires_approval, super::super::native_route::WriterRoute::Legacy)
+        host_file_fixture(
+            mode,
+            tool_call_id,
+            requires_approval,
+            super::super::native_route::WriterRoute::Legacy,
+        )
     }
 
     fn host_file_fixture(
@@ -2647,17 +2774,38 @@ mod tests {
         // Seed the Host facts first so the unrouted Kernel test reaches the
         // credential boundary with the same durable source row.
         if route == super::super::native_route::WriterRoute::Legacy {
-            db.freeze_legacy_run_control(&run, "legacy-file-test").unwrap();
+            db.freeze_legacy_run_control(&run, "legacy-file-test")
+                .unwrap();
         } else {
-            use fox_engine_protocol::{ExecutionAuthority, ExecutorRoute, FrozenPermission, PermissionMode, ResourceExecutor, RunControlBinding, TimeBudgets};
-            let permission = FrozenPermission { mode:match mode { "ask"=>PermissionMode::Ask,"read_only"=>PermissionMode::ReadOnly,_=>PermissionMode::Allow },
-                project_root:Some(root_text),grants:Vec::new(),approval_epoch:None };
-            db.freeze_run_control(&RunControlBinding { schema_version:fox_engine_protocol::CONTROL_SCHEMA_VERSION,
-                run_id:run.clone(),conversation_id:conversation.clone(),engine_id:"pi".into(),execution_profile_id:"legacy-file-test".into(),
-                authority:ExecutionAuthority::Authoritative,
-                executor_route:(route==super::super::native_route::WriterRoute::PiNative).then_some(ExecutorRoute::PiNative),
-                read_only_executor:ResourceExecutor::Rust,permission_snapshot_id:Database::run_control_permission_hash(&permission).unwrap(),
-                permission,budgets:TimeBudgets::default() }).unwrap();
+            use fox_engine_protocol::{
+                ExecutionAuthority, ExecutorRoute, FrozenPermission, PermissionMode,
+                ResourceExecutor, RunControlBinding, TimeBudgets,
+            };
+            let permission = FrozenPermission {
+                mode: match mode {
+                    "ask" => PermissionMode::Ask,
+                    "read_only" => PermissionMode::ReadOnly,
+                    _ => PermissionMode::Allow,
+                },
+                project_root: Some(root_text),
+                grants: Vec::new(),
+                approval_epoch: None,
+            };
+            db.freeze_run_control(&RunControlBinding {
+                schema_version: fox_engine_protocol::CONTROL_SCHEMA_VERSION,
+                run_id: run.clone(),
+                conversation_id: conversation.clone(),
+                engine_id: "pi".into(),
+                execution_profile_id: "legacy-file-test".into(),
+                authority: ExecutionAuthority::Authoritative,
+                executor_route: (route == super::super::native_route::WriterRoute::PiNative)
+                    .then_some(ExecutorRoute::PiNative),
+                read_only_executor: ResourceExecutor::Rust,
+                permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(),
+                permission,
+                budgets: TimeBudgets::default(),
+            })
+            .unwrap();
         }
         let input_json = crate::canonical_json::to_string(&input).unwrap();
         let resolver = crate::runtime_host::managed_files::HostFileTargetResolver {
@@ -2739,59 +2887,156 @@ mod tests {
 
     #[test]
     fn native_file_credential_preserves_host_facts_and_the_single_execution_claim() {
-        let (db,conversation,run,version)=host_file_fixture("allow","native-write",false,super::super::native_route::WriterRoute::PiNative);
-        let credential=db.issue_legacy_file_credential(&run,"native-write",version).unwrap();
-        assert_eq!(credential.action_class,ActionClass::Write);
-        assert_eq!(credential.run_id,run);
-        assert_eq!(credential.conversation_id,conversation);
-        assert_eq!(db.issue_legacy_file_credential(&run,"native-write",version).unwrap(),credential);
-        db.verify_execution_credential(&run,&credential).unwrap();
+        let (db, conversation, run, version) = host_file_fixture(
+            "allow",
+            "native-write",
+            false,
+            super::super::native_route::WriterRoute::PiNative,
+        );
+        let credential = db
+            .issue_legacy_file_credential(&run, "native-write", version)
+            .unwrap();
+        assert_eq!(credential.action_class, ActionClass::Write);
+        assert_eq!(credential.run_id, run);
+        assert_eq!(credential.conversation_id, conversation);
+        assert_eq!(
+            db.issue_legacy_file_credential(&run, "native-write", version)
+                .unwrap(),
+            credential
+        );
+        db.verify_execution_credential(&run, &credential).unwrap();
         db.revalidate_execution_credential(&credential).unwrap();
-        assert!(credential.requires_replace_grant,"the native route cannot bypass replacement confirmation");
-        let baseline=credential.file_baseline.as_ref().unwrap();
-        db.approve_whole_file_replacement(&run,&credential.dispatch_id,&conversation,&baseline.target_identity,&baseline.version,
-            credential.replace_candidate_digest.as_deref().unwrap(),credential.replace_request_digest.as_deref().unwrap()).unwrap();
-        assert_eq!(db.claim_execution_attempt(&run,&conversation,&credential,&credential.intent_digest,"native-host-fixture").unwrap(),AttemptOutcome::Claimed);
+        assert!(
+            credential.requires_replace_grant,
+            "the native route cannot bypass replacement confirmation"
+        );
+        let baseline = credential.file_baseline.as_ref().unwrap();
+        db.approve_whole_file_replacement(
+            &run,
+            &credential.dispatch_id,
+            &conversation,
+            &baseline.target_identity,
+            &baseline.version,
+            credential.replace_candidate_digest.as_deref().unwrap(),
+            credential.replace_request_digest.as_deref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            db.claim_execution_attempt(
+                &run,
+                &conversation,
+                &credential,
+                &credential.intent_digest,
+                "native-host-fixture"
+            )
+            .unwrap(),
+            AttemptOutcome::Claimed
+        );
         db.revalidate_execution_credential(&credential).unwrap();
-        assert_eq!(db.claim_execution_attempt(&run,&conversation,&credential,&credential.intent_digest,"duplicate-native-host").unwrap(),AttemptOutcome::Unknown);
+        assert_eq!(
+            db.claim_execution_attempt(
+                &run,
+                &conversation,
+                &credential,
+                &credential.intent_digest,
+                "duplicate-native-host"
+            )
+            .unwrap(),
+            AttemptOutcome::Unknown
+        );
     }
 
     /// PiNative Run with one background `run_command start` Host tool row.
-    fn native_command_fixture(mode: &str, tool_call_id: &str, requires_approval: bool)
-        -> (Database, String, String, u64) {
-        use fox_engine_protocol::{ExecutionAuthority, ExecutorRoute, FrozenPermission, PermissionMode, ResourceExecutor, RunControlBinding, TimeBudgets};
+    fn native_command_fixture(
+        mode: &str,
+        tool_call_id: &str,
+        requires_approval: bool,
+    ) -> (Database, String, String, u64) {
+        use fox_engine_protocol::{
+            ExecutionAuthority, ExecutorRoute, FrozenPermission, PermissionMode, ResourceExecutor,
+            RunControlBinding, TimeBudgets,
+        };
         let (db, _, conversation, run) = fixture();
         let root = std::env::temp_dir().join(format!("fox-a1-command-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let root_text = root.to_string_lossy().into_owned();
         db.with_connection(|connection| {
-            connection.execute("UPDATE conversations SET project_root=?2 WHERE id=?1", params![conversation, root_text])?;
-            connection.execute("UPDATE runs SET status='running',started_at=?2 WHERE id=?1", params![run, now_ms()])?;
+            connection.execute(
+                "UPDATE conversations SET project_root=?2 WHERE id=?1",
+                params![conversation, root_text],
+            )?;
+            connection.execute(
+                "UPDATE runs SET status='running',started_at=?2 WHERE id=?1",
+                params![run, now_ms()],
+            )?;
             Ok(())
-        }).unwrap();
-        db.update_conversation_permission_mode(&conversation, mode).unwrap();
+        })
+        .unwrap();
+        db.update_conversation_permission_mode(&conversation, mode)
+            .unwrap();
         let input = serde_json::json!({"action":"start","command":"npm test"});
-        let record = db.create_host_tool_call(&run, tool_call_id, "run_command", &input,
-            if requires_approval { "pending" } else { "running" }, requires_approval).unwrap();
+        let record = db
+            .create_host_tool_call(
+                &run,
+                tool_call_id,
+                "run_command",
+                &input,
+                if requires_approval {
+                    "pending"
+                } else {
+                    "running"
+                },
+                requires_approval,
+            )
+            .unwrap();
         if requires_approval {
-            let approval = db.create_approval(&record.id, "npm test",
-                &serde_json::json!({"availableDecisions":["allow_once","deny"]})).unwrap();
-            db.resolve_approval(&approval.id, crate::database::ApprovalDecision::AllowOnce).unwrap()
+            let approval = db
+                .create_approval(
+                    &record.id,
+                    "npm test",
+                    &serde_json::json!({"availableDecisions":["allow_once","deny"]}),
+                )
+                .unwrap();
+            db.resolve_approval(&approval.id, crate::database::ApprovalDecision::AllowOnce)
+                .unwrap()
                 .expect("approval must resolve");
             assert!(db.claim_approved_tool_call(&run, tool_call_id).unwrap());
         }
-        let permission = FrozenPermission { mode: match mode { "ask"=>PermissionMode::Ask, "read_only"=>PermissionMode::ReadOnly, _=>PermissionMode::Allow },
-            project_root: Some(root_text), grants: Vec::new(), approval_epoch: None };
-        db.freeze_run_control(&RunControlBinding { schema_version: fox_engine_protocol::CONTROL_SCHEMA_VERSION,
-            run_id: run.clone(), conversation_id: conversation.clone(), engine_id: "pi".into(), execution_profile_id: "a1-command-test".into(),
-            authority: ExecutionAuthority::Authoritative, executor_route: Some(ExecutorRoute::PiNative),
-            read_only_executor: ResourceExecutor::Rust, permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(),
-            permission, budgets: TimeBudgets::default() }).unwrap();
+        let permission = FrozenPermission {
+            mode: match mode {
+                "ask" => PermissionMode::Ask,
+                "read_only" => PermissionMode::ReadOnly,
+                _ => PermissionMode::Allow,
+            },
+            project_root: Some(root_text),
+            grants: Vec::new(),
+            approval_epoch: None,
+        };
+        db.freeze_run_control(&RunControlBinding {
+            schema_version: fox_engine_protocol::CONTROL_SCHEMA_VERSION,
+            run_id: run.clone(),
+            conversation_id: conversation.clone(),
+            engine_id: "pi".into(),
+            execution_profile_id: "a1-command-test".into(),
+            authority: ExecutionAuthority::Authoritative,
+            executor_route: Some(ExecutorRoute::PiNative),
+            read_only_executor: ResourceExecutor::Rust,
+            permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(),
+            permission,
+            budgets: TimeBudgets::default(),
+        })
+        .unwrap();
         let version = db.execution_policy(&conversation).unwrap().version;
         (db, conversation, run, version)
     }
 
-    fn record_auto_allow(db: &Database, conversation: &str, run: &str, tool_call_id: &str, reason: &str) {
+    fn record_auto_allow(
+        db: &Database,
+        conversation: &str,
+        run: &str,
+        tool_call_id: &str,
+        reason: &str,
+    ) {
         db.with_connection(|connection| {
             connection.execute("INSERT INTO permission_audit(conversation_id,run_id,tool_call_id,tool,mode,class,risk,reason,created_at)
                 VALUES(?1,?2,?3,'run_command','ask','command','low',?4,?5)", params![conversation, run, tool_call_id, reason, now_ms()])?;
@@ -2802,116 +3047,293 @@ mod tests {
     #[test]
     fn a1_native_command_credential_from_project_rule_carries_fox_job_evidence() {
         let (db, conversation, run, version) = native_command_fixture("ask", "rule-start", false);
-        assert!(db.issue_legacy_command_credential(&run, "rule-start", version, crate::process_jobs::FOX_JOB_BACKEND_DIGEST)
-            .unwrap_err().contains("approval_required"), "no Host decision, no credential");
+        assert!(
+            db.issue_legacy_command_credential(
+                &run,
+                "rule-start",
+                version,
+                crate::process_jobs::FOX_JOB_BACKEND_DIGEST
+            )
+            .unwrap_err()
+            .contains("approval_required"),
+            "no Host decision, no credential"
+        );
         record_auto_allow(&db, &conversation, &run, "rule-start", "rule");
-        let credential = db.issue_legacy_command_credential(&run, "rule-start", version, crate::process_jobs::FOX_JOB_BACKEND_DIGEST).unwrap();
+        let credential = db
+            .issue_legacy_command_credential(
+                &run,
+                "rule-start",
+                version,
+                crate::process_jobs::FOX_JOB_BACKEND_DIGEST,
+            )
+            .unwrap();
         assert_eq!(credential.action_class, ActionClass::Execute);
         assert_eq!(credential.conversation_id, conversation);
-        assert_eq!(credential.backend_requirement.evidence_digest.as_deref(), Some(crate::process_jobs::FOX_JOB_BACKEND_DIGEST));
-        assert_eq!(db.issue_legacy_command_credential(&run, "rule-start", version, crate::process_jobs::FOX_JOB_BACKEND_DIGEST).unwrap(),
-            credential, "a repeated delivery returns the stored credential");
+        assert_eq!(
+            credential.backend_requirement.evidence_digest.as_deref(),
+            Some(crate::process_jobs::FOX_JOB_BACKEND_DIGEST)
+        );
+        assert_eq!(
+            db.issue_legacy_command_credential(
+                &run,
+                "rule-start",
+                version,
+                crate::process_jobs::FOX_JOB_BACKEND_DIGEST
+            )
+            .unwrap(),
+            credential,
+            "a repeated delivery returns the stored credential"
+        );
         db.verify_execution_credential(&run, &credential).unwrap();
         db.revalidate_execution_credential(&credential).unwrap();
-        assert_eq!(db.claim_execution_attempt(&run, &conversation, &credential, &credential.intent_digest, "a1-native-command").unwrap(),
-            AttemptOutcome::Claimed);
-        assert_eq!(db.claim_execution_attempt(&run, &conversation, &credential, &credential.intent_digest, "a1-native-command-again").unwrap(),
-            AttemptOutcome::Unknown, "the single claim is never replayed");
+        assert_eq!(
+            db.claim_execution_attempt(
+                &run,
+                &conversation,
+                &credential,
+                &credential.intent_digest,
+                "a1-native-command"
+            )
+            .unwrap(),
+            AttemptOutcome::Claimed
+        );
+        assert_eq!(
+            db.claim_execution_attempt(
+                &run,
+                &conversation,
+                &credential,
+                &credential.intent_digest,
+                "a1-native-command-again"
+            )
+            .unwrap(),
+            AttemptOutcome::Unknown,
+            "the single claim is never replayed"
+        );
     }
 
     #[test]
     fn a1_native_command_credential_accepts_a_claimed_approval_and_refuses_stale_or_read_only() {
         let (db, _, run, version) = native_command_fixture("ask", "approved-start", true);
-        assert!(db.issue_legacy_command_credential(&run, "approved-start", version, crate::process_jobs::FOX_JOB_BACKEND_DIGEST).is_ok());
+        assert!(db
+            .issue_legacy_command_credential(
+                &run,
+                "approved-start",
+                version,
+                crate::process_jobs::FOX_JOB_BACKEND_DIGEST
+            )
+            .is_ok());
 
-        let (db, conversation, run, version) = native_command_fixture("allow", "stale-start", false);
+        let (db, conversation, run, version) =
+            native_command_fixture("allow", "stale-start", false);
         record_auto_allow(&db, &conversation, &run, "stale-start", "mode");
-        assert!(db.issue_legacy_command_credential(&run, "stale-start", version + 1, crate::process_jobs::FOX_JOB_BACKEND_DIGEST)
-            .unwrap_err().contains("policy_version_conflict"));
-        assert!(db.issue_legacy_command_credential(&run, "stale-start", version, "")
-            .unwrap_err().contains("sandbox_unavailable"), "evidence is never synthesized");
+        assert!(db
+            .issue_legacy_command_credential(
+                &run,
+                "stale-start",
+                version + 1,
+                crate::process_jobs::FOX_JOB_BACKEND_DIGEST
+            )
+            .unwrap_err()
+            .contains("policy_version_conflict"));
+        assert!(
+            db.issue_legacy_command_credential(&run, "stale-start", version, "")
+                .unwrap_err()
+                .contains("sandbox_unavailable"),
+            "evidence is never synthesized"
+        );
 
-        let (db, conversation, run, version) = native_command_fixture("read_only", "ro-start", false);
+        let (db, conversation, run, version) =
+            native_command_fixture("read_only", "ro-start", false);
         record_auto_allow(&db, &conversation, &run, "ro-start", "mode");
-        assert!(db.issue_legacy_command_credential(&run, "ro-start", version, crate::process_jobs::FOX_JOB_BACKEND_DIGEST)
-            .unwrap_err().contains("policy_denied"));
+        assert!(db
+            .issue_legacy_command_credential(
+                &run,
+                "ro-start",
+                version,
+                crate::process_jobs::FOX_JOB_BACKEND_DIGEST
+            )
+            .unwrap_err()
+            .contains("policy_denied"));
     }
 
     #[test]
     fn native_file_create_credential_accepts_approved_missing_target_without_replace_grant() {
         let call = "native-approved-create";
         let (db, conversation, run, version) = host_file_fixture(
-            "ask", call, true, super::super::native_route::WriterRoute::PiNative,
+            "ask",
+            call,
+            true,
+            super::super::native_route::WriterRoute::PiNative,
         );
         let binding = db.run_control_binding(&run).unwrap().unwrap();
-        let observation = crate::resource_gateway::observe_missing_file_target(&binding, "document.txt")
-            .unwrap().host_observation(call);
+        let observation =
+            crate::resource_gateway::observe_missing_file_target(&binding, "document.txt")
+                .unwrap()
+                .host_observation(call);
         // Replace the fixture's synthetic read with the real missing-target probe.
-        db.with_connection(|connection| connection.execute(
-            "DELETE FROM kernel_host_observations WHERE run_id=?1", [&run],
-        )).unwrap();
-        db.record_host_observation(&run, &conversation, &observation).unwrap();
-        assert_eq!(write_operation_kind(Some(&observation)), Some(WriteOperationKind::Create));
+        db.with_connection(|connection| {
+            connection.execute(
+                "DELETE FROM kernel_host_observations WHERE run_id=?1",
+                [&run],
+            )
+        })
+        .unwrap();
+        db.record_host_observation(&run, &conversation, &observation)
+            .unwrap();
+        assert_eq!(
+            write_operation_kind(Some(&observation)),
+            Some(WriteOperationKind::Create)
+        );
         assert!(!db.needs_replace_grant(&run, &observation).unwrap());
 
-        let credential = db.issue_legacy_file_credential(&run, call, version).unwrap();
+        let credential = db
+            .issue_legacy_file_credential(&run, call, version)
+            .unwrap();
         assert_eq!(credential.file_baseline.as_ref(), Some(&observation));
         assert!(!credential.requires_replace_grant);
         assert!(credential.replace_candidate_digest.is_none());
         assert!(credential.replace_request_digest.is_none());
-        let grants: i64 = db.with_connection(|connection| connection.query_row(
-            "SELECT COUNT(*) FROM kernel_whole_file_replace_grants WHERE run_id=?1",
-            [&run], |row| row.get(0),
-        )).unwrap();
+        let grants: i64 = db
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT COUNT(*) FROM kernel_whole_file_replace_grants WHERE run_id=?1",
+                    [&run],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
         assert_eq!(grants, 0);
         assert_eq!(
-            db.claim_execution_attempt(&run, &conversation, &credential, &credential.intent_digest,
-                "native-create-host").unwrap(),
+            db.claim_execution_attempt(
+                &run,
+                &conversation,
+                &credential,
+                &credential.intent_digest,
+                "native-create-host"
+            )
+            .unwrap(),
             AttemptOutcome::Claimed,
         );
     }
 
     #[test]
     fn native_file_credential_cannot_adopt_unrouted_kernel_or_corrupt_binding_columns() {
-        let (db,_,run,version)=host_file_fixture("allow","kernel-host-write",false,super::super::native_route::WriterRoute::Kernel);
-        assert!(db.issue_legacy_file_credential(&run,"kernel-host-write",version).unwrap_err().contains("unrouted Kernel"));
-        assert!(db.read_execution_credential(&run,&encode_dispatch_id(&run,"kernel-host-write").unwrap()).unwrap().is_none());
-        for column in ["authority","engine_id","binding_hash"] {
-            let (db,_,run,version)=host_file_fixture("allow","native-corrupt-write",false,super::super::native_route::WriterRoute::PiNative);
-            let sql=match column {
-                "authority"=>"UPDATE run_control_bindings SET authority='legacy' WHERE run_id=?1",
-                "engine_id"=>"UPDATE run_control_bindings SET engine_id='codex' WHERE run_id=?1",
-                _=>"UPDATE run_control_bindings SET binding_hash='corrupt' WHERE run_id=?1",
+        let (db, _, run, version) = host_file_fixture(
+            "allow",
+            "kernel-host-write",
+            false,
+            super::super::native_route::WriterRoute::Kernel,
+        );
+        assert!(db
+            .issue_legacy_file_credential(&run, "kernel-host-write", version)
+            .unwrap_err()
+            .contains("unrouted Kernel"));
+        assert!(db
+            .read_execution_credential(
+                &run,
+                &encode_dispatch_id(&run, "kernel-host-write").unwrap()
+            )
+            .unwrap()
+            .is_none());
+        for column in ["authority", "engine_id", "binding_hash"] {
+            let (db, _, run, version) = host_file_fixture(
+                "allow",
+                "native-corrupt-write",
+                false,
+                super::super::native_route::WriterRoute::PiNative,
+            );
+            let sql = match column {
+                "authority" => "UPDATE run_control_bindings SET authority='legacy' WHERE run_id=?1",
+                "engine_id" => "UPDATE run_control_bindings SET engine_id='codex' WHERE run_id=?1",
+                _ => "UPDATE run_control_bindings SET binding_hash='corrupt' WHERE run_id=?1",
             };
-            db.with_connection(|connection|connection.execute(sql,[&run])).unwrap();
-            assert!(db.issue_legacy_file_credential(&run,"native-corrupt-write",version).is_err(),"{column}");
-            assert!(db.read_execution_credential(&run,&encode_dispatch_id(&run,"native-corrupt-write").unwrap()).unwrap().is_none());
+            db.with_connection(|connection| connection.execute(sql, [&run]))
+                .unwrap();
+            assert!(
+                db.issue_legacy_file_credential(&run, "native-corrupt-write", version)
+                    .is_err(),
+                "{column}"
+            );
+            assert!(db
+                .read_execution_credential(
+                    &run,
+                    &encode_dispatch_id(&run, "native-corrupt-write").unwrap()
+                )
+                .unwrap()
+                .is_none());
         }
     }
 
     #[test]
     fn native_file_credential_still_requires_the_original_consumed_approval() {
-        let (db,_,run,version)=host_file_fixture("ask","native-approved-write",true,super::super::native_route::WriterRoute::PiNative);
-        assert!(db.issue_legacy_file_credential(&run,"native-approved-write",version).is_ok());
+        let (db, _, run, version) = host_file_fixture(
+            "ask",
+            "native-approved-write",
+            true,
+            super::super::native_route::WriterRoute::PiNative,
+        );
+        assert!(db
+            .issue_legacy_file_credential(&run, "native-approved-write", version)
+            .is_ok());
         db.with_connection(|connection|connection.execute("UPDATE approvals SET claimed_at=NULL,claimed_by_run_id=NULL WHERE tool_call_id=(
             SELECT id FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id='native-approved-write')",[&run])).unwrap();
-        assert!(db.issue_legacy_file_credential(&run,"native-approved-write",version).unwrap_err().contains("approval_required"));
+        assert!(db
+            .issue_legacy_file_credential(&run, "native-approved-write", version)
+            .unwrap_err()
+            .contains("approval_required"));
 
-        let (db,_,run,version)=host_file_fixture("ask","native-no-approval-write",false,super::super::native_route::WriterRoute::PiNative);
-        assert!(db.issue_legacy_file_credential(&run,"native-no-approval-write",version).unwrap_err().contains("approval_required"));
+        let (db, _, run, version) = host_file_fixture(
+            "ask",
+            "native-no-approval-write",
+            false,
+            super::super::native_route::WriterRoute::PiNative,
+        );
+        assert!(db
+            .issue_legacy_file_credential(&run, "native-no-approval-write", version)
+            .unwrap_err()
+            .contains("approval_required"));
     }
 
     #[test]
     fn native_file_credential_refuses_read_only_stale_policy_and_revocation_before_claim() {
-        let (db,_,run,version)=host_file_fixture("read_only","native-read-only-write",false,super::super::native_route::WriterRoute::PiNative);
-        assert!(db.issue_legacy_file_credential(&run,"native-read-only-write",version).unwrap_err().contains("policy_denied"));
-        let (db,conversation,run,version)=host_file_fixture("allow","native-revoked-write",false,super::super::native_route::WriterRoute::PiNative);
-        assert!(db.issue_legacy_file_credential(&run,"native-revoked-write",version+1).unwrap_err().contains("policy_version_conflict"));
-        let credential=db.issue_legacy_file_credential(&run,"native-revoked-write",version).unwrap();
-        db.update_conversation_permission_mode(&conversation,"read_only").unwrap();
+        let (db, _, run, version) = host_file_fixture(
+            "read_only",
+            "native-read-only-write",
+            false,
+            super::super::native_route::WriterRoute::PiNative,
+        );
+        assert!(db
+            .issue_legacy_file_credential(&run, "native-read-only-write", version)
+            .unwrap_err()
+            .contains("policy_denied"));
+        let (db, conversation, run, version) = host_file_fixture(
+            "allow",
+            "native-revoked-write",
+            false,
+            super::super::native_route::WriterRoute::PiNative,
+        );
+        assert!(db
+            .issue_legacy_file_credential(&run, "native-revoked-write", version + 1)
+            .unwrap_err()
+            .contains("policy_version_conflict"));
+        let credential = db
+            .issue_legacy_file_credential(&run, "native-revoked-write", version)
+            .unwrap();
+        db.update_conversation_permission_mode(&conversation, "read_only")
+            .unwrap();
         assert!(db.revalidate_execution_credential(&credential).is_err());
-        let outcome=db.claim_execution_attempt(&run,&conversation,&credential,&credential.intent_digest,"revoked-native-host").unwrap();
-        assert!(matches!(outcome,AttemptOutcome::AlreadyRefused {code} if code=="policy_version_conflict" || code=="policy_denied"));
+        let outcome = db
+            .claim_execution_attempt(
+                &run,
+                &conversation,
+                &credential,
+                &credential.intent_digest,
+                "revoked-native-host",
+            )
+            .unwrap();
+        assert!(
+            matches!(outcome,AttemptOutcome::AlreadyRefused {code} if code=="policy_version_conflict" || code=="policy_denied")
+        );
     }
 
     fn credential_for(
@@ -2999,7 +3421,7 @@ mod tests {
                 target_identity: "notes/a.txt".into(),
                 version: "v7".into(),
                 observed_by_tool_call_id: "read-9".into(),
-            ..Default::default()
+                ..Default::default()
             },
         )
         .unwrap();
@@ -3076,7 +3498,7 @@ mod tests {
                 target_identity: "notes/a.txt".into(),
                 version: "v7".into(),
                 observed_by_tool_call_id: "read-9".into(),
-            ..Default::default()
+                ..Default::default()
             })
         );
         assert_ne!(
@@ -3197,7 +3619,9 @@ mod tests {
         {
             let mut connection = rusqlite::Connection::open(&path).unwrap();
             crate::database::migrations::run_to_v74_for_test(&mut connection, 1).unwrap();
-            connection.execute_batch("DROP TABLE kernel_execution_credentials;").unwrap();
+            connection
+                .execute_batch("DROP TABLE kernel_execution_credentials;")
+                .unwrap();
             connection.execute_batch(V74_CREDENTIALS_TABLE).unwrap();
             connection.execute_batch(
                 "INSERT INTO agents(id,name,description,runtime_type,system_prompt,default_model,created_at,updated_at)
@@ -3207,9 +3631,11 @@ mod tests {
                  INSERT INTO runs(id,conversation_id,status,model,created_at)
                  VALUES ('v74-run','v74-conversation','running','model',1);",
             ).unwrap();
-            let version: i64 = connection.query_row(
-                "SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0),
-            ).unwrap();
+            let version: i64 = connection
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
             assert_eq!(version, 74);
             let future_notice_table: i64 = connection.query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='kernel_job_notices'",
@@ -3727,7 +4153,7 @@ mod tests {
                 target_identity: "a.txt".into(),
                 version: "v1".into(),
                 observed_by_tool_call_id: "read-1".into(),
-            ..Default::default()
+                ..Default::default()
             }),
             None,
         );

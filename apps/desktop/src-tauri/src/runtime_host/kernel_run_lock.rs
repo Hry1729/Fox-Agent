@@ -48,8 +48,12 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("fox-kernel-lock-{}", uuid::Uuid::new_v4()));
         let first = KernelRunLock::acquire(&directory, "run/../../not-a-path").unwrap();
-        assert_eq!(KernelRunLock::acquire(&directory, "run/../../not-a-path")
-            .err().as_deref(), Some(KERNEL_RUN_ALREADY_OWNED));
+        assert_eq!(
+            KernelRunLock::acquire(&directory, "run/../../not-a-path")
+                .err()
+                .as_deref(),
+            Some(KERNEL_RUN_ALREADY_OWNED)
+        );
         let independent = KernelRunLock::acquire(&directory, "other-run").unwrap();
         drop(first);
         let recovered = KernelRunLock::acquire(&directory, "run/../../not-a-path").unwrap();
@@ -72,7 +76,10 @@ mod tests {
         let locks = directory.join("kernel-run-locks");
         std::fs::write(&locks, b"x").unwrap();
         let error = KernelRunLock::acquire(&directory, "run-1").err().unwrap();
-        assert!(error.contains(&format!("{} 应为目录但是文件", locks.display())), "{error}");
+        assert!(
+            error.contains(&format!("{} 应为目录但是文件", locks.display())),
+            "{error}"
+        );
         let _ = std::fs::remove_dir_all(directory);
     }
 }

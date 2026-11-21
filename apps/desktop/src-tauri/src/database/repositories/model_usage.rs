@@ -1,9 +1,9 @@
 //! Request accounting is telemetry, not a second controller or budget authority.
-#[allow(unused_imports)]
-use crate::canonical_json::CanonicalJson;
 use super::now_ms;
 #[cfg(test)]
 use super::Database;
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};

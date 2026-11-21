@@ -1,6 +1,8 @@
 import { useId, useMemo, useState } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import type { ArtifactRecord } from '@/features/conversations/model/types'
+import { ArtifactCardMenu } from './artifact-card-menu'
+import { displayArtifactPath } from './final-artifact-references'
 
 /**
  * A file the model explicitly declared through `present_files`.
@@ -99,10 +101,10 @@ export function artifactTypeBadge(artifact: ArtifactRecord) {
  * chip row reads like a list of files rather than a stack of cards.
  */
 function ArtifactResultCard({ artifact, onOpenArtifact }: { artifact: ArtifactRecord; onOpenArtifact?: (artifact: ArtifactRecord) => void }) {
-  const path = artifact.storagePath ?? artifact.displayName
+  const path = displayArtifactPath(artifact.storagePath || artifact.displayName)
   const note = artifactSummaryLine(artifact)
   return (
-    <button
+    <ArtifactCardMenu artifact={artifact}><button
       type="button"
       className="fox-artifact-chip"
       data-slot="file-root"
@@ -113,7 +115,7 @@ function ArtifactResultCard({ artifact, onOpenArtifact }: { artifact: ArtifactRe
       <span className="fox-artifact-chip-type" data-slot="file-type" aria-hidden="true">{artifactTypeBadge(artifact)}</span>
       <span className="fox-artifact-chip-name" data-slot="file-name">{artifact.displayName}</span>
       {artifact.byteSize != null && <span className="fox-artifact-chip-size" data-slot="file-size">{compactFileSize(artifact.byteSize)}</span>}
-    </button>
+    </button></ArtifactCardMenu>
   )
 }
 

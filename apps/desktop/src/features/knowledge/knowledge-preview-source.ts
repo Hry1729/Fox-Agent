@@ -14,6 +14,9 @@ export type KnowledgeCachedPreviewOpener = (
   options: KnowledgeCachedPreviewOpenOptions,
 ) => Promise<KnowledgeCachedPreviewSource>
 
+export type WholeFilePreviewSource = Pick<KnowledgeCachedPreviewSource, 'readAll' | 'close'>
+export type WholeFilePreviewOpener = (options: KnowledgeCachedPreviewOpenOptions) => Promise<WholeFilePreviewSource>
+
 export async function openKnowledgeRangePreviewSource({
   knowledgeBaseId,
   documentId,

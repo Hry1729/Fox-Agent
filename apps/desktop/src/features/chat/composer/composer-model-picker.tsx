@@ -3,12 +3,14 @@ import { Models } from '@/components/assistant-ui/elements/composer'
 import type { ModelServiceRecord } from '@/features/conversations/model/types'
 import { useModelProviders } from '@/features/settings/use-model-providers'
 import { useModelService } from '@/features/settings/use-model-service'
+import { providerIcon } from '@/features/settings/model-agent/service-presets'
 import { notify as toast } from '@/features/notifications'
 
-export function ComposerModelPicker({ service, disabled, onOpenSettings }: {
+export function ComposerModelPicker({ service, disabled, onOpenSettings, menuRow }: {
   service?: ModelServiceRecord | null
   disabled: boolean
   onOpenSettings?: () => void
+  menuRow?: boolean
 }) {
   const providers = useModelProviders()
   const modelService = useModelService()
@@ -22,8 +24,8 @@ export function ComposerModelPicker({ service, disabled, onOpenSettings }: {
     id: `${provider.id}:${model.id}`, provider, model,
   })))
   const selected = choices.find(choice => choice.provider.baseUrl === service?.baseUrl && choice.provider.apiType === service?.apiType && choice.model.modelId === service?.modelId)
-  const options = choices.map(choice => ({ id: choice.id, name: choice.model.modelId, meta: choice.provider.name }))
-  if (service?.modelId && !selected) options.unshift({ id: 'current-service', name: service.modelId, meta: service.name })
+  const options = choices.map(choice => ({ id: choice.id, name: choice.model.displayName || choice.model.modelId, meta: choice.provider.name, icon: providerIcon(choice.provider.name, choice.provider.baseUrl, choice.provider.icon) }))
+  if (service?.modelId && !selected) options.unshift({ id: 'current-service', name: service.modelId, meta: service.name, icon: providerIcon(service.name, service.baseUrl) })
 
   const select = async (id: string) => {
     if (disabled || saving.current || id === selected?.id || id === 'current-service') return
@@ -43,5 +45,5 @@ export function ComposerModelPicker({ service, disabled, onOpenSettings }: {
       if (!saved) toast.error('模型切换失败，请重试')
     } finally { saving.current = false }
   }
-  return <Models value={selected?.id ?? (service?.modelId ? 'current-service' : undefined)} options={options} fallbackLabel={service?.modelId || '选择模型'} disabled={disabled || modelService.saving} onValueChange={id => void select(id)} note={providers.error ? '模型列表读取失败，可前往设置重试。' : '切换默认模型，后续对话使用。'} onManage={onOpenSettings} />
+  return <Models menuRow={menuRow} value={selected?.id ?? (service?.modelId ? 'current-service' : undefined)} options={options} fallbackLabel={service?.modelId || '选择模型'} disabled={disabled || modelService.saving} onValueChange={id => void select(id)} note={providers.error ? '模型列表读取失败，可前往设置重试。' : '切换默认模型，后续对话使用。'} onManage={onOpenSettings} />
 }

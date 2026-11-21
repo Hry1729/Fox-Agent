@@ -16,7 +16,7 @@
 //! unconfirmed write whose outcome is unknown is not permission to write again.
 
 use super::{now_ms, Database};
-use fox_engine_protocol::{TimeBudgets, RunControlBinding};
+use fox_engine_protocol::{RunControlBinding, TimeBudgets};
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -100,7 +100,9 @@ pub fn run_budget_for_tier(
         budgets.run_execution_ms = target;
         budgets.tool_execution_ms = budgets.tool_execution_ms.min(target);
         budgets.model_request_ms = budgets.model_request_ms.min(target);
-        budgets.model_first_response_ms = budgets.model_first_response_ms.min(budgets.model_request_ms);
+        budgets.model_first_response_ms = budgets
+            .model_first_response_ms
+            .min(budgets.model_request_ms);
         budgets.model_idle_ms = budgets.model_idle_ms.min(budgets.model_request_ms);
     }
     budgets.validate()?;
@@ -164,8 +166,11 @@ pub struct PreparedContinuation {
     pub prompt_config_hash: String,
     pub capability_manifest_hash: String,
     pub frozen_config_json: String,
-    pub artifacts: Option<(crate::kernel_model_config::KernelModelConfig,
-        fox_engine_protocol::KernelInitialModelInput, super::KernelHostScope)>,
+    pub artifacts: Option<(
+        crate::kernel_model_config::KernelModelConfig,
+        fox_engine_protocol::KernelInitialModelInput,
+        super::KernelHostScope,
+    )>,
     pub skill_activations: Vec<super::SkillActivationRecord>,
 }
 
@@ -175,10 +180,7 @@ fn invalid(message: &str) -> rusqlite::Error {
 
 /// The banked progress rows of one run, newest first. The resumed-by id is read
 /// from the durable link, not inferred, so "already continued" is a fact.
-fn progress_rows(
-    tx: &Transaction<'_>,
-    run_id: &str,
-) -> rusqlite::Result<Vec<ContinuableRun>> {
+fn progress_rows(tx: &Transaction<'_>, run_id: &str) -> rusqlite::Result<Vec<ContinuableRun>> {
     let mut statement = tx.prepare(
         "SELECT p.run_id, COALESCE(r.conversation_id, ''), p.attempt, p.pause_reason,
                 p.completed_tool_calls, p.pending_tool_calls, p.running_elapsed_ms,
@@ -279,32 +281,31 @@ impl Database {
         if source.conversation_id != conversation_id {
             return Err("续做目标与原任务不属于同一会话".into());
         }
-        let (mode, project_root, live_grants) =
-            self.with_connection(|connection| {
-                let conversation: Option<(String, Option<String>)> = connection
-                    .query_row(
-                        "SELECT permission_mode, project_root FROM conversations WHERE id = ?1",
-                        params![conversation_id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()?;
-                let Some((mode, root)) = conversation else {
-                    return Err(invalid("找不到会话的当前权限"));
-                };
-                let mut statement = connection.prepare(
-                    "SELECT tool_name, scope_key FROM conversation_tool_permissions
+        let (mode, project_root, live_grants) = self.with_connection(|connection| {
+            let conversation: Option<(String, Option<String>)> = connection
+                .query_row(
+                    "SELECT permission_mode, project_root FROM conversations WHERE id = ?1",
+                    params![conversation_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((mode, root)) = conversation else {
+                return Err(invalid("找不到会话的当前权限"));
+            };
+            let mut statement = connection.prepare(
+                "SELECT tool_name, scope_key FROM conversation_tool_permissions
                       WHERE conversation_id = ?1 AND revoked_at IS NULL
                       ORDER BY tool_name, scope_key",
-                )?;
-                let rows = statement.query_map(params![conversation_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?;
-                let mut grants = Vec::new();
-                for row in rows {
-                    grants.push(row?);
-                }
-                Ok((mode, root, grants))
+            )?;
+            let rows = statement.query_map(params![conversation_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?;
+            let mut grants = Vec::new();
+            for row in rows {
+                grants.push(row?);
+            }
+            Ok((mode, root, grants))
+        })?;
         let mut permission = source.permission.clone();
         permission.mode = match mode.as_str() {
             "ask" => fox_engine_protocol::PermissionMode::Ask,
@@ -372,10 +373,8 @@ impl Database {
         if prepared.artifacts.is_none() {
             return Err("continuation requires complete Host-prepared artifacts".into());
         }
-        let verified = self.re_verify_continuation_permission(
-            &request.source_run_id,
-            &request.conversation_id,
-        )?;
+        let verified = self
+            .re_verify_continuation_permission(&request.source_run_id, &request.conversation_id)?;
         let source_binding = self
             .run_control_binding(&request.source_run_id)?
             .ok_or("缺少冻结权限")?;
@@ -572,7 +571,8 @@ mod tests {
     #[test]
     fn standard_tier_preserves_the_inherited_duration_policy() {
         for budgets in [TimeBudgets::default(), TimeBudgets::continuous()] {
-            let resolved = run_budget_for_tier(budgets.clone(), BudgetTier::Standard, None).unwrap();
+            let resolved =
+                run_budget_for_tier(budgets.clone(), BudgetTier::Standard, None).unwrap();
             assert_eq!(resolved, budgets);
             let bounded = run_budget_for_tier(budgets, BudgetTier::Short, None).unwrap();
             assert_eq!(bounded.remaining_run_ms(600_001), Some(-1));
@@ -640,7 +640,12 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let db = crate::database::Database::open(root.join("facts.db")).unwrap();
         let conversation = db
-            .create_conversation(db.default_agent_id(), Some("cont"), Some(root.to_str().unwrap()), Some("allow"))
+            .create_conversation(
+                db.default_agent_id(),
+                Some("cont"),
+                Some(root.to_str().unwrap()),
+                Some("allow"),
+            )
             .unwrap();
         let source = db.create_run(&conversation.id, "source", None).unwrap();
         let source_id = source.run.id.clone();
@@ -648,7 +653,10 @@ mod tests {
         // Run, so the source is settled first — it stays paused at the Kernel
         // level, which is the audited state this test checks is not rewritten.
         db.with_connection(|c| {
-            c.execute("UPDATE runs SET status='completed', finished_at=1 WHERE id=?1", [&source_id])?;
+            c.execute(
+                "UPDATE runs SET status='completed', finished_at=1 WHERE id=?1",
+                [&source_id],
+            )?;
             Ok(())
         })
         .unwrap();
@@ -667,7 +675,10 @@ mod tests {
             execution_profile_id: "legacy".into(),
             authority: fox_engine_protocol::ExecutionAuthority::Authoritative,
             read_only_executor: fox_engine_protocol::ResourceExecutor::Rust,
-            permission_snapshot_id: crate::database::Database::run_control_permission_hash(&permission).unwrap(),
+            permission_snapshot_id: crate::database::Database::run_control_permission_hash(
+                &permission,
+            )
+            .unwrap(),
             permission,
             budgets: TimeBudgets::default(),
         };
@@ -762,7 +773,10 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(successor_rows, 0, "the successor starts without a checklist");
+        assert_eq!(
+            successor_rows, 0,
+            "the successor starts without a checklist"
+        );
         assert_eq!(source_rows, 1, "the source keeps its own row");
         assert_eq!(source_status, "failed", "the source's finding is untouched");
         // The source's audited waiting state is not rewritten either.

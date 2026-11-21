@@ -1,23 +1,21 @@
-#[allow(unused_imports)]
-use crate::canonical_json::CanonicalJson;
 use super::{
-    migrations, CompanionChatState, AgentRecord, AgentResourceRecord, AgentResourcesRecord, ArtifactDeliveryView, ArtifactRecord,
-    AttachmentRecord, ConversationDetail, ConversationExpertBinding,
-    ConversationExpertBindingError, ConversationRuntimeRecord, ConversationSummary,
-    ExpertPackageVersionRecord, ExternalRunRecord, InstallExpertPackageVersionRequest,
-    KnowledgeBindingRecord, KnowledgeDocumentActivity, KnowledgeDocumentAnnotation,
-    KnowledgeDocumentBookmark, KnowledgeDocumentReadingState, KnowledgePreviewCacheEntry,
-    KnowledgeReference, KnowledgeReferenceBindingInput, KnowledgeReferenceBindingRecord,
-    McpPluginSourceRecord, MessageRecord, ModelConnectionTest, ModelProviderRecord,
-    ModelServiceRecord, PendingWorkModeDispatch, PluginCatalogEntryRecord, PluginInstallStatus,
-    PluginInstallationRecord, PluginKind, PluginOrigin, ProviderModelRecord,
+    migrations, AgentRecord, AgentResourceRecord, AgentResourcesRecord, ArtifactDeliveryView,
+    ArtifactRecord, AttachmentRecord, CompanionChatState, ConversationDetail,
+    ConversationExpertBinding, ConversationExpertBindingError, ConversationRuntimeRecord,
+    ConversationSummary, CreateRunError, ExpertPackageVersionRecord, ExternalRunRecord,
+    InstallExpertPackageVersionRequest, KnowledgeBindingRecord, KnowledgeDocumentActivity,
+    KnowledgeDocumentAnnotation, KnowledgeDocumentBookmark, KnowledgeDocumentReadingState,
+    KnowledgePreviewCacheEntry, KnowledgeReference, KnowledgeReferenceBindingInput,
+    KnowledgeReferenceBindingRecord, McpPluginSourceRecord, MessageRecord, ModelConnectionTest,
+    ModelProviderRecord, ModelServiceRecord, PendingWorkModeDispatch, PluginCatalogEntryRecord,
+    PluginInstallStatus, PluginInstallationRecord, PluginKind, PluginOrigin, ProviderModelRecord,
     RecoverableExternalRunRecord, RunEventRecord, RunRecord, RuntimePromptMessage,
     RuntimeSessionFileRecord, RuntimeSessionRecord, RuntimeSessionStatus, SaveAgentRequest,
-    CreateRunError, StartRunResult,
-    ToolCallRecord, ToolResultRange,
-    YuxiAgentRecord,
-    YuxiConnectionTest, YuxiServiceRecord,
+    StartRunResult, ToolCallRecord, ToolResultRange, YuxiAgentRecord, YuxiConnectionTest,
+    YuxiServiceRecord,
 };
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -31,65 +29,69 @@ use uuid::Uuid;
 
 mod a1_workflow;
 mod agent_config;
-mod artifact_delivery_view;
 mod app_management;
+mod artifact_delivery_view;
 mod bundled_capabilities;
-pub(crate) mod companions;
 pub(crate) mod companion_capabilities;
+mod companion_chief;
+pub(crate) mod companion_coordination;
 pub(crate) mod companion_files;
 pub(crate) mod companion_ownership;
+pub(crate) mod companions;
 use self::companion_ownership::ORDINARY_CHAT_FILTER;
+mod child_runs;
 mod computed_artifacts;
 mod delivery_acceptance;
-mod child_runs;
 mod digital_colleagues;
 mod expert_teams;
 mod expert_workflows;
 mod graph_lead;
 mod kernel;
-mod kernel_compaction;
 pub(crate) mod kernel_authorization;
+mod kernel_compaction;
 pub(crate) mod kernel_continuation;
 pub(crate) mod kernel_execution_admission;
 pub(crate) mod kernel_execution_policy;
-pub(crate) mod permission_rules;
-pub(crate) mod kernel_jobs;
 mod kernel_job_execution;
-mod model_usage;
+pub(crate) mod kernel_jobs;
 pub(crate) mod kernel_reconciliation;
+mod model_usage;
+pub(crate) mod permission_rules;
 pub(crate) use kernel_authorization::{
     AdditionalGrant, GrantRegistration, GrantScopeKind, GrantSkipReason,
 };
-pub(crate) use kernel_continuation::{run_budget_for_tier, BudgetTier, ContinuableRun, ContinuationRequest};
+pub(crate) use kernel_continuation::{
+    run_budget_for_tier, BudgetTier, ContinuableRun, ContinuationRequest,
+};
 pub(crate) use kernel_continuation::{PreparedContinuation, VerifiedContinuationPermission};
 pub(crate) use kernel_jobs::{JobSnapshot, JobStartOutcome, JobStartRequest, JobState};
 mod run_control;
-pub(crate) use run_control::{EXECUTOR_ROUTE_RETIRED, EXECUTOR_ROUTE_RETIRED_MESSAGE, EXECUTOR_ROUTE_UNKNOWN};
-mod native_route;
-pub(crate) use native_route::{
-    approval_invalidation, register_approval_invalidation_in_tx,
-    settle_unclaimed_approval_refusal_in_tx, ApprovalRefusal, ApprovalRefusalSettlement,
+pub(crate) use run_control::{
+    EXECUTOR_ROUTE_RETIRED, EXECUTOR_ROUTE_RETIRED_MESSAGE, EXECUTOR_ROUTE_UNKNOWN,
 };
+mod native_route;
 #[cfg(test)]
 pub(crate) use native_route::approval_refusal_receipt;
 #[cfg(test)]
 pub(crate) use native_route::refusal_fault;
+pub(crate) use native_route::{
+    approval_invalidation, register_approval_invalidation_in_tx,
+    settle_unclaimed_approval_refusal_in_tx, ApprovalRefusal, ApprovalRefusalSettlement,
+};
+mod delivery_checks;
 #[cfg(test)]
 mod native_route_tests;
 #[cfg(test)]
 mod run_control_startup_tests;
 mod skill_activations;
-mod delivery_checks;
 pub(crate) use delivery_acceptance::{AcceptanceBinding, AcceptanceRow, AcceptanceWrite};
-mod run_steering;
 mod managed_files;
-pub(crate) use delivery_checks::{
-    DeliveryChecklistSeed, DeliveryRequirement, RequirementKind,
-};
+mod run_steering;
 #[cfg(test)]
 pub(crate) use delivery_checks::finalize_fault;
 #[cfg(test)]
 pub(crate) use delivery_checks::stage_fault;
+pub(crate) use delivery_checks::{DeliveryChecklistSeed, DeliveryRequirement, RequirementKind};
 
 /// Test-only fault injection for the stage-two session mapping write.
 ///
@@ -137,19 +139,21 @@ pub(crate) mod native_session_fault {
         })
     }
 }
-pub(crate) use managed_files::{ManagedFileSource, ManagedFileVersion, ManagedFileVersionInput, RestoreClaim, RestoreRequestRecord};
+pub(crate) use managed_files::{
+    ManagedFileSource, ManagedFileVersion, ManagedFileVersionInput, RestoreClaim,
+    RestoreRequestRecord,
+};
 pub(crate) use run_steering::{
-    SteeringMessage, MAX_STEERING_FOLLOWUPS,
-    STEERING_LANE_CURRENT, STEERING_LANE_NEXT_TURN,
+    SteeringMessage, MAX_STEERING_FOLLOWUPS, STEERING_LANE_CURRENT, STEERING_LANE_NEXT_TURN,
 };
 pub(crate) use skill_activations::SkillActivationRecord;
-mod kernel_model_config;
-mod kernel_initial_input;
-mod kernel_host;
 mod agent_backend;
+mod kernel_host;
+mod kernel_initial_input;
+mod kernel_model_config;
 pub(crate) use agent_backend::RunBackendIdentity;
-mod kernel_projection;
 mod kernel_display;
+mod kernel_projection;
 pub(crate) use kernel_host::KernelHostScope;
 mod companion_notes;
 pub(crate) mod contact_bubbles;
@@ -194,7 +198,11 @@ pub use graph_lead::{
 };
 pub use work_events::WORK_EVENT_TYPES;
 #[allow(unused_imports)]
-pub use work_graph::{AddEvidenceInput, CreateGoalInput, CreateTaskInput, FinishTaskAttemptInput, GoalRepository, PreflightTaskRepairOverrideInput, RepositoryError, StartTaskAttemptInput, StartTaskRepairOverrideInput, TaskEvidenceRepository, WorkTaskRepository};
+pub use work_graph::{
+    AddEvidenceInput, CreateGoalInput, CreateTaskInput, FinishTaskAttemptInput, GoalRepository,
+    PreflightTaskRepairOverrideInput, RepositoryError, StartTaskAttemptInput,
+    StartTaskRepairOverrideInput, TaskEvidenceRepository, WorkTaskRepository,
+};
 
 const DEFAULT_AGENT_ID: &str = "fox-general";
 
@@ -539,7 +547,9 @@ impl Database {
                 super::migration_backup::MIGRATION_BACKUP_KEEP,
                 now_ms(),
             )
-            .map_err(|error| format!("数据库升级前的自动备份失败，已停止升级，数据库未改动：{error}"))?;
+            .map_err(|error| {
+                format!("数据库升级前的自动备份失败，已停止升级，数据库未改动：{error}")
+            })?;
         }
         Self::open_after_schema_check(path)
     }
@@ -560,7 +570,11 @@ impl Database {
             transaction
                 .execute(
                     "INSERT OR IGNORE INTO app_settings(key,value,updated_at) VALUES(?1,?2,?3)",
-                    params![DATA_ROOT_INSTANCE_UUID_KEY, Uuid::new_v4().to_string(), now_ms()],
+                    params![
+                        DATA_ROOT_INSTANCE_UUID_KEY,
+                        Uuid::new_v4().to_string(),
+                        now_ms()
+                    ],
                 )
                 .map_err(|error| error.to_string())?;
             let stored: String = transaction
@@ -732,7 +746,10 @@ impl Database {
                 |row| row.get(0),
             )
         })?;
-        Ok(blank && self.runtime_conversation_expert_binding(conversation_id)?.is_none())
+        Ok(blank
+            && self
+                .runtime_conversation_expert_binding(conversation_id)?
+                .is_none())
     }
 
     pub fn backup_to(&self, path: &std::path::Path) -> Result<(), String> {
@@ -1310,7 +1327,7 @@ impl Database {
     /// writer leaves it NULL, which is how the UI distinguishes "the model handed
     /// this to you" from "the Host saw this file written".
     ///
-    /// Returns the display names in declaration order, so the caller can report
+    /// Returns the artifact IDs in declaration order, so the caller can report
     /// exactly what was recorded.
     ///
     /// 每个文件都要能读到。读失败或超过交付大小上限时，整次声明返回错误并回滚，
@@ -1336,10 +1353,12 @@ impl Database {
                 )
             };
             let transaction = connection.unchecked_transaction()?;
-            let mut names = Vec::with_capacity(files.len());
+            let mut ids = Vec::with_capacity(files.len());
             for (path, display_name, description) in files {
                 let metadata = std::fs::metadata(path).map_err(|error| {
-                    refuse(format!("present_files: cannot read {display_name}: {error}"))
+                    refuse(format!(
+                        "present_files: cannot read {display_name}: {error}"
+                    ))
                 })?;
                 if metadata.len() > MAX_PRESENT_FILE_BYTES {
                     return Err(refuse(format!(
@@ -1347,7 +1366,9 @@ impl Database {
                     )));
                 }
                 let bytes = std::fs::read(path).map_err(|error| {
-                    refuse(format!("present_files: cannot read {display_name}: {error}"))
+                    refuse(format!(
+                        "present_files: cannot read {display_name}: {error}"
+                    ))
                 })?;
                 if bytes.len() as u64 > MAX_PRESENT_FILE_BYTES {
                     return Err(refuse(format!(
@@ -1379,7 +1400,8 @@ impl Database {
                         description
                     ],
                 )?;
-                if updated == 0 {
+                let id = if updated == 0 {
+                    let id = format!("presented:{run_id}:{}", uuid::Uuid::new_v4());
                     transaction.execute(
                         "INSERT INTO artifacts(
                             id, conversation_id, run_id, display_name, artifact_type,
@@ -1389,7 +1411,7 @@ impl Database {
                          VALUES (?1,?2,?3,?4,'created_file','deliverable','project',
                                  ?5,?6,?7,?8,'ready',?9,?9,?10,?9,?11)",
                         params![
-                            format!("presented:{run_id}:{}", uuid::Uuid::new_v4()),
+                            id,
                             conversation_id,
                             run_id,
                             display_name,
@@ -1402,11 +1424,18 @@ impl Database {
                             description
                         ],
                     )?;
-                }
-                names.push(display_name.clone());
+                    id
+                } else {
+                    transaction.query_row(
+                        "SELECT id FROM artifacts WHERE run_id=?1 AND storage_path=?2 ORDER BY id LIMIT 1",
+                        params![run_id, path],
+                        |row| row.get(0),
+                    )?
+                };
+                ids.push(id);
             }
             transaction.commit()?;
-            Ok(names)
+            Ok(ids)
         })
     }
 
@@ -1688,7 +1717,15 @@ impl Database {
         offset: usize,
     ) -> Result<super::ContactBubbleSearchPage, String> {
         self.with_connection(|connection| {
-            contact_bubbles::search_bubbles(connection, conversation_id, query, since, until, limit, offset)
+            contact_bubbles::search_bubbles(
+                connection,
+                conversation_id,
+                query,
+                since,
+                until,
+                limit,
+                offset,
+            )
         })
     }
 
@@ -2215,24 +2252,33 @@ impl Database {
     /// as a contact task whose chain is broken errors instead of resolving to
     /// None, so no caller silently falls back to the unrestricted path.
     pub(crate) fn conversation_companion_id(&self, chat: &str) -> Result<Option<String>, String> {
-        Ok(self.conversation_companion_scope(chat)?.map(|scope| scope.companion_id))
+        Ok(self
+            .conversation_companion_scope(chat)?
+            .map(|scope| scope.companion_id))
     }
 
-    pub(crate) fn companion_chat_state(&self, chat: &str) -> Result<Option<CompanionChatState>, String> {
+    pub(crate) fn companion_chat_state(
+        &self,
+        chat: &str,
+    ) -> Result<Option<CompanionChatState>, String> {
         self.with_connection(|connection| {
-            connection.query_row(
-                "SELECT p.deleting_at IS NOT NULL, p.archived_at IS NOT NULL
+            connection
+                .query_row(
+                    "SELECT p.deleting_at IS NOT NULL, p.archived_at IS NOT NULL
                  FROM conversations c JOIN companion_profiles p ON p.id = c.companion_id
                  WHERE c.id = ?1",
-                [chat],
-                |row| Ok(if row.get(0)? {
-                    CompanionChatState::Deleting
-                } else if row.get(1)? {
-                    CompanionChatState::Archived
-                } else {
-                    CompanionChatState::Active
-                }),
-            ).optional()
+                    [chat],
+                    |row| {
+                        Ok(if row.get(0)? {
+                            CompanionChatState::Deleting
+                        } else if row.get(1)? {
+                            CompanionChatState::Archived
+                        } else {
+                            CompanionChatState::Active
+                        })
+                    },
+                )
+                .optional()
         })
     }
 
@@ -2370,11 +2416,14 @@ impl Database {
 
             let mut agent_statement = connection.prepare(
                 "WITH latest_usage AS (
-                    SELECT c.agent_id, e.event_json,
+                    SELECT coalesce(origin.agent_id,c.agent_id) AS agent_id, e.event_json,
                            ROW_NUMBER() OVER (PARTITION BY e.run_id ORDER BY e.seq DESC) AS position
                     FROM run_events e
                     JOIN runs r ON r.id = e.run_id
                     JOIN conversations c ON c.id = r.conversation_id
+                    JOIN run_usage_roots u ON u.run_id=r.id
+                    LEFT JOIN runs root ON root.id=u.usage_root_id AND u.coordinated
+                    LEFT JOIN conversations origin ON origin.id=root.conversation_id
                     WHERE e.event_type = 'usage.updated'
                  ), conversation_counts AS (
                     SELECT agent_id, COUNT(*) AS conversation_count
@@ -2672,21 +2721,31 @@ impl Database {
             if connection.execute(
                 "UPDATE projects SET pinned = ?2, updated_at = ?3 WHERE id = ?1",
                 params![project_id, pinned, now_ms()],
-            )? == 0 {
+            )? == 0
+            {
                 return Ok(None);
             }
-            connection.query_row(
-                "SELECT id, name, root_path, permission_mode, status,
+            connection
+                .query_row(
+                    "SELECT id, name, root_path, permission_mode, status,
                         created_at, updated_at, last_opened_at, pinned
                  FROM projects WHERE id = ?1",
-                [project_id],
-                |row| Ok(super::ProjectRecord {
-                    id: row.get(0)?, name: row.get(1)?, root_path: row.get(2)?,
-                    permission_mode: row.get(3)?, status: row.get(4)?,
-                    created_at: row.get(5)?, updated_at: row.get(6)?,
-                    last_opened_at: row.get(7)?, pinned: row.get(8)?,
-                }),
-            ).optional()
+                    [project_id],
+                    |row| {
+                        Ok(super::ProjectRecord {
+                            id: row.get(0)?,
+                            name: row.get(1)?,
+                            root_path: row.get(2)?,
+                            permission_mode: row.get(3)?,
+                            status: row.get(4)?,
+                            created_at: row.get(5)?,
+                            updated_at: row.get(6)?,
+                            last_opened_at: row.get(7)?,
+                            pinned: row.get(8)?,
+                        })
+                    },
+                )
+                .optional()
         })
     }
 
@@ -2820,7 +2879,8 @@ impl Database {
             return Err(ConversationExpertBindingError::RemoteUnavailable);
         }
 
-        let binding = activate_expert_binding(&transaction, conversation_id, &expert, activation_source)?;
+        let binding =
+            activate_expert_binding(&transaction, conversation_id, &expert, activation_source)?;
         transaction.commit()?;
         Ok(binding)
     }
@@ -2949,7 +3009,8 @@ impl Database {
             contact_bubbles::ensure_window(connection, id, oldest_ordinal, None)?;
             let bubbles = contact_bubbles::query_window(connection, id, oldest_ordinal, None)?;
             let bubble_marks = contact_marks::marks_window(connection, id, oldest_ordinal, None)?;
-            let message_quotes = contact_marks::quotes_window(connection, id, oldest_ordinal, None)?;
+            let message_quotes =
+                contact_marks::quotes_window(connection, id, oldest_ordinal, None)?;
             let runtime_events = query_runtime_events_window(connection, id, oldest_ordinal, None)?;
             let tool_calls = query_tool_calls_window(connection, id, oldest_ordinal, None)?;
             let approvals = query_approvals_window(connection, id, oldest_ordinal, None)?;
@@ -2958,8 +3019,12 @@ impl Database {
             let knowledge_bindings = query_knowledge_bindings(connection, id)?;
             let expert_bindings = query_conversation_expert_bindings(connection, id)?;
             let last_run = query_last_run(connection, id)?;
-            let (delivery_checklist,delivery_checklist_truncated)=delivery_checks::query_current_checklist_view(
-                connection,id,last_run.as_ref().map(|run|run.id.as_str()))?;
+            let (delivery_checklist, delivery_checklist_truncated) =
+                delivery_checks::query_current_checklist_view(
+                    connection,
+                    id,
+                    last_run.as_ref().map(|run| run.id.as_str()),
+                )?;
             let run_ids = messages
                 .iter()
                 .filter_map(|message| message.run_id.clone())
@@ -2972,6 +3037,7 @@ impl Database {
             )?;
             Ok(ConversationDetail {
                 conversation,
+                coordination: companion_coordination::thread_on(connection, id)?,
                 expert_bindings,
                 messages,
                 runtime_events,
@@ -3055,7 +3121,10 @@ impl Database {
                 .query_map([report_conversation_id], map_approval)?
                 .collect::<rusqlite::Result<Vec<_>>>()?
                 .into_iter()
-                .filter(|record| record.status == "pending" || approval_invalidation(record.decision.as_ref()).is_some())
+                .filter(|record| {
+                    record.status == "pending"
+                        || approval_invalidation(record.decision.as_ref()).is_some()
+                })
                 .collect();
             Ok(records)
         })
@@ -3066,27 +3135,50 @@ impl Database {
     /// the scope from the decided call and its frozen project root.
     fn enrich_kernel_approval_preview(&self, approvals: &mut [super::ApprovalRecord]) {
         for approval in approvals {
-            if approval.status != "pending" || approval.request["authority"] != "kernel" { continue; }
+            if approval.status != "pending" || approval.request["authority"] != "kernel" {
+                continue;
+            }
             let binding = self.run_control_binding(&approval.run_id).ok().flatten();
-            let root = binding.as_ref().and_then(|binding| binding.permission.project_root.as_deref());
+            let root = binding
+                .as_ref()
+                .and_then(|binding| binding.permission.project_root.as_deref());
             let input = &approval.request["input"];
-            let office = approval.tool_name == "call_mcp_tool" && input["serverId"] == crate::office::SERVER_ID;
-            let office_scope = office.then(|| crate::runtime_host::office_grants::reusable_edit_scope(input, root)).flatten();
+            let office = approval.tool_name == "call_mcp_tool"
+                && input["serverId"] == crate::office::SERVER_ID;
+            let office_scope = office
+                .then(|| crate::runtime_host::office_grants::reusable_edit_scope(input, root))
+                .flatten();
             let reusable = if office {
                 office_scope.is_some()
-            } else if approval.tool_name == "task_repair_escalate_start" || approval.request.get("wholeFileReplacement").is_some() {
+            } else if approval.tool_name == "task_repair_escalate_start"
+                || approval.request.get("wholeFileReplacement").is_some()
+            {
                 false
             } else {
-                crate::runtime_host::tool_operation_scope(&approval.tool_name, input, root).is_some()
+                crate::runtime_host::tool_operation_scope(&approval.tool_name, input, root)
+                    .is_some()
             };
             if let Some(request) = approval.request.as_object_mut() {
-                request.insert("availableDecisions".into(), if reusable {
-                    json!(["allow_once", "allow_conversation", "deny"])
-                } else { json!(["allow_once", "deny"]) });
+                request.insert(
+                    "availableDecisions".into(),
+                    if reusable {
+                        json!(["allow_once", "allow_conversation", "deny"])
+                    } else {
+                        json!(["allow_once", "deny"])
+                    },
+                );
                 if let Some(scope) = office_scope {
                     request.insert("target".into(), Value::String(scope.target.clone()));
-                    request.insert("summary".into(), Value::String("仅修改下列单元格及属性；内容可变，文件版本仍需校验。".into()));
-                    request.insert("officeReuse".into(), json!({"target": scope.target, "selectors": scope.selectors}));
+                    request.insert(
+                        "summary".into(),
+                        Value::String(
+                            "仅修改下列单元格及属性；内容可变，文件版本仍需校验。".into(),
+                        ),
+                    );
+                    request.insert(
+                        "officeReuse".into(),
+                        json!({"target": scope.target, "selectors": scope.selectors}),
+                    );
                 }
             }
         }
@@ -3116,9 +3208,8 @@ impl Database {
         offset: usize,
         limit: usize,
     ) -> Result<ToolResultRange, String> {
-        let (run_id, tool_call_id) =
-            crate::kernel_compaction::parse_tool_result_ref(reference)
-                .ok_or_else(|| "invalid tool result reference".to_owned())?;
+        let (run_id, tool_call_id) = crate::kernel_compaction::parse_tool_result_ref(reference)
+            .ok_or_else(|| "invalid tool result reference".to_owned())?;
         let authorized = authorized_conversation_id.trim();
         if authorized.is_empty() {
             return Err("missing authorized conversation".to_owned());
@@ -3185,13 +3276,17 @@ impl Database {
     /// read as permission to omit. Authorization still comes from the row's own
     /// conversation and from the same real range read, never from the status.
     pub(crate) fn tool_result_storage(
-        &self, run_id: &str, tool_call_id: &str,
+        &self,
+        run_id: &str,
+        tool_call_id: &str,
     ) -> Result<crate::kernel_compaction::ToolResultStorage, String> {
         let (fact, error) = self.with_connection(|connection| {
-            Ok(match tool_result_storage_for(connection, run_id, tool_call_id) {
-                Ok(fact) => (Some(fact), None),
-                Err(error) => (None, Some(error)),
-            })
+            Ok(
+                match tool_result_storage_for(connection, run_id, tool_call_id) {
+                    Ok(fact) => (Some(fact), None),
+                    Err(error) => (None, Some(error)),
+                },
+            )
         })?;
         match (fact, error) {
             (Some(fact), _) => Ok(fact),
@@ -3359,7 +3454,12 @@ impl Database {
                 .map(|message| message.ordinal)
                 .unwrap_or(before_ordinal);
             contact_bubbles::ensure_window(connection, id, oldest_ordinal, Some(before_ordinal))?;
-            let bubbles = contact_bubbles::query_window(connection, id, oldest_ordinal, Some(before_ordinal))?;
+            let bubbles = contact_bubbles::query_window(
+                connection,
+                id,
+                oldest_ordinal,
+                Some(before_ordinal),
+            )?;
             let bubble_marks =
                 contact_marks::marks_window(connection, id, oldest_ordinal, Some(before_ordinal))?;
             let message_quotes =
@@ -4504,7 +4604,8 @@ impl Database {
             return Err("Office 文档由 Fox 管理，请使用启用/停用操作。".to_owned());
         }
         let now = now_ms();
-        let args_json = crate::canonical_json::to_string(args).map_err(|error| error.to_string())?;
+        let args_json =
+            crate::canonical_json::to_string(args).map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
             connection.execute(
                 "INSERT INTO mcp_servers(
@@ -4660,7 +4761,8 @@ impl Database {
         details: &Value,
     ) -> Result<(), String> {
         let now = now_ms();
-        let details_json = crate::canonical_json::to_string(details).map_err(|error| error.to_string())?;
+        let details_json =
+            crate::canonical_json::to_string(details).map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
             connection.execute(
                 "INSERT INTO lifecycle_hook_executions(
@@ -4897,9 +4999,15 @@ impl Database {
     /// 13.38（A-2）：Host 执行中的前台命令把已产生的输出写进它那一行（节流由调用方负责）。
     /// 只改仍在运行的 Host 工具卡；结束后的最终结果照常由结算覆盖。取消时 run.cancelled
     /// 把这一行定格为 cancelled，这里写下的输出原样保留，界面可以展开查看。
-    pub(crate) fn update_host_tool_live_output(&self, run_id: &str, runtime_tool_call_id: &str, text: &str) -> Result<bool, String> {
+    pub(crate) fn update_host_tool_live_output(
+        &self,
+        run_id: &str,
+        runtime_tool_call_id: &str,
+        text: &str,
+    ) -> Result<bool, String> {
         let result = json!({ "status": "running", "text": text, "streamedOutput": true });
-        let result_json = crate::canonical_json::to_string(&result).map_err(|error| error.to_string())?;
+        let result_json =
+            crate::canonical_json::to_string(&result).map_err(|error| error.to_string())?;
         let now = now_ms();
         self.with_connection(|connection| {
             let changed = connection.execute(
@@ -4950,7 +5058,8 @@ impl Database {
             );
         }
         let now = now_ms();
-        let input_json = crate::canonical_json::to_string(input).map_err(|error| error.to_string())?;
+        let input_json =
+            crate::canonical_json::to_string(input).map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -5460,23 +5569,35 @@ impl Database {
         }
         let now = now_ms();
         let id = Uuid::new_v4().to_string();
-        let request_json = crate::canonical_json::to_string(request).map_err(|error| error.to_string())?;
+        let request_json =
+            crate::canonical_json::to_string(request).map_err(|error| error.to_string())?;
         let approval = self.with_connection(|connection| {
-            let run_id: String = connection.query_row("SELECT run_id FROM tool_calls WHERE id=?1", [tool_call_id], |row| row.get(0))?;
+            let run_id: String = connection.query_row(
+                "SELECT run_id FROM tool_calls WHERE id=?1",
+                [tool_call_id],
+                |row| row.get(0),
+            )?;
             require_legacy_run_writer(connection, &run_id)?;
             // D1-2: a fresh tool-execution approval must still pass the current
             // grant/frozen-snapshot gate. The task-repair override keeps its own
             // specialized contract and is not a companion capability.
             if category == TOOL_EXECUTION_APPROVAL_CATEGORY {
-                let tool: Option<(String, String)> = connection.query_row(
-                    "SELECT tool_name, input_json FROM tool_calls WHERE id=?1",
-                    [tool_call_id], |row| Ok((row.get(0)?, row.get(1)?)),
-                ).optional()?;
+                let tool: Option<(String, String)> = connection
+                    .query_row(
+                        "SELECT tool_name, input_json FROM tool_calls WHERE id=?1",
+                        [tool_call_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
                 if let Some((tool_name, input_json)) = tool {
                     let input = serde_json::from_str::<Value>(&input_json).unwrap_or_default();
-                    super::ensure_granted_on(connection, &run_id, &tool_name, Some(&input)).map_err(|error| {
-                        rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR), Some(error))
-                    })?;
+                    super::ensure_granted_on(connection, &run_id, &tool_name, Some(&input))
+                        .map_err(|error| {
+                            rusqlite::Error::SqliteFailure(
+                                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                                Some(error),
+                            )
+                        })?;
                 }
             }
             connection.execute(
@@ -5757,9 +5878,14 @@ impl Database {
             // this claim can never revive the old approval; only a fresh call
             // with a new approval can. A revoked call fails with its reason on
             // the card instead of running.
-            let decision_json: Option<String> = transaction
-                .query_row("SELECT decision_json FROM approvals WHERE id = ?1", [&approval_id], |row| row.get::<_, Option<String>>(0))?;
-            let decision = decision_json.as_deref().and_then(|text| serde_json::from_str::<Value>(text).ok());
+            let decision_json: Option<String> = transaction.query_row(
+                "SELECT decision_json FROM approvals WHERE id = ?1",
+                [&approval_id],
+                |row| row.get::<_, Option<String>>(0),
+            )?;
+            let decision = decision_json
+                .as_deref()
+                .and_then(|text| serde_json::from_str::<Value>(text).ok());
             let barrier = approval_invalidation(decision.as_ref());
             let call: Option<(String, String)> = transaction
                 .query_row(
@@ -5772,7 +5898,8 @@ impl Database {
             let refusal = match barrier {
                 Some((code, message)) => Some(ApprovalRefusal::new(&code, message)),
                 None => call.and_then(|(tool, input_json)| {
-                    let input: serde_json::Value = serde_json::from_str(&input_json).unwrap_or_default();
+                    let input: serde_json::Value =
+                        serde_json::from_str(&input_json).unwrap_or_default();
                     super::ensure_granted_on(&transaction, run_id, &tool, Some(&input))
                         .err()
                         .map(|error| ApprovalRefusal::new("companion.tool_not_available", error))
@@ -5781,7 +5908,11 @@ impl Database {
             if let Some(refusal) = refusal {
                 let message = refusal.message.clone();
                 let outcome = settle_unclaimed_approval_refusal_in_tx(
-                    &transaction, run_id, &approval_id, &refusal, now,
+                    &transaction,
+                    run_id,
+                    &approval_id,
+                    &refusal,
+                    now,
                 )?;
                 // NotEligible means the intent's identity can no longer be
                 // verified (e.g. the native session generation moved past the
@@ -5792,7 +5923,12 @@ impl Database {
                 // and a pending Host intent. Cleanup of an identity anomaly
                 // needs its own reconciliation contract, not a partial settle.
                 if matches!(outcome, ApprovalRefusalSettlement::NotEligible) {
-                    register_approval_invalidation_in_tx(&transaction, &approval_id, &refusal, now)?;
+                    register_approval_invalidation_in_tx(
+                        &transaction,
+                        &approval_id,
+                        &refusal,
+                        now,
+                    )?;
                 }
                 transaction.commit()?;
                 return Err(rusqlite::Error::SqliteFailure(
@@ -5989,7 +6125,9 @@ impl Database {
     ) -> Result<StartRunResult, CreateRunError> {
         let clean_text = text.trim();
         if clean_text.is_empty() {
-            return Err(CreateRunError::Storage("message text cannot be empty".to_owned()));
+            return Err(CreateRunError::Storage(
+                "message text cannot be empty".to_owned(),
+            ));
         }
         let mut outcome: Option<CreateRunError> = None;
         let result = self.with_connection(|connection| {
@@ -6079,8 +6217,13 @@ impl Database {
         })
     }
 
-    pub fn conversation_requires_native_recovery(&self, conversation_id: &str) -> Result<bool, String> {
-        self.with_connection(|connection| native_session_recovery_required(connection, conversation_id))
+    pub fn conversation_requires_native_recovery(
+        &self,
+        conversation_id: &str,
+    ) -> Result<bool, String> {
+        self.with_connection(|connection| {
+            native_session_recovery_required(connection, conversation_id)
+        })
     }
 
     pub fn rewind_run(
@@ -6567,7 +6710,8 @@ impl Database {
                     Uuid::new_v4().to_string(),
                     parent_run_id,
                     seq,
-                    crate::canonical_json::to_string(&payload).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    crate::canonical_json::to_string(&payload)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
                     now_ms()
                 ],
             )?;
@@ -6818,10 +6962,7 @@ impl Database {
 
     /// The generation a new mapping for this conversation must be installed at:
     /// one above every generation it has used, live or retired.
-    pub fn next_runtime_session_generation(
-        &self,
-        conversation_id: &str,
-    ) -> Result<i64, String> {
+    pub fn next_runtime_session_generation(&self, conversation_id: &str) -> Result<i64, String> {
         self.runtime_session_generation_high_water(conversation_id)
             .map(|high| high.saturating_add(1))
     }
@@ -7537,7 +7678,10 @@ impl Database {
     /// explicit override wins over the global singleton; a dangling or disabled
     /// override is an explicit error, never a silent fallback to another model.
     /// `Ok(None)` means nothing is configured (the global model is missing).
-    pub fn resolve_effective_model(&self, conversation_id: &str) -> Result<Option<ModelServiceRecord>, String> {
+    pub fn resolve_effective_model(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<ModelServiceRecord>, String> {
         // K2/K5: background tasks resolve through the same ownership chain as
         // the private chat, so one contact has one effective model.
         let companion = self
@@ -7546,12 +7690,14 @@ impl Database {
         let override_ids: Option<(String, String)> = match companion {
             None => None,
             Some(companion) => self.with_connection(|connection| {
-                connection.query_row(
-                    "SELECT model_provider_id, model_ref FROM companion_profiles
+                connection
+                    .query_row(
+                        "SELECT model_provider_id, model_ref FROM companion_profiles
                      WHERE id = ?1 AND model_provider_id IS NOT NULL AND model_ref IS NOT NULL",
-                    [&companion],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                ).optional()
+                        [&companion],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
             })?,
         };
         let Some((provider_id, model_ref)) = override_ids else {
@@ -7565,22 +7711,36 @@ impl Database {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
             ).optional()
         })?;
-        let Some((name, enabled, base_url, api_type, last_status, last_latency_ms, last_checked_at)) = provider else {
+        let Some((
+            name,
+            enabled,
+            base_url,
+            api_type,
+            last_status,
+            last_latency_ms,
+            last_checked_at,
+        )) = provider
+        else {
             return Err("联系人的独立模型服务已被删除，请在资料页重新选择模型".to_owned());
         };
         if enabled == 0 {
             return Err(format!("联系人的独立模型服务「{name}」已停用，请在模型服务设置中启用，或在资料页改选其他模型"));
         }
         let model: Option<(String, i64, i64, i64)> = self.with_connection(|connection| {
-            connection.query_row(
-                "SELECT model_id, context_window, max_output_tokens, supports_image_input
+            connection
+                .query_row(
+                    "SELECT model_id, context_window, max_output_tokens, supports_image_input
                  FROM provider_models WHERE id = ?1 AND provider_id = ?2",
-                params![model_ref, provider_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            ).optional()
+                    params![model_ref, provider_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()
         })?;
-        let Some((model_id, context_window, max_output_tokens, supports_image_input)) = model else {
-            return Err(format!("联系人的独立模型已从「{name}」中移除，请在资料页重新选择模型"));
+        let Some((model_id, context_window, max_output_tokens, supports_image_input)) = model
+        else {
+            return Err(format!(
+                "联系人的独立模型已从「{name}」中移除，请在资料页重新选择模型"
+            ));
         };
         Ok(Some(ModelServiceRecord {
             name,
@@ -7605,7 +7765,13 @@ impl Database {
     /// created before v109 have none and resolve once at their next start.
     pub fn run_model_snapshot(&self, run_id: &str) -> Result<Option<ModelServiceRecord>, String> {
         let raw: Option<Option<String>> = self.with_connection(|connection| {
-            connection.query_row("SELECT model_snapshot FROM runs WHERE id = ?1", [run_id], |row| row.get(0)).optional()
+            connection
+                .query_row(
+                    "SELECT model_snapshot FROM runs WHERE id = ?1",
+                    [run_id],
+                    |row| row.get(0),
+                )
+                .optional()
         })?;
         match raw.flatten() {
             Some(json) => serde_json::from_str(&json)
@@ -7617,7 +7783,11 @@ impl Database {
 
     /// Freeze the resolved model for the run's whole lifetime. Write-once:
     /// queueing, retry and restart never replace it with the current global.
-    pub fn freeze_run_model_snapshot(&self, run_id: &str, service: &ModelServiceRecord) -> Result<(), String> {
+    pub fn freeze_run_model_snapshot(
+        &self,
+        run_id: &str,
+        service: &ModelServiceRecord,
+    ) -> Result<(), String> {
         let json = crate::canonical_json::to_string(service).map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
             connection.execute(
@@ -7700,7 +7870,14 @@ impl Database {
                         })?
                         .collect::<Result<Vec<_>, _>>()?;
                     Ok(ModelProviderRecord {
-                        protocol_profiles: serde_json::from_str(&row.get::<_, String>(12)?).map_err(|error| rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, Box::new(error)))?,
+                        protocol_profiles: serde_json::from_str(&row.get::<_, String>(12)?)
+                            .map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    12,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            })?,
                         id,
                         name: row.get(1)?,
                         icon: row.get(2)?,
@@ -7825,7 +8002,8 @@ impl Database {
             .get("type")
             .and_then(Value::as_str)
             .ok_or_else(|| "runtime event type is missing".to_owned())?;
-        let event_json = crate::canonical_json::to_string(payload).map_err(|error| error.to_string())?;
+        let event_json =
+            crate::canonical_json::to_string(payload).map_err(|error| error.to_string())?;
         let now = now_ms();
 
         self.with_connection(|connection| {
@@ -8423,7 +8601,9 @@ fn create_run_in_transaction(
                                    JOIN provider_models m ON m.id = cp.model_ref AND m.provider_id = cp.model_provider_id
                                    WHERE cp.id = COALESCE(c.companion_id,
                                        (SELECT dc.companion_id FROM digital_colleagues dc
-                                        WHERE dc.conversation_id = c.id AND dc.companion_bound = 1))),
+                                        WHERE dc.conversation_id = c.id AND dc.companion_bound = 1),
+                                       (SELECT t.recipient_companion_id FROM companion_coordination_threads t
+                                        WHERE t.conversation_id = c.id))),
                                   (SELECT model_id FROM model_service WHERE singleton_id = 1 AND enabled = 1),
                                   a.default_model)
                 END,
@@ -8433,7 +8613,9 @@ fn create_run_in_transaction(
            AND NOT EXISTS (SELECT 1 FROM companion_profiles cp
                            WHERE cp.id = COALESCE(c.companion_id,
                                (SELECT dc.companion_id FROM digital_colleagues dc
-                                WHERE dc.conversation_id = c.id AND dc.companion_bound = 1))
+                                WHERE dc.conversation_id = c.id AND dc.companion_bound = 1),
+                               (SELECT t.recipient_companion_id FROM companion_coordination_threads t
+                                WHERE t.conversation_id = c.id))
                              AND (cp.archived_at IS NOT NULL OR cp.deleting_at IS NOT NULL))",
         params![conversation_id, requested_model],
         |row| Ok((row.get(0)?, row.get(1)?)),
@@ -8577,7 +8759,10 @@ fn mark_run_interrupted_in_tx(
     {
         return Ok(());
     }
-    if matches!(status.as_str(), "completed" | "failed" | "cancelled" | "interrupted") {
+    if matches!(
+        status.as_str(),
+        "completed" | "failed" | "cancelled" | "interrupted"
+    ) {
         return Err(projection_violation(format!(
             "late Host interruption cannot replace terminal Run '{run_id}' outcome '{status}'"
         )));
@@ -8605,14 +8790,27 @@ fn mark_run_interrupted_in_tx(
         params![run_id, message, now],
     )?;
     end_pending_approvals_for_interrupted_run(transaction, run_id, Some(code), now)?;
-    observability::close_run_trace_in_transaction(transaction, run_id, now, "error", Some(code), Some(message))?;
+    observability::close_run_trace_in_transaction(
+        transaction,
+        run_id,
+        now,
+        "error",
+        Some(code),
+        Some(message),
+    )?;
     child_runs::project_child_run_event(
-        transaction, run_id, "run.interrupted",
-        &json!({ "type": "run.interrupted", "code": code, "message": message }), now,
+        transaction,
+        run_id,
+        "run.interrupted",
+        &json!({ "type": "run.interrupted", "code": code, "message": message }),
+        now,
     )?;
     digital_colleagues::project_digital_colleague_event(
-        transaction, run_id, "run.interrupted",
-        &json!({ "type": "run.interrupted", "code": code, "message": message }), now,
+        transaction,
+        run_id,
+        "run.interrupted",
+        &json!({ "type": "run.interrupted", "code": code, "message": message }),
+        now,
     )?;
     interrupt_tasks_owned_by_run(transaction, run_id, &now.to_string(), "failed", message)?;
     contact_bubbles::project_run_in_transaction(transaction, run_id)?;
@@ -8724,7 +8922,11 @@ fn apply_active_run_activity(
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                (row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, bool>(3)?),
+                (
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, bool>(3)?,
+                ),
             ))
         })?
         .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
@@ -8793,11 +8995,18 @@ fn apply_active_run_activity(
                 EXISTS(SELECT 1 FROM pending_questions q WHERE q.conversation_id = r.conversation_id)
          FROM latest_runs r",
     )?;
-    let latest = latest_statement.query_map([ids], |row| {
-        Ok((row.get::<_, String>(0)?, (
-            row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, bool>(3)?,
-        )))
-    })?.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
+    let latest = latest_statement
+        .query_map([ids], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, bool>(3)?,
+                ),
+            ))
+        })?
+        .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
     for record in records.iter_mut() {
         if let Some((run_id, status, awaiting_reply)) = latest.get(&record.id) {
             record.last_run_id = Some(run_id.clone());
@@ -8896,7 +9105,11 @@ fn agent_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRecor
             .cloned()
             .and_then(|value| serde_json::from_value(value).ok())
             .unwrap_or_else(|| {
-                if runtime_type == "pi" { builtin_pi_resources() } else { AgentResourcesRecord::default() }
+                if runtime_type == "pi" {
+                    builtin_pi_resources()
+                } else {
+                    AgentResourcesRecord::default()
+                }
             }),
         configurable_items: metadata
             .get("configurableItems")
@@ -8961,7 +9174,9 @@ pub(crate) fn agent_package_snapshot_with_connection(
 }
 
 pub(crate) fn package_snapshot_hash(package_snapshot: &Value) -> String {
-    hex::encode(Sha256::digest(package_snapshot.canonical_string().as_bytes()))
+    hex::encode(Sha256::digest(
+        package_snapshot.canonical_string().as_bytes(),
+    ))
 }
 
 fn activate_expert_binding(
@@ -9173,9 +9388,12 @@ fn query_message_page(
 }
 
 fn answer_delta_fingerprint(delta: &str) -> String {
-    let hash = delta.as_bytes().iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
-    });
+    let hash = delta
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
     format!("{hash:016x}")
 }
 
@@ -9196,19 +9414,27 @@ fn query_runtime_events_window(
          WHERE c.conversation_id=?1 AND c.authority='authoritative'
            AND e.event_type IN ('engine.initial_response','engine.batch_response','engine.continuation_response')
            AND json_extract(b.value,'$.type')='toolCall'
-           AND EXISTS(SELECT 1 FROM messages m WHERE m.run_id=e.run_id AND m.role='user'
+           AND EXISTS(SELECT 1 FROM messages m WHERE m.run_id=e.run_id
                       AND m.ordinal>=?2 AND (?3 IS NULL OR m.ordinal<?3))",
     )?;
-    let tool_rounds = round_query.query_map(params![conversation_id, from_ordinal, before_ordinal], |row| {
-        Ok(((row.get::<_, String>(0)?, row.get::<_, String>(1)?), row.get::<_, String>(2)?))
-    })?.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
+    let tool_rounds = round_query
+        .query_map(
+            params![conversation_id, from_ordinal, before_ordinal],
+            |row| {
+                Ok((
+                    (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?
+        .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
     let mut statement = connection.prepare(
         "SELECT e.run_id, e.seq, e.event_type, e.event_json, e.created_at,
                 e.trace_id, e.span_id
          FROM run_events e
          JOIN runs r ON r.id = e.run_id
          WHERE r.conversation_id = ?1
-           AND EXISTS(SELECT 1 FROM messages m WHERE m.run_id = r.id AND m.role = 'user'
+           AND EXISTS(SELECT 1 FROM messages m WHERE m.run_id = r.id
                       AND m.ordinal >= ?2 AND (?3 IS NULL OR m.ordinal < ?3))
            AND e.event_type IN (
                'run.started', 'run.request_snapshot', 'run.phase', 'run.model_waiting',
@@ -9273,7 +9499,7 @@ fn query_tool_calls_window(
                 started_at, completed_at, updated_at, trace_id, span_id
          FROM tool_calls
          WHERE conversation_id = ?1
-           AND EXISTS(SELECT 1 FROM messages m WHERE m.run_id = tool_calls.run_id AND m.role = 'user'
+           AND EXISTS(SELECT 1 FROM messages m WHERE m.run_id = tool_calls.run_id
                       AND m.ordinal >= ?2 AND (?3 IS NULL OR m.ordinal < ?3))
          ORDER BY started_at ASC, rowid ASC",
     )?;
@@ -9476,8 +9702,12 @@ fn query_approvals_window(
                 a.claimed_by_run_id
          FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id
          WHERE t.conversation_id = ?1
-           AND EXISTS(SELECT 1 FROM messages m WHERE m.run_id = t.run_id AND m.role = 'user'
-                      AND m.ordinal >= ?2 AND (?3 IS NULL OR m.ordinal < ?3))
+           AND (EXISTS(SELECT 1 FROM messages m WHERE m.run_id = t.run_id
+                       AND m.ordinal >= ?2 AND (?3 IS NULL OR m.ordinal < ?3))
+                -- The initial window must retain its actionable tickets even
+                -- after their starting message pages out. Earlier pages only
+                -- return their own records, avoiding duplicates on prepend.
+                OR (?3 IS NULL AND a.status = 'pending'))
          ORDER BY a.requested_at ASC",
     )?;
     let records = statement
@@ -9543,7 +9773,7 @@ fn query_artifacts_window(
                 turn_call_id, declared_at, declared_description
          FROM artifacts WHERE conversation_id = ?1
            AND (run_id IS NULL OR EXISTS(
-             SELECT 1 FROM messages m WHERE m.run_id = artifacts.run_id AND m.role = 'user'
+             SELECT 1 FROM messages m WHERE m.run_id = artifacts.run_id
                AND m.ordinal >= ?2 AND (?3 IS NULL OR m.ordinal < ?3)
            ))
          ORDER BY created_at ASC",
@@ -9620,7 +9850,8 @@ fn mime_for_display_name(display_name: &str) -> Option<String> {
 fn query_knowledge_bindings(
     connection: &Connection,
     conversation_id: &str,
-) -> rusqlite::Result<Vec<KnowledgeBindingRecord>> {    let Some(bindings) = query_knowledge_reference_bindings_v2(connection, conversation_id)? else {
+) -> rusqlite::Result<Vec<KnowledgeBindingRecord>> {
+    let Some(bindings) = query_knowledge_reference_bindings_v2(connection, conversation_id)? else {
         return query_legacy_knowledge_bindings(connection, conversation_id);
     };
     Ok(bindings
@@ -9962,8 +10193,8 @@ fn project_tool_updated(
         return Ok(());
     };
     let (inline_result, blob) = split_tool_result(payload.get("update").unwrap_or(&Value::Null));
-    let result_json = crate::canonical_json::to_string(&inline_result)
-        .unwrap_or_else(|_| "null".to_owned());
+    let result_json =
+        crate::canonical_json::to_string(&inline_result).unwrap_or_else(|_| "null".to_owned());
     let incoming_tool_name = payload.get("tool").and_then(Value::as_str);
     if let Some((sha, full, bytes)) = &blob {
         transaction.execute(
@@ -10024,7 +10255,8 @@ fn project_tool_completed(
         return Ok(());
     };
     let (inline_result, blob) = split_tool_result(payload.get("result").unwrap_or(&Value::Null));
-    let result_json = crate::canonical_json::to_string(&inline_result).unwrap_or_else(|_| "null".to_owned());
+    let result_json =
+        crate::canonical_json::to_string(&inline_result).unwrap_or_else(|_| "null".to_owned());
     let is_error = payload
         .get("isError")
         .and_then(Value::as_bool)
@@ -10284,11 +10516,15 @@ fn validate_managed_tool_acquisition(
     now: i64,
     fresh_slot: bool,
 ) -> rusqlite::Result<()> {
-    validate_managed_tool_acquisition_with_clock(transaction,run_id,now,fresh_slot,true)
+    validate_managed_tool_acquisition_with_clock(transaction, run_id, now, fresh_slot, true)
 }
 
 fn validate_managed_tool_acquisition_with_clock(
-    transaction: &rusqlite::Transaction<'_>, run_id: &str, now: i64, fresh_slot: bool, wall_clock: bool,
+    transaction: &rusqlite::Transaction<'_>,
+    run_id: &str,
+    now: i64,
+    fresh_slot: bool,
+    wall_clock: bool,
 ) -> rusqlite::Result<()> {
     let run_status: String =
         transaction.query_row("SELECT status FROM runs WHERE id = ?1", [run_id], |row| {
@@ -10310,18 +10546,27 @@ fn validate_managed_tool_acquisition_with_clock(
         )
         .optional()?;
     if let Some((started_at, max_duration)) = child_duration {
-        if wall_clock { enforce_completion_deadline(transaction, run_id, "child_run", started_at, max_duration, now)?; }
+        if wall_clock {
+            enforce_completion_deadline(
+                transaction,
+                run_id,
+                "child_run",
+                started_at,
+                max_duration,
+                now,
+            )?;
+        }
     }
 
     let digital_budget = transaction
         .query_row(
             "SELECT r.started_at, r.budget_json, t.colleague_id,
                     t.total_tokens, t.output_tokens,
-                    (SELECT COUNT(*) FROM tool_calls calls JOIN runs member ON member.id = calls.run_id
-                     WHERE member.id = t.run_id OR (member.root_run_id = t.run_id AND member.run_kind = 'child'))
+                    (SELECT COUNT(*) FROM tool_calls calls JOIN run_usage_roots u ON u.run_id=calls.run_id
+                     WHERE u.usage_root_id=t.run_id)
              FROM digital_colleague_triggers t
              JOIN runs r ON r.id = t.run_id
-             WHERE t.run_id = (SELECT CASE WHEN run_kind = 'child' THEN root_run_id ELSE id END FROM runs WHERE id = ?1)",
+             WHERE t.run_id = (SELECT usage_root_id FROM run_usage_roots WHERE run_id=?1)",
             [run_id],
             |row| {
                 Ok((
@@ -10382,7 +10627,16 @@ fn validate_managed_tool_acquisition_with_clock(
                 "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' has an invalid frozen daily window"
             ))
         })?;
-    if wall_clock { enforce_completion_deadline(transaction, run_id, "digital_colleague", started_at, max_duration, now)?; }
+    if wall_clock {
+        enforce_completion_deadline(
+            transaction,
+            run_id,
+            "digital_colleague",
+            started_at,
+            max_duration,
+            now,
+        )?;
+    }
     if total >= max_total {
         return Err(projection_violation(format!(
             "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' reached its frozen per-Run total-token budget ({total}/{max_total})"
@@ -10430,18 +10684,25 @@ fn enforce_managed_run_completion_budget(
         )
         .optional()?;
     if let Some((started_at, max_duration)) = child_duration {
-        enforce_completion_deadline(transaction, run_id, "child_run", started_at, max_duration, now)?;
+        enforce_completion_deadline(
+            transaction,
+            run_id,
+            "child_run",
+            started_at,
+            max_duration,
+            now,
+        )?;
     }
 
     let digital_budget = transaction
         .query_row(
             "SELECT r.started_at, r.budget_json, t.colleague_id,
                     t.total_tokens, t.output_tokens,
-                    (SELECT COUNT(*) FROM tool_calls calls JOIN runs member ON member.id = calls.run_id
-                     WHERE member.id = t.run_id OR (member.root_run_id = t.run_id AND member.run_kind = 'child'))
+                    (SELECT COUNT(*) FROM tool_calls calls JOIN run_usage_roots u ON u.run_id=calls.run_id
+                     WHERE u.usage_root_id=t.run_id)
              FROM digital_colleague_triggers t
              JOIN runs r ON r.id = t.run_id
-             WHERE t.run_id = (SELECT CASE WHEN run_kind = 'child' THEN root_run_id ELSE id END FROM runs WHERE id = ?1)",
+             WHERE t.run_id = (SELECT usage_root_id FROM run_usage_roots WHERE run_id=?1)",
             [run_id],
             |row| {
                 Ok((
@@ -10502,7 +10763,14 @@ fn enforce_managed_run_completion_budget(
                 "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' has an invalid frozen daily window"
             ))
         })?;
-    enforce_completion_deadline(transaction, run_id, "digital_colleague", started_at, max_duration, now)?;
+    enforce_completion_deadline(
+        transaction,
+        run_id,
+        "digital_colleague",
+        started_at,
+        max_duration,
+        now,
+    )?;
     if total >= max_total {
         return Err(projection_violation(format!(
             "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' reached its frozen per-Run total-token budget ({total}/{max_total})"
@@ -10538,21 +10806,29 @@ fn enforce_managed_run_completion_budget(
 /// `[requested_at, resolved_at or now]` intervals, so parallel approvals are not
 /// counted twice). Approvals have no deadline, and waiting for the user must
 /// not consume a managed Run's wall-clock duration budget.
-pub(crate) fn approval_wait_ms_in_tx(connection: &rusqlite::Connection, run_id: &str, now: i64) -> rusqlite::Result<i64> {
+pub(crate) fn approval_wait_ms_in_tx(
+    connection: &rusqlite::Connection,
+    run_id: &str,
+    now: i64,
+) -> rusqlite::Result<i64> {
     let mut query = connection.prepare(
         "SELECT a.requested_at, COALESCE(a.resolved_at, ?2)
          FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id
          WHERE t.run_id = ?1 ORDER BY a.requested_at",
     )?;
     let intervals = query
-        .query_map(params![run_id, now], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+        .query_map(params![run_id, now], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut total = 0_i64;
     let mut current: Option<(i64, i64)> = None;
     for (start, end) in intervals {
         let end = end.min(now).max(start);
         match current {
-            Some((open_start, open_end)) if start <= open_end => current = Some((open_start, open_end.max(end))),
+            Some((open_start, open_end)) if start <= open_end => {
+                current = Some((open_start, open_end.max(end)))
+            }
             Some((open_start, open_end)) => {
                 total = total.saturating_add(open_end - open_start);
                 current = Some((start, end));
@@ -10648,10 +10924,7 @@ fn split_tool_result(value: &Value) -> (Value, Option<(String, String, usize)>) 
         return (value.clone(), None);
     }
     let inline = compact_tool_result(value);
-    let sha = format!(
-        "sha256:{}",
-        hex::encode(Sha256::digest(full.as_bytes()))
-    );
+    let sha = format!("sha256:{}", hex::encode(Sha256::digest(full.as_bytes())));
     let bytes = full.len();
     (inline, Some((sha, full, bytes)))
 }
@@ -10703,25 +10976,22 @@ fn query_runs_by_ids(
     );
     let mut statement = connection.prepare(&sql)?;
     let records = statement
-        .query_map(
-            rusqlite::params_from_iter(run_ids.iter()),
-            |row| {
-                Ok(RunRecord {
-                    id: row.get(0)?,
-                    conversation_id: row.get(1)?,
-                    runtime_session_id: row.get(2)?,
-                    status: row.get(3)?,
-                    model: row.get(4)?,
-                    started_at: row.get(5)?,
-                    finished_at: row.get(6)?,
-                    error_code: row.get(7)?,
-                    error_message: row.get(8)?,
-                    last_seq: row.get(9)?,
-                    trace_id: row.get(10)?,
-                    root_span_id: row.get(11)?,
-                })
-            },
-        )?
+        .query_map(rusqlite::params_from_iter(run_ids.iter()), |row| {
+            Ok(RunRecord {
+                id: row.get(0)?,
+                conversation_id: row.get(1)?,
+                runtime_session_id: row.get(2)?,
+                status: row.get(3)?,
+                model: row.get(4)?,
+                started_at: row.get(5)?,
+                finished_at: row.get(6)?,
+                error_code: row.get(7)?,
+                error_message: row.get(8)?,
+                last_seq: row.get(9)?,
+                trace_id: row.get(10)?,
+                root_span_id: row.get(11)?,
+            })
+        })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(records)
 }
@@ -10894,12 +11164,38 @@ mod tests {
         use fox_agent_backend::provider_protocol::ProtocolProfile;
         let (database, path) = test_database();
         let provider = ModelProviderRecord {
-            id: "protocol-test".into(), name: "Protocol test".into(), icon: None,
-            base_url: "https://example.com/v1".into(), api_type: "openai-completions".into(),
-            enabled: true, is_default: true, credential_configured: false, connection_type: "remote".into(),
-            last_status: "unknown".into(), last_latency_ms: None, last_checked_at: None, created_at: 0, updated_at: 0,
-            models: vec![ProviderModelRecord { id: "model-test".into(), model_id: "native-model".into(), display_name: "Native".into(), context_window: 128000, max_output_tokens: 8192, supports_image_input: false, is_default: true }],
-            protocol_profiles: vec![ProtocolProfile { preset_id: None, id: "responses".into(), api_type: "openai-responses".into(), base_url: "https://example.com/responses-api/v1".into(), model_id: "codex-model".into(), separate_credential: true, credential_configured: false }],
+            id: "protocol-test".into(),
+            name: "Protocol test".into(),
+            icon: None,
+            base_url: "https://example.com/v1".into(),
+            api_type: "openai-completions".into(),
+            enabled: true,
+            is_default: true,
+            credential_configured: false,
+            connection_type: "remote".into(),
+            last_status: "unknown".into(),
+            last_latency_ms: None,
+            last_checked_at: None,
+            created_at: 0,
+            updated_at: 0,
+            models: vec![ProviderModelRecord {
+                id: "model-test".into(),
+                model_id: "native-model".into(),
+                display_name: "Native".into(),
+                context_window: 128000,
+                max_output_tokens: 8192,
+                supports_image_input: false,
+                is_default: true,
+            }],
+            protocol_profiles: vec![ProtocolProfile {
+                preset_id: None,
+                id: "responses".into(),
+                api_type: "openai-responses".into(),
+                base_url: "https://example.com/responses-api/v1".into(),
+                model_id: "codex-model".into(),
+                separate_credential: true,
+                credential_configured: false,
+            }],
         };
         let saved = database.save_model_provider(&provider).unwrap();
         assert_eq!(saved.protocol_profiles, provider.protocol_profiles);
@@ -10914,7 +11210,10 @@ mod tests {
         assert!(migrated.protocol_profiles.is_empty());
         assert_eq!(migrated.models[0].model_id, "native-model");
         assert_eq!(migrated.api_type, "openai-completions");
-        assert_eq!(reopened.schema_version().unwrap(), crate::database::DATABASE_SCHEMA_VERSION);
+        assert_eq!(
+            reopened.schema_version().unwrap(),
+            crate::database::DATABASE_SCHEMA_VERSION
+        );
         drop(reopened);
         let _ = std::fs::remove_file(path);
     }
@@ -10980,7 +11279,10 @@ mod tests {
             .create_run(&busy.id, "请处理", None)
             .expect("create run");
         let queued = summary(&database, &busy.id);
-        assert_eq!(queued.active_run_id.as_deref(), Some(started.run.id.as_str()));
+        assert_eq!(
+            queued.active_run_id.as_deref(),
+            Some(started.run.id.as_str())
+        );
         assert_eq!(queued.active_run_status.as_deref(), Some("queued"));
         assert!(!queued.awaiting_approval);
         // The idle conversation is untouched by its neighbour's Run.
@@ -11048,22 +11350,59 @@ mod tests {
         let beta = root.join("Beta");
         std::fs::create_dir_all(&alpha).expect("create Alpha folder");
         std::fs::create_dir_all(&beta).expect("create Beta folder");
-        let alpha_conversation = database.create_conversation("fox-general", Some("Alpha"), alpha.to_str(), None).expect("create Alpha");
-        database.create_conversation("fox-general", Some("Beta"), beta.to_str(), None).expect("create Beta");
+        let alpha_conversation = database
+            .create_conversation("fox-general", Some("Alpha"), alpha.to_str(), None)
+            .expect("create Alpha");
+        database
+            .create_conversation("fox-general", Some("Beta"), beta.to_str(), None)
+            .expect("create Beta");
         let initial = database.list_projects().expect("list projects");
         let order: Vec<_> = initial.iter().map(|p| p.id.clone()).collect();
-        let beta_id = initial.iter().find(|p| p.name == "Beta").expect("Beta").id.clone();
-        assert!(database.set_project_pinned("missing-project", true).expect("missing id").is_none());
-        assert!(database.set_project_pinned(&beta_id, true).expect("pin Beta").expect("Beta exists").pinned);
-        assert_eq!(database.list_projects().expect("pinned list")[0].id, beta_id);
-        database.create_conversation("fox-general", Some("Alpha again"), alpha.to_str(), None).expect("open Alpha again");
-        assert_eq!(database.list_projects().expect("stable pinned list")[0].id, beta_id);
+        let beta_id = initial
+            .iter()
+            .find(|p| p.name == "Beta")
+            .expect("Beta")
+            .id
+            .clone();
+        assert!(database
+            .set_project_pinned("missing-project", true)
+            .expect("missing id")
+            .is_none());
+        assert!(
+            database
+                .set_project_pinned(&beta_id, true)
+                .expect("pin Beta")
+                .expect("Beta exists")
+                .pinned
+        );
+        assert_eq!(
+            database.list_projects().expect("pinned list")[0].id,
+            beta_id
+        );
+        database
+            .create_conversation("fox-general", Some("Alpha again"), alpha.to_str(), None)
+            .expect("open Alpha again");
+        assert_eq!(
+            database.list_projects().expect("stable pinned list")[0].id,
+            beta_id
+        );
         assert!(database.load_conversation(&alpha_conversation.id).is_ok());
         drop(database);
         let reopened = Database::open(path.clone()).expect("reopen database");
         assert!(reopened.list_projects().expect("durable pinned list")[0].pinned);
-        assert!(!reopened.set_project_pinned(&beta_id, false).expect("unpin").expect("Beta exists").pinned);
-        let restored: Vec<_> = reopened.list_projects().expect("restored order").iter().map(|p| p.id.clone()).collect();
+        assert!(
+            !reopened
+                .set_project_pinned(&beta_id, false)
+                .expect("unpin")
+                .expect("Beta exists")
+                .pinned
+        );
+        let restored: Vec<_> = reopened
+            .list_projects()
+            .expect("restored order")
+            .iter()
+            .map(|p| p.id.clone())
+            .collect();
         assert_eq!(restored, order);
         drop(reopened);
         let _ = std::fs::remove_file(path);
@@ -11075,24 +11414,55 @@ mod tests {
     #[test]
     fn sidebar_latest_run_restores_question_waiting_and_completion() {
         let (database, path) = test_database();
-        let conversation = database.create_conversation("fox-general", Some("Question state"), None, None).expect("conversation");
-        let run = database.create_run(&conversation.id, "Choose a scope", None).expect("run");
-        database.apply_runtime_event(&run.run.id, 1, &json!({"type":"run.started"})).expect("start");
+        let conversation = database
+            .create_conversation("fox-general", Some("Question state"), None, None)
+            .expect("conversation");
+        let run = database
+            .create_run(&conversation.id, "Choose a scope", None)
+            .expect("run");
+        database
+            .apply_runtime_event(&run.run.id, 1, &json!({"type":"run.started"}))
+            .expect("start");
         database.apply_runtime_event(&run.run.id, 2, &json!({"type":"user.question.requested","questions":[{"question_id":"scope","question":"Choose scope"}]})).expect("question");
-        database.apply_runtime_event(&run.run.id, 3, &json!({"type":"run.completed","completionReason":"awaiting_user"})).expect("completed question turn");
-        let question = database.list_conversations().expect("list").into_iter().find(|r| r.id == conversation.id).expect("question row");
+        database
+            .apply_runtime_event(
+                &run.run.id,
+                3,
+                &json!({"type":"run.completed","completionReason":"awaiting_user"}),
+            )
+            .expect("completed question turn");
+        let question = database
+            .list_conversations()
+            .expect("list")
+            .into_iter()
+            .find(|r| r.id == conversation.id)
+            .expect("question row");
         assert_eq!(question.last_run_status.as_deref(), Some("completed"));
         assert!(question.awaiting_reply);
         assert!(question.active_run_id.is_none());
-        database.create_resumed_run(&conversation.id, &run.run.id, "Selected scope A").expect("resume question");
-        let resumed = database.list_conversations().expect("list resumed").into_iter().find(|r| r.id == conversation.id).expect("resumed row");
+        database
+            .create_resumed_run(&conversation.id, &run.run.id, "Selected scope A")
+            .expect("resume question");
+        let resumed = database
+            .list_conversations()
+            .expect("list resumed")
+            .into_iter()
+            .find(|r| r.id == conversation.id)
+            .expect("resumed row");
         assert!(!resumed.awaiting_reply);
         assert_eq!(resumed.active_run_status.as_deref(), Some("queued"));
         let resumed_id = resumed.active_run_id.expect("new Run");
-        database.apply_runtime_event(&resumed_id, 1, &json!({"type":"run.completed"})).expect("complete response");
+        database
+            .apply_runtime_event(&resumed_id, 1, &json!({"type":"run.completed"}))
+            .expect("complete response");
         drop(database);
         let reopened = Database::open(path.clone()).expect("reopen database");
-        let done = reopened.list_conversations().expect("list completed").into_iter().find(|r| r.id == conversation.id).expect("completed row");
+        let done = reopened
+            .list_conversations()
+            .expect("list completed")
+            .into_iter()
+            .find(|r| r.id == conversation.id)
+            .expect("completed row");
         assert_eq!(done.last_run_status.as_deref(), Some("completed"));
         assert!(!done.awaiting_reply);
         assert!(done.active_run_id.is_none());
@@ -11103,12 +11473,32 @@ mod tests {
     #[test]
     fn sidebar_latest_run_does_not_wait_for_closed_or_empty_questions() {
         let (database, path) = test_database();
-        for (title, questions) in [("normal completion", json!([{"question":"Choose scope"}])), ("empty question", json!([]))] {
-            let conversation = database.create_conversation("fox-general", Some(title), None, None).expect("conversation");
-            let run = database.create_run(&conversation.id, "Question closure", None).expect("run");
-            database.apply_runtime_event(&run.run.id, 1, &json!({"type":"user.question.requested","questions":questions})).expect("question");
-            database.apply_runtime_event(&run.run.id, 2, &json!({"type":"run.completed"})).expect("normal completion");
-            let completed = database.list_conversations().expect("list").into_iter().find(|r| r.id == conversation.id).expect("row");
+        for (title, questions) in [
+            ("normal completion", json!([{"question":"Choose scope"}])),
+            ("empty question", json!([])),
+        ] {
+            let conversation = database
+                .create_conversation("fox-general", Some(title), None, None)
+                .expect("conversation");
+            let run = database
+                .create_run(&conversation.id, "Question closure", None)
+                .expect("run");
+            database
+                .apply_runtime_event(
+                    &run.run.id,
+                    1,
+                    &json!({"type":"user.question.requested","questions":questions}),
+                )
+                .expect("question");
+            database
+                .apply_runtime_event(&run.run.id, 2, &json!({"type":"run.completed"}))
+                .expect("normal completion");
+            let completed = database
+                .list_conversations()
+                .expect("list")
+                .into_iter()
+                .find(|r| r.id == conversation.id)
+                .expect("row");
             assert!(!completed.awaiting_reply);
             assert_eq!(completed.last_run_status.as_deref(), Some("completed"));
         }
@@ -11388,20 +11778,41 @@ mod tests {
     fn default_assistant_compute_permissions_survive_existing_database_upgrade() {
         // Shared with the JS tool-selection test: exercise the default assistant
         // whitelist as well as the expert whitelist, not an unrestricted null.
-        let expected: Value = serde_json::from_str(include_str!("../../../../../services/agent-runtime/test/fixtures/default-assistant-tools.json")).unwrap();
+        let expected: Value = serde_json::from_str(include_str!(
+            "../../../../../services/agent-runtime/test/fixtures/default-assistant-tools.json"
+        ))
+        .unwrap();
         let (database, path) = test_database();
         let agent = database.get_agent(DEFAULT_AGENT_ID).unwrap().unwrap();
         assert_eq!(agent.package_manifest["allowedTools"], expected);
-        assert!(expected.as_array().unwrap().contains(&json!("attachment_compute")));
+        assert!(expected
+            .as_array()
+            .unwrap()
+            .contains(&json!("attachment_compute")));
         let mut old_manifest = agent.package_manifest;
-        old_manifest["allowedTools"].as_array_mut().unwrap().retain(|name| name != "attachment_compute");
-        database.with_connection(|connection| {
-            connection.execute("UPDATE agents SET package_manifest_json=?1 WHERE id=?2", params![old_manifest.canonical_string(), DEFAULT_AGENT_ID])?;
-            Ok(())
-        }).unwrap();
+        old_manifest["allowedTools"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|name| name != "attachment_compute");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE agents SET package_manifest_json=?1 WHERE id=?2",
+                    params![old_manifest.canonical_string(), DEFAULT_AGENT_ID],
+                )?;
+                Ok(())
+            })
+            .unwrap();
         drop(database);
         let reopened = Database::open(path.clone()).unwrap();
-        assert_eq!(reopened.get_agent(DEFAULT_AGENT_ID).unwrap().unwrap().package_manifest["allowedTools"], expected);
+        assert_eq!(
+            reopened
+                .get_agent(DEFAULT_AGENT_ID)
+                .unwrap()
+                .unwrap()
+                .package_manifest["allowedTools"],
+            expected
+        );
         drop(reopened);
         let _ = std::fs::remove_file(path);
     }
@@ -11685,7 +12096,10 @@ mod tests {
         );
         let legacy_snapshot = first.package_snapshot.clone();
         let mut legacy_without_skills = legacy_snapshot.clone();
-        legacy_without_skills.as_object_mut().unwrap().remove("enabledSkills");
+        legacy_without_skills
+            .as_object_mut()
+            .unwrap()
+            .remove("enabledSkills");
         database.with_connection(|connection| {
             connection.execute(
                 "UPDATE conversation_expert_bindings SET package_snapshot_json = ?2, package_hash = 'legacy-hash' WHERE id = ?1",
@@ -11693,13 +12107,29 @@ mod tests {
             )?;
             Ok(())
         }).unwrap();
-        database.set_agent_skill_enabled("fox-debugger", "legacy-skill", true).unwrap();
-        let materialized = database.current_conversation_expert_binding(&conversation.id)
-            .unwrap().unwrap();
-        assert_eq!(materialized.package_snapshot["enabledSkills"], json!(["legacy-skill"]));
-        assert_eq!(materialized.package_snapshot["systemPrompt"], legacy_snapshot["systemPrompt"]);
-        assert_eq!(materialized.package_snapshot["resources"], legacy_snapshot["resources"]);
-        assert_eq!(materialized.package_hash, package_snapshot_hash(&materialized.package_snapshot));
+        database
+            .set_agent_skill_enabled("fox-debugger", "legacy-skill", true)
+            .unwrap();
+        let materialized = database
+            .current_conversation_expert_binding(&conversation.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            materialized.package_snapshot["enabledSkills"],
+            json!(["legacy-skill"])
+        );
+        assert_eq!(
+            materialized.package_snapshot["systemPrompt"],
+            legacy_snapshot["systemPrompt"]
+        );
+        assert_eq!(
+            materialized.package_snapshot["resources"],
+            legacy_snapshot["resources"]
+        );
+        assert_eq!(
+            materialized.package_hash,
+            package_snapshot_hash(&materialized.package_snapshot)
+        );
 
         let second = database
             .bind_conversation_expert(&conversation.id, "fox-reviewer", "manual")
@@ -11730,7 +12160,10 @@ mod tests {
         assert_eq!(detail.expert_bindings[0].state, "replaced");
         assert!(detail.expert_bindings[0].deactivated_at.is_some());
         assert_eq!(detail.expert_bindings[1].state, "active");
-        assert_eq!(detail.expert_bindings[1].expert_id.as_deref(), Some("fox-reviewer"));
+        assert_eq!(
+            detail.expert_bindings[1].expert_id.as_deref(),
+            Some("fox-reviewer")
+        );
 
         let removed = reopened
             .remove_conversation_expert(&conversation.id)
@@ -11925,13 +12358,21 @@ mod tests {
                 .bind_conversation_expert(&dialog.id, "fox-reviewer", "manual")
                 .expect("idle conversation can replace its expert after messages");
             assert_eq!(replacement.expert_id.as_deref(), Some("fox-reviewer"));
-            let history = database.list_conversation_expert_bindings(&dialog.id).unwrap();
+            let history = database
+                .list_conversation_expert_bindings(&dialog.id)
+                .unwrap();
             assert_eq!(history.len(), 2);
             assert_eq!(history[0].state, "replaced");
             assert_eq!(history[1].state, "active");
-            let preserved = database.with_connection(|connection| {
-                connection.query_row("SELECT content FROM messages WHERE conversation_id = ?1", [&dialog.id], |row| row.get::<_, String>(0))
-            }).unwrap();
+            let preserved = database
+                .with_connection(|connection| {
+                    connection.query_row(
+                        "SELECT content FROM messages WHERE conversation_id = ?1",
+                        [&dialog.id],
+                        |row| row.get::<_, String>(0),
+                    )
+                })
+                .unwrap();
             assert_eq!(preserved, "hello");
             assert_eq!(
                 database.remove_conversation_expert(&dialog.id).unwrap_err(),
@@ -12175,12 +12616,23 @@ mod tests {
                 .iter()
                 .map(|event| event.event_type.as_str())
                 .collect::<Vec<_>>(),
-            vec!["run.started", "message.started", "message.delta", "message.delta"]
+            vec![
+                "run.started",
+                "message.started",
+                "message.delta",
+                "message.delta"
+            ]
         );
         assert_eq!(detail.runtime_events[2].event["deltaLength"], 10);
         assert_eq!(detail.runtime_events[3].event["deltaLength"], 3);
-        assert_eq!(detail.runtime_events[2].event["deltaFingerprint"], answer_delta_fingerprint("hello back"));
-        assert_eq!(detail.runtime_events[3].event["deltaFingerprint"], "0e93180be4fd9c9e");
+        assert_eq!(
+            detail.runtime_events[2].event["deltaFingerprint"],
+            answer_delta_fingerprint("hello back")
+        );
+        assert_eq!(
+            detail.runtime_events[3].event["deltaFingerprint"],
+            "0e93180be4fd9c9e"
+        );
         assert!(detail.runtime_events[2].event.get("delta").is_none());
         assert!(detail.runtime_events[3].event.get("delta").is_none());
         let history = database
@@ -12410,52 +12862,111 @@ mod tests {
         // 13.38（A-2）：取消宽限期（cancelling）里，外部后端工具卡的输出与结束照常落库；
         // run.cancelled 把没结束的卡定格为 cancelled，已写下的输出原样保留。
         let (database, path) = test_database();
-        let conversation = database.create_conversation(DEFAULT_AGENT_ID, None, None, None).expect("create conversation");
-        let started = database.create_run(&conversation.id, "ping", None).expect("create run");
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create conversation");
+        let started = database
+            .create_run(&conversation.id, "ping", None)
+            .expect("create run");
         let run = started.run.id.clone();
-        database.apply_runtime_event(&run, 1, &serde_json::json!({ "type": "run.started" })).expect("run.started");
+        database
+            .apply_runtime_event(&run, 1, &serde_json::json!({ "type": "run.started" }))
+            .expect("run.started");
         database.apply_runtime_event(&run, 2, &serde_json::json!({ "type": "tool.started", "toolCallId": "p1", "tool": "bash", "input": { "command": "ping -n 60 127.0.0.1" } })).expect("tool.started");
         database.mark_run_cancelling(&run).expect("cancelling");
         let applied = database.apply_runtime_event(&run, 3, &serde_json::json!({ "type": "tool.updated", "toolCallId": "p1",
             "update": { "status": "in_progress", "text": "来自 127.0.0.1 的回复\n", "output": "来自 127.0.0.1 的回复\n", "streamedOutput": true } })).expect("tool.updated while cancelling");
         assert!(applied, "cancelling 期间的工具输出不再被丢弃");
         // 其它事件、以及取消期间才出现的卡，在 cancelling 期间照旧被丢弃（不报投影错误）。
-        assert!(!database.apply_runtime_event(&run, 4, &serde_json::json!({ "type": "message.delta", "delta": "late" })).expect("late delta"));
+        assert!(!database
+            .apply_runtime_event(
+                &run,
+                4,
+                &serde_json::json!({ "type": "message.delta", "delta": "late" })
+            )
+            .expect("late delta"));
         assert!(!database.apply_runtime_event(&run, 6, &serde_json::json!({ "type": "tool.updated", "toolCallId": "never-started", "update": { "text": "x" } })).expect("unknown tool while cancelling"));
-        database.apply_runtime_event(&run, 7, &serde_json::json!({ "type": "run.cancelled" })).expect("run.cancelled");
+        database
+            .apply_runtime_event(&run, 7, &serde_json::json!({ "type": "run.cancelled" }))
+            .expect("run.cancelled");
         let (status, result): (String, String) = database.with_connection(|connection| connection.query_row(
             "SELECT status, result_json FROM tool_calls WHERE run_id = ?1 AND runtime_tool_call_id = 'p1'", [&run],
             |row| Ok((row.get(0)?, row.get(1)?)))).expect("tool row");
         assert_eq!(status, "cancelled");
-        assert!(result.contains("来自 127.0.0.1 的回复"), "取消前的输出保留：{result}");
+        assert!(
+            result.contains("来自 127.0.0.1 的回复"),
+            "取消前的输出保留：{result}"
+        );
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn host_tool_live_output_only_touches_running_host_cards() {
         let (database, path) = test_database();
-        let conversation = database.create_conversation(DEFAULT_AGENT_ID, None, None, None).expect("create conversation");
-        let started = database.create_run(&conversation.id, "ping", None).expect("create run");
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create conversation");
+        let started = database
+            .create_run(&conversation.id, "ping", None)
+            .expect("create run");
         let run = started.run.id.clone();
-        database.apply_runtime_event(&run, 1, &serde_json::json!({ "type": "run.started" })).expect("run.started");
-        database.create_host_tool_call(&run, "host-1", "run_command", &serde_json::json!({ "command": "ping" }), "running", false).expect("host tool call");
-        assert!(database.update_host_tool_live_output(&run, "host-1", "正在 Ping\n").expect("live output"));
-        assert!(!database.update_host_tool_live_output(&run, "missing", "x").expect("unknown card"), "不存在的卡不写");
+        database
+            .apply_runtime_event(&run, 1, &serde_json::json!({ "type": "run.started" }))
+            .expect("run.started");
+        database
+            .create_host_tool_call(
+                &run,
+                "host-1",
+                "run_command",
+                &serde_json::json!({ "command": "ping" }),
+                "running",
+                false,
+            )
+            .expect("host tool call");
+        assert!(database
+            .update_host_tool_live_output(&run, "host-1", "正在 Ping\n")
+            .expect("live output"));
+        assert!(
+            !database
+                .update_host_tool_live_output(&run, "missing", "x")
+                .expect("unknown card"),
+            "不存在的卡不写"
+        );
         let result: String = database.with_connection(|connection| connection.query_row(
             "SELECT result_json FROM tool_calls WHERE run_id = ?1 AND runtime_tool_call_id = 'host-1'", [&run], |row| row.get(0))).expect("row");
-        assert!(result.contains("正在 Ping") && result.contains("streamedOutput"), "{result}");
+        assert!(
+            result.contains("正在 Ping") && result.contains("streamedOutput"),
+            "{result}"
+        );
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn provider_trouble_is_detected_from_retry_and_provider_failure_events() {
         let (database, path) = test_database();
-        let conversation = database.create_conversation(DEFAULT_AGENT_ID, None, None, None).expect("create conversation");
-        let quiet = database.create_run(&conversation.id, "quiet", None).expect("create run");
-        database.apply_runtime_event(&quiet.run.id, 1, &serde_json::json!({ "type": "run.started" })).expect("run.started");
-        assert!(!database.run_had_provider_trouble(&quiet.run.id).expect("query"));
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create conversation");
+        let quiet = database
+            .create_run(&conversation.id, "quiet", None)
+            .expect("create run");
+        database
+            .apply_runtime_event(
+                &quiet.run.id,
+                1,
+                &serde_json::json!({ "type": "run.started" }),
+            )
+            .expect("run.started");
+        assert!(!database
+            .run_had_provider_trouble(&quiet.run.id)
+            .expect("query"));
         database.apply_runtime_event(&quiet.run.id, 2, &serde_json::json!({ "type": "run.retrying", "attempt": 1, "maxAttempts": 3, "message": "socket hang up" })).expect("run.retrying");
-        assert!(database.run_had_provider_trouble(&quiet.run.id).expect("query"), "模型重试算模型服务问题");
+        assert!(
+            database
+                .run_had_provider_trouble(&quiet.run.id)
+                .expect("query"),
+            "模型重试算模型服务问题"
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -15446,8 +15957,15 @@ mod tests {
             .create_conversation(DEFAULT_AGENT_ID, None, Some(&first_root), Some("ask"))
             .expect("create conversation");
         let before = conversation.project_id.clone().expect("first project");
-        let _ = database.create_run(&conversation.id, "列出目录", None).expect("run");
-        assert!(!database.conversation_has_completed_run(&conversation.id).unwrap(), "还没有完成的一轮");
+        let _ = database
+            .create_run(&conversation.id, "列出目录", None)
+            .expect("run");
+        assert!(
+            !database
+                .conversation_has_completed_run(&conversation.id)
+                .unwrap(),
+            "还没有完成的一轮"
+        );
 
         let moved = database
             .change_conversation_project(&conversation.id, Some(&second_root), "allow")
@@ -15467,13 +15985,27 @@ mod tests {
             .unwrap();
         assert_eq!(back.project_id.as_deref(), Some(before.as_str()));
         let mode: String = database
-            .with_connection(|connection| connection.query_row("SELECT permission_mode FROM projects WHERE id = ?1", [&before], |row| row.get(0)))
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT permission_mode FROM projects WHERE id = ?1",
+                    [&before],
+                    |row| row.get(0),
+                )
+            })
             .unwrap();
         assert_eq!(mode, "ask");
-        let cleared = database.change_conversation_project(&conversation.id, None, "ask").unwrap().unwrap();
+        let cleared = database
+            .change_conversation_project(&conversation.id, None, "ask")
+            .unwrap()
+            .unwrap();
         assert!(cleared.project_root.is_none() && cleared.project_id.is_none());
-        assert!(database.change_conversation_project("missing", None, "ask").unwrap().is_none());
-        assert!(database.change_conversation_project(&conversation.id, None, "full").is_err());
+        assert!(database
+            .change_conversation_project("missing", None, "ask")
+            .unwrap()
+            .is_none());
+        assert!(database
+            .change_conversation_project(&conversation.id, None, "full")
+            .is_err());
 
         drop(database);
         let _ = std::fs::remove_file(path);
@@ -15580,7 +16112,10 @@ mod tests {
             "a conversation created after the default changed starts from it"
         );
         assert_eq!(
-            database.execution_policy(&later.id).expect("policy").version,
+            database
+                .execution_policy(&later.id)
+                .expect("policy")
+                .version,
             1,
             "a brand-new conversation's policy starts at generation 1"
         );
@@ -15626,8 +16161,16 @@ mod tests {
             .create_conversation(DEFAULT_AGENT_ID, None, Some(root), Some("ask"))
             .expect("create project conversation");
         let project_id = conversation.project_id.expect("linked project");
-        let policy = database.execution_policy(&conversation.id).expect("initial policy");
-        database.change_execution_policy(&conversation.id, "local-choice", policy.version, "read_only")
+        let policy = database
+            .execution_policy(&conversation.id)
+            .expect("initial policy");
+        database
+            .change_execution_policy(
+                &conversation.id,
+                "local-choice",
+                policy.version,
+                "read_only",
+            )
             .expect("set explicit conversation permission");
         drop(database);
 
@@ -15637,21 +16180,59 @@ mod tests {
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='execution_policy_project_change'",
                 [], |row| row.get(0),
             )).expect("project propagation trigger count");
-            assert_eq!(trigger_count, 0, "project propagation revived on reopen {reopen}");
-            database.update_project_permission_mode(&project_id, if reopen == 0 { "allow" } else { "ask" })
-                .expect("change project default").expect("project exists");
-            assert_eq!(database.execution_policy(&conversation.id).expect("policy").mode, "read_only");
-            assert_eq!(database.load_conversation(&conversation.id).expect("conversation").conversation.permission_mode, "read_only");
+            assert_eq!(
+                trigger_count, 0,
+                "project propagation revived on reopen {reopen}"
+            );
+            database
+                .update_project_permission_mode(
+                    &project_id,
+                    if reopen == 0 { "allow" } else { "ask" },
+                )
+                .expect("change project default")
+                .expect("project exists");
+            assert_eq!(
+                database
+                    .execution_policy(&conversation.id)
+                    .expect("policy")
+                    .mode,
+                "read_only"
+            );
+            assert_eq!(
+                database
+                    .load_conversation(&conversation.id)
+                    .expect("conversation")
+                    .conversation
+                    .permission_mode,
+                "read_only"
+            );
             if reopen == 1 {
-                assert!(database.delete_project(&project_id).expect("delete project"));
-                let detached = database.load_conversation(&conversation.id).expect("detached conversation").conversation;
+                assert!(database
+                    .delete_project(&project_id)
+                    .expect("delete project"));
+                let detached = database
+                    .load_conversation(&conversation.id)
+                    .expect("detached conversation")
+                    .conversation;
                 assert_eq!(detached.project_id, None);
                 assert_eq!(detached.permission_mode, "read_only");
-                assert_eq!(database.execution_policy(&conversation.id).expect("detached policy").mode, "read_only");
+                assert_eq!(
+                    database
+                        .execution_policy(&conversation.id)
+                        .expect("detached policy")
+                        .mode,
+                    "read_only"
+                );
             }
         }
         let database = Database::open(path.clone()).expect("reopen after project deletion");
-        assert_eq!(database.execution_policy(&conversation.id).expect("final policy").mode, "read_only");
+        assert_eq!(
+            database
+                .execution_policy(&conversation.id)
+                .expect("final policy")
+                .mode,
+            "read_only"
+        );
         drop(database);
         let _ = std::fs::remove_file(path);
     }
@@ -16076,7 +16657,9 @@ mod tests {
         let other = database
             .create_conversation(database.default_agent_id(), Some("other"), None, None)
             .unwrap();
-        let started = database.create_run(&conversation.id, "range", None).unwrap();
+        let started = database
+            .create_run(&conversation.id, "range", None)
+            .unwrap();
         let text = "中文内容😀".repeat(20);
         seed_settled_tool_call(
             &database,
@@ -16167,7 +16750,9 @@ mod tests {
         let conversation = database
             .create_conversation(database.default_agent_id(), Some("preview"), None, None)
             .unwrap();
-        let started = database.create_run(&conversation.id, "preview", None).unwrap();
+        let started = database
+            .create_run(&conversation.id, "preview", None)
+            .unwrap();
         // Above MAX_STORED_TOOL_RESULT_BYTES the row holds a Fox preview, so the
         // reader must say so instead of implying the full text is available.
         let stored = json!({
@@ -16192,7 +16777,10 @@ mod tests {
                 64_000,
             )
             .unwrap();
-        assert!(range.truncated, "a bounded stored copy must be reported as truncated");
+        assert!(
+            range.truncated,
+            "a bounded stored copy must be reported as truncated"
+        );
         assert!(
             !range.retrievable,
             "storage only kept a preview, so nothing beyond it is reachable from here"
@@ -16206,16 +16794,37 @@ mod tests {
 
     #[test]
     fn replacing_large_progress_clears_blob_pointer_for_small_empty_and_error_results() {
-        let database = Database::open(std::env::temp_dir().join(format!("fox-blob-replacement-{}.db", Uuid::new_v4()))).unwrap();
-        let conversation = database.create_conversation(database.default_agent_id(), Some("blob replacement"), None, None).unwrap();
+        let database = Database::open(
+            std::env::temp_dir().join(format!("fox-blob-replacement-{}.db", Uuid::new_v4())),
+        )
+        .unwrap();
+        let conversation = database
+            .create_conversation(
+                database.default_agent_id(),
+                Some("blob replacement"),
+                None,
+                None,
+            )
+            .unwrap();
         let started = database.create_run(&conversation.id, "test", None).unwrap();
         let big = json!({"content":[{"type":"text","text":"progress".repeat(30_000)}]});
         for (index, (final_result, is_error, host)) in [
-            (json!({"content":[{"type":"text","text":"final-small"}]}), false, false),
+            (
+                json!({"content":[{"type":"text","text":"final-small"}]}),
+                false,
+                false,
+            ),
             (Value::Null, false, false),
             (json!({"error":"final failure"}), true, false),
-            (json!({"content":[{"type":"text","text":"host-final"}]}), false, true),
-        ].into_iter().enumerate() {
+            (
+                json!({"content":[{"type":"text","text":"host-final"}]}),
+                false,
+                true,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let call = format!("replace-{index}");
             database.with_connection(|connection| {
                 connection.execute("UPDATE runs SET status='running' WHERE id=?1", [&started.run.id])?;
@@ -16226,14 +16835,25 @@ mod tests {
                 project_tool_updated(&tx, &started.run.id, &json!({"toolCallId":call,"tool":"read","update":big}), 2)?;
                 tx.commit()
             }).unwrap();
-            let reference = format!("fox-result://{}/{call}",started.run.id);
-            assert!(database.tool_result_range(&reference,&conversation.id,0,4096).unwrap().content.starts_with("progress"));
+            let reference = format!("fox-result://{}/{call}", started.run.id);
+            assert!(database
+                .tool_result_range(&reference, &conversation.id, 0, 4096)
+                .unwrap()
+                .content
+                .starts_with("progress"));
             if host {
                 database.with_connection(|connection| {
                     connection.execute("UPDATE tool_calls SET execution_location='host' WHERE run_id=?1 AND runtime_tool_call_id=?2", params![started.run.id,call])?;
                     Ok(())
                 }).unwrap();
-                database.complete_host_tool_call(&started.run.id,&call,Some(&final_result),is_error.then_some("failure")).unwrap();
+                database
+                    .complete_host_tool_call(
+                        &started.run.id,
+                        &call,
+                        Some(&final_result),
+                        is_error.then_some("failure"),
+                    )
+                    .unwrap();
             } else {
                 database.with_connection(|connection| {
                     let tx = connection.transaction()?;
@@ -16246,9 +16866,14 @@ mod tests {
                     tx.commit()
                 }).unwrap();
             }
-            let range = database.tool_result_range(&reference,&conversation.id,0,4096).unwrap();
-            let expected = final_result["content"][0]["text"].as_str().map(str::to_owned).unwrap_or_else(||final_result.canonical_string());
-            assert_eq!(range.content,expected);
+            let range = database
+                .tool_result_range(&reference, &conversation.id, 0, 4096)
+                .unwrap();
+            let expected = final_result["content"][0]["text"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| final_result.canonical_string());
+            assert_eq!(range.content, expected);
             database.with_connection(|connection| {
                 let pointer: Option<String> = connection.query_row("SELECT result_blob_sha256 FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id=?2",params![started.run.id,call],|row|row.get(0))?;
                 assert!(pointer.is_none());
@@ -16307,7 +16932,10 @@ mod tests {
             .unwrap();
         let inline: Value = serde_json::from_str(&inline).unwrap();
         assert_eq!(inline["truncated"], true);
-        assert!(blob_sha.is_some(), "the full copy must be spilled to the blob table");
+        assert!(
+            blob_sha.is_some(),
+            "the full copy must be spilled to the blob table"
+        );
         let blob: String = database
             .with_connection(|connection| {
                 Ok(connection.query_row(
@@ -16317,13 +16945,19 @@ mod tests {
                 )?)
             })
             .unwrap();
-        assert!(blob.contains("tail-marker-终"), "blob keeps the full result");
+        assert!(
+            blob.contains("tail-marker-终"),
+            "blob keeps the full result"
+        );
         // Range reading reassembles every byte and reports retrievable.
         let reference = format!("fox-result://{}/call-big", started.run.id);
         let first = database
             .tool_result_range(&reference, &conversation.id, 0, 64_000)
             .unwrap();
-        assert!(first.retrievable, "blob-backed results are fully retrievable");
+        assert!(
+            first.retrievable,
+            "blob-backed results are fully retrievable"
+        );
         // Served from the full blob: the range text itself is complete, so the
         // reader does not mark truncation; only an inline preview without a
         // blob reports truncated + not-retrievable (covered by the test above).
@@ -16394,7 +17028,10 @@ mod tests {
             loop {
                 let (start, end, next) = utf8_byte_range(text, offset, limit).unwrap();
                 assert_eq!(start, offset, "a legal offset must never be moved");
-                assert!(end > start, "a remaining tail must return a non-empty range");
+                assert!(
+                    end > start,
+                    "a remaining tail must return a non-empty range"
+                );
                 assert!(end - start <= limit, "the range must respect its own limit");
                 assert!(
                     !text[start..end].contains('\u{FFFD}'),
@@ -16434,7 +17071,9 @@ mod tests {
         let conversation = database
             .create_conversation(database.default_agent_id(), Some("boundary"), None, None)
             .unwrap();
-        let started = database.create_run(&conversation.id, "boundary", None).unwrap();
+        let started = database
+            .create_run(&conversation.id, "boundary", None)
+            .unwrap();
         seed_settled_tool_call(
             &database,
             &conversation.id,
@@ -16538,7 +17177,8 @@ mod tests {
                 10,
             )
             .expect("declare");
-        assert_eq!(names, vec!["report.md".to_owned()]);
+        assert_eq!(names.len(), 1);
+        assert!(names[0].starts_with("presented:run-1:"));
         let expected = hex::encode(sha2::Sha256::digest(contents));
         let (sha, size): (String, i64) = database
             .with_connection(|connection| {

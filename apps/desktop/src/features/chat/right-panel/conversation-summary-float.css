@@ -1,0 +1,22 @@
+.fox-summary-float {
+  position: absolute;
+  top: 52px;
+  right: 12px;
+  z-index: 26;
+  display: flex;
+  flex-direction: column;
+  width: min(320px, calc(100% - 24px));
+  max-height: calc(100% - 76px);
+  overflow: hidden;
+  border: 1px solid var(--fox-border);
+  border-radius: 14px;
+  background: var(--fox-card);
+  color: var(--fox-text);
+  box-shadow: var(--fox-shadow-md);
+}
+.fox-chat-pane:has(.fox-chat-quick-actions) > .fox-summary-float { right: 64px; width: min(320px, calc(100% - 76px)); }
+.fox-summary-float-header { display: flex; align-items: center; justify-content: space-between; flex: none; min-height: 42px; padding: 0 12px 0 16px; border-bottom: 1px solid var(--fox-border); font-size: var(--fox-type-meta); color: var(--fox-muted); }
+.fox-summary-float-header button { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: var(--fox-radius-control); background: transparent; color: inherit; }
+.fox-summary-float-header button:hover { background: var(--fox-hover); color: var(--fox-text); }
+.fox-summary-float-header button:focus-visible { outline: 2px solid var(--fox-outline); outline-offset: -2px; }
+.fox-summary-float > .fox-summary-page { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 16px 16px; scrollbar-width: thin; scrollbar-color: var(--fox-border-strong) transparent; }

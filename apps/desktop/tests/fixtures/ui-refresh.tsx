@@ -1,3 +1,4 @@
+import { RightPanelFixture, installRightPanelFixture } from './right-panel-fixture'
 import { useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { mockIPC } from '@tauri-apps/api/mocks'
@@ -17,6 +18,7 @@ import '../../src/styles/globals.css'
 import '../../src/styles/themes.css'
 import '../../src/styles/workbench.css'
 import '../../src/styles/workspace-pages.css'
+import '../../src/styles/areas/chat.css'
 import '../../src/styles/areas/pages.css'
 
 let contact: Companion = {
@@ -96,4 +98,5 @@ function Scene() {
     <style>{`.ui-refresh-fixture{height:100vh;display:flex;flex-direction:column;background:var(--fox-surface);color:var(--fox-text)}.fixture-controls{display:flex;align-items:center;gap:16px;padding:8px 20px;font-size:12px}.fixture-controls button{border:1px solid var(--fox-border);border-radius:6px;padding:4px 9px}.fixture-layout{display:flex;flex:1;min-height:0;gap:8px;padding:8px}.fixture-layout>.fox-content-card{margin:0;flex:1;min-width:0;container-type:inline-size;container-name:fox-chat}.fixture-layout .fox-chat-pane{height:100%;display:flex;flex-direction:column;position:relative}.fixture-layout .fox-chat-stage{flex:1;min-height:0}.fixture-layout>.fox-contact-side-card{flex:0 0 320px}`}</style>
   </ContactsContext.Provider></TooltipProvider>
 }
-createRoot(document.getElementById('root')!).render(<Scene />)
+if (location.search.includes('right-panel')) installRightPanelFixture()
+createRoot(document.getElementById('root')!).render(location.search.includes('right-panel') ? <RightPanelFixture /> : <Scene />)

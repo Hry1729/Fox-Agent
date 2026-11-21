@@ -1,27 +1,27 @@
+mod agent_config;
 mod app_capabilities;
 mod app_state;
 mod artifact_gateway;
 mod canonical_json;
 mod commands;
-mod database;
-mod data_paths;
 mod companion_notes_files;
+pub(crate) use database::companions::companion_team;
 mod companion_workspace;
 mod data_compute;
-mod report_pdf;
+mod data_paths;
+mod database;
 mod expert_packages;
 mod expert_teams;
 mod expert_workflows;
 mod external_backend;
 mod external_model;
-mod agent_config;
-mod search_service;
 mod external_policy;
 mod external_tools;
+mod html_preview;
 mod kernel;
 mod kernel_compaction;
-mod kernel_reconciliation;
 mod kernel_model_config;
+mod kernel_reconciliation;
 mod lifecycle_hooks;
 #[cfg(feature = "local-embedding")]
 mod local_embedding;
@@ -33,26 +33,26 @@ mod local_knowledge_vector;
 mod maintenance;
 mod mcp;
 mod mcp_openapi;
-mod office;
 mod model_reachability;
 mod model_service;
-mod runtime_host;
+mod office;
+mod process_jobs;
+mod report_pdf;
 mod resource_gateway;
+mod runtime_host;
 mod script_encoding;
+mod search_service;
 mod skills;
 mod startup_failure;
 mod system_proxy;
 mod tool_guard;
 mod tool_host;
-mod html_preview;
-mod process_jobs;
 mod vector_store;
+#[cfg(windows)]
+mod window_resize;
 mod work_diagnostics;
 mod work_mode_gate;
 mod yuxi;
-#[cfg(windows)]
-mod window_resize;
-
 
 use app_state::AppState;
 use database::Database;
@@ -159,11 +159,18 @@ pub fn run() {
     // Otherwise two development/acceptance instances can share localStorage and
     // cached conversation selections despite using different databases.
     let isolated_windows = std::env::var_os("FOX_DATA_DIR").map(|_| {
-        context.config_mut().app.windows.iter_mut().filter(|window|window.create).map(|window| {
-            let config = window.clone();
-            window.create = false;
-            config
-        }).collect::<Vec<_>>()
+        context
+            .config_mut()
+            .app
+            .windows
+            .iter_mut()
+            .filter(|window| window.create)
+            .map(|window| {
+                let config = window.clone();
+                window.create = false;
+                config
+            })
+            .collect::<Vec<_>>()
     });
     let app = tauri::Builder::default()
         .register_uri_scheme_protocol("fox-preview", |ctx,request| html_preview::serve(ctx.webview_label(),request))
@@ -301,6 +308,7 @@ pub fn run() {
                 app_data_dir,
                 skills_dir,
             ));
+            app.manage(commands::project_terminal::ProjectTerminals::default());
             // AppState 注册之后才能派发：调度器拉起的 Run 会调用 app.state::<AppState>()。
             commands::companion_deletions::resume_pending(&app.state::<AppState>());
             app.state::<AppState>().runtime_host.start_digital_colleague_scheduler();
@@ -358,6 +366,7 @@ pub fn run() {
             commands::companions::companion_ensure_default,
             commands::companions::companion_add_from_expert,
             commands::companions::companion_create_blank,
+            commands::companions::companion_next_default_name,
             commands::companions::companion_open,
             commands::companions::companion_update_profile,
             commands::companions::companion_set_model,
@@ -367,6 +376,8 @@ pub fn run() {
             commands::companion_files::companion_file_open,
             commands::companion_files::companion_file_save,
             commands::companions::companion_set_pinned,
+            commands::companions::companion_set_pinned_order,
+            commands::companions::companion_set_work_shortcuts,
             commands::companions::companion_mark_read,
             commands::companions::companion_mark_unread,
             commands::companions::companion_set_reminder_mode,
@@ -456,6 +467,11 @@ pub fn run() {
             companion_workspace::companion_import_files,
             companion_workspace::companion_export_file,
             commands::companion_deletions::companion_delete_preview,
+            commands::companions::companion_team_actions_list,
+            commands::companions::companion_assignments_list,
+            commands::companions::companion_assignment_answer,
+            commands::companions::companion_assignment_cancel,
+            commands::companions::companion_team_action_resolve,
             commands::companion_deletions::companion_delete,
             commands::companion_deletions::companion_delete_resume,
             commands::companion_deletions::companion_retained_list,
@@ -474,8 +490,15 @@ pub fn run() {
             commands::project_folder_pick,
             commands::project_folder_open,
             commands::external_url_open,
-            commands::project_files_list,
+            commands::project_files::project_files_list,
+            commands::project_files::project_files_children,
+            commands::project_files::project_files_search,
+            commands::project_terminal::project_terminal_start,
+            commands::project_terminal::project_terminal_write,
+            commands::project_terminal::project_terminal_resize,
+            commands::project_terminal::project_terminal_close,
             commands::project_file_read,
+            commands::conversation_office_preview_read,
             commands::project_file_action,
             commands::artifact_inspect,
             commands::artifact_action,
@@ -515,6 +538,10 @@ pub fn run() {
             commands::kernel_reconciliation_confirm,
             commands::kernel_reconciliation_resume,
             commands::kernel_reliability_snapshot,
+            commands::conversation_summary_files,
+            commands::conversation_command_tasks,
+            commands::conversation_command_task_output,
+            commands::conversation_command_task_stop,
             commands::kernel_job_execute,
             commands::kernel_job_start,
             commands::kernel_job_status,
@@ -660,13 +687,16 @@ pub fn run() {
         .expect("error while building Fox");
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            app_handle.state::<commands::project_terminal::ProjectTerminals>().close_all();
             // CX-2: shutdown already ran every step; its summary is the
             // diagnostic record of what could not be cleaned up.
             if let Err(error) = app_handle.state::<AppState>().runtime_host.shutdown() {
                 eprintln!("[fox.exit] runtime shutdown finished with errors: {error}");
             }
             mcp::shutdown_connections();
-            app_handle.state::<external_backend::ExternalBackendHost>().shutdown_blocking();
+            app_handle
+                .state::<external_backend::ExternalBackendHost>()
+                .shutdown_blocking();
         }
     });
 }

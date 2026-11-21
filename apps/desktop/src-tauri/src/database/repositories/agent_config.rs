@@ -1,9 +1,23 @@
 use super::*;
-use fox_agent_backend::{agent_config::{AgentBinding, BindingRecord, BindingSource, LayerResult, VerificationLayer, VerificationReport, VerificationStatus}, port::AgentBackend};
+use fox_agent_backend::{
+    agent_config::{
+        AgentBinding, BindingRecord, BindingSource, LayerResult, VerificationLayer,
+        VerificationReport, VerificationStatus,
+    },
+    port::AgentBackend,
+};
 
 impl Database {
     pub fn app_setting_updated_at(&self, key: &str) -> Result<Option<i64>, String> {
-        self.with_connection(|connection| connection.query_row("SELECT updated_at FROM app_settings WHERE key=?1", [key], |row| row.get(0)).optional())
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT updated_at FROM app_settings WHERE key=?1",
+                    [key],
+                    |row| row.get(0),
+                )
+                .optional()
+        })
     }
 
     pub fn agent_binding(&self, backend: AgentBackend) -> Result<Option<BindingRecord>, String> {
@@ -31,9 +45,22 @@ impl Database {
         })
     }
 
-    pub fn save_agent_binding(&self, backend: AgentBackend, binding: &BindingSource) -> Result<(), String> {
+    pub fn save_agent_binding(
+        &self,
+        backend: AgentBackend,
+        binding: &BindingSource,
+    ) -> Result<(), String> {
         let (source, provider, endpoint, model) = match binding {
-            BindingSource::FoxService { provider_id, endpoint_id, model_id } => ("fox_service", provider_id.as_deref(), Some(endpoint_id.as_str()), Some(model_id.as_str())),
+            BindingSource::FoxService {
+                provider_id,
+                endpoint_id,
+                model_id,
+            } => (
+                "fox_service",
+                provider_id.as_deref(),
+                Some(endpoint_id.as_str()),
+                Some(model_id.as_str()),
+            ),
             BindingSource::Native => ("native", None, None, None),
         };
         self.with_connection(|connection| {
@@ -51,7 +78,11 @@ impl Database {
         })
     }
 
-    pub fn save_agent_verification(&self, backend: AgentBackend, report: &VerificationReport) -> Result<(), String> {
+    pub fn save_agent_verification(
+        &self,
+        backend: AgentBackend,
+        report: &VerificationReport,
+    ) -> Result<(), String> {
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
             for layer in &report.layers {
@@ -62,7 +93,11 @@ impl Database {
         })
     }
 
-    pub fn agent_verification(&self, backend: AgentBackend, identity: &str) -> Result<Option<VerificationReport>, String> {
+    pub fn agent_verification(
+        &self,
+        backend: AgentBackend,
+        identity: &str,
+    ) -> Result<Option<VerificationReport>, String> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare("SELECT layer,status,latency_ms,code,checked_at FROM agent_verifications WHERE backend=?1 AND identity=?2")?;
             let rows = statement.query_map(params![backend.as_str(),identity], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,Option<i64>>(2)?,row.get::<_,Option<String>>(3)?,row.get::<_,i64>(4)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;

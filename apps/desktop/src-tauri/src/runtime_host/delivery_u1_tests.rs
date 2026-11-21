@@ -21,10 +21,12 @@
 //! The Run-lifecycle half (single entry edge, exits, fail-closed preconditions)
 //! lives in `fox-agent-kernel`'s `delivery_review_tests`.
 
+use super::*;
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::*;
-use crate::database::{AcceptanceWrite, Database, DeliveryChecklistSeed, DeliveryRequirement, RequirementKind};
+use crate::database::{
+    AcceptanceWrite, Database, DeliveryChecklistSeed, DeliveryRequirement, RequirementKind,
+};
 use crate::runtime_host::delivery::delivery_u1::{
     delivery_acceptance_state, effective_delivery_acceptance, parse_acceptance_decision,
     resolve_delivery_acceptance, AcceptanceIneffective,
@@ -65,11 +67,8 @@ struct Fixture {
 
 impl Fixture {
     fn new(label: &str) -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "p2d-u1-{label}-{}-{}",
-            std::process::id(),
-            line!()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("p2d-u1-{label}-{}-{}", std::process::id(), line!()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("in")).unwrap();
         std::fs::write(root.join("in/a.txt"), b"alpha").unwrap();
@@ -221,25 +220,27 @@ impl Fixture {
     fn seed_managed_version(&self, bytes: &[u8]) -> String {
         let absolute = self.root.join("out.txt");
         let version_id = format!("mv-{}", self.item);
-        self.database.with_connection(|connection| {
-            connection.execute(
-                "INSERT INTO managed_file_versions
+        self.database
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO managed_file_versions
                  (id, conversation_id, run_id, tool_call_id, tool, storage_path, display_name,
                   version_no, change_kind, before_hash, before_size, after_hash, after_size,
                   backup_path, restored_from_id, created_at)
                  VALUES (?1, ?2, ?3, 'call-1', 'write_file', ?4, 'out.txt', 1, 'created',
                          NULL, NULL, ?5, ?6, NULL, NULL, 1)",
-                rusqlite::params![
-                    version_id,
-                    self.conversation,
-                    self.run,
-                    absolute.to_string_lossy(),
-                    digest(bytes),
-                    bytes.len() as i64
-                ],
-            )?;
-            Ok(())
-        }).unwrap();
+                    rusqlite::params![
+                        version_id,
+                        self.conversation,
+                        self.run,
+                        absolute.to_string_lossy(),
+                        digest(bytes),
+                        bytes.len() as i64
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
         version_id
     }
 
@@ -304,10 +305,7 @@ fn a_row_with_no_verdict_envelope_cannot_be_accepted() {
     // Seeded, never verified: the row has no v2 envelope at all.
     assert_eq!(fixture.status(), "pending");
     let error = fixture.accept().unwrap_err();
-    assert!(
-        error.contains("不是可核验的 v2 同一行信封"),
-        "{error}"
-    );
+    assert!(error.contains("不是可核验的 v2 同一行信封"), "{error}");
     assert!(fixture.effective().unwrap().is_none());
 }
 
@@ -320,13 +318,16 @@ fn a_corrupt_envelope_cannot_be_accepted() {
     finding["deliveryVerdict"] = json!({"verdictSchemaVersion":2,"verdictEnvelopeVersion":2,
         "itemKey":fixture.item,"class":"unconfirmed","aggregateClass":"unconfirmed",
         "itemCount":1,"terminal":false,"facts":"not-an-array"});
-    fixture.database.with_connection(|connection| {
-        connection.execute(
+    fixture
+        .database
+        .with_connection(|connection| {
+            connection.execute(
             "UPDATE delivery_checklist_items SET finding_json=?3 WHERE run_id=?1 AND item_key=?2",
             rusqlite::params![fixture.run, fixture.item, finding.canonical_string()],
         )?;
-        Ok(())
-    }).unwrap();
+            Ok(())
+        })
+        .unwrap();
     let error = fixture.accept().unwrap_err();
     assert!(error.contains("不是可核验的 v2 同一行信封"), "{error}");
 }
@@ -354,10 +355,7 @@ fn an_envelope_naming_another_item_cannot_be_accepted() {
 #[test]
 fn a_confirmed_row_needs_no_acceptance_and_cannot_take_one() {
     let fixture = Fixture::new("confirmed-row");
-    fixture.store_verdict(
-        "confirmed",
-        vec![fact("passed", "已通过")],
-    );
+    fixture.store_verdict("confirmed", vec![fact("passed", "已通过")]);
     let error = fixture.accept().unwrap_err();
     assert!(error.contains("只有未核验项可被接受"), "{error}");
 }
@@ -399,7 +397,11 @@ fn a_first_acceptance_is_recorded_and_the_finding_is_untouched() {
     assert!(!effective.spec_hash.is_empty());
 
     // The acceptance changes nothing about the verification.
-    assert_eq!(fixture.finding_json(), before, "finding_json is byte-identical");
+    assert_eq!(
+        fixture.finding_json(),
+        before,
+        "finding_json is byte-identical"
+    );
     assert_eq!(fixture.status(), "pending", "the row is still pending");
 }
 
@@ -407,14 +409,17 @@ fn a_first_acceptance_is_recorded_and_the_finding_is_untouched() {
 fn a_repeated_identical_acceptance_is_a_no_op() {
     let fixture = Fixture::new("repeat-accept");
     fixture.make_unverified();
-    fixture.store_verdict(
-        "unconfirmed",
-        vec![fact("unconfirmed", "义务未履行")],
+    fixture.store_verdict("unconfirmed", vec![fact("unconfirmed", "义务未履行")]);
+    assert_eq!(
+        fixture.accept().unwrap(),
+        crate::database::AcceptanceWrite::Written
     );
-    assert_eq!(fixture.accept().unwrap(), crate::database::AcceptanceWrite::Written);
     let first = fixture.effective().unwrap().unwrap();
 
-    assert_eq!(fixture.accept().unwrap(), crate::database::AcceptanceWrite::Unchanged);
+    assert_eq!(
+        fixture.accept().unwrap(),
+        crate::database::AcceptanceWrite::Unchanged
+    );
     let second = fixture.effective().unwrap().unwrap();
     assert_eq!(first.accepted_at, second.accepted_at, "not rewritten");
     assert_eq!(first.accepted_by, second.accepted_by);
@@ -434,11 +439,11 @@ fn a_repeated_identical_acceptance_is_a_no_op() {
 fn a_revocation_withdraws_the_acceptance_and_a_re_acceptance_is_a_new_decision() {
     let fixture = Fixture::new("revoke-reaccept");
     fixture.make_unverified();
-    fixture.store_verdict(
-        "unconfirmed",
-        vec![fact("unconfirmed", "义务未履行")],
+    fixture.store_verdict("unconfirmed", vec![fact("unconfirmed", "义务未履行")]);
+    assert_eq!(
+        fixture.accept().unwrap(),
+        crate::database::AcceptanceWrite::Written
     );
-    assert_eq!(fixture.accept().unwrap(), crate::database::AcceptanceWrite::Written);
     let first_at = fixture.effective().unwrap().unwrap().accepted_at;
 
     let revoked = resolve_delivery_acceptance(
@@ -509,10 +514,7 @@ fn a_revocation_withdraws_the_acceptance_and_a_re_acceptance_is_a_new_decision()
 fn a_rejection_is_recorded_without_an_acceptance_and_is_idempotent() {
     let fixture = Fixture::new("reject");
     fixture.make_unverified();
-    fixture.store_verdict(
-        "unconfirmed",
-        vec![fact("unconfirmed", "义务未履行")],
-    );
+    fixture.store_verdict("unconfirmed", vec![fact("unconfirmed", "义务未履行")]);
     let before = fixture.finding_json();
 
     let written = resolve_delivery_acceptance(
@@ -525,18 +527,24 @@ fn a_rejection_is_recorded_without_an_acceptance_and_is_idempotent() {
     )
     .unwrap();
     assert_eq!(written, crate::database::AcceptanceWrite::Written);
-    assert!(fixture.effective().unwrap().is_none(), "a rejection is not an acceptance");
+    assert!(
+        fixture.effective().unwrap().is_none(),
+        "a rejection is not an acceptance"
+    );
     assert_eq!(fixture.finding_json(), before);
 
     // `accepted_at` must stay 0: a rejected item was never accepted, and a
     // non-zero value would read back as one.
-    let accepted_at: i64 = fixture.database.with_connection(|connection| {
-        connection.query_row(
-            "SELECT accepted_at FROM delivery_acceptances WHERE run_id=?1 AND item_key=?2",
-            rusqlite::params![fixture.run, fixture.item],
-            |row| row.get(0),
-        )
-    }).unwrap();
+    let accepted_at: i64 = fixture
+        .database
+        .with_connection(|connection| {
+            connection.query_row(
+                "SELECT accepted_at FROM delivery_acceptances WHERE run_id=?1 AND item_key=?2",
+                rusqlite::params![fixture.run, fixture.item],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
     assert_eq!(accepted_at, 0);
 
     let again = resolve_delivery_acceptance(
@@ -555,10 +563,7 @@ fn a_rejection_is_recorded_without_an_acceptance_and_is_idempotent() {
 fn the_actor_must_be_a_trusted_session_identifier() {
     let fixture = Fixture::new("actor");
     fixture.make_unverified();
-    fixture.store_verdict(
-        "unconfirmed",
-        vec![fact("unconfirmed", "义务未履行")],
-    );
+    fixture.store_verdict("unconfirmed", vec![fact("unconfirmed", "义务未履行")]);
     for bad in ["", "   "] {
         let error = resolve_delivery_acceptance(
             &fixture.database,
@@ -569,9 +574,15 @@ fn the_actor_must_be_a_trusted_session_identifier() {
             crate::database::now_ms(),
         )
         .unwrap_err();
-        assert!(matches!(error, AcceptanceResolveError::Storage(_)), "{error:?}");
+        assert!(
+            matches!(error, AcceptanceResolveError::Storage(_)),
+            "{error:?}"
+        );
     }
-    assert!(fixture.effective().unwrap().is_none(), "nothing was written");
+    assert!(
+        fixture.effective().unwrap().is_none(),
+        "nothing was written"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -582,11 +593,11 @@ fn the_actor_must_be_a_trusted_session_identifier() {
 fn rewriting_the_candidate_bytes_withdraws_the_acceptance() {
     let fixture = Fixture::new("byte-drift");
     fixture.make_unverified();
-    fixture.store_verdict(
-        "unconfirmed",
-        vec![fact("unconfirmed", "义务未履行")],
+    fixture.store_verdict("unconfirmed", vec![fact("unconfirmed", "义务未履行")]);
+    assert_eq!(
+        fixture.accept().unwrap(),
+        crate::database::AcceptanceWrite::Written
     );
-    assert_eq!(fixture.accept().unwrap(), crate::database::AcceptanceWrite::Written);
     assert!(fixture.effective().unwrap().is_some());
 
     // Rewrite the file but leave every database column alone — exactly the case
@@ -594,10 +605,13 @@ fn rewriting_the_candidate_bytes_withdraws_the_acceptance() {
     std::fs::write(fixture.root.join("out.txt"), b"tampered").unwrap();
 
     let reason = fixture.effective().unwrap_err();
-    assert_eq!(reason, AcceptanceIneffective::CandidateDrift {
-        expected: digest(b"a.txt\nalpha"),
-        actual: digest(b"tampered"),
-    });
+    assert_eq!(
+        reason,
+        AcceptanceIneffective::CandidateDrift {
+            expected: digest(b"a.txt\nalpha"),
+            actual: digest(b"tampered"),
+        }
+    );
     assert!(reason.is_definite());
 }
 
@@ -605,11 +619,11 @@ fn rewriting_the_candidate_bytes_withdraws_the_acceptance() {
 fn rewriting_the_contract_withdraws_the_acceptance() {
     let fixture = Fixture::new("contract-drift");
     fixture.make_unverified();
-    fixture.store_verdict(
-        "unconfirmed",
-        vec![fact("unconfirmed", "义务未履行")],
+    fixture.store_verdict("unconfirmed", vec![fact("unconfirmed", "义务未履行")]);
+    assert_eq!(
+        fixture.accept().unwrap(),
+        crate::database::AcceptanceWrite::Written
     );
-    assert_eq!(fixture.accept().unwrap(), crate::database::AcceptanceWrite::Written);
 
     // The row's own frozen contract column is replaced.
     let requirements = crate::canonical_json::to_string(&[DeliveryRequirement {
@@ -630,31 +644,39 @@ fn rewriting_the_contract_withdraws_the_acceptance() {
     }).unwrap();
 
     let reason = fixture.effective().unwrap_err();
-    assert!(matches!(reason, AcceptanceIneffective::ContractDrift { .. }), "{reason:?}");
+    assert!(
+        matches!(reason, AcceptanceIneffective::ContractDrift { .. }),
+        "{reason:?}"
+    );
 }
 
 #[test]
 fn terminating_the_row_withdraws_the_acceptance() {
     let fixture = Fixture::new("row-terminated");
     fixture.make_unverified();
-    fixture.store_verdict(
-        "unconfirmed",
-        vec![fact("unconfirmed", "义务未履行")],
+    fixture.store_verdict("unconfirmed", vec![fact("unconfirmed", "义务未履行")]);
+    assert_eq!(
+        fixture.accept().unwrap(),
+        crate::database::AcceptanceWrite::Written
     );
-    assert_eq!(fixture.accept().unwrap(), crate::database::AcceptanceWrite::Written);
 
-    fixture.database.with_connection(|connection| {
-        connection.execute(
+    fixture
+        .database
+        .with_connection(|connection| {
+            connection.execute(
             "UPDATE delivery_checklist_items SET status='failed' WHERE run_id=?1 AND item_key=?2",
             rusqlite::params![fixture.run, fixture.item],
         )?;
-        Ok(())
-    }).unwrap();
+            Ok(())
+        })
+        .unwrap();
 
     let reason = fixture.effective().unwrap_err();
     assert_eq!(
         reason,
-        AcceptanceIneffective::RowNotPending { status: "failed".to_owned() }
+        AcceptanceIneffective::RowNotPending {
+            status: "failed".to_owned()
+        }
     );
 }
 
@@ -662,20 +684,23 @@ fn terminating_the_row_withdraws_the_acceptance() {
 fn withdrawing_the_project_authorization_makes_the_acceptance_unconfirmed_not_drift() {
     let fixture = Fixture::new("auth-withdrawn");
     fixture.make_unverified();
-    fixture.store_verdict(
-        "unconfirmed",
-        vec![fact("unconfirmed", "义务未履行")],
+    fixture.store_verdict("unconfirmed", vec![fact("unconfirmed", "义务未履行")]);
+    assert_eq!(
+        fixture.accept().unwrap(),
+        crate::database::AcceptanceWrite::Written
     );
-    assert_eq!(fixture.accept().unwrap(), crate::database::AcceptanceWrite::Written);
 
     // Remove the project access the acceptance was made under.
-    fixture.database.with_connection(|connection| {
-        connection.execute(
-            "UPDATE conversations SET project_root=NULL, project_id=NULL WHERE id=?1",
-            rusqlite::params![fixture.conversation],
-        )?;
-        Ok(())
-    }).unwrap();
+    fixture
+        .database
+        .with_connection(|connection| {
+            connection.execute(
+                "UPDATE conversations SET project_root=NULL, project_id=NULL WHERE id=?1",
+                rusqlite::params![fixture.conversation],
+            )?;
+            Ok(())
+        })
+        .unwrap();
 
     let reason = fixture.effective().unwrap_err();
     assert_eq!(reason, AcceptanceIneffective::AuthorizationWithdrawn);
@@ -692,18 +717,21 @@ fn withdrawing_the_project_authorization_makes_the_acceptance_unconfirmed_not_dr
 fn the_item_detail_surface_keeps_verification_and_acceptance_apart() {
     let fixture = Fixture::new("detail");
     fixture.make_unverified();
-    fixture.store_verdict(
-        "unconfirmed",
-        vec![fact("unconfirmed", "义务未履行")],
-    );
+    fixture.store_verdict("unconfirmed", vec![fact("unconfirmed", "义务未履行")]);
 
     let before = delivery_acceptance_state(&fixture.database, &fixture.run, &fixture.item).unwrap();
     assert_eq!(before.verification_class, "unconfirmed");
     assert!(before.accepted.is_none());
     assert!(!before.rejected);
-    assert!(before.blocked.is_none(), "an unverified row may be accepted");
+    assert!(
+        before.blocked.is_none(),
+        "an unverified row may be accepted"
+    );
 
-    assert_eq!(fixture.accept().unwrap(), crate::database::AcceptanceWrite::Written);
+    assert_eq!(
+        fixture.accept().unwrap(),
+        crate::database::AcceptanceWrite::Written
+    );
     let after = delivery_acceptance_state(&fixture.database, &fixture.run, &fixture.item).unwrap();
     // The verification class is unchanged by the acceptance.
     assert_eq!(after.verification_class, "unconfirmed");
@@ -714,10 +742,7 @@ fn the_item_detail_surface_keeps_verification_and_acceptance_apart() {
 #[test]
 fn the_item_detail_surface_reports_a_blocked_row_without_an_acceptance() {
     let fixture = Fixture::new("detail-blocked");
-    fixture.store_verdict(
-        "confirmed",
-        vec![fact("passed", "已通过")],
-    );
+    fixture.store_verdict("confirmed", vec![fact("passed", "已通过")]);
     let state = delivery_acceptance_state(&fixture.database, &fixture.run, &fixture.item).unwrap();
     assert_eq!(state.verification_class, "confirmed");
     assert!(state.accepted.is_none());
@@ -738,7 +763,8 @@ fn the_item_detail_surface_reports_a_blocked_row_without_an_acceptance() {
 #[test]
 fn a_missing_row_reads_as_absent_rather_than_panicking() {
     let fixture = Fixture::new("missing-row");
-    let state = delivery_acceptance_state(&fixture.database, &fixture.run, "file:nope.txt").unwrap();
+    let state =
+        delivery_acceptance_state(&fixture.database, &fixture.run, "file:nope.txt").unwrap();
     assert!(state.accepted.is_none());
     assert_eq!(
         state.blocked.as_ref().map(|blocked| blocked.kind.as_str()),
@@ -781,8 +807,10 @@ fn d4_an_absolute_target_path_binds_the_same_object() {
     fixture.make_unverified();
     fixture.store_verdict("unconfirmed", vec![fact("unconfirmed", "义务未履行")]);
     let version_id = fixture.seed_managed_version(b"a.txt\nalpha");
-    fixture.database.with_connection(|connection| {
-        connection.execute(
+    fixture
+        .database
+        .with_connection(|connection| {
+            connection.execute(
             "UPDATE delivery_checklist_items SET target_path=?3 WHERE run_id=?1 AND item_key=?2",
             rusqlite::params![
                 fixture.run,
@@ -790,8 +818,9 @@ fn d4_an_absolute_target_path_binds_the_same_object() {
                 fixture.root.join("out.txt").to_string_lossy()
             ],
         )?;
-        Ok(())
-    }).unwrap();
+            Ok(())
+        })
+        .unwrap();
 
     assert_eq!(fixture.accept().unwrap(), AcceptanceWrite::Written);
     let row = fixture
@@ -818,25 +847,28 @@ fn d4_a_new_version_of_the_same_bytes_withdraws_the_acceptance() {
 
     // A second version of the SAME bytes: same content, different version identity.
     let second = format!("{first}-v2");
-    fixture.database.with_connection(|connection| {
-        connection.execute(
-            "INSERT INTO managed_file_versions
+    fixture
+        .database
+        .with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO managed_file_versions
              (id, conversation_id, run_id, tool_call_id, tool, storage_path, display_name,
               version_no, change_kind, before_hash, before_size, after_hash, after_size,
               backup_path, restored_from_id, created_at)
              VALUES (?1, ?2, ?3, 'call-2', 'write_file', ?4, 'out.txt', 2, 'modified',
                      NULL, NULL, ?5, ?6, NULL, NULL, 2)",
-            rusqlite::params![
-                second,
-                fixture.conversation,
-                fixture.run,
-                fixture.root.join("out.txt").to_string_lossy(),
-                digest(b"a.txt\nalpha"),
-                b"a.txt\nalpha".len() as i64
-            ],
-        )?;
-        Ok(())
-    }).unwrap();
+                rusqlite::params![
+                    second,
+                    fixture.conversation,
+                    fixture.run,
+                    fixture.root.join("out.txt").to_string_lossy(),
+                    digest(b"a.txt\nalpha"),
+                    b"a.txt\nalpha".len() as i64
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
 
     assert_eq!(
         fixture.effective().unwrap_err(),
@@ -881,7 +913,9 @@ fn d3_the_blocked_reason_serializes_into_the_shape_the_frontend_reads() {
     let state = delivery_acceptance_state(&fixture.database, &fixture.run, &fixture.item).unwrap();
 
     let wire = serde_json::to_value(&state).unwrap();
-    let blocked = wire["blocked"].as_object().expect("an object, not a bare string");
+    let blocked = wire["blocked"]
+        .as_object()
+        .expect("an object, not a bare string");
     assert_eq!(
         blocked.get("kind").and_then(Value::as_str),
         Some("class_not_unconfirmed"),
@@ -899,14 +933,28 @@ fn d3_the_blocked_reason_serializes_into_the_shape_the_frontend_reads() {
     // become the generic fallback.
     for reason in [
         AcceptanceIneffective::Absent,
-        AcceptanceIneffective::RowNotPending { status: "failed".to_owned() },
+        AcceptanceIneffective::RowNotPending {
+            status: "failed".to_owned(),
+        },
         AcceptanceIneffective::NotAVerifiableRecord,
-        AcceptanceIneffective::ClassNotUnconfirmed { class: "confirmed".to_owned() },
-        AcceptanceIneffective::BlockedByFact { detail: "d".to_owned() },
-        AcceptanceIneffective::CandidateDrift { expected: "e".to_owned(), actual: "a".to_owned() },
-        AcceptanceIneffective::CandidateUnreadable { detail: "d".to_owned() },
+        AcceptanceIneffective::ClassNotUnconfirmed {
+            class: "confirmed".to_owned(),
+        },
+        AcceptanceIneffective::BlockedByFact {
+            detail: "d".to_owned(),
+        },
+        AcceptanceIneffective::CandidateDrift {
+            expected: "e".to_owned(),
+            actual: "a".to_owned(),
+        },
+        AcceptanceIneffective::CandidateUnreadable {
+            detail: "d".to_owned(),
+        },
         AcceptanceIneffective::VersionDrift,
-        AcceptanceIneffective::ContractDrift { expected: "e".to_owned(), actual: "a".to_owned() },
+        AcceptanceIneffective::ContractDrift {
+            expected: "e".to_owned(),
+            actual: "a".to_owned(),
+        },
         AcceptanceIneffective::AuthorizationWithdrawn,
     ] {
         let dto = reason.blocked();
@@ -921,4 +969,3 @@ fn d3_the_blocked_reason_serializes_into_the_shape_the_frontend_reads() {
 // ---------------------------------------------------------------------------
 // Package 2-D repair, D-5: the executable downgrade pre-check
 // ---------------------------------------------------------------------------
-

@@ -65,8 +65,8 @@ describe('a local document becomes a real draft attachment', () => {
   })
 })
 
-const workbench = readFileSync(new URL('../src/features/chat/workbench.tsx', import.meta.url), 'utf8')
-const callbackSource = workbench.slice(workbench.indexOf('  const askLocalKnowledgeDocument ='), workbench.indexOf('  const switchAssistantMode ='))
+const workbench = readFileSync(new URL('../src/features/chat/workbench.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+const callbackSource = workbench.slice(workbench.indexOf('  const askLocalKnowledgeDocument ='), workbench.indexOf('  useEffect(() => {', workbench.indexOf('  const askLocalKnowledgeDocument =')))
 
 function callbackHarness(readFile: typeof localKnowledgeDocumentFile) {
   const request = { current: { version: 0, abort: null as AbortController | null } }

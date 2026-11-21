@@ -16,6 +16,7 @@ type BuiltinPreset = {
 // Keep these defaults aligned with Yuxi's builtin provider catalog.
 const builtinPresets: BuiltinPreset[] = [
   { id: 'openai', name: 'OpenAI', icon: 'openai.svg', baseUrl: 'https://api.openai.com/v1', apiType: 'openai-completions', modelPlaceholder: 'gpt-4.1', contextWindow: 128000, maxOutputTokens: 16384, supportsImageInput: true },
+  { id: 'anthropic', name: 'Anthropic', icon: '', baseUrl: 'https://api.anthropic.com', apiType: 'anthropic-messages', modelPlaceholder: '填写 Anthropic 模型 ID', contextWindow: 200000, maxOutputTokens: 8192, supportsImageInput: true },
   { id: 'deepseek', name: 'DeepSeek 官方', icon: 'deepseek.svg', baseUrl: 'https://api.deepseek.com', apiType: 'openai-completions', modelPlaceholder: 'deepseek-flash', contextWindow: 128000, maxOutputTokens: 8192, supportsImageInput: false },
   { id: 'alibaba', name: 'DashScope', icon: 'alibaba.svg', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', apiType: 'openai-completions', modelPlaceholder: 'qwen3-max', contextWindow: 128000, maxOutputTokens: 8192, supportsImageInput: true },
   { id: 'alibaba-coding-plan-cn', name: 'Aliyun Coding Plan', icon: 'alibaba-cloud.svg', baseUrl: 'https://coding.dashscope.aliyuncs.com/v1', apiType: 'openai-completions', modelPlaceholder: 'qwen3-coder-plus', contextWindow: 128000, maxOutputTokens: 16384, supportsImageInput: false },
@@ -38,25 +39,41 @@ const builtinPresets: BuiltinPreset[] = [
   { id: 'siliconflow', name: 'SiliconFlow (International)', icon: 'siliconflow.svg', baseUrl: 'https://api.siliconflow.com/v1', apiType: 'openai-completions', modelPlaceholder: 'deepseek-ai/DeepSeek-V4-Flash', contextWindow: 128000, maxOutputTokens: 8192, supportsImageInput: false },
 ]
 
-export type ServicePreset = BuiltinPreset & { endpoints: { apiType: import('./agent-config-types').ApiType; baseUrl: string }[] }
-export const servicePresets: ServicePreset[] = builtinPresets.map(preset => ({ ...preset, endpoints: [
+const catalogCopy: Partial<Record<string, { label: string; note?: string }>> = {
+  'alibaba-coding-plan-cn': { label: 'Aliyun · 中国', note: '使用中国站 Coding Plan 的 API Key。' },
+  'alibaba-coding-plan': { label: 'Aliyun · 国际', note: '使用国际站 Coding Plan 的 API Key。' },
+  zhipuai: { label: 'Zhipu · BigModel' },
+  'zhipuai-coding-plan': { label: 'Zhipu · Coding', note: '使用 BigModel Coding Plan 的 API Key。' },
+  zai: { label: 'Zhipu · Z.AI' },
+  'zai-coding-plan': { label: 'Z.AI · Coding', note: '使用 Z.AI Coding Plan 的 API Key。' },
+  'xiaomi-token-plan-cn': { label: 'MiMo · Token Plan', note: '使用中国站 Token Plan 的 API Key。' },
+  moonshotai: { label: 'Moonshot · 国际', note: '使用 Moonshot 国际站的 API Key。' },
+  minimax: { label: 'MiniMax · 国际', note: '使用 MiniMax 国际站的 API Key。' },
+  siliconflow: { label: 'SiliconFlow · 国际', note: '使用 SiliconFlow 国际站的 API Key。' },
+}
+
+export type ServicePreset = BuiltinPreset & {
+  catalog?: { label: string; note?: string }
+  endpoints: { apiType: import('./agent-config-types').ApiType; baseUrl: string }[]
+}
+export const servicePresets: ServicePreset[] = builtinPresets.map(preset => ({ ...preset, catalog: catalogCopy[preset.id], endpoints: [
   { apiType: preset.apiType, baseUrl: preset.baseUrl },
   ...(preset.id === 'deepseek' ? [{ apiType: 'anthropic-messages' as const, baseUrl: 'https://api.deepseek.com/anthropic' }, { apiType: 'openai-responses' as const, baseUrl: 'https://api.deepseek.com' }] : preset.id === 'openai' ? [{ apiType: 'openai-responses' as const, baseUrl: 'https://api.openai.com/v1' }] : []),
 ] }))
 
-export const providerIconOptions = Array.from(new Map(servicePresets.map((preset) => [preset.icon, preset])).values())
+export const providerIconOptions = Array.from(new Map(servicePresets.filter(preset => preset.icon).map(preset => [preset.icon, preset])).values())
 
 export function providerIcon(name: string, baseUrl: string, customIcon?: string | null) {
   if (customIcon) return `/providers/${customIcon}`
   const preset = servicePresets.find((item) => item.baseUrl === baseUrl)
     ?? servicePresets.find((item) => name.toLowerCase().includes(item.id.split('-')[0]))
-  return preset ? `/providers/${preset.icon}` : null
+  return preset?.icon ? `/providers/${preset.icon}` : null
 }
 
 export function presetDraft(preset: ServicePreset, isDefault: boolean): ServiceDraft {
   return {
     name: preset.name,
-    icon: preset.icon,
+    icon: preset.icon || null,
     baseUrl: preset.baseUrl,
     apiType: preset.apiType,
     protocolProfiles: preset.endpoints.slice(1).map(endpoint => ({ id: crypto.randomUUID(), presetId: preset.id, apiType: endpoint.apiType, baseUrl: endpoint.baseUrl, modelId: '', separateCredential: false })),

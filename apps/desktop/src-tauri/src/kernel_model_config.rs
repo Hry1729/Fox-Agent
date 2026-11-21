@@ -25,8 +25,12 @@ pub(crate) const SUPPORTED_KERNEL_ENGINE: &str = "pi";
 /// Engines retired by the single Pi mainline. Readable, never executable.
 pub(crate) const RETIRED_KERNEL_ENGINES: [&str; 2] = ["codex", "deepseek_harness"];
 
-fn pi_engine() -> String { SUPPORTED_KERNEL_ENGINE.into() }
-fn is_pi(value: &str) -> bool { value == SUPPORTED_KERNEL_ENGINE }
+fn pi_engine() -> String {
+    SUPPORTED_KERNEL_ENGINE.into()
+}
+fn is_pi(value: &str) -> bool {
+    value == SUPPORTED_KERNEL_ENGINE
+}
 
 fn retired_engine_error(engine: &str) -> String {
     format!(
@@ -47,10 +51,15 @@ pub(crate) struct NativeAdapterConfig {
 /// silently select another adapter because an old deployment still exports
 /// `FOX_KERNEL_ENGINE`.
 pub(crate) fn configured_engine() -> Result<String, String> {
-    let name = std::env::var("FOX_KERNEL_ENGINE").unwrap_or_else(|_| SUPPORTED_KERNEL_ENGINE.into());
+    let name =
+        std::env::var("FOX_KERNEL_ENGINE").unwrap_or_else(|_| SUPPORTED_KERNEL_ENGINE.into());
     let name = name.trim();
-    if name.is_empty() || name == SUPPORTED_KERNEL_ENGINE { return Ok(SUPPORTED_KERNEL_ENGINE.into()); }
-    if RETIRED_KERNEL_ENGINES.contains(&name) { return Err(retired_engine_error(name)); }
+    if name.is_empty() || name == SUPPORTED_KERNEL_ENGINE {
+        return Ok(SUPPORTED_KERNEL_ENGINE.into());
+    }
+    if RETIRED_KERNEL_ENGINES.contains(&name) {
+        return Err(retired_engine_error(name));
+    }
     Err(format!(
         "{KERNEL_ENGINE_RETIRED_CODE}: FOX_KERNEL_ENGINE=`{name}` is not a supported engine; only `{SUPPORTED_KERNEL_ENGINE}` runs in this build."
     ))
@@ -75,9 +84,10 @@ pub(crate) struct KernelModelConfig {
 fn secret_field(value: &Value) -> bool {
     match value {
         Value::Object(fields) => fields.iter().any(|(key, value)| {
-            matches!(key.to_ascii_lowercase().replace('_', "").as_str(),
-                "apikey" | "authorization" | "credentials" | "accesstoken" | "password" | "secret")
-                || secret_field(value)
+            matches!(
+                key.to_ascii_lowercase().replace('_', "").as_str(),
+                "apikey" | "authorization" | "credentials" | "accesstoken" | "password" | "secret"
+            ) || secret_field(value)
         }),
         Value::Array(values) => values.iter().any(secret_field),
         _ => false,
@@ -122,51 +132,103 @@ impl KernelModelConfig {
 
     pub(crate) fn hash(&self) -> Result<String, String> {
         self.adapter_version()?;
-        let service = self.model_service.as_object().ok_or("invalid Kernel model service")?;
-        if secret_field(&self.model_service) { return Err("Kernel credentials must be supplied separately".into()); }
+        let service = self
+            .model_service
+            .as_object()
+            .ok_or("invalid Kernel model service")?;
+        if secret_field(&self.model_service) {
+            return Err("Kernel credentials must be supplied separately".into());
+        }
         if self.execution_profile_id.trim().is_empty()
-            || !service.get("modelId").and_then(Value::as_str).is_some_and(|id| !id.trim().is_empty()) {
+            || !service
+                .get("modelId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty())
+        {
             return Err("incomplete Kernel model configuration".into());
         }
-        let url = service.get("baseUrl").and_then(Value::as_str)
-            .and_then(|value| reqwest::Url::parse(value).ok()).ok_or("invalid Kernel model base URL")?;
-        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
-            || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+        let url = service
+            .get("baseUrl")
+            .and_then(Value::as_str)
+            .and_then(|value| reqwest::Url::parse(value).ok())
+            .ok_or("invalid Kernel model base URL")?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
             return Err("Kernel model URL must not contain credentials or query parameters".into());
         }
-        if service.keys().any(|key| !matches!(key.as_str(), "apiType" | "modelId" | "baseUrl" | "modelProfile"
-            | "reasoning" | "thinkingLevel" | "contextWindow" | "maxOutputTokens" | "supportsImageInput"
-            | "fauxResponses" | "fauxTokensPerSecond")) {
+        if service.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "apiType"
+                    | "modelId"
+                    | "baseUrl"
+                    | "modelProfile"
+                    | "reasoning"
+                    | "thinkingLevel"
+                    | "contextWindow"
+                    | "maxOutputTokens"
+                    | "supportsImageInput"
+                    | "fauxResponses"
+                    | "fauxTokensPerSecond"
+            )
+        }) {
             return Err("unsupported Kernel model service field".into());
         }
         if let Some(api) = service.get("apiType") {
-            if !matches!(api.as_str(), Some("faux" | "openai-completions" | "openai-responses" | "anthropic-messages")) {
+            if !matches!(
+                api.as_str(),
+                Some("faux" | "openai-completions" | "openai-responses" | "anthropic-messages")
+            ) {
                 return Err("unsupported Kernel model API".into());
             }
         }
-        if service.get("modelProfile").is_some_and(|value| !value.is_object()) {
+        if service
+            .get("modelProfile")
+            .is_some_and(|value| !value.is_object())
+        {
             return Err("invalid Kernel model profile".into());
         }
         // Definitions are bounded by the registered catalog and serialized
         // configuration size, independently of the per-batch proposal limit.
         let mut names = std::collections::HashSet::new();
         for tool in &self.proposal_tools {
-            let name = tool["name"].as_str().ok_or("missing Kernel proposal tool name")?;
+            let name = tool["name"]
+                .as_str()
+                .ok_or("missing Kernel proposal tool name")?;
             if !names.insert(name) {
-                return Err(format!("invalid Kernel proposal tool schema: `{name}` is duplicated").into());
+                return Err(
+                    format!("invalid Kernel proposal tool schema: `{name}` is duplicated").into(),
+                );
             }
             if fox_engine_protocol::canonical_runtime_tool_contract(name).is_none() {
                 return Err(format!("invalid Kernel proposal tool schema: `{name}` is not a registered tool contract").into());
             }
-            if !tool["description"].as_str().is_some_and(|text| !text.trim().is_empty()) {
-                return Err(format!("invalid Kernel proposal tool schema: `{name}` has no description").into());
+            if !tool["description"]
+                .as_str()
+                .is_some_and(|text| !text.trim().is_empty())
+            {
+                return Err(format!(
+                    "invalid Kernel proposal tool schema: `{name}` has no description"
+                )
+                .into());
             }
             if !object_rooted_parameters(&tool["parameters"]) {
-                return Err(format!("invalid Kernel proposal tool schema: `{name}` has no object parameter schema").into());
+                return Err(format!(
+                    "invalid Kernel proposal tool schema: `{name}` has no object parameter schema"
+                )
+                .into());
             }
         }
-        let bytes = crate::canonical_json::to_vec(self).map_err(|_| "invalid Kernel model configuration")?;
-        if bytes.len() > 1_048_576 { return Err("Kernel model configuration exceeds frame limit".into()); }
+        let bytes = crate::canonical_json::to_vec(self)
+            .map_err(|_| "invalid Kernel model configuration")?;
+        if bytes.len() > 1_048_576 {
+            return Err("Kernel model configuration exceeds frame limit".into());
+        }
         Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
     }
 }
@@ -177,9 +239,14 @@ mod tests {
     use serde_json::json;
 
     fn config() -> KernelModelConfig {
-        KernelModelConfig { engine_id: "pi".into(), native_adapter: None, execution_profile_id: "legacy".into(),
+        KernelModelConfig {
+            engine_id: "pi".into(),
+            native_adapter: None,
+            execution_profile_id: "legacy".into(),
             model_service: json!({"apiType":"openai-completions","modelId":"test","baseUrl":"https://example.com/v1"}),
-            system_prompt: "Host instructions".into(), proposal_tools: vec![] }
+            system_prompt: "Host instructions".into(),
+            proposal_tools: vec![],
+        }
     }
 
     #[test]
@@ -207,12 +274,18 @@ mod tests {
                 {"type":"object","properties":{"idempotencyKey":{"type":"string"}}},
                 {"type":"object","properties":{"jobId":{"type":"string"}}}]}});
         config.proposal_tools = vec![union];
-        assert!(config.hash().is_ok(), "an anyOf of object variants must be accepted");
+        assert!(
+            config.hash().is_ok(),
+            "an anyOf of object variants must be accepted"
+        );
 
         let nested = json!({"name":"compute_job_start","description":"Start or resume",
             "parameters":{"oneOf":[{"anyOf":[{"type":"object"}]}]}});
         config.proposal_tools = vec![nested];
-        assert!(config.hash().is_ok(), "nested unions of objects are still object-rooted");
+        assert!(
+            config.hash().is_ok(),
+            "nested unions of objects are still object-rooted"
+        );
 
         for rejected in [
             json!({"type":"array"}),
@@ -236,22 +309,31 @@ mod tests {
     }
 
     #[test]
-    fn configuration_rejects_credentials_unknown_fields_and_invalid_tool_schemas() {        let good = config();
+    fn configuration_rejects_credentials_unknown_fields_and_invalid_tool_schemas() {
+        let good = config();
         assert!(good.hash().unwrap().starts_with("sha256:"));
-        for (key,value) in [
-            ("apiKey",json!("secret")), ("modelProfile",json!({"compat":{"Authorization":"secret"}})),
-            ("headers",json!({"X-Api-Key":"secret"})), ("apiType",json!("unknown")),
-            ("baseUrl",json!("https://user:pass@example.com")), ("baseUrl",json!("https://example.com?key=secret")),
+        for (key, value) in [
+            ("apiKey", json!("secret")),
+            ("modelProfile", json!({"compat":{"Authorization":"secret"}})),
+            ("headers", json!({"X-Api-Key":"secret"})),
+            ("apiType", json!("unknown")),
+            ("baseUrl", json!("https://user:pass@example.com")),
+            ("baseUrl", json!("https://example.com?key=secret")),
         ] {
-            let mut bad = good.clone(); bad.model_service[key] = value;
+            let mut bad = good.clone();
+            bad.model_service[key] = value;
             assert!(bad.hash().is_err(), "{key}");
         }
-        for tool in [json!({"name":"unknown","description":"bad","parameters":{"type":"object"}}),
-            json!({"name":"read","description":"bad","parameters":{"type":"array"}})] {
-            let mut bad = good.clone(); bad.proposal_tools.push(tool);
+        for tool in [
+            json!({"name":"unknown","description":"bad","parameters":{"type":"object"}}),
+            json!({"name":"read","description":"bad","parameters":{"type":"array"}}),
+        ] {
+            let mut bad = good.clone();
+            bad.proposal_tools.push(tool);
             assert!(bad.hash().is_err());
         }
-        let mut wire = serde_json::to_value(&good).unwrap(); wire["extra"] = json!(true);
+        let mut wire = serde_json::to_value(&good).unwrap();
+        wire["extra"] = json!(true);
         assert!(serde_json::from_value::<KernelModelConfig>(wire).is_err());
     }
     /// Serialize the tests that read or write the process environment.
@@ -279,9 +361,18 @@ mod tests {
     #[test]
     fn the_only_engine_this_build_runs_is_pi() {
         assert_eq!(with_engine_env(None, configured_engine), Ok("pi".into()));
-        assert_eq!(with_engine_env(Some("pi"), configured_engine), Ok("pi".into()));
-        assert_eq!(with_engine_env(Some(" pi "), configured_engine), Ok("pi".into()));
-        assert_eq!(with_engine_env(Some(""), configured_engine), Ok("pi".into()));
+        assert_eq!(
+            with_engine_env(Some("pi"), configured_engine),
+            Ok("pi".into())
+        );
+        assert_eq!(
+            with_engine_env(Some(" pi "), configured_engine),
+            Ok("pi".into())
+        );
+        assert_eq!(
+            with_engine_env(Some(""), configured_engine),
+            Ok("pi".into())
+        );
     }
 
     /// A retired engine is refused with a recognizable code. It must never
@@ -292,7 +383,10 @@ mod tests {
         for engine in RETIRED_KERNEL_ENGINES {
             let refusal = with_engine_env(Some(engine), configured_engine).unwrap_err();
             assert!(refusal.starts_with(KERNEL_ENGINE_RETIRED_CODE), "{refusal}");
-            assert!(refusal.contains(engine), "the refusal names the engine: {refusal}");
+            assert!(
+                refusal.contains(engine),
+                "the refusal names the engine: {refusal}"
+            );
         }
         for engine in ["gpt", "codex-cli", "pi-1.4.0"] {
             let refusal = with_engine_env(Some(engine), configured_engine).unwrap_err();
@@ -312,18 +406,24 @@ mod tests {
                 "proposalTools": [],
                 "engineId": engine
             });
-            let record: KernelModelConfig = serde_json::from_value(wire).expect("old record still reads");
+            let record: KernelModelConfig =
+                serde_json::from_value(wire).expect("old record still reads");
             assert_eq!(record.engine_id, engine);
             let refusal = record.adapter_version().unwrap_err();
             assert!(refusal.starts_with(KERNEL_ENGINE_RETIRED_CODE), "{refusal}");
-            assert!(record.hash().is_err(), "a retired engine hash must not freeze a run");
+            assert!(
+                record.hash().is_err(),
+                "a retired engine hash must not freeze a run"
+            );
         }
         // A Pi record with a stale native adapter is refused too: the only
         // engine runs in the sidecar and has no binary to attest.
         let mut stale = config();
-        stale.native_adapter = Some(NativeAdapterConfig { command: "/tmp/codex".into(), binary_hash: format!("sha256:{}", "0".repeat(64)) });
+        stale.native_adapter = Some(NativeAdapterConfig {
+            command: "/tmp/codex".into(),
+            binary_hash: format!("sha256:{}", "0".repeat(64)),
+        });
         assert!(stale.adapter_version().is_err());
         assert!(stale.hash().is_err());
     }
-
 }

@@ -121,7 +121,9 @@ impl JobError {
             JobError::IdempotencyConflict { job_id } => format!(
                 "idempotency key already belongs to job '{job_id}' with a different request"
             ),
-            JobError::InvalidRequest(detail) | JobError::CredentialMismatch(detail) => detail.clone(),
+            JobError::InvalidRequest(detail) | JobError::CredentialMismatch(detail) => {
+                detail.clone()
+            }
             JobError::Capacity { max_jobs } => {
                 format!("job capacity reached (max {max_jobs} tracked jobs)")
             }
@@ -250,7 +252,9 @@ impl BackendRefusal {
                 "no execution backend on this Host has been verified to confine a process tree"
                     .to_owned()
             }
-            Self::CredentialMismatch => "credential_mismatch: backend evidence changed after admission".into(),
+            Self::CredentialMismatch => {
+                "credential_mismatch: backend evidence changed after admission".into()
+            }
             Self::CapabilitiesNotMet { backend, missing } => {
                 let names: Vec<&str> = missing.iter().map(|c| c.as_str()).collect();
                 format!(
@@ -393,7 +397,10 @@ pub const FOX_JOB_BACKEND_DIGEST: &str = "fox-job:v1";
 
 impl BackendCapabilityProof for FoxJobBackend {
     fn availability(&self) -> BackendAvailability {
-        BackendAvailability::Available { backend: ExecutionBackend::FoxJob, digest: FOX_JOB_BACKEND_DIGEST.to_owned() }
+        BackendAvailability::Available {
+            backend: ExecutionBackend::FoxJob,
+            digest: FOX_JOB_BACKEND_DIGEST.to_owned(),
+        }
     }
 }
 
@@ -418,7 +425,9 @@ pub fn runtime_capabilities(manifest_hash: &str, profile_id: &str) -> serde_json
 /// Check before approval and again before dispatch. Control-plane operations
 /// never start an external process and remain available.
 pub fn command_start_availability(action: Option<&str>) -> Result<(), String> {
-    if matches!(action, Some("status" | "output" | "cancel")) { return Ok(()); }
+    if matches!(action, Some("status" | "output" | "cancel")) {
+        return Ok(());
+    }
     authorize_execution().map(|_| ()).map_err(|refusal|
         format!("[tool.sandbox_unavailable] {}. No process was started. Use available in-process tools; retrying this command cannot provide a backend.", refusal.reason()))
 }
@@ -553,11 +562,18 @@ pub enum TerminateOutcome {
     /// The tree walker ran and reported success. `walker_visited` is how many
     /// processes it reported acting on, so "0 visited" is visible rather than
     /// silently implied.
-    Terminated { walker_exit_code: Option<i32>, walker_visited: u32 },
+    Terminated {
+        walker_exit_code: Option<i32>,
+        walker_visited: u32,
+    },
     /// The walker could not be run or did not report success. The direct child
     /// was still signalled as a fallback, so the outcome for *that* process is
     /// known, but the tree as a whole is not. Never reported as `Terminated`.
-    Incomplete { walker_exit_code: Option<i32>, walker_visited: u32, detail: String },
+    Incomplete {
+        walker_exit_code: Option<i32>,
+        walker_visited: u32,
+        detail: String,
+    },
     /// The pid no longer resolves to our process instance, so it was **not**
     /// touched. This is the guard that keeps a reused pid from being killed.
     SkippedIdentityMismatch,
@@ -566,7 +582,10 @@ pub enum TerminateOutcome {
 impl TerminateOutcome {
     /// Whether the attempt is a positive statement that the tree stopped.
     pub fn tree_stopped(&self) -> bool {
-        matches!(self, TerminateOutcome::AlreadyExited | TerminateOutcome::Terminated { .. })
+        matches!(
+            self,
+            TerminateOutcome::AlreadyExited | TerminateOutcome::Terminated { .. }
+        )
     }
 
     pub fn as_str(&self) -> &'static str {
@@ -632,7 +651,12 @@ impl SpawnSpec {
         #[cfg(windows)]
         let (program, args) = (
             "cmd.exe".to_owned(),
-            vec!["/D".to_owned(), "/S".to_owned(), "/C".to_owned(), command.to_owned()],
+            vec![
+                "/D".to_owned(),
+                "/S".to_owned(),
+                "/C".to_owned(),
+                command.to_owned(),
+            ],
         );
         #[cfg(not(windows))]
         let (program, args) = ("sh".to_owned(), vec!["-lc".to_owned(), command.to_owned()]);
@@ -718,7 +742,10 @@ impl StartRequest {
                 }
             }
         }
-        out.push_str(&format!("budget_ms={}\n", self.execution_budget.as_millis()));
+        out.push_str(&format!(
+            "budget_ms={}\n",
+            self.execution_budget.as_millis()
+        ));
         out
     }
 
@@ -772,7 +799,9 @@ pub struct ProcessIdentity {
 /// What the OS says about a pid right now.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Liveness {
-    Alive { start_marker: Option<i64> },
+    Alive {
+        start_marker: Option<i64>,
+    },
     Gone,
     /// The probe could not answer. Never collapse this into `Gone`.
     Unknown(String),
@@ -885,7 +914,13 @@ fn current_process_start_marker() -> Option<i64> {
         let mut exit: FileTime = std::mem::zeroed();
         let mut kernel: FileTime = std::mem::zeroed();
         let mut user: FileTime = std::mem::zeroed();
-        if GetProcessTimes(GetCurrentProcess(), &mut creation, &mut exit, &mut kernel, &mut user) == 0
+        if GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        ) == 0
         {
             return None;
         }
@@ -1317,10 +1352,7 @@ impl ProcessSpawner for SystemSpawnerFlags {
     }
 }
 
-fn spawn_system_child(
-    spec: &SpawnSpec,
-    creation_flags: u32,
-) -> io::Result<Box<dyn ChildHandle>> {
+fn spawn_system_child(spec: &SpawnSpec, creation_flags: u32) -> io::Result<Box<dyn ChildHandle>> {
     // console-policy: console mode set below from `creation_flags`.
     let mut command = std::process::Command::new(&spec.program);
     command
@@ -1498,7 +1530,10 @@ fn resume_process_thread(pid: u32) -> io::Result<()> {
     }
     unsafe { CloseHandle(snapshot) };
     let thread_id = thread_id.ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, "suspended child thread was not found")
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "suspended child thread was not found",
+        )
     })?;
     let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread_id) };
     if thread == 0 {
@@ -1584,20 +1619,14 @@ struct ThreadEntry32 {
 #[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {
-    fn CreateJobObjectW(
-        job_attributes: *mut std::ffi::c_void,
-        name: *const u16,
-    ) -> isize;
+    fn CreateJobObjectW(job_attributes: *mut std::ffi::c_void, name: *const u16) -> isize;
     fn SetInformationJobObject(
         job: isize,
         information_class: i32,
         information: *mut std::ffi::c_void,
         information_length: u32,
     ) -> i32;
-    fn AssignProcessToJobObject(
-        job: isize,
-        process: isize,
-    ) -> i32;
+    fn AssignProcessToJobObject(job: isize, process: isize) -> i32;
     fn TerminateJobObject(job: isize, exit_code: u32) -> i32;
     fn QueryInformationJobObject(
         job: isize,
@@ -1632,7 +1661,9 @@ impl ChildHandle for SystemChild {
             drop(job);
             terminated?;
         }
-        Ok(Some(ExitReport { code: status.code() }))
+        Ok(Some(ExitReport {
+            code: status.code(),
+        }))
     }
 
     fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
@@ -1675,7 +1706,8 @@ impl ChildHandle for SystemChild {
                         report.walker_visited = 1;
                     }
                     Err(error) => {
-                        report.walker_error = Some(format!("could not terminate Job Object: {error}"));
+                        report.walker_error =
+                            Some(format!("could not terminate Job Object: {error}"));
                     }
                 },
                 None => {
@@ -1819,10 +1851,21 @@ pub struct ReaderPostMortem {
 /// What one supervision step did, for tests and logs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TickAction {
-    StopRequested { job_id: String, reason: StopReason },
-    TerminateAttempt { job_id: String, outcome: TerminateOutcome },
-    Finalized { job_id: String, state: JobRunState },
-    ReadersOrphaned { job_id: String },
+    StopRequested {
+        job_id: String,
+        reason: StopReason,
+    },
+    TerminateAttempt {
+        job_id: String,
+        outcome: TerminateOutcome,
+    },
+    Finalized {
+        job_id: String,
+        state: JobRunState,
+    },
+    ReadersOrphaned {
+        job_id: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1932,7 +1975,9 @@ struct JobEntry {
 
 impl std::fmt::Debug for JobEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("JobEntry").field("id", &self.id).finish_non_exhaustive()
+        f.debug_struct("JobEntry")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
     }
 }
 
@@ -2039,7 +2084,9 @@ impl ProcessJobManager {
             return Err(JobError::InvalidRequest("runId must not be empty".into()));
         }
         if request.idempotency_key.trim().is_empty() {
-            return Err(JobError::InvalidRequest("idempotencyKey must not be empty".into()));
+            return Err(JobError::InvalidRequest(
+                "idempotencyKey must not be empty".into(),
+            ));
         }
         if request.spec.program.trim().is_empty() {
             return Err(JobError::InvalidRequest("program must not be empty".into()));
@@ -2048,7 +2095,9 @@ impl ProcessJobManager {
             return Err(JobError::InvalidRequest("cwd must not be empty".into()));
         }
         if request.execution_budget.is_zero() {
-            return Err(JobError::InvalidRequest("execution budget must be greater than zero".into()));
+            return Err(JobError::InvalidRequest(
+                "execution budget must be greater than zero".into(),
+            ));
         }
         if request.execution_budget > self.config.max_execution_budget {
             return Err(JobError::InvalidRequest(format!(
@@ -2111,7 +2160,9 @@ impl ProcessJobManager {
                 // must not treat that absence as "already gone".
                 launch_in_flight: true,
             }),
-            output: Arc::new(Mutex::new(OutputWindow::new(self.config.stream_retention_bytes))),
+            output: Arc::new(Mutex::new(OutputWindow::new(
+                self.config.stream_retention_bytes,
+            ))),
             control: Mutex::new(ChildControl {
                 child: None,
                 stdout_reader: None,
@@ -2127,7 +2178,9 @@ impl ProcessJobManager {
             let mut keys = lock(&self.keys);
             if let Some(claim) = keys.get(&key) {
                 if claim.canonical != canonical {
-                    return Err(JobError::IdempotencyConflict { job_id: claim.job_id.clone() });
+                    return Err(JobError::IdempotencyConflict {
+                        job_id: claim.job_id.clone(),
+                    });
                 }
                 let existing_id = claim.job_id.clone();
                 drop(keys);
@@ -2139,7 +2192,9 @@ impl ProcessJobManager {
             {
                 let mut jobs = lock(&self.jobs);
                 if jobs.len() >= self.config.max_jobs {
-                    return Err(JobError::Capacity { max_jobs: self.config.max_jobs });
+                    return Err(JobError::Capacity {
+                        max_jobs: self.config.max_jobs,
+                    });
                 }
                 // Entry first, claim second: an observer holding `keys` can only
                 // ever see a claim whose entry is already published.
@@ -2147,7 +2202,10 @@ impl ProcessJobManager {
             }
             keys.insert(
                 key.clone(),
-                KeyClaim { job_id: job_id.clone(), canonical },
+                KeyClaim {
+                    job_id: job_id.clone(),
+                    canonical,
+                },
             );
         }
 
@@ -2162,7 +2220,11 @@ impl ProcessJobManager {
     /// invariants on [`ProcessJobManager::start`]).
     fn allocate_job_id(&self, now_ms: i64) -> String {
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-        format!("job-{:08x}-{:04x}", now_ms as u64 & 0xffff_ffff, seq & 0xffff)
+        format!(
+            "job-{:08x}-{:04x}",
+            now_ms as u64 & 0xffff_ffff,
+            seq & 0xffff
+        )
     }
 
     /// Performs the single spawn attempt for a claimed job.
@@ -2346,7 +2408,11 @@ impl ProcessJobManager {
         self.supervise(&entry);
         let view = self.view(&entry);
         let acknowledged = view.state == JobRunState::Cancelled;
-        Ok(CancelOutcome { view, changed, acknowledged })
+        Ok(CancelOutcome {
+            view,
+            changed,
+            acknowledged,
+        })
     }
 
     // -- supervision ---------------------------------------------------------
@@ -2372,7 +2438,10 @@ impl ProcessJobManager {
                 std::thread::sleep(interval);
             }
         });
-        SupervisorHandle { stop, handle: Some(handle) }
+        SupervisorHandle {
+            stop,
+            handle: Some(handle),
+        }
     }
 
     fn supervise(&self, entry: &Arc<JobEntry>) -> Vec<TickAction> {
@@ -2458,7 +2527,8 @@ impl ProcessJobManager {
                     Ok(None) => {}
                     Err(error) => {
                         let mut state = lock(&entry.state);
-                        state.error_message = Some(format!("failed to wait for the process: {error}"));
+                        state.error_message =
+                            Some(format!("failed to wait for the process: {error}"));
                         exited = true;
                     }
                 }
@@ -2503,7 +2573,9 @@ impl ProcessJobManager {
                 self.record(entry, JobEventKind::ReadersJoined);
             } else {
                 let mut state = lock(&entry.state);
-                let deadline = *state.drain_deadline.get_or_insert_with(|| Instant::now() + self.config.reader_grace);
+                let deadline = *state
+                    .drain_deadline
+                    .get_or_insert_with(|| Instant::now() + self.config.reader_grace);
                 if Instant::now() < deadline {
                     return actions;
                 }
@@ -2514,8 +2586,7 @@ impl ProcessJobManager {
                 // was ever released at all, instead of only knowing that it had
                 // not been released yet when the grace expired.
                 state.readers_orphaned = true;
-                state.readers_pending_at_orphan =
-                    u8::from(!stdout_done) + u8::from(!stderr_done);
+                state.readers_pending_at_orphan = u8::from(!stdout_done) + u8::from(!stderr_done);
                 drop(state);
                 // Taken after the state lock is released: the clock is an injected
                 // dependency and must never be called while holding a lock.
@@ -2528,7 +2599,9 @@ impl ProcessJobManager {
                     control.abandoned_stderr = Some(handle);
                 }
                 self.record(entry, JobEventKind::ReadersOrphaned);
-                actions.push(TickAction::ReadersOrphaned { job_id: entry.id.clone() });
+                actions.push(TickAction::ReadersOrphaned {
+                    job_id: entry.id.clone(),
+                });
             }
         }
 
@@ -2567,7 +2640,10 @@ impl ProcessJobManager {
             terminal
         };
         self.record(entry, JobEventKind::Finished(final_state));
-        actions.push(TickAction::Finalized { job_id: entry.id.clone(), state: final_state });
+        actions.push(TickAction::Finalized {
+            job_id: entry.id.clone(),
+            state: final_state,
+        });
         actions
     }
 
@@ -2796,7 +2872,9 @@ fn spawn_reader(
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // A panic in a supervisor step must not poison the whole lifecycle: the
     // remaining data is still structurally valid.
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 // ---------------------------------------------------------------------------
@@ -2860,7 +2938,11 @@ impl RecoveryDecision {
         if self.to != JobRunState::Interrupted {
             return None;
         }
-        Some(if self.needs_review { "interrupted_unknown" } else { "interrupted" })
+        Some(if self.needs_review {
+            "interrupted_unknown"
+        } else {
+            "interrupted"
+        })
     }
 }
 
@@ -2915,18 +2997,31 @@ mod tests {
         let manager = ProcessJobManager::new(
             Arc::new(ManualClock::default()),
             Arc::clone(&spawner) as Arc<dyn ProcessSpawner>,
-            Arc::new(ScriptedProbe::new(vec![(99, Liveness::Alive { start_marker: Some(1) })])),
+            Arc::new(ScriptedProbe::new(vec![(
+                99,
+                Liveness::Alive {
+                    start_marker: Some(1),
+                },
+            )])),
             ManagerConfig::default(),
         );
         assert!(manager.start(request("fox-job", "echo ok")).is_ok());
-        assert_eq!(spawner.spawn_count(), 1, "the production backend reaches the spawner");
+        assert_eq!(
+            spawner.spawn_count(),
+            1,
+            "the production backend reaches the spawner"
+        );
 
         let refused: Arc<ScriptedSpawner> = ScriptedSpawner::new(vec![]);
         let error = refusing_manager(Arc::clone(&refused))
             .start(request("denied", "echo nope"))
             .expect_err("the legacy refusing proof must refuse");
         assert_eq!(error.code(), "sandbox_unavailable");
-        assert_eq!(refused.spawn_count(), 0, "a refused start must not reach the spawner at all");
+        assert_eq!(
+            refused.spawn_count(),
+            0,
+            "a refused start must not reach the spawner at all"
+        );
     }
 
     /// Two managers alive at once must be able to hold *different* decisions.
@@ -2938,7 +3033,12 @@ mod tests {
             ScriptedSpawner::new(vec![scripted_plan(101, "ok")]);
         let authorized = manager(
             Arc::clone(&authorized_spawner),
-            Arc::new(ScriptedProbe::new(vec![(101, Liveness::Alive { start_marker: Some(1) })])),
+            Arc::new(ScriptedProbe::new(vec![(
+                101,
+                Liveness::Alive {
+                    start_marker: Some(1),
+                },
+            )])),
             Arc::new(ManualClock::default()),
             ManagerConfig::default(),
         );
@@ -2974,7 +3074,12 @@ mod tests {
             ScriptedSpawner::new(vec![scripted_plan(102, "ok")]);
         let authorized = manager(
             Arc::clone(&authorized_spawner),
-            Arc::new(ScriptedProbe::new(vec![(102, Liveness::Alive { start_marker: Some(1) })])),
+            Arc::new(ScriptedProbe::new(vec![(
+                102,
+                Liveness::Alive {
+                    start_marker: Some(1),
+                },
+            )])),
             Arc::new(ManualClock::default()),
             ManagerConfig::default(),
         );
@@ -2998,7 +3103,10 @@ mod tests {
         };
         // `Box<dyn ChildHandle>` is not `Debug`, so match rather than expect_err.
         match SystemSpawner.spawn(&RefusingInTests, &spec) {
-            Ok(child) => panic!("the refusing proof must not create a child: pid {}", child.pid()),
+            Ok(child) => panic!(
+                "the refusing proof must not create a child: pid {}",
+                child.pid()
+            ),
             Err(error) => {
                 assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
                 assert!(error.to_string().contains("sandbox_unavailable"), "{error}");
@@ -3007,7 +3115,10 @@ mod tests {
         // The same seam with an authorizing proof is allowed through, proving the
         // refusal above came from the proof and not from something incidental.
         assert!(SystemSpawner
-            .spawn(&AvailableInTests::host_user_unconfined("spawner-probe"), &spec)
+            .spawn(
+                &AvailableInTests::host_user_unconfined("spawner-probe"),
+                &spec
+            )
             .is_ok());
     }
 
@@ -3037,7 +3148,9 @@ mod tests {
                         Arc::clone(&spawner),
                         Arc::new(ScriptedProbe::new(vec![(
                             700 + index,
-                            Liveness::Alive { start_marker: Some(1) },
+                            Liveness::Alive {
+                                start_marker: Some(1),
+                            },
                         )])),
                         Arc::new(ManualClock::default()),
                         ManagerConfig::default(),
@@ -3123,7 +3236,10 @@ mod tests {
         fn new(answers: Vec<(u32, Liveness)>) -> Self {
             Self {
                 answers: Mutex::new(answers.into_iter().collect()),
-                current: ProcessIdentity { pid: 4242, start_marker: Some(7) },
+                current: ProcessIdentity {
+                    pid: 4242,
+                    start_marker: Some(7),
+                },
             }
         }
         fn set(&self, pid: u32, liveness: Liveness) {
@@ -3171,10 +3287,14 @@ mod tests {
             Ok(None)
         }
         fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
-            self.stdout.take().map(|bytes| Box::new(io::Cursor::new(bytes)) as Box<dyn Read + Send>)
+            self.stdout
+                .take()
+                .map(|bytes| Box::new(io::Cursor::new(bytes)) as Box<dyn Read + Send>)
         }
         fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
-            self.stderr.take().map(|bytes| Box::new(io::Cursor::new(bytes)) as Box<dyn Read + Send>)
+            self.stderr
+                .take()
+                .map(|bytes| Box::new(io::Cursor::new(bytes)) as Box<dyn Read + Send>)
         }
         fn terminate_tree(&mut self) -> TreeKillReport {
             self.terminated.fetch_add(1, Ordering::SeqCst);
@@ -3256,12 +3376,17 @@ mod tests {
             }
             let plan = plan.remove(0);
             if plan.fail {
-                return Err(io::Error::new(io::ErrorKind::NotFound, "scripted spawn failure"));
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "scripted spawn failure",
+                ));
             }
             Ok(Box::new(ScriptedChild {
                 pid: plan.pid,
                 remain_ticks: plan.remain_ticks,
-                exit: ExitReport { code: plan.exit_code },
+                exit: ExitReport {
+                    code: plan.exit_code,
+                },
                 stdout: Some(plan.stdout),
                 stderr: Some(plan.stderr),
                 terminated: Arc::clone(&self.terminates),
@@ -3362,8 +3487,12 @@ mod tests {
             Ok(Box::new(HeldPipeChild {
                 pid: self.pid,
                 terminated: Arc::clone(&self.terminated),
-                stdout: Some(Box::new(HeldPipe { released: Arc::clone(&self.released) })),
-                stderr: Some(Box::new(HeldPipe { released: Arc::clone(&self.released) })),
+                stdout: Some(Box::new(HeldPipe {
+                    released: Arc::clone(&self.released),
+                })),
+                stderr: Some(Box::new(HeldPipe {
+                    released: Arc::clone(&self.released),
+                })),
             }))
         }
     }
@@ -3607,16 +3736,32 @@ mod tests {
 
     #[test]
     fn owner_classification_never_guesses() {
-        let expected = ProcessIdentity { pid: 10, start_marker: Some(5) };
+        let expected = ProcessIdentity {
+            pid: 10,
+            start_marker: Some(5),
+        };
         assert_eq!(
-            classify_owner(&expected, &Liveness::Alive { start_marker: Some(5) }),
+            classify_owner(
+                &expected,
+                &Liveness::Alive {
+                    start_marker: Some(5)
+                }
+            ),
             OwnerStatus::Alive
         );
         assert_eq!(
-            classify_owner(&expected, &Liveness::Alive { start_marker: Some(6) }),
+            classify_owner(
+                &expected,
+                &Liveness::Alive {
+                    start_marker: Some(6)
+                }
+            ),
             OwnerStatus::Replaced
         );
-        assert_eq!(classify_owner(&expected, &Liveness::Gone), OwnerStatus::Gone);
+        assert_eq!(
+            classify_owner(&expected, &Liveness::Gone),
+            OwnerStatus::Gone
+        );
         assert_eq!(
             classify_owner(&expected, &Liveness::Unknown("denied".into())),
             OwnerStatus::Unknown
@@ -3628,8 +3773,13 @@ mod tests {
         );
         assert_eq!(
             classify_owner(
-                &ProcessIdentity { pid: 10, start_marker: None },
-                &Liveness::Alive { start_marker: Some(5) }
+                &ProcessIdentity {
+                    pid: 10,
+                    start_marker: None
+                },
+                &Liveness::Alive {
+                    start_marker: Some(5)
+                }
             ),
             OwnerStatus::Unknown
         );
@@ -3660,12 +3810,19 @@ mod tests {
     #[test]
     fn admission_verifier_rejects_before_manager_state_or_spawn() {
         let spawner = ScriptedSpawner::new(vec![]);
-        let manager = manager(Arc::clone(&spawner),
-            Arc::new(ScriptedProbe::new(vec![])), Arc::new(ManualClock::default()),
-            ManagerConfig::default());
-        let error = manager.start_authorized(request("host-dispatch", "echo nope"), |_| {
-            Err(JobError::CredentialMismatch("changed authoritative fields".into()))
-        }).unwrap_err();
+        let manager = manager(
+            Arc::clone(&spawner),
+            Arc::new(ScriptedProbe::new(vec![])),
+            Arc::new(ManualClock::default()),
+            ManagerConfig::default(),
+        );
+        let error = manager
+            .start_authorized(request("host-dispatch", "echo nope"), |_| {
+                Err(JobError::CredentialMismatch(
+                    "changed authoritative fields".into(),
+                ))
+            })
+            .unwrap_err();
         assert_eq!(error.code(), "credential_mismatch");
         assert_eq!(spawner.spawn_count(), 0);
         assert!(lock(&manager.jobs).is_empty());
@@ -3674,7 +3831,8 @@ mod tests {
 
     #[test]
     fn same_key_different_request_is_a_conflict_not_a_second_launch() {
-        let spawner = ScriptedSpawner::new(vec![scripted_plan(100, "one"), scripted_plan(101, "two")]);
+        let spawner =
+            ScriptedSpawner::new(vec![scripted_plan(100, "one"), scripted_plan(101, "two")]);
         let manager = manager(
             Arc::clone(&spawner),
             Arc::new(ScriptedProbe::new(vec![])),
@@ -3701,7 +3859,9 @@ mod tests {
         for _ in 0..8 {
             let manager = Arc::clone(&manager);
             handles.push(std::thread::spawn(move || {
-                manager.start(request("race", "echo hi")).map(|outcome| outcome.launched())
+                manager
+                    .start(request("race", "echo hi"))
+                    .map(|outcome| outcome.launched())
             }));
         }
         let launched = handles
@@ -3748,7 +3908,10 @@ mod tests {
             Arc::clone(&spawner),
             Arc::new(ScriptedProbe::new(vec![])),
             Arc::new(ManualClock::default()),
-            ManagerConfig { max_jobs: 2, ..ManagerConfig::default() },
+            ManagerConfig {
+                max_jobs: 2,
+                ..ManagerConfig::default()
+            },
         );
         manager.start(request("a", "echo a")).unwrap();
         manager.start(request("b", "echo b")).unwrap();
@@ -3777,7 +3940,9 @@ mod tests {
         let pid = 900;
         let probe = Arc::new(ScriptedProbe::new(vec![(
             pid,
-            Liveness::Alive { start_marker: Some(5) },
+            Liveness::Alive {
+                start_marker: Some(5),
+            },
         )]));
         let spawner = ScriptedSpawner::new(vec![scripted_plan(pid, "hello")]);
         // Concrete fakes are kept for their counters; the manager gets trait
@@ -3814,7 +3979,11 @@ mod tests {
         );
         match duplicate {
             Ok(StartOutcome::Existing(view)) => {
-                assert_eq!(view.job_id, first.view().job_id, "the duplicate must name the same job")
+                assert_eq!(
+                    view.job_id,
+                    first.view().job_id,
+                    "the duplicate must name the same job"
+                )
             }
             other => panic!("a same-key duplicate must resolve, not fail: {other:?}"),
         }
@@ -3841,7 +4010,9 @@ mod tests {
         let pid = 901;
         let probe = Arc::new(ScriptedProbe::new(vec![(
             pid,
-            Liveness::Alive { start_marker: Some(5) },
+            Liveness::Alive {
+                start_marker: Some(5),
+            },
         )]));
         let terminates = Arc::new(AtomicUsize::new(0));
         let spawner = Arc::new(ParkingSpawner {
@@ -3869,7 +4040,11 @@ mod tests {
             .expect("the spawner must park");
 
         let listed = manager.list(None);
-        assert_eq!(listed.len(), 1, "a starting job must be visible: {listed:?}");
+        assert_eq!(
+            listed.len(),
+            1,
+            "a starting job must be visible: {listed:?}"
+        );
         let job_id = listed[0].job_id.clone();
         let cancelled = manager.cancel(&job_id).expect("cancel");
 
@@ -3896,7 +4071,10 @@ mod tests {
             1,
             "the tree the launch created must actually be reclaimed"
         );
-        assert_eq!(view.terminate.as_ref().map(TerminateOutcome::as_str), Some("terminated"));
+        assert_eq!(
+            view.terminate.as_ref().map(TerminateOutcome::as_str),
+            Some("terminated")
+        );
         assert_eq!(
             view.owner_after_stop,
             Some(OwnerStatus::Gone),
@@ -3922,7 +4100,10 @@ mod tests {
             Arc::new(ManualClock::default()),
             spawner_for_manager,
             Arc::new(ScriptedProbe::new(vec![])),
-            ManagerConfig { max_jobs: 2, ..ManagerConfig::default() },
+            ManagerConfig {
+                max_jobs: 2,
+                ..ManagerConfig::default()
+            },
             lifecycle_proof(),
         ));
 
@@ -3937,15 +4118,24 @@ mod tests {
                 })
             })
             .collect();
-        let results: Vec<_> = workers.into_iter().map(|handle| handle.join().unwrap()).collect();
+        let results: Vec<_> = workers
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
 
         let launched = results.iter().filter(|result| result.is_ok()).count();
         let rejected = results
             .iter()
             .filter(|result| matches!(result, Err(JobError::Capacity { .. })))
             .count();
-        assert_eq!(launched, 2, "exactly the capacity must be admitted: {results:?}");
-        assert_eq!(rejected, 2, "the rest must be rejected, not queued: {results:?}");
+        assert_eq!(
+            launched, 2,
+            "exactly the capacity must be admitted: {results:?}"
+        );
+        assert_eq!(
+            rejected, 2,
+            "the rest must be rejected, not queued: {results:?}"
+        );
         assert_eq!(
             spawner.spawn_count(),
             2,
@@ -3967,7 +4157,9 @@ mod tests {
         spawner.fail_tree_walker();
         let probe = Arc::new(ScriptedProbe::new(vec![(
             pid,
-            Liveness::Alive { start_marker: Some(5) },
+            Liveness::Alive {
+                start_marker: Some(5),
+            },
         )]));
         let manager = manager(
             Arc::clone(&spawner),
@@ -3983,7 +4175,11 @@ mod tests {
 
         let view = wait_terminal(&manager, &job_id);
         match &view.terminate {
-            Some(outcome @ TerminateOutcome::Incomplete { walker_exit_code, .. }) => {
+            Some(
+                outcome @ TerminateOutcome::Incomplete {
+                    walker_exit_code, ..
+                },
+            ) => {
                 assert_eq!(*walker_exit_code, Some(128));
                 assert!(
                     !outcome.tree_stopped(),
@@ -4018,14 +4214,21 @@ mod tests {
             terminated: Arc::clone(&terminated),
             released: Arc::clone(&released),
         });
-        let probe: Arc<dyn IdentityProbe> =
-            Arc::new(ScriptedProbe::new(vec![(pid, Liveness::Alive { start_marker: Some(5) })]));
+        let probe: Arc<dyn IdentityProbe> = Arc::new(ScriptedProbe::new(vec![(
+            pid,
+            Liveness::Alive {
+                start_marker: Some(5),
+            },
+        )]));
         let clock: Arc<dyn Clock> = Arc::new(ManualClock::default());
         let manager = ProcessJobManager::with_backend_proof(
             clock,
             spawner,
             probe,
-            ManagerConfig { reader_grace: Duration::from_millis(50), ..ManagerConfig::default() },
+            ManagerConfig {
+                reader_grace: Duration::from_millis(50),
+                ..ManagerConfig::default()
+            },
             lifecycle_proof(),
         );
 
@@ -4040,7 +4243,9 @@ mod tests {
             "a pipe that is still held after the grace must be reported: {view:?}"
         );
 
-        let post = manager.reader_post_mortem(&job_id).expect("post mortem is readable");
+        let post = manager
+            .reader_post_mortem(&job_id)
+            .expect("post mortem is readable");
         assert_eq!(post.pending_at_orphan, 2, "both streams were still open");
         assert!(post.orphan_observed_at_ms.is_some(), "{post:?}");
         assert_eq!(
@@ -4085,11 +4290,18 @@ mod tests {
             ManagerConfig::default(),
         );
 
-        let job_id = manager.start(request("joined", "echo hello")).unwrap().view().job_id.clone();
+        let job_id = manager
+            .start(request("joined", "echo hello"))
+            .unwrap()
+            .view()
+            .job_id
+            .clone();
         let view = wait_terminal(&manager, &job_id);
         assert!(!view.readers_orphaned, "{view:?}");
 
-        let post = manager.reader_post_mortem(&job_id).expect("post mortem is readable");
+        let post = manager
+            .reader_post_mortem(&job_id)
+            .expect("post mortem is readable");
         assert_eq!(post.pending_at_orphan, 0, "{post:?}");
         assert_eq!(post.orphan_observed_at_ms, None, "{post:?}");
         assert_eq!(
@@ -4121,8 +4333,18 @@ mod tests {
             ManagerConfig::default(),
         );
 
-        let ok = manager.start(request("ok", "echo fine")).unwrap().view().job_id.clone();
-        let bad = manager.start(request("bad", "echo bad")).unwrap().view().job_id.clone();
+        let ok = manager
+            .start(request("ok", "echo fine"))
+            .unwrap()
+            .view()
+            .job_id
+            .clone();
+        let bad = manager
+            .start(request("bad", "echo bad"))
+            .unwrap()
+            .view()
+            .job_id
+            .clone();
 
         // State must not be judged before the process is reaped.
         assert_eq!(manager.status(&bad).unwrap().state, JobRunState::Running);
@@ -4161,7 +4383,12 @@ mod tests {
             Arc::new(ManualClock::default()),
             ManagerConfig::default(),
         );
-        let job = manager.start(request("k", "echo hi")).unwrap().view().job_id.clone();
+        let job = manager
+            .start(request("k", "echo hi"))
+            .unwrap()
+            .view()
+            .job_id
+            .clone();
         for _ in 0..25 {
             let view = manager.status(&job).unwrap();
             assert_eq!(view.state, JobRunState::Running, "status must not advance");
@@ -4185,7 +4412,9 @@ mod tests {
         }]);
         let probe = Arc::new(ScriptedProbe::new(vec![(
             100,
-            Liveness::Alive { start_marker: Some(5) },
+            Liveness::Alive {
+                start_marker: Some(5),
+            },
         )]));
         let manager = manager(
             Arc::clone(&spawner),
@@ -4232,7 +4461,9 @@ mod tests {
         }]);
         let probe = Arc::new(ScriptedProbe::new(vec![(
             100,
-            Liveness::Alive { start_marker: Some(5) },
+            Liveness::Alive {
+                start_marker: Some(5),
+            },
         )]));
         let manager = manager(
             Arc::clone(&spawner),
@@ -4249,11 +4480,18 @@ mod tests {
         assert!(
             actions.iter().any(|action| matches!(
                 action,
-                TickAction::StopRequested { reason: StopReason::Timeout, .. }
+                TickAction::StopRequested {
+                    reason: StopReason::Timeout,
+                    ..
+                }
             )),
             "a timeout must be recorded as a stop request: {actions:?}"
         );
-        assert_eq!(spawner.terminate_count(), 1, "the tree must be signalled exactly once");
+        assert_eq!(
+            spawner.terminate_count(),
+            1,
+            "the tree must be signalled exactly once"
+        );
 
         // The terminal state is only written once readers have drained.
         for _ in 0..20 {
@@ -4318,7 +4556,9 @@ mod tests {
         }]);
         let probe = Arc::new(ScriptedProbe::new(vec![(
             100,
-            Liveness::Alive { start_marker: Some(5) },
+            Liveness::Alive {
+                start_marker: Some(5),
+            },
         )]));
         let manager = manager(
             Arc::clone(&spawner),
@@ -4326,7 +4566,12 @@ mod tests {
             Arc::new(ManualClock::default()),
             ManagerConfig::default(),
         );
-        let job = manager.start(request("k", "sleep forever")).unwrap().view().job_id.clone();
+        let job = manager
+            .start(request("k", "sleep forever"))
+            .unwrap()
+            .view()
+            .job_id
+            .clone();
 
         let first = manager.cancel(&job).unwrap();
         assert!(first.changed);
@@ -4338,7 +4583,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(manager.status(&job).unwrap().state, JobRunState::Cancelled);
-        assert!(manager.status(&job).unwrap().cancel_acknowledged_at.is_some());
+        assert!(manager
+            .status(&job)
+            .unwrap()
+            .cancel_acknowledged_at
+            .is_some());
         assert!(manager.status(&job).unwrap().production_state() == "cancelled");
 
         let second = manager.cancel(&job).unwrap();
@@ -4360,8 +4609,16 @@ mod tests {
             Arc::new(ManualClock::default()),
             ManagerConfig::default(),
         );
-        let job = manager.start(request("k", "echo done")).unwrap().view().job_id.clone();
-        assert_eq!(run_to_terminal(&manager, &job).state, JobRunState::Succeeded);
+        let job = manager
+            .start(request("k", "echo done"))
+            .unwrap()
+            .view()
+            .job_id
+            .clone();
+        assert_eq!(
+            run_to_terminal(&manager, &job).state,
+            JobRunState::Succeeded
+        );
 
         let outcome = manager.cancel(&job).unwrap();
         assert!(!outcome.changed);
@@ -4380,7 +4637,10 @@ mod tests {
         window.push(Stream::Stdout, b"GHIJ");
 
         let view = window.view(Stream::Stdout);
-        assert_eq!(view.total_bytes, 20, "every byte the child wrote is counted");
+        assert_eq!(
+            view.total_bytes, 20,
+            "every byte the child wrote is counted"
+        );
         assert_eq!(view.retained_bytes, 16);
         assert_eq!(view.dropped_bytes, 4);
         assert_eq!(view.retained_start, 4);
@@ -4466,7 +4726,10 @@ mod tests {
         let mut window = OutputWindow::new(64);
         window.push(Stream::Stdout, b"partial");
         let page = window.page(Stream::Stdout, 0, 4096);
-        assert!(page.at_end_of_available, "the cursor caught up with the producer");
+        assert!(
+            page.at_end_of_available,
+            "the cursor caught up with the producer"
+        );
         assert!(
             !page.stream_closed,
             "a buffer cannot claim the pipe ended; only the manager knows"
@@ -4503,7 +4766,9 @@ mod tests {
         }]);
         let probe = Arc::new(ScriptedProbe::new(vec![(
             100,
-            Liveness::Alive { start_marker: Some(5) },
+            Liveness::Alive {
+                start_marker: Some(5),
+            },
         )]));
         let manager = manager(
             Arc::clone(&spawner),
@@ -4511,11 +4776,24 @@ mod tests {
             Arc::new(ManualClock::default()),
             ManagerConfig::default(),
         );
-        let job = manager.start(request("k", "sleep forever")).unwrap().view().job_id.clone();
-        assert_eq!(manager.status(&job).unwrap().owner.unwrap().start_marker, Some(5));
+        let job = manager
+            .start(request("k", "sleep forever"))
+            .unwrap()
+            .view()
+            .job_id
+            .clone();
+        assert_eq!(
+            manager.status(&job).unwrap().owner.unwrap().start_marker,
+            Some(5)
+        );
 
         // The pid now belongs to a different process instance.
-        probe.set(100, Liveness::Alive { start_marker: Some(999) });
+        probe.set(
+            100,
+            Liveness::Alive {
+                start_marker: Some(999),
+            },
+        );
         let outcome = manager.cancel(&job).unwrap();
 
         assert!(outcome.changed, "the request itself is recorded");
@@ -4547,7 +4825,9 @@ mod tests {
         }]);
         let probe = Arc::new(ScriptedProbe::new(vec![(
             100,
-            Liveness::Alive { start_marker: Some(5) },
+            Liveness::Alive {
+                start_marker: Some(5),
+            },
         )]));
         let manager = manager(
             Arc::clone(&spawner),
@@ -4555,7 +4835,12 @@ mod tests {
             Arc::new(ManualClock::default()),
             ManagerConfig::default(),
         );
-        let job = manager.start(request("k", "sleep forever")).unwrap().view().job_id.clone();
+        let job = manager
+            .start(request("k", "sleep forever"))
+            .unwrap()
+            .view()
+            .job_id
+            .clone();
         probe.set(100, Liveness::Unknown("access denied".into()));
         manager.cancel(&job).unwrap();
         assert_eq!(
@@ -4581,8 +4866,14 @@ mod tests {
         for (state, expected) in table {
             assert_eq!(state.production_state(), expected, "{state:?}");
         }
-        assert_eq!(JobRunState::TimedOut.production_error_code(), Some("timed_out"));
-        assert_eq!(JobRunState::Interrupted.production_error_code(), Some("interrupted"));
+        assert_eq!(
+            JobRunState::TimedOut.production_error_code(),
+            Some("timed_out")
+        );
+        assert_eq!(
+            JobRunState::Interrupted.production_error_code(),
+            Some("interrupted")
+        );
         assert_eq!(JobRunState::Succeeded.production_error_code(), None);
         assert_eq!(JobRunState::Failed.production_error_code(), None);
 
@@ -4608,9 +4899,19 @@ mod tests {
     #[test]
     fn recovery_uses_ownership_evidence_and_never_allows_replay() {
         let probe = Arc::new(ScriptedProbe::new(vec![
-            (11, Liveness::Alive { start_marker: Some(1) }),
+            (
+                11,
+                Liveness::Alive {
+                    start_marker: Some(1),
+                },
+            ),
             (12, Liveness::Gone),
-            (13, Liveness::Alive { start_marker: Some(999) }),
+            (
+                13,
+                Liveness::Alive {
+                    start_marker: Some(999),
+                },
+            ),
             (14, Liveness::Unknown("access denied".into())),
         ]));
         let manager = manager(
@@ -4619,16 +4920,55 @@ mod tests {
             Arc::new(ManualClock::default()),
             ManagerConfig::default(),
         );
-        let record = |job_id: &str, state: JobRunState, owner: Option<ProcessIdentity>| {
-            PersistedJobRecord { job_id: job_id.to_owned(), run_id: "r".into(), state, owner }
-        };
+        let record =
+            |job_id: &str, state: JobRunState, owner: Option<ProcessIdentity>| PersistedJobRecord {
+                job_id: job_id.to_owned(),
+                run_id: "r".into(),
+                state,
+                owner,
+            };
         let records = vec![
-            record("alive", JobRunState::Running, Some(ProcessIdentity { pid: 11, start_marker: Some(1) })),
-            record("gone", JobRunState::Running, Some(ProcessIdentity { pid: 12, start_marker: Some(2) })),
-            record("reused", JobRunState::Running, Some(ProcessIdentity { pid: 13, start_marker: Some(3) })),
-            record("unknown", JobRunState::Running, Some(ProcessIdentity { pid: 14, start_marker: Some(4) })),
+            record(
+                "alive",
+                JobRunState::Running,
+                Some(ProcessIdentity {
+                    pid: 11,
+                    start_marker: Some(1),
+                }),
+            ),
+            record(
+                "gone",
+                JobRunState::Running,
+                Some(ProcessIdentity {
+                    pid: 12,
+                    start_marker: Some(2),
+                }),
+            ),
+            record(
+                "reused",
+                JobRunState::Running,
+                Some(ProcessIdentity {
+                    pid: 13,
+                    start_marker: Some(3),
+                }),
+            ),
+            record(
+                "unknown",
+                JobRunState::Running,
+                Some(ProcessIdentity {
+                    pid: 14,
+                    start_marker: Some(4),
+                }),
+            ),
             record("norecord", JobRunState::Running, None),
-            record("done", JobRunState::Succeeded, Some(ProcessIdentity { pid: 11, start_marker: Some(1) })),
+            record(
+                "done",
+                JobRunState::Succeeded,
+                Some(ProcessIdentity {
+                    pid: 11,
+                    start_marker: Some(1),
+                }),
+            ),
         ];
         let decisions = manager.recover(&records);
         let find = |id: &str| {
@@ -4690,7 +5030,10 @@ mod tests {
             job_id: "orphan".into(),
             run_id: "r".into(),
             state: JobRunState::Running,
-            owner: Some(ProcessIdentity { pid: 9, start_marker: Some(1) }),
+            owner: Some(ProcessIdentity {
+                pid: 9,
+                start_marker: Some(1),
+            }),
         }]);
         assert_eq!(decisions[0].to, JobRunState::Interrupted);
         assert_eq!(decisions[0].owner_status, OwnerStatus::Unknown);
@@ -4708,16 +5051,34 @@ mod tests {
             ManagerConfig::default(),
         );
         let mutations: Vec<(&str, Box<dyn Fn(&mut StartRequest)>)> = vec![
-            ("empty run", Box::new(|request: &mut StartRequest| request.run_id.clear())),
-            ("empty key", Box::new(|request: &mut StartRequest| request.idempotency_key.clear())),
-            ("empty program", Box::new(|request: &mut StartRequest| request.spec.program.clear())),
-            ("empty cwd", Box::new(|request: &mut StartRequest| request.spec.cwd.clear())),
-            ("zero budget", Box::new(|request: &mut StartRequest| {
-                request.execution_budget = Duration::ZERO;
-            })),
-            ("budget too large", Box::new(|request: &mut StartRequest| {
-                request.execution_budget = Duration::from_secs(99_999);
-            })),
+            (
+                "empty run",
+                Box::new(|request: &mut StartRequest| request.run_id.clear()),
+            ),
+            (
+                "empty key",
+                Box::new(|request: &mut StartRequest| request.idempotency_key.clear()),
+            ),
+            (
+                "empty program",
+                Box::new(|request: &mut StartRequest| request.spec.program.clear()),
+            ),
+            (
+                "empty cwd",
+                Box::new(|request: &mut StartRequest| request.spec.cwd.clear()),
+            ),
+            (
+                "zero budget",
+                Box::new(|request: &mut StartRequest| {
+                    request.execution_budget = Duration::ZERO;
+                }),
+            ),
+            (
+                "budget too large",
+                Box::new(|request: &mut StartRequest| {
+                    request.execution_budget = Duration::from_secs(99_999);
+                }),
+            ),
         ];
         for (label, mutate) in mutations {
             let mut candidate = request("k", "echo hi");
@@ -4725,7 +5086,11 @@ mod tests {
             let error = manager.start(candidate).unwrap_err();
             assert_eq!(error.code(), "job.invalid_request", "{label}");
         }
-        assert_eq!(spawner.spawn_count(), 0, "validation happens before any spawn");
+        assert_eq!(
+            spawner.spawn_count(),
+            0,
+            "validation happens before any spawn"
+        );
     }
 
     #[test]
@@ -4738,7 +5103,10 @@ mod tests {
         );
         assert_eq!(manager.status("nope").unwrap_err().code(), "job.unknown");
         assert_eq!(
-            manager.output("nope", Stream::Stdout, 0, 16).unwrap_err().code(),
+            manager
+                .output("nope", Stream::Stdout, 0, 16)
+                .unwrap_err()
+                .code(),
             "job.unknown"
         );
         assert_eq!(manager.cancel("nope").unwrap_err().code(), "job.unknown");
@@ -4774,6 +5142,9 @@ mod tests {
             .collect();
         let mut sorted = ids.clone();
         sorted.sort();
-        assert_eq!(ids, sorted, "listing is ordered so evidence is reproducible");
+        assert_eq!(
+            ids, sorted,
+            "listing is ordered so evidence is reproducible"
+        );
     }
 }

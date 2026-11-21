@@ -38,11 +38,15 @@ mock.module('../src/features/conversations/api/desktop-client', () => ({
 }))
 
 const React = await import('react')
-const { act, cleanup, fireEvent, render, waitFor, within } = await import('@testing-library/react')
+const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react')
 const { ModelProvidersPage } = await import('../src/features/settings/settings-pages')
 const { TooltipProvider } = await import('../src/components/ui/tooltip')
 const { ConfirmDialogProvider } = await import('../src/components/ui/confirm-dialog')
 const { PromptDialogProvider } = await import('../src/components/ui/prompt-dialog')
+const { MotionGlobalConfig } = await import('motion/react')
+const previousMotion = MotionGlobalConfig.skipAnimations
+MotionGlobalConfig.skipAnimations = true
+afterAll(() => { MotionGlobalConfig.skipAnimations = previousMotion })
 
 afterEach(() => { cleanup(); deleted.length = 0 })
 
@@ -100,9 +104,10 @@ describe('service row ⋯ menu', () => {
     for (const action of ['取消', '保存']) {
       await openMenuAndChoose('编辑')
       await waitFor(() => expect(document.querySelector('.fox-service-form')).toBeTruthy())
-      expect(document.querySelector('[data-slot="sheet-content"]')).toBeNull()
-      const form = document.querySelector<HTMLElement>('.fox-service-form')!
-      const input = within(form).getByLabelText('服务名称') as HTMLInputElement
+      const sheet = document.querySelector<HTMLElement>('[data-slot="sheet-content"]')!
+      expect(sheet.dataset.side).toBe('right')
+      const form = sheet.querySelector<HTMLElement>('.fox-service-form')!
+      const input = form.querySelector<HTMLInputElement>('[data-provider-initial-focus]')!
       expect(input.value).toBe('测试服务')
       await act(async () => { fireEvent.change(input, { target: { value: '改名后的服务' } }) })
       await act(async () => { fireEvent.click(buttonIn(form, action)) })

@@ -24,7 +24,11 @@ fn desktop_embedding_smoke_worker_does_not_start_the_app_window() {
             // the CI Suite builds with --no-default-features, where the worker
             // exits immediately with "local embedding is not enabled" (2).
             // Either way it must exit instead of starting the app window.
-            let expected = if cfg!(feature = "local-embedding") { 1 } else { 2 };
+            let expected = if cfg!(feature = "local-embedding") {
+                1
+            } else {
+                2
+            };
             assert_eq!(status.code(), Some(expected));
             return;
         }

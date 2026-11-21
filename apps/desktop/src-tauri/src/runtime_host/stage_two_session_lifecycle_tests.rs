@@ -11,12 +11,12 @@
 //!   mapping and the Run association used to be two independent statements, so
 //!   the row survived while the compensation deleted the file.
 
+use super::protocol::{timestamp, PROTOCOL_NAME, PROTOCOL_VERSION};
 use super::session_lifecycle::{
     event_proves_persistence, native_session_file_is_persisted, open_decision, OpenDecision,
     SessionLifecycle, SessionOpenError, SessionRuntimeLink, SESSION_NOT_PERSISTED,
     SESSION_UNAVAILABLE,
 };
-use super::protocol::{timestamp, PROTOCOL_NAME, PROTOCOL_VERSION};
 use super::RuntimeEnvelope;
 use crate::database::{Database, RuntimeSessionRecord, RuntimeSessionStatus};
 use serde_json::{json, Value};
@@ -30,9 +30,16 @@ use std::time::Duration;
 enum Scripted {
     /// `session_created`. `persist` decides whether the runtime also wrote the
     /// JSONL (a Pi version that persists eagerly) or only booked the path.
-    Created { path: PathBuf, session_id: String, persist: bool },
+    Created {
+        path: PathBuf,
+        session_id: String,
+        persist: bool,
+    },
     /// `request_failed` with a stable code.
-    Rejected { code: &'static str, message: &'static str },
+    Rejected {
+        code: &'static str,
+        message: &'static str,
+    },
 }
 
 /// Scripted stand-in for the runtime's session protocol.
@@ -67,8 +74,10 @@ impl SessionRuntimeLink for ScriptedRuntime {
         request: super::RuntimeRequest,
         _timeout: Duration,
     ) -> Result<RuntimeEnvelope, String> {
-        self.requests
-            .push((request.r#type.clone(), request.payload.clone().unwrap_or(Value::Null)));
+        self.requests.push((
+            request.r#type.clone(),
+            request.payload.clone().unwrap_or(Value::Null),
+        ));
         let answer = self.answers.pop_front().expect(
             "the Host sent a session request the test did not script \
              — an unrecoverable conversation must not ask the runtime anything",
@@ -135,10 +144,8 @@ struct Fixture {
 
 impl Fixture {
     fn new(label: &str) -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "fox-stage-two-{label}-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("fox-stage-two-{label}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let database = Database::open(root.join("facts.db")).unwrap();
         let conversation = database
@@ -209,7 +216,12 @@ impl Fixture {
         self.sessions_dir.join(name)
     }
 
-    fn seed_native_mapping(&self, runtime_session_id: &str, file_name: &str, status: RuntimeSessionStatus) -> PathBuf {
+    fn seed_native_mapping(
+        &self,
+        runtime_session_id: &str,
+        file_name: &str,
+        status: RuntimeSessionStatus,
+    ) -> PathBuf {
         let file = self.session_file(file_name);
         self.database
             .ensure_native_runtime_session(
@@ -270,7 +282,11 @@ fn a_failed_native_restore_stays_failed_on_the_next_open() {
         .lifecycle()
         .open(&fixture.conversation_id, &mut first)
         .expect_err("a corrupted native session must not open");
-    assert_eq!(recovery_code(&first_error), Some("session.native_corrupt"), "{first_error:?}");
+    assert_eq!(
+        recovery_code(&first_error),
+        Some("session.native_corrupt"),
+        "{first_error:?}"
+    );
     assert_eq!(
         fixture.mapping().unwrap().status,
         "unavailable",
@@ -375,9 +391,15 @@ fn a_session_that_pi_never_persisted_is_never_called_recoverable() {
         "the missing file is never resumed: the new generation adopts a new Pi session"
     );
     let mapping = fixture.mapping().expect("the mapping survives adoption");
-    assert_eq!(mapping.status, "allocated", "adoption never claims the file exists");
+    assert_eq!(
+        mapping.status, "allocated",
+        "adoption never claims the file exists"
+    );
     assert_eq!(mapping.runtime_session_id, runtime_session_id);
-    assert_eq!(mapping.context_generation, 1, "adoption keeps the generation");
+    assert_eq!(
+        mapping.context_generation, 1,
+        "adoption keeps the generation"
+    );
     assert_eq!(mapping.native_session_ref.as_deref(), Some("pi-adopted"));
     let expected_adopted = std::fs::canonicalize(&fixture.sessions_dir)
         .unwrap()
@@ -452,7 +474,11 @@ fn verification_promotes_an_allocated_mapping_without_touching_the_file() {
         Some(RuntimeSessionStatus::Ready)
     );
     assert_eq!(fixture.mapping().unwrap().status, "ready");
-    assert_eq!(std::fs::read(&file).unwrap(), before, "verify must not rewrite Pi's file");
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        before,
+        "verify must not rewrite Pi's file"
+    );
 }
 
 // ------------------------------------------- (c) atomic mapping + runs ----
@@ -481,7 +507,10 @@ fn a_failed_mapping_write_leaves_no_row_pointing_at_the_removed_file() {
     let fired = crate::database::native_session_fault::fired();
     crate::database::native_session_fault::disarm();
 
-    assert!(fired, "the fault must fire at the Run association, not elsewhere");
+    assert!(
+        fired,
+        "the fault must fire at the Run association, not elsewhere"
+    );
     assert!(
         matches!(result, Err(SessionOpenError::Failed(_))),
         "the mapping write must fail visibly, got {result:?}"
@@ -537,8 +566,7 @@ fn a_legacy_snapshot_still_resumes_and_still_falls_back_to_a_fresh_session() {
     let (_, payload) = &resuming.requests[0];
     assert_eq!(payload["sessionPath"], json!(snapshot.to_string_lossy()));
     assert!(
-        payload.get("sessionFormat").is_none()
-            && payload.get("nativeSessionPath").is_none(),
+        payload.get("sessionFormat").is_none() && payload.get("nativeSessionPath").is_none(),
         "a legacy row must keep asking for its snapshot by path: {payload}"
     );
     let mapping = fixture.mapping().unwrap();
@@ -565,7 +593,10 @@ fn a_legacy_snapshot_still_resumes_and_still_falls_back_to_a_fresh_session() {
         .open(&fixture.conversation_id, &mut falling_back)
         .expect("a failed legacy reopen still starts a fresh session");
     assert_ne!(new_id, "legacy-1");
-    assert_eq!(falling_back.request_types(), vec!["resume_session", "create_session"]);
+    assert_eq!(
+        falling_back.request_types(),
+        vec!["resume_session", "create_session"]
+    );
     let mapping = fixture.mapping().unwrap();
     assert_eq!(mapping.runtime_session_id, new_id);
     assert_eq!(mapping.format_version, 2, "the fresh session is Pi-native");
@@ -618,18 +649,30 @@ fn the_open_decision_never_turns_a_native_failure_into_a_fresh_session() {
     );
     assert!(matches!(
         open_decision(Some(&native_record(RuntimeSessionStatus::Allocated)), false),
-        OpenDecision::Refuse { code: SESSION_NOT_PERSISTED, .. }
+        OpenDecision::Refuse {
+            code: SESSION_NOT_PERSISTED,
+            ..
+        }
     ));
     assert!(matches!(
-        open_decision(Some(&native_record(RuntimeSessionStatus::Unavailable)), true),
-        OpenDecision::Refuse { code: SESSION_UNAVAILABLE, .. }
+        open_decision(
+            Some(&native_record(RuntimeSessionStatus::Unavailable)),
+            true
+        ),
+        OpenDecision::Refuse {
+            code: SESSION_UNAVAILABLE,
+            ..
+        }
     ));
     // A status this build does not understand is never "recoverable".
     let mut unknown = native_record(RuntimeSessionStatus::Ready);
     unknown.status = "mystery".into();
     assert!(matches!(
         open_decision(Some(&unknown), true),
-        OpenDecision::Refuse { code: SESSION_UNAVAILABLE, .. }
+        OpenDecision::Refuse {
+            code: SESSION_UNAVAILABLE,
+            ..
+        }
     ));
 }
 
@@ -654,7 +697,10 @@ fn legacy_rows_keep_their_pre_stage_two_behaviour() {
 
 #[test]
 fn only_a_real_persistence_event_may_promote_a_mapping() {
-    assert!(!event_proves_persistence("run.started"), "emitted before the first append");
+    assert!(
+        !event_proves_persistence("run.started"),
+        "emitted before the first append"
+    );
     assert!(!event_proves_persistence("message.delta"));
     assert!(!event_proves_persistence("run.phase"));
     for event in [
@@ -679,7 +725,10 @@ fn an_empty_or_missing_file_is_not_a_persisted_session() {
     std::fs::write(&written, "{\"type\":\"session\"}\n").unwrap();
     assert!(!native_session_file_is_persisted(&missing));
     assert!(!native_session_file_is_persisted(&empty));
-    assert!(!native_session_file_is_persisted(&root), "a directory is not a session file");
+    assert!(
+        !native_session_file_is_persisted(&root),
+        "a directory is not a session file"
+    );
     assert!(native_session_file_is_persisted(&written));
     let _ = std::fs::remove_dir_all(Path::new(&root));
 }

@@ -51,9 +51,22 @@ fn is_local_or_private(host: &str) -> bool {
     if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
         return true;
     }
-    match host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
-        Ok(IpAddr::V4(address)) => address.is_loopback() || address.is_private() || address.is_link_local() || address.is_unspecified(),
-        Ok(IpAddr::V6(address)) => address.is_loopback() || address.is_unspecified() || (address.segments()[0] & 0xfe00) == 0xfc00,
+    match host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+    {
+        Ok(IpAddr::V4(address)) => {
+            address.is_loopback()
+                || address.is_private()
+                || address.is_link_local()
+                || address.is_unspecified()
+        }
+        Ok(IpAddr::V6(address)) => {
+            address.is_loopback()
+                || address.is_unspecified()
+                || (address.segments()[0] & 0xfe00) == 0xfc00
+        }
         Err(_) => false,
     }
 }
@@ -64,8 +77,13 @@ pub fn check_with(base_url: &str, proxy_in_use: bool) -> Result<(), Unreachable>
     if !matches!(url.scheme(), "http" | "https") {
         return Err(Unreachable::InvalidAddress);
     }
-    let host = url.host_str().ok_or(Unreachable::InvalidAddress)?.to_owned();
-    let port = url.port_or_known_default().ok_or(Unreachable::InvalidAddress)?;
+    let host = url
+        .host_str()
+        .ok_or(Unreachable::InvalidAddress)?
+        .to_owned();
+    let port = url
+        .port_or_known_default()
+        .ok_or(Unreachable::InvalidAddress)?;
     if proxy_in_use && !is_local_or_private(&host) {
         return Ok(());
     }
@@ -74,20 +92,37 @@ pub fn check_with(base_url: &str, proxy_in_use: bool) -> Result<(), Unreachable>
     for address in addresses.into_iter().take(MAX_ADDRESSES) {
         match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
             Ok(_) => return Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::TimedOut || error.kind() == std::io::ErrorKind::WouldBlock => timed_out = true,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::TimedOut
+                    || error.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                timed_out = true
+            }
             Err(_) => {}
         }
     }
-    Err(if timed_out { Unreachable::TimedOut } else { Unreachable::Refused })
+    Err(if timed_out {
+        Unreachable::TimedOut
+    } else {
+        Unreachable::Refused
+    })
 }
 
 /// 系统 DNS 没有超时参数，放到线程里等；超时按「解析失败」报（线程自己结束后退出）。
 fn resolve(host: &str, port: u16) -> Result<Vec<SocketAddr>, Unreachable> {
     let bare = host.trim_start_matches('[').trim_end_matches(']');
-    let target = if bare.contains(':') { format!("[{bare}]:{port}") } else { format!("{bare}:{port}") };
+    let target = if bare.contains(':') {
+        format!("[{bare}]:{port}")
+    } else {
+        format!("{bare}:{port}")
+    };
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = sender.send(target.to_socket_addrs().map(|addresses| addresses.collect::<Vec<_>>()));
+        let _ = sender.send(
+            target
+                .to_socket_addrs()
+                .map(|addresses| addresses.collect::<Vec<_>>()),
+        );
     });
     match receiver.recv_timeout(RESOLVE_TIMEOUT) {
         Ok(Ok(addresses)) if !addresses.is_empty() => Ok(addresses),
@@ -114,8 +149,15 @@ mod tests {
     fn a_listening_local_port_is_reachable() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        assert_eq!(check_with(&format!("http://127.0.0.1:{port}/v1"), false), Ok(()));
-        assert_eq!(check_with(&format!("http://localhost:{port}/v1"), true), Ok(()), "本机地址即使有代理也照样检查");
+        assert_eq!(
+            check_with(&format!("http://127.0.0.1:{port}/v1"), false),
+            Ok(())
+        );
+        assert_eq!(
+            check_with(&format!("http://localhost:{port}/v1"), true),
+            Ok(()),
+            "本机地址即使有代理也照样检查"
+        );
     }
 
     /// 实测 B4-5：http://127.0.0.1:9/v1（端口没有服务）在建 Run 之前就被拒。
@@ -125,26 +167,52 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let reason = check_with(&format!("http://127.0.0.1:{port}/v1"), true).unwrap_err();
-        assert!(matches!(reason, Unreachable::Refused | Unreachable::TimedOut), "{reason:?}");
-        let (code, message) = (UNREACHABLE_CODE, refusal_message("http://127.0.0.1:9/v1", &reason));
+        assert!(
+            matches!(reason, Unreachable::Refused | Unreachable::TimedOut),
+            "{reason:?}"
+        );
+        let (code, message) = (
+            UNREACHABLE_CODE,
+            refusal_message("http://127.0.0.1:9/v1", &reason),
+        );
         assert_eq!(code, "model.connection_unreachable");
-        assert!(message.starts_with("连不上模型服务") && message.contains("设置 → 模型服务"), "{message}");
+        assert!(
+            message.starts_with("连不上模型服务") && message.contains("设置 → 模型服务"),
+            "{message}"
+        );
     }
 
     #[test]
     fn unresolvable_hosts_and_bad_addresses() {
         // 本机代理可能给 .invalid 返回地址。超出 DNS 长度上限的域名在解析阶段就会失败。
         let too_long_for_dns = format!("https://{}invalid/v1", "fox.".repeat(64));
-        assert_eq!(check_with(&too_long_for_dns, false), Err(Unreachable::DnsFailed));
-        assert_eq!(check_with("not a url", false), Err(Unreachable::InvalidAddress));
-        assert_eq!(check_with("ftp://example.com", false), Err(Unreachable::InvalidAddress));
+        assert_eq!(
+            check_with(&too_long_for_dns, false),
+            Err(Unreachable::DnsFailed)
+        );
+        assert_eq!(
+            check_with("not a url", false),
+            Err(Unreachable::InvalidAddress)
+        );
+        assert_eq!(
+            check_with("ftp://example.com", false),
+            Err(Unreachable::InvalidAddress)
+        );
     }
 
     #[test]
     fn remote_hosts_are_not_probed_through_a_proxy() {
         // 代理环境下远程地址直接放行（不做 DNS，也不连接）。
-        assert_eq!(check_with("https://fox-unreachable.invalid/v1", true), Ok(()));
-        assert!(is_local_or_private("127.0.0.1") && is_local_or_private("192.168.1.2") && is_local_or_private("[::1]") && is_local_or_private("localhost"));
+        assert_eq!(
+            check_with("https://fox-unreachable.invalid/v1", true),
+            Ok(())
+        );
+        assert!(
+            is_local_or_private("127.0.0.1")
+                && is_local_or_private("192.168.1.2")
+                && is_local_or_private("[::1]")
+                && is_local_or_private("localhost")
+        );
         assert!(!is_local_or_private("api.deepseek.com") && !is_local_or_private("8.8.8.8"));
     }
 }

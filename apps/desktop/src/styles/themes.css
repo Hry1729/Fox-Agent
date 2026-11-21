@@ -209,7 +209,8 @@
   --fox-radius-large: 14px;
   --fox-radius-overlay: 16px;
   --background: oklch(1 0 0);
-  --chat-background: oklch(0.993 0.003 250);
+  --chat-background: oklch(0.998 0.001 250);
+  --fox-new-conversation-shadow-color: oklch(0.68 0.10 250);
   --foreground: oklch(0.2 0.015 245);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.2 0.015 245);

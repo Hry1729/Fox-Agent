@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { mockIPC, clearMocks } from '@tauri-apps/api/mocks'
 import AssistantUiChat from '../src/features/chat/thread/fox-assistant-ui-chat'
@@ -9,10 +9,12 @@ import { ContactsContext, type ContactsContextValue } from '../src/features/comp
 import { ContactWorkStatus } from '../src/features/companions/chat-status'
 import { ContactQuestionCard } from '../src/features/companions/chat-question'
 import { ContactWriteCards, WriteCallsContext } from '../src/features/companions/chat-cards'
-import { contactReplies } from '../src/features/companions/chat-message-model'
+import { contactBubbleGuide, contactReplies } from '../src/features/companions/chat-message-model'
 import { RuntimeApprovalPrompt } from '../src/features/chat/components/RuntimeApprovalPrompt'
 import { runtimeQuestionHistory } from '../src/features/conversations/model/pending-interactions'
+import { applyKernelModelPreview } from '../src/features/conversations/model/kernel-model-preview'
 import { withMonotonicInvalidation } from '../src/features/conversations/model/approval-labels'
+import type { CompanionTeamAction } from '../src/features/companions/api'
 import type { ApprovalRecord, ConversationDetail, ConversationMessage, RunEventRecord, ToolCallRecord } from '../src/features/conversations/model/types'
 
 const context: ContactsContextValue = {
@@ -39,10 +41,10 @@ const detail = (patch: Partial<ConversationDetail> = {}): ConversationDetail => 
   lastRun: { id: 'run', conversationId: 'chat', runtimeSessionId: null, model: 'test', status: 'running', lastSeq: 1,
     errorCode: null, errorMessage: null, startedAt: 1700000000000, finishedAt: null }, ...patch,
 })
-const withContact = (children: React.ReactNode) => <ContactsContext.Provider value={context}>{children}</ContactsContext.Provider>
-const renderChat = (snapshot: ConversationDetail) => withContact(<AssistantUiChat
+const withContact = (children: React.ReactNode, value: ContactsContextValue = context) => <ContactsContext.Provider value={value}>{children}</ContactsContext.Provider>
+const renderChat = (snapshot: ConversationDetail, value: ContactsContextValue = context) => withContact(<AssistantUiChat
   conversation={{ enabled: true, detail: snapshot, streamingText: snapshot.messages.at(-1)?.content ?? '' } as any}
-  callbacks={{ onSubmit: () => {} }} />)
+  callbacks={{ onSubmit: () => {} }} />, value)
 
 afterEach(() => { cleanup(); clearMocks() })
 
@@ -85,16 +87,191 @@ describe('聊天边缘渐变', () => {
 })
 
 describe('联系人按条送达', () => {
+  test('后续 Kernel 流式检查点保持已显示气泡和审批的位置', async () => {
+    const approval: ApprovalRecord = {
+      id: 'approval-order', conversationId: 'chat', runId: 'run', toolCallId: 'write',
+      toolName: 'write_file', status: 'pending', requestedAction: '写入测试文档',
+      request: { summary: '写入测试文档' } as ApprovalRecord['request'],
+      decision: null, requestedAt: 1700000000003, resolvedAt: null,
+    }
+    const before = message(2, '我会先核对材料。')
+    let snapshot = detail({
+      messages: [before], approvals: [approval],
+      kernelSnapshot: { schemaVersion: 1, runId: 'run', turnId: 'turn', state: 'running', lastEventSeq: '6', terminalWritten: false },
+    })
+    const view = render(renderChat(snapshot))
+    const first = await view.findByText(before.content)
+    const firstBubble = first.closest('.fox-contact-message')
+    await waitFor(() => expect(view.container.querySelector('.fox-contact-decision-entry')).not.toBeNull())
+    const card = view.container.querySelector('.fox-contact-decision-entry')!
+    const approved = { ...approval, status: 'approved' as const, resolvedAt: 1700000000004 }
+    snapshot = { ...snapshot, approvals: [approved] }
+    const preview = (revision: number, text: string) => applyKernelModelPreview(snapshot, {
+      schemaVersion: 1, runId: 'run', conversationId: 'chat', turnId: 'turn',
+      checkpointSeq: 5, revision, text,
+    }, 1700000000005 + revision)!
+    for (const [revision, text] of ['已写好', '已写好测试文档。'].entries()) {
+      snapshot = preview(revision + 1, text)
+      view.rerender(renderChat(snapshot))
+      const last = await view.findByText(text)
+      expect(view.getByText(before.content).closest('.fox-contact-message') === firstBubble).toBe(true)
+      expect(view.container.querySelector('.fox-contact-decision-entry') === card).toBe(true)
+      expect(card.compareDocumentPosition(last) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    }
+    const lastBubble = view.getByText('已写好测试文档。').closest('.fox-contact-message')
+    const settled = detail({
+      lastRun: { ...detail().lastRun!, status: 'completed' },
+      approvals: [approved],
+      messages: [before, message(5, '已写好测试文档。')],
+      bubbles: [before, message(5, '已写好测试文档。')].map((reply, index) => ({
+        id: `run:kernel:${reply.ordinal}:response`, conversationId: 'chat', runId: 'run',
+        messageId: reply.id, sourceOrdinal: reply.ordinal, author: 'companion', projection: 'kernel',
+        segmentStart: reply.ordinal, segmentEnd: reply.ordinal, deliveryOrder: index + 1,
+        deliveredAt: reply.createdAt, content: reply.content, fingerprint: '', metadata: {},
+      })),
+    })
+    view.rerender(renderChat(settled))
+    await waitFor(() => expect(view.getByText('已写好测试文档。').closest('.fox-contact-message')?.getAttribute('data-delivery-order')).toBe('2'))
+    expect(view.getByText(before.content).closest('.fox-contact-message') === firstBubble).toBe(true)
+    expect(view.container.querySelector('.fox-contact-decision-entry') === card).toBe(true)
+    expect(view.getByText('已写好测试文档。').closest('.fox-contact-message') === lastBubble).toBe(true)
+    expect(view.container.querySelector('.fox-contact-decision-entry') === card).toBe(true)
+    view.unmount()
+    const reopened = render(renderChat(settled))
+    const reopenedLast = await reopened.findByText('已写好测试文档。')
+    expect(reopened.container.querySelector('.fox-contact-decision-entry')!.compareDocumentPosition(reopenedLast)
+      & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  test('小狐的操作卡出现在对应回合，无助手回复时仍显示待确认操作', async () => {
+    const item: CompanionTeamAction = {
+      id: 'create', companionId: 'contact', conversationId: 'chat', runId: 'run', targetId: 'new',
+      targetName: '周报伙伴', kind: 'create', status: 'applied', createdAt: 1, updatedAt: 1,
+    }
+    mockIPC(command => {
+      if (command === 'companion_team_actions_list') return { ok: true, data: [
+        item,
+        { ...item, id: 'archive', runId: 'other-run', kind: 'archive', status: 'pending' },
+        { ...item, id: 'background', runId: 'background-run', targetName: '定时报表伙伴', createdAt: 1700000000002 },
+        { ...item, id: 'history', runId: 'old-run', targetName: '旧报表伙伴' },
+      ] }
+      throw new Error(`Unexpected command: ${command}`)
+    }, { shouldMockEvents: true })
+    const ctx = { ...context, current: { ...context.current!, isDefault: true } }
+    const view = render(renderChat(detail({
+      messages: [message(1, '已创建周报伙伴。')],
+      hasEarlierMessages: true,
+    }), ctx))
+    const creation = await view.findByRole('region', { name: '已新建「周报伙伴」' })
+    expect(creation.closest('[data-turn-message-id]')?.getAttribute('data-turn-message-id')).toBe('kernel-message:run:1')
+    const archive = await view.findByRole('region', { name: '要归档「周报伙伴」吗？' })
+    expect(archive.closest('[data-turn-message-id]')).toBeNull()
+    const background = await view.findByRole('region', { name: '已新建「定时报表伙伴」' })
+    expect(background.closest('[data-turn-message-id]')).toBeNull()
+    expect(view.queryByRole('region', { name: '已新建「旧报表伙伴」' })).toBeNull()
+    expect(view.getAllByRole('region', { name: '已新建「周报伙伴」' })).toHaveLength(1)
+  })
+
+  test('创建回合从流式检查点落库后仍保留消息和操作卡，撤销结果重开可见', async () => {
+    let records: CompanionTeamAction[] = [{
+      id: 'm3-create', companionId: 'contact', conversationId: 'chat', runId: 'run', targetId: 'new-peer',
+      targetName: '复测核对员', kind: 'create', status: 'applied', createdAt: 1700000000003, updatedAt: 1700000000003,
+      after: { name: '复测核对员', duty: '核对数字' },
+    }]
+    mockIPC((command, args) => {
+      if (command === 'companion_team_actions_list') return { ok: true, data: records }
+      if (command === 'companion_team_action_resolve') {
+        expect(args).toEqual({ request: { actionId: 'm3-create', decision: 'undo' } })
+        records = records.map(record => ({ ...record, status: 'undone' }))
+        return { ok: true, data: records[0] }
+      }
+      throw new Error(`Unexpected command: ${command}`)
+    }, { shouldMockEvents: true })
+    const ctx = { ...context, current: { ...context.current!, isDefault: true } }
+    const user = message(1, '新建一个叫“复测核对员”的伙伴，职责是核对数字。', { id: 'm3-user', role: 'user' })
+    const streaming = detail({
+      messages: [user, message(2, '我来创建这位伙伴。')],
+      kernelSnapshot: { schemaVersion: 1, runId: 'run', turnId: 'turn', state: 'running', lastEventSeq: '6', terminalWritten: false },
+    })
+    const view = render(renderChat(streaming, ctx))
+    expect(await view.findByText(user.content)).toBeDefined()
+    const creation = await view.findByRole('region', { name: '已新建「复测核对员」' })
+    const settled = detail({
+      lastRun: { ...detail().lastRun!, status: 'completed' },
+      messages: [user, message(3, '我来创建这位伙伴。已创建成功。', { id: 'assistant-run' })],
+    })
+    view.rerender(renderChat(settled, ctx))
+    expect(await view.findByText('我来创建这位伙伴。已创建成功。')).toBeDefined()
+    expect(view.getByText(user.content)).toBeDefined()
+    expect(view.getByRole('region', { name: '已新建「复测核对员」' })).toBe(creation)
+    fireEvent.click(within(creation).getByRole('button', { name: '撤销' }))
+    expect((await within(creation).findByRole('status')).textContent).toBe('已撤销')
+    view.unmount()
+    const reopened = render(renderChat(settled, ctx))
+    expect(await reopened.findByText(user.content)).toBeDefined()
+    const restored = within(await reopened.findByRole('region', { name: '已新建「复测核对员」' }))
+    expect((await restored.findByRole('status')).textContent).toBe('已撤销')
+    expect(restored.queryByRole('button', { name: '撤销' })).toBeNull()
+  })
+
   test('没有运行记录的问候使用持久气泡身份', async () => {
     const greeting = message(1, '你好，我是资料伙伴。', { id: 'greeting', runId: null })
     const snapshot = detail({ messages: [greeting], lastRun: null, bubbles: [{
       id: 'greeting', conversationId: 'chat', runId: null, messageId: 'greeting', sourceOrdinal: 1,
       author: 'companion', projection: 'message', segmentStart: null, segmentEnd: null,
-      deliveryOrder: 1000, deliveredAt: greeting.createdAt, content: greeting.content, fingerprint: 'f',
+      deliveryOrder: 1000, deliveredAt: greeting.createdAt, content: greeting.content, fingerprint: 'f', metadata: {},
     }] })
     const view = render(renderChat(snapshot))
     await act(async () => {})
     expect(view.container.querySelector('[data-delivery-order="1000"]')?.textContent).toContain('你好，我是资料伙伴。')
+  })
+
+  test('问候引导提交后保留题目和原选项，重开对话仍能看到', async () => {
+    const guide = {
+      title: '先给我定个方向',
+      options: [
+        { label: '整理文件和资料', message: '以后主要帮我整理文件和资料' },
+        { label: '写材料和汇报', message: '以后主要帮我写材料和汇报' },
+        { label: '定期提醒和跟进', message: '以后主要帮我做定期提醒和跟进' },
+        { label: '处理表格和数据', message: '以后主要帮我处理表格和数据' },
+      ],
+    }
+    const greeting = message(1, '你好，我是资料伙伴。', { id: 'greeting', runId: null })
+    const greetingBubble = {
+      id: 'greeting', conversationId: 'chat', runId: null, messageId: 'greeting', sourceOrdinal: 1,
+      author: 'companion' as const, projection: 'message', segmentStart: null, segmentEnd: null,
+      deliveryOrder: 1000, deliveredAt: greeting.createdAt, content: greeting.content, fingerprint: 'f', metadata: { companionGuide: guide },
+    }
+    const sent: string[] = []
+    const ctx = { ...context, sendPrompt: async (text: string) => { sent.push(text) } }
+    const view = render(renderChat(detail({ messages: [greeting], lastRun: null, bubbles: [greetingBubble] }), ctx))
+    const option = await view.findByRole('button', { name: '写材料和汇报' })
+    expect(view.container.querySelectorAll('.fox-companion-guide button')).toHaveLength(4)
+    fireEvent.click(option)
+    await waitFor(() => expect(sent).toEqual(['以后主要帮我写材料和汇报']))
+    const user = message(2, sent[0], { id: 'user-guide', runId: null, role: 'user' })
+    const settled = detail({ messages: [greeting, user], lastRun: null, bubbles: [greetingBubble] })
+    view.rerender(renderChat(settled, ctx))
+    const receipt = within(await view.findByRole('region', { name: guide.title }))
+    expect(receipt.getByText('写材料和汇报')).toBeDefined()
+    expect(receipt.getByText('B')).toBeDefined()
+    expect(receipt.queryByRole('button')).toBeNull()
+    expect(receipt.queryByText('整理文件和资料')).toBeNull()
+
+    view.unmount()
+    const laterUser = message(3, guide.options[0].message, { id: 'later-user', runId: null, role: 'user' })
+    const reopened = render(renderChat({ ...settled, messages: [...settled.messages, laterUser] }, ctx))
+    const restored = within(await reopened.findByRole('region', { name: guide.title }))
+    expect(restored.getByText('写材料和汇报')).toBeDefined()
+    expect(restored.queryByText('整理文件和资料')).toBeNull()
+  })
+
+  test('引导元数据拒绝畸形选项并限制为四项', () => {
+    const options = Array.from({ length: 5 }, (_, index) => ({ label: `方向 ${index}`, message: `消息 ${index}` }))
+    const bubble = { metadata: { companionGuide: { title: '方向', options: [...options, { label: ' ', message: '忽略' }] } } } as Parameters<typeof contactBubbleGuide>[0]
+    expect(contactBubbleGuide(bubble)?.options).toHaveLength(4)
+    expect(contactBubbleGuide({ metadata: { companionGuide: { title: '方向', options: [{ label: '空', message: '' }] } } } as Parameters<typeof contactBubbleGuide>[0])).toBeUndefined()
+    expect(contactBubbleGuide({ metadata: {} } as Parameters<typeof contactBubbleGuide>[0])).toBeUndefined()
   })
 
   test('三条中途说明与最终回复各成气泡，流式预览即用持久身份，工具过程不进入聊天，历史分段相同', async () => {
@@ -271,8 +448,9 @@ test('提问选项与自由回答互斥，真实历史事件恢复回答和所�
   const saved = { ...snapshot, runtimeEvents: [requested, event(5, 'user.question.responded', { childRunId: 'answer-run' })],
     messages: [message(6, '先整理哪一部分？：代码', { id: 'user-answer', role: 'user', runId: 'answer-run' })] }
   const reopened = render(<ContactQuestionCard request={runtimeQuestionHistory(saved)[0]} />)
-  expect(reopened.container.textContent).toContain('已收到你的回答')
-  expect(reopened.getByText('代码').closest('button')?.getAttribute('aria-pressed')).toBe('true')
+  expect(reopened.container.querySelector('.is-resolved')).not.toBeNull()
+  expect(reopened.getByText('代码').closest('.fox-contact-answer-choice')?.textContent).toBe('B代码')
+  expect(reopened.queryByRole('button')).toBeNull()
   expect(reopened.queryByRole('textbox')).toBeNull()
 })
 
@@ -293,8 +471,9 @@ test('笔记确认重新挂载后使用持久化结果，不恢复已经处理�
   view.unmount()
   const reopened = render(ui())
   await waitFor(() => expect(reopened.getByText('已确认移动')).toBeDefined())
-  expect(reopened.getByText('确认移动').closest('button')?.disabled).toBe(true)
-  expect(reopened.getByText('确认移动').closest('button')?.getAttribute('aria-pressed')).toBe('true')
+  expect(reopened.queryByRole('button', { name: '确认移动' })).toBeNull()
+  expect(reopened.queryByRole('button', { name: '暂不移动' })).toBeNull()
+  expect(reopened.container.querySelector('.is-resolved')).not.toBeNull()
 })
 
 test('撤销自动笔记后重开聊天仍显示已撤销', async () => {

@@ -78,6 +78,41 @@ fn fresh_and_populated_v105_reopen_without_rewriting_old_chats() {
 }
 
 #[test]
+fn companion_pin_order_migration_preserves_v118_pins_and_unread_state() {
+    let mut db = Connection::open_in_memory().unwrap();
+    run_with_target(&mut db, 1, MigrationTarget::V118).unwrap();
+    assert_eq!(
+        number(&db, "SELECT max(version) FROM schema_migrations"),
+        118
+    );
+    assert_eq!(number(&db, "SELECT count(*) FROM pragma_table_info('companion_profiles') WHERE name='pinned_order'"), 0);
+    db.execute_batch(AGENTS).unwrap();
+    db.execute_batch(PROFILES).unwrap();
+    db.execute_batch(
+        "UPDATE companion_profiles SET pinned_at=23,last_read_ordinal=5,last_read_delivery_order=100,
+         manual_unread_from_order=200,manual_unread_at=24,work_shortcut_order=1 WHERE id='cmp_b';
+         INSERT INTO messages(id,conversation_id,role,kind,content,status,ordinal,created_at,updated_at)
+         VALUES('prior-message','private-b','assistant','text','保留旧消息','completed',6,23,23);
+         INSERT INTO contact_bubbles(bubble_id,conversation_id,source_message_id,source_ordinal,author,projection,
+         delivery_order,delivered_at,content,fingerprint,created_at)
+         VALUES('prior-bubble','private-b','prior-message',6,'companion','message',200,23,'保留旧消息','fixture',23);",
+    ).unwrap();
+    run(&mut db, 2).unwrap();
+    assert_eq!(
+        number(&db, "SELECT max(version) FROM schema_migrations"),
+        119
+    );
+    let row: (i64,Option<i64>,i64,i64,i64,i64,i64) = db.query_row(
+        "SELECT pinned_at,pinned_order,last_read_ordinal,last_read_delivery_order,manual_unread_from_order,
+         manual_unread_at,work_shortcut_order FROM companion_profiles WHERE id='cmp_b'",
+        [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)),
+    ).unwrap();
+    assert_eq!(row, (23, None, 5, 100, 200, 24, 1));
+    assert_eq!(number(&db,"SELECT count(*) FROM contact_bubbles WHERE bubble_id='prior-bubble' AND delivery_order=200"),1);
+    check_foreign_keys_after_migration(&db).unwrap();
+}
+
+#[test]
 fn identity_chat_shape_and_grants_are_enforced() {
     let db = database();
     denied(&db, "INSERT INTO agents(id,name,description,runtime_type,system_prompt,default_model,created_at,updated_at)
@@ -424,7 +459,10 @@ fn v109_model_columns_default_to_follow_global_and_migration_never_rewrites_a_ch
         "旧联系人升级后默认跟随全局"
     );
     assert_eq!(
-        number(&db, "SELECT count(*) FROM pragma_table_info('runs') WHERE name='model_snapshot'"),
+        number(
+            &db,
+            "SELECT count(*) FROM pragma_table_info('runs') WHERE name='model_snapshot'"
+        ),
         1
     );
     db.execute_batch("UPDATE companion_profiles SET model_provider_id='prov', model_ref='prov-model' WHERE id='cmp_a'").unwrap();
@@ -443,9 +481,16 @@ fn v110_grants_start_empty_and_the_snapshot_column_defaults_to_null() {
     run(&mut db, 1).unwrap();
     db.execute_batch(AGENTS).unwrap();
     db.execute_batch(PROFILES).unwrap();
-    assert_eq!(number(&db, "SELECT count(*) FROM companion_tool_grants"), 0, "旧联系人不自动获得新能力");
     assert_eq!(
-        number(&db, "SELECT count(*) FROM pragma_table_info('runs') WHERE name='companion_tools_snapshot'"),
+        number(&db, "SELECT count(*) FROM companion_tool_grants"),
+        0,
+        "旧联系人不自动获得新能力"
+    );
+    assert_eq!(
+        number(
+            &db,
+            "SELECT count(*) FROM pragma_table_info('runs') WHERE name='companion_tools_snapshot'"
+        ),
         1
     );
     db.execute_batch(
@@ -465,9 +510,25 @@ fn v110_grants_start_empty_and_the_snapshot_column_defaults_to_null() {
 fn v112_reminders_default_to_global_and_legacy_read_converts_after_backfill() {
     let db = database();
     // 升级保留原有通知偏好：旧联系人默认沿用全局，游标尚未转换。
-    assert_eq!(number(&db, "SELECT count(*) FROM companion_profiles WHERE reminder_mode='follow_global'"), 2);
-    assert_eq!(number(&db, "SELECT count(*) FROM companion_profiles WHERE last_read_delivery_order IS NULL"), 2);
-    denied(&db, "UPDATE companion_profiles SET reminder_mode='loud' WHERE id='cmp_a'", "CHECK");
+    assert_eq!(
+        number(
+            &db,
+            "SELECT count(*) FROM companion_profiles WHERE reminder_mode='follow_global'"
+        ),
+        2
+    );
+    assert_eq!(
+        number(
+            &db,
+            "SELECT count(*) FROM companion_profiles WHERE last_read_delivery_order IS NULL"
+        ),
+        2
+    );
+    denied(
+        &db,
+        "UPDATE companion_profiles SET reminder_mode='loud' WHERE id='cmp_a'",
+        "CHECK",
+    );
     // 通知中心接受新的 message 提醒类型，未知类型仍被拒绝。
     db.execute_batch("INSERT INTO app_notifications(id,merge_key,kind,severity,title,body,source_type,source_id,status,created_at,updated_at)
         VALUES ('n1','companion-messages:cmp_a','message','normal','Fox','1 条新消息','companion_messages','cmp_a','bubble:1000',1,1)").unwrap();
@@ -486,7 +547,13 @@ fn v112_reminders_default_to_global_and_legacy_read_converts_after_backfill() {
         INSERT INTO contact_bubble_backfills(conversation_id,completed_at) VALUES ('private-a',1);
         UPDATE companion_profiles SET last_read_ordinal=2 WHERE id='cmp_a';").unwrap();
     super::super::repositories::companions::convert_pending_read_cursors(&db).unwrap();
-    assert_eq!(number(&db, "SELECT last_read_delivery_order FROM companion_profiles WHERE id='cmp_a'"), 2000);
+    assert_eq!(
+        number(
+            &db,
+            "SELECT last_read_delivery_order FROM companion_profiles WHERE id='cmp_a'"
+        ),
+        2000
+    );
     // 未回填的联系人游标保持 NULL（VIEW 仍按旧 ordinal 计算有效位置）。
     assert_eq!(number(&db, "SELECT count(*) FROM companion_profiles WHERE id='cmp_b' AND last_read_delivery_order IS NULL"), 1);
     check_foreign_keys_after_migration(&db).unwrap();
@@ -496,9 +563,15 @@ fn v112_reminders_default_to_global_and_legacy_read_converts_after_backfill() {
 fn v113_message_marks_are_additive_and_bound_to_durable_bubbles() {
     let mut db = database();
     // 升级只加空表：历史消息不会凭空多出引用、收藏或表情。
-    assert_eq!(number(&db, "SELECT count(*) FROM contact_message_quotes"), 0);
+    assert_eq!(
+        number(&db, "SELECT count(*) FROM contact_message_quotes"),
+        0
+    );
     assert_eq!(number(&db, "SELECT count(*) FROM contact_bubble_marks"), 0);
-    assert_eq!(number(&db, "SELECT max(version) FROM schema_migrations"), DATABASE_SCHEMA_VERSION);
+    assert_eq!(
+        number(&db, "SELECT max(version) FROM schema_migrations"),
+        DATABASE_SCHEMA_VERSION
+    );
     db.execute_batch("
         INSERT INTO messages(id,conversation_id,role,kind,content,status,ordinal,created_at,updated_at)
         VALUES ('m1','private-a','assistant','text','一','completed',1,1,1),
@@ -511,23 +584,39 @@ fn v113_message_marks_are_additive_and_bound_to_durable_bubbles() {
         INSERT INTO contact_bubble_marks(bubble_id,conversation_id,favorited_at,reaction,reaction_at,updated_at)
         VALUES ('b1','private-a',1,'👍',1,1);").unwrap();
     // 只接受六种表情；标记必须挂在已落库气泡上，引用必须挂在真实消息上。
-    denied(&db, "UPDATE contact_bubble_marks SET reaction='🔥' WHERE bubble_id='b1'", "CHECK");
+    denied(
+        &db,
+        "UPDATE contact_bubble_marks SET reaction='🔥' WHERE bubble_id='b1'",
+        "CHECK",
+    );
     denied(&db, "INSERT INTO contact_bubble_marks(bubble_id,conversation_id,favorited_at,updated_at) VALUES ('live','private-a',1,1)", "FOREIGN KEY");
     denied(&db, "INSERT INTO contact_message_quotes(message_id,conversation_id,bubble_id,author,summary,excerpt,delivered_at,source_ordinal,created_at)
         VALUES ('missing','private-a','b1','user','s','e',1,1,1)", "FOREIGN KEY");
     denied(&db, "INSERT INTO contact_message_quotes(message_id,conversation_id,bubble_id,author,summary,excerpt,delivered_at,source_ordinal,created_at)
         VALUES ('m2','private-a','b1','companion','s','e',1,1,1)", "UNIQUE");
     // 源气泡消失：标记随之消失，已发出的引用保留摘要（不指向别的消息）。
-    db.execute_batch("DELETE FROM contact_bubbles WHERE bubble_id='b1'").unwrap();
+    db.execute_batch("DELETE FROM contact_bubbles WHERE bubble_id='b1'")
+        .unwrap();
     assert_eq!(number(&db, "SELECT count(*) FROM contact_bubble_marks"), 0);
-    assert_eq!(number(&db, "SELECT count(*) FROM contact_message_quotes"), 1);
-    assert_eq!(number(&db, "SELECT length(excerpt) FROM contact_message_quotes WHERE message_id='m2'"), 1);
+    assert_eq!(
+        number(&db, "SELECT count(*) FROM contact_message_quotes"),
+        1
+    );
+    assert_eq!(
+        number(
+            &db,
+            "SELECT length(excerpt) FROM contact_message_quotes WHERE message_id='m2'"
+        ),
+        1
+    );
     // 重复执行迁移保留用户已保存的引用。
     run(&mut db, 2).unwrap();
-    assert_eq!(number(&db, "SELECT count(*) FROM contact_message_quotes"), 1);
+    assert_eq!(
+        number(&db, "SELECT count(*) FROM contact_message_quotes"),
+        1
+    );
     check_foreign_keys_after_migration(&db).unwrap();
 }
-
 
 #[test]
 fn a02_v113_upgrade_preserves_identity_and_materializes_companion_skills() {
@@ -551,13 +640,23 @@ fn a02_v113_upgrade_preserves_identity_and_materializes_companion_skills() {
             '{"id":"tpl-b","name":"Before"}','{"id":"tpl-b"}',0);"#,
     ).unwrap();
     run(&mut db, 2).unwrap();
-    assert_eq!(number(&db, "SELECT max(version) FROM schema_migrations"), crate::database::DATABASE_SCHEMA_VERSION);
+    assert_eq!(
+        number(&db, "SELECT max(version) FROM schema_migrations"),
+        crate::database::DATABASE_SCHEMA_VERSION
+    );
     let (duty, persona, provider, model): (String, String, String, String) = db.query_row(
         "SELECT duty,persona_override,model_provider_id,model_ref FROM companion_profiles WHERE id='cmp_b'",
         [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
     ).unwrap();
-    assert_eq!((duty.as_str(),persona.as_str(),provider.as_str(),model.as_str()),
-        ("keep-duty","keep-persona","keep-provider","keep-model"));
+    assert_eq!(
+        (
+            duty.as_str(),
+            persona.as_str(),
+            provider.as_str(),
+            model.as_str()
+        ),
+        ("keep-duty", "keep-persona", "keep-provider", "keep-model")
+    );
     let (snapshot, hash, version): (String,String,String) = db.query_row(
         "SELECT package_snapshot_json,package_hash,expert_version FROM conversation_expert_bindings WHERE id='binding-b'",
         [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
@@ -568,17 +667,28 @@ fn a02_v113_upgrade_preserves_identity_and_materializes_companion_skills() {
     assert_eq!(snapshot["resources"], serde_json::json!({"keep":true}));
     assert_eq!(version, "7.2.1");
     assert_eq!(hash, package_snapshot_hash(&snapshot));
-    let historical: String = db.query_row(
-        "SELECT package_hash FROM conversation_expert_bindings WHERE id='binding-old'",[],|row|row.get(0),
-    ).unwrap();
+    let historical: String = db
+        .query_row(
+            "SELECT package_hash FROM conversation_expert_bindings WHERE id='binding-old'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(historical, "historical-hash");
     db.execute_batch("UPDATE agent_runtime_config SET value_json='[\"changed-skill\"]' WHERE agent_id='tpl-b' AND config_key='skills.enabled'")
         .unwrap();
     run(&mut db, 3).unwrap();
-    let reopened_snapshot: String = db.query_row(
-        "SELECT package_snapshot_json FROM conversation_expert_bindings WHERE id='binding-b'", [], |row| row.get(0),
-    ).unwrap();
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&reopened_snapshot).unwrap()["enabledSkills"], serde_json::json!(["skill-b"]));
+    let reopened_snapshot: String = db
+        .query_row(
+            "SELECT package_snapshot_json FROM conversation_expert_bindings WHERE id='binding-b'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&reopened_snapshot).unwrap()["enabledSkills"],
+        serde_json::json!(["skill-b"])
+    );
     check_foreign_keys_after_migration(&db).unwrap();
 }
 
@@ -597,15 +707,20 @@ fn a03_sources_are_repeatable_nullable_and_deletable_without_losing_snapshots() 
             '{"id":"tpl-b","name":"B"}',1);"#,
     ).unwrap();
     // Real fixed chats execute through the base assistant, not the source expert.
-    db.execute("UPDATE conversations SET agent_id='tpl-a' WHERE id='private-b'", []).unwrap();
-    db.execute_batch("DELETE FROM agents WHERE id='tpl-b'").unwrap();
+    db.execute(
+        "UPDATE conversations SET agent_id='tpl-a' WHERE id='private-b'",
+        [],
+    )
+    .unwrap();
+    db.execute_batch("DELETE FROM agents WHERE id='tpl-b'")
+        .unwrap();
     assert_eq!(number(&db,"SELECT count(*) FROM companion_profiles WHERE id IN ('cmp_b','cmp_c') AND template_agent_id IS NULL"),2);
     let binding: (Option<String>,String,String) = db.query_row(
         "SELECT expert_id,expert_version,package_snapshot_json FROM conversation_expert_bindings WHERE id='binding-b'",
         [],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
     ).unwrap();
-    assert_eq!(binding.0,None);
-    assert_eq!(binding.1,"1.2.3");
+    assert_eq!(binding.0, None);
+    assert_eq!(binding.1, "1.2.3");
     assert!(binding.2.contains("frozen"));
     check_foreign_keys_after_migration(&db).unwrap();
 }
@@ -621,10 +736,17 @@ fn v114_rebuild_preserves_external_triggers_and_restores_sqlite_mode() {
             "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='companion_deletions_default_guard'",
             [], |row| row.get(0),
         ).unwrap();
-        db.pragma_update(None, "legacy_alter_table", legacy_alter_table).unwrap();
+        db.pragma_update(None, "legacy_alter_table", legacy_alter_table)
+            .unwrap();
         run(&mut db, 2).unwrap();
-        assert_eq!(db.pragma_query_value(None, "legacy_alter_table", |row| row.get::<_, bool>(0)).unwrap(), legacy_alter_table);
-        assert!(db.pragma_query_value(None, "foreign_keys", |row| row.get::<_, bool>(0)).unwrap());
+        assert_eq!(
+            db.pragma_query_value(None, "legacy_alter_table", |row| row.get::<_, bool>(0))
+                .unwrap(),
+            legacy_alter_table
+        );
+        assert!(db
+            .pragma_query_value(None, "foreign_keys", |row| row.get::<_, bool>(0))
+            .unwrap());
         let trigger_after: String = db.query_row(
             "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='companion_deletions_default_guard'",
             [], |row| row.get(0),
@@ -632,7 +754,13 @@ fn v114_rebuild_preserves_external_triggers_and_restores_sqlite_mode() {
         assert_eq!(trigger_after, trigger_before);
         denied(&db, "INSERT INTO companion_deletions(companion_id,template_agent_id,display_name,plan_json,plan_hash,state,started_at) VALUES('cmp_a','tpl-a','Fox','{}','hash','deleting',2)", "companion_default_not_deletable");
         assert_eq!(number(&db, "SELECT count(*) FROM companion_profiles"), 2);
-        assert_eq!(number(&db, "SELECT count(*) FROM conversations WHERE companion_id IS NOT NULL"), 2);
+        assert_eq!(
+            number(
+                &db,
+                "SELECT count(*) FROM conversations WHERE companion_id IS NOT NULL"
+            ),
+            2
+        );
         check_foreign_keys_after_migration(&db).unwrap();
     }
 }

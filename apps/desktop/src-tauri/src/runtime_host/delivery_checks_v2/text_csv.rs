@@ -35,9 +35,9 @@
 //! so the basic check, the content check and row counting share this dialect.
 //! That wiring is the integration step, not part of this module.
 
-use super::budget::{validate_utf8_metered, Budget, BudgetStop, Clock, Outcome, SystemClock};
 #[cfg(test)]
 use super::budget::Phase;
+use super::budget::{validate_utf8_metered, Budget, BudgetStop, Clock, Outcome, SystemClock};
 use super::merge_rule::MergeRule;
 use super::*;
 
@@ -395,10 +395,8 @@ fn diagnose_concat_metered(
         );
         observation.expected = Some(format!("末尾 LF {expected_lf} 个"));
         observation.actual = Some(format!("末尾 LF {actual_lf} 个"));
-        observation.locator = Some(
-            RecordLocator::default()
-                .at_byte(strip_one_trailing_lf(expected).len() as u64),
-        );
+        observation.locator =
+            Some(RecordLocator::default().at_byte(strip_one_trailing_lf(expected).len() as u64));
         return Ok(observation);
     }
 
@@ -411,75 +409,76 @@ fn diagnose_concat_metered(
     //    model off to rewrite bodies. The finding is therefore built exactly as
     //    before and only *relabelled* afterwards (see `pending_source`), which
     //    keeps every budget threshold and the proven-code-on-stop rule intact.
-    let mut pending_source: Option<CheckObservation> =
-        match header_positions_metered(actual, segments, budget)? {
-            None => {
-                // Every frozen header may still be present out of order: a bounded
-                // reordering search gated by the existing 1 MiB input-length scope.
-                if actual.len() <= DIAGNOSIS_SCAN_BYTES
-                    && headers_all_present_metered(actual, segments, budget)?
-                {
-                    // ORDER is proven: code and expected are fixed before any
-                    // display-only window read.
-                    let mut observation = failed(
-                        rule_id,
-                        check,
-                        reason_code::TEXT_ORDER_MISMATCH,
-                        binding,
-                        format!(
-                            "候选包含全部来源标题行，但顺序与冻结合并顺序不一致；冻结顺序：{}",
-                            header_names_bounded(segments, " → ")
-                        ),
-                    );
-                    observation.expected = Some(header_order_diagnosis(segments));
-                    observation.actual = display(actual, 0, budget);
-                    return Ok(observation);
+    let mut pending_source: Option<CheckObservation> = match header_positions_metered(
+        actual, segments, budget,
+    )? {
+        None => {
+            // Every frozen header may still be present out of order: a bounded
+            // reordering search gated by the existing 1 MiB input-length scope.
+            if actual.len() <= DIAGNOSIS_SCAN_BYTES
+                && headers_all_present_metered(actual, segments, budget)?
+            {
+                // ORDER is proven: code and expected are fixed before any
+                // display-only window read.
+                let mut observation = failed(
+                    rule_id,
+                    check,
+                    reason_code::TEXT_ORDER_MISMATCH,
+                    binding,
+                    format!(
+                        "候选包含全部来源标题行，但顺序与冻结合并顺序不一致；冻结顺序：{}",
+                        header_names_bounded(segments, " → ")
+                    ),
+                );
+                observation.expected = Some(header_order_diagnosis(segments));
+                observation.actual = display(actual, 0, budget);
+                return Ok(observation);
+            }
+            let frozen_names = header_names_bounded(segments, "、");
+            // A CRLF-terminated header is the usual reason a frozen `name\n`
+            // is not found. The byte comparison remains the authority.
+            let mut crlf_header: Option<(String, usize)> = None;
+            for segment in segments {
+                let mut needle = segment.file_name().as_bytes().to_vec();
+                needle.extend_from_slice(b"\r\n");
+                if let Some(offset) = find_needle_metered(actual, 0, &needle, budget)? {
+                    crlf_header = Some((segment.file_name().to_owned(), offset));
+                    break;
                 }
-                let frozen_names = header_names_bounded(segments, "、");
-                // A CRLF-terminated header is the usual reason a frozen `name\n`
-                // is not found. The byte comparison remains the authority.
-                let mut crlf_header: Option<(String, usize)> = None;
-                for segment in segments {
-                    let mut needle = segment.file_name().as_bytes().to_vec();
-                    needle.extend_from_slice(b"\r\n");
-                    if let Some(offset) = find_needle_metered(actual, 0, &needle, budget)? {
-                        crlf_header = Some((segment.file_name().to_owned(), offset));
-                        break;
-                    }
-                }
-                // SOURCE is proven (with an already-held CRLF-header locator):
-                // fix code/detail/expected/locator before the display window.
-                let detail = match &crlf_header {
+            }
+            // SOURCE is proven (with an already-held CRLF-header locator):
+            // fix code/detail/expected/locator before the display window.
+            let detail = match &crlf_header {
                     Some((name, _)) => format!(
                         "候选没有按冻结顺序包含标题行「{name}」+LF；该标题在候选里以 CRLF 结尾，而冻结合并格式要求标题行用 LF。冻结顺序：{frozen_names}"
                     ),
                     None => format!("候选没有按冻结顺序包含全部来源标题行；冻结顺序：{frozen_names}"),
                 };
-                let mut observation = failed(
-                    rule_id,
-                    check,
-                    reason_code::TEXT_SOURCE_MISSING,
-                    binding,
-                    detail,
-                );
-                // The frozen headers are what is missing, so `expected` names
-                // them. It must never be the frozen bytes themselves: for an
-                // all-empty source set `names.join("\n")` *is* the expected
-                // artifact, and handing that string to the model reads as "write
-                // this", which is how a candidate ends up missing the separators
-                // it was asked for.
-                observation.expected = Some(header_order_diagnosis(segments));
-                observation.locator = crlf_header
-                    .map(|(_, offset)| RecordLocator::default().at_byte(offset as u64));
-                observation.actual = display(actual, 0, budget);
-                Some(observation)
-            }
-            Some(_positions) => {
-                // Headers appear in frozen order; content before the first one is a
-                // content difference, decided below.
-                None
-            }
-        };
+            let mut observation = failed(
+                rule_id,
+                check,
+                reason_code::TEXT_SOURCE_MISSING,
+                binding,
+                detail,
+            );
+            // The frozen headers are what is missing, so `expected` names
+            // them. It must never be the frozen bytes themselves: for an
+            // all-empty source set `names.join("\n")` *is* the expected
+            // artifact, and handing that string to the model reads as "write
+            // this", which is how a candidate ends up missing the separators
+            // it was asked for.
+            observation.expected = Some(header_order_diagnosis(segments));
+            observation.locator =
+                crlf_header.map(|(_, offset)| RecordLocator::default().at_byte(offset as u64));
+            observation.actual = display(actual, 0, budget);
+            Some(observation)
+        }
+        Some(_positions) => {
+            // Headers appear in frozen order; content before the first one is a
+            // content difference, decided below.
+            None
+        }
+    };
 
     // 3. Bodies are byte-identical and only the inter-segment blank line / EOF
     //    structure differs.
@@ -543,7 +542,6 @@ fn diagnose_concat_metered(
     if let Some(source) = pending_source {
         return Ok(source);
     }
-
 
     // 5. A real body difference. The first-difference locator is the proven
     //    fact (set before any display read). The three display windows are
@@ -732,7 +730,9 @@ fn expected_tail_diagnosis(
         // entries, never at the file end, so the attribution names which rule was
         // applied instead of implying the terminator came from the contract.
         let rule_note = match rule {
-            MergeRule::SeparatorV1 => "（历史规则：该空正文若后面还有来源，会被补一个终止 LF 再补空行）",
+            MergeRule::SeparatorV1 => {
+                "（历史规则：该空正文若后面还有来源，会被补一个终止 LF 再补空行）"
+            }
             MergeRule::SeparatorV2 => "（修正规则：该空正文不贡献任何行，因此不补终止 LF）",
         };
         format!(
@@ -833,7 +833,8 @@ fn only_separators_differ_metered(
     if segments.is_empty() {
         return Ok(false);
     }
-    let Some(positions) = header_positions_allow_unterminated_last_metered(actual, segments, budget)?
+    let Some(positions) =
+        header_positions_allow_unterminated_last_metered(actual, segments, budget)?
     else {
         return Ok(false);
     };
@@ -955,12 +956,12 @@ pub(crate) fn check_text_concat_budgeted(
     budget.phase(Phase::Entry);
 
     // K1 helper: a stop obtained while the conclusion is still incomplete.
-    let stopped =
-        |stop: BudgetStop| stop.to_observation(limits, rule_id, check, binding);
+    let stopped = |stop: BudgetStop| stop.to_observation(limits, rule_id, check, binding);
     // Unified exit: Stopped -> K1, ProvenFailed is kept (terminal time check
     // cannot demote it), Complete passes the terminal time check.
-    let finish =
-        |budget: &mut Budget<'_>, outcome: Outcome| budget.finalize(outcome, rule_id, check, binding);
+    let finish = |budget: &mut Budget<'_>, outcome: Outcome| {
+        budget.finalize(outcome, rule_id, check, binding)
+    };
 
     // S0: the 0 ms gate trips before any allocation or scan.
     if let Err(stop) = budget.check_time() {
@@ -981,54 +982,48 @@ pub(crate) fn check_text_concat_budgeted(
     // The separator rule comes from the frozen record, not from this build: a
     // record that does not declare one is verified with the historical rule it
     // was actually written with.
-    let expected = match build_expected_metered(request.segments, request.envelope.merge_rule, &mut budget)
-    {
-        Ok(expected) => expected,
-        Err(stop) => return stopped(stop),
-    };
+    let expected =
+        match build_expected_metered(request.segments, request.envelope.merge_rule, &mut budget) {
+            Ok(expected) => expected,
+            Err(stop) => return stopped(stop),
+        };
 
     // A proven failure whose detailed diagnosis may still stop. A stop while
     // the *fact* is being established yields the generic content failure with
     // no fabricated location; a stop in a *display window* is handled inside
     // diagnose_concat_metered and keeps the already-proven code/locator.
-    let diagnose_failed =
-        |budget: &mut Budget<'_>, note: Option<&str>| -> CheckObservation {
-            let mut observation = match diagnose_concat_metered(
+    let diagnose_failed = |budget: &mut Budget<'_>, note: Option<&str>| -> CheckObservation {
+        let mut observation = match diagnose_concat_metered(
+            rule_id,
+            check,
+            binding,
+            request.segments,
+            &expected,
+            request.actual,
+            request.envelope.merge_rule,
+            policy.eof,
+            budget,
+        ) {
+            Ok(observation) => observation,
+            Err(_) => failed(
                 rule_id,
                 check,
+                reason_code::TEXT_CONTENT_MISMATCH,
                 binding,
-                request.segments,
-                &expected,
-                request.actual,
-                request.envelope.merge_rule,
-                policy.eof,
-                budget,
-            ) {
-                Ok(observation) => observation,
-                Err(_) => failed(
-                    rule_id,
-                    check,
-                    reason_code::TEXT_CONTENT_MISMATCH,
-                    binding,
-                    "候选与冻结构造不一致；详细诊断在资源上限内未完成".to_owned(),
-                ),
-            };
-            if let Some(note) = note {
-                let suffix = format!("；另外，{note}");
-                match observation.detail.as_mut() {
-                    Some(detail) => detail.push_str(&suffix),
-                    None => observation.detail = Some(note.to_owned()),
-                }
-            }
-            // The failure is already proven under the full policy; the
-            // terminal time check must not demote it (K2).
-            budget.finalize(
-                Outcome::ProvenFailed(observation),
-                rule_id,
-                check,
-                binding,
-            )
+                "候选与冻结构造不一致；详细诊断在资源上限内未完成".to_owned(),
+            ),
         };
+        if let Some(note) = note {
+            let suffix = format!("；另外，{note}");
+            match observation.detail.as_mut() {
+                Some(detail) => detail.push_str(&suffix),
+                None => observation.detail = Some(note.to_owned()),
+            }
+        }
+        // The failure is already proven under the full policy; the
+        // terminal time check must not demote it (K2).
+        budget.finalize(Outcome::ProvenFailed(observation), rule_id, check, binding)
+    };
 
     // (1) v1: the old byte comparison, and nothing else.
     if request.envelope.is_v1() {
@@ -1138,21 +1133,16 @@ pub(crate) fn check_text_concat_budgeted(
             binding,
             conflict.clone(),
         );
-        return budget.finalize(
-            Outcome::Complete(observation),
-            rule_id,
-            check,
-            binding,
-        );
+        return budget.finalize(Outcome::Complete(observation), rule_id, check, binding);
     }
 
     // (5) The candidate's own declared line-ending policy. A violation is a
     //     proven failure.
-    let candidate_endings =
-        match line_ending_verdict_metered(request.actual, declared, &mut budget) {
-            Ok(verdict) => verdict,
-            Err(stop) => return stopped(stop),
-        };
+    let candidate_endings = match line_ending_verdict_metered(request.actual, declared, &mut budget)
+    {
+        Ok(verdict) => verdict,
+        Err(stop) => return stopped(stop),
+    };
     if let LineEndingVerdict::Violation(detail) = &candidate_endings {
         // The violation is already proven; render the window only if its
         // bounded read still fits the budget (no free scanning for a locator).
@@ -1219,12 +1209,7 @@ pub(crate) fn check_text_concat_budgeted(
                     return diagnose_failed(&mut budget, None);
                 }
             };
-            return budget.finalize(
-                Outcome::Complete(observation),
-                rule_id,
-                check,
-                binding,
-            );
+            return budget.finalize(Outcome::Complete(observation), rule_id, check, binding);
         }
     }
 
@@ -1253,12 +1238,7 @@ pub(crate) fn check_text_concat_budgeted(
                 binding,
                 detail.clone(),
             );
-            return budget.finalize(
-                Outcome::Complete(observation),
-                rule_id,
-                check,
-                binding,
-            );
+            return budget.finalize(Outcome::Complete(observation), rule_id, check, binding);
         }
         // Fall through: an independent difference keeps blocking (R2).
     }
@@ -1315,8 +1295,8 @@ fn line_ending_verdict_metered(
             b'\r' => {
                 // The lookahead is a real read; if the next byte does not exist
                 // there is nothing to charge (natural EOF).
-                let followed_by_lf = index + 1 < bytes.len()
-                    && budget.byte_at(bytes, index + 1)? == b'\n';
+                let followed_by_lf =
+                    index + 1 < bytes.len() && budget.byte_at(bytes, index + 1)? == b'\n';
                 if followed_by_lf {
                     has_crlf = true;
                     index += 2;
@@ -1509,9 +1489,7 @@ fn contains_crlf_metered(bytes: &[u8], budget: &mut Budget<'_>) -> Result<bool, 
     budget.phase(Phase::ConflictAttribution);
     let mut index = 0usize;
     while index + 1 < bytes.len() {
-        if budget.byte_at(bytes, index)? == b'\r'
-            && budget.byte_at(bytes, index + 1)? == b'\n'
-        {
+        if budget.byte_at(bytes, index)? == b'\r' && budget.byte_at(bytes, index + 1)? == b'\n' {
             return Ok(true);
         }
         index += 1;
@@ -1716,12 +1694,7 @@ fn table_budget_error(
     limits: &CheckLimits,
     locator: RecordLocator,
 ) -> TableError {
-    TableError::budget(
-        stop.kind,
-        limits.ceiling(stop.kind),
-        stop.observed,
-        locator,
-    )
+    TableError::budget(stop.kind, limits.ceiling(stop.kind), stop.observed, locator)
 }
 
 /// Parse a delimited table under an explicit dialect and the frozen ceilings.
@@ -1814,95 +1787,86 @@ pub(crate) fn parse_table_with_clock(
     // BOM handling is a declared policy, and a violation of it is an encoding
     // finding. The comparison short-circuits on the first byte, so an input
     // without a BOM costs one logical read.
-    let (body, bom_stripped) = match dialect.bom {
-        BomPolicy::Auto => {
-            // Natural EOF reads nothing; otherwise the first byte is read
-            // and a BOM match continues only when it is 0xEF.
-            let first = if bytes.is_empty() {
-                None
-            } else {
-                Some(
-                    budget
-                        .byte_at(bytes, 0)
-                        .map_err(|stop| table_budget_error(stop, limits, RecordLocator::default()))?,
-                )
-            };
-            if first == Some(0xEF)
-                && bytes.len() >= 3
-                && budget
-                    .byte_at(bytes, 1)
+    let (body, bom_stripped) =
+        match dialect.bom {
+            BomPolicy::Auto => {
+                // Natural EOF reads nothing; otherwise the first byte is read
+                // and a BOM match continues only when it is 0xEF.
+                let first = if bytes.is_empty() {
+                    None
+                } else {
+                    Some(budget.byte_at(bytes, 0).map_err(|stop| {
+                        table_budget_error(stop, limits, RecordLocator::default())
+                    })?)
+                };
+                if first == Some(0xEF)
+                    && bytes.len() >= 3
+                    && budget.byte_at(bytes, 1).map_err(|stop| {
+                        table_budget_error(stop, limits, RecordLocator::default())
+                    })? == 0xBB
+                    && budget.byte_at(bytes, 2).map_err(|stop| {
+                        table_budget_error(stop, limits, RecordLocator::default())
+                    })? == 0xBF
+                {
+                    (&bytes[3..], true)
+                } else {
+                    (bytes, false)
+                }
+            }
+            BomPolicy::Required => {
+                if bytes.len() < 3 {
+                    return Err(TableError::violation(
+                        reason_code::TABLE_ENCODING_UNSUPPORTED,
+                        RecordLocator::default(),
+                        "冻结合同要求 UTF-8 BOM，候选没有".to_owned(),
+                    ));
+                }
+                let has_bom = budget
+                    .byte_at(bytes, 0)
                     .map_err(|stop| table_budget_error(stop, limits, RecordLocator::default()))?
-                    == 0xBB
-                && budget
-                    .byte_at(bytes, 2)
-                    .map_err(|stop| table_budget_error(stop, limits, RecordLocator::default()))?
-                    == 0xBF
-            {
-                (&bytes[3..], true)
-            } else {
+                    == 0xEF
+                    && budget.byte_at(bytes, 1).map_err(|stop| {
+                        table_budget_error(stop, limits, RecordLocator::default())
+                    })? == 0xBB
+                    && budget.byte_at(bytes, 2).map_err(|stop| {
+                        table_budget_error(stop, limits, RecordLocator::default())
+                    })? == 0xBF;
+                if has_bom {
+                    (&bytes[3..], true)
+                } else {
+                    return Err(TableError::violation(
+                        reason_code::TABLE_ENCODING_UNSUPPORTED,
+                        RecordLocator::default(),
+                        "冻结合同要求 UTF-8 BOM，候选没有".to_owned(),
+                    ));
+                }
+            }
+            BomPolicy::Forbidden => {
+                let first = if bytes.is_empty() {
+                    None
+                } else {
+                    Some(budget.byte_at(bytes, 0).map_err(|stop| {
+                        table_budget_error(stop, limits, RecordLocator::default())
+                    })?)
+                };
+                if first == Some(0xEFu8)
+                    && bytes.len() >= 3
+                    && budget.byte_at(bytes, 1).map_err(|stop| {
+                        table_budget_error(stop, limits, RecordLocator::default())
+                    })? == 0xBB
+                    && budget.byte_at(bytes, 2).map_err(|stop| {
+                        table_budget_error(stop, limits, RecordLocator::default())
+                    })? == 0xBF
+                {
+                    return Err(TableError::violation(
+                        reason_code::TABLE_ENCODING_UNSUPPORTED,
+                        RecordLocator::default(),
+                        "冻结合同禁止 UTF-8 BOM，候选带 BOM".to_owned(),
+                    ));
+                }
                 (bytes, false)
             }
-        }
-        BomPolicy::Required => {
-            if bytes.len() < 3 {
-                return Err(TableError::violation(
-                    reason_code::TABLE_ENCODING_UNSUPPORTED,
-                    RecordLocator::default(),
-                    "冻结合同要求 UTF-8 BOM，候选没有".to_owned(),
-                ));
-            }
-            let has_bom = budget
-                .byte_at(bytes, 0)
-                .map_err(|stop| table_budget_error(stop, limits, RecordLocator::default()))?
-                == 0xEF
-                && budget
-                    .byte_at(bytes, 1)
-                    .map_err(|stop| table_budget_error(stop, limits, RecordLocator::default()))?
-                    == 0xBB
-                && budget
-                    .byte_at(bytes, 2)
-                    .map_err(|stop| table_budget_error(stop, limits, RecordLocator::default()))?
-                    == 0xBF;
-            if has_bom {
-                (&bytes[3..], true)
-            } else {
-                return Err(TableError::violation(
-                    reason_code::TABLE_ENCODING_UNSUPPORTED,
-                    RecordLocator::default(),
-                    "冻结合同要求 UTF-8 BOM，候选没有".to_owned(),
-                ));
-            }
-        }
-        BomPolicy::Forbidden => {
-            let first = if bytes.is_empty() {
-                None
-            } else {
-                Some(
-                    budget
-                        .byte_at(bytes, 0)
-                        .map_err(|stop| table_budget_error(stop, limits, RecordLocator::default()))?,
-                )
-            };
-            if first == Some(0xEFu8)
-                && bytes.len() >= 3
-                && budget
-                    .byte_at(bytes, 1)
-                    .map_err(|stop| table_budget_error(stop, limits, RecordLocator::default()))?
-                    == 0xBB
-                && budget
-                    .byte_at(bytes, 2)
-                    .map_err(|stop| table_budget_error(stop, limits, RecordLocator::default()))?
-                    == 0xBF
-            {
-                return Err(TableError::violation(
-                    reason_code::TABLE_ENCODING_UNSUPPORTED,
-                    RecordLocator::default(),
-                    "冻结合同禁止 UTF-8 BOM，候选带 BOM".to_owned(),
-                ));
-            }
-            (bytes, false)
-        }
-    };
+        };
 
     // P2: per-byte UTF-8 validation (no whole-slice from_utf8 re-scan).
     validate_utf8_metered(body, &mut budget)?;
@@ -1921,10 +1885,9 @@ pub(crate) fn parse_table_with_clock(
             b'\r' => {
                 let mut followed_by_lf = false;
                 if index + 1 < raw.len() {
-                    followed_by_lf = budget
-                        .byte_at(raw, index + 1)
-                        .map_err(|stop| table_budget_error(stop, limits, RecordLocator::default()))?
-                        == b'\n';
+                    followed_by_lf = budget.byte_at(raw, index + 1).map_err(|stop| {
+                        table_budget_error(stop, limits, RecordLocator::default())
+                    })? == b'\n';
                 }
                 if !followed_by_lf {
                     return Err(TableError::unsupported(
@@ -1947,10 +1910,9 @@ pub(crate) fn parse_table_with_clock(
                 if dialect.line_ending == LineEnding::Crlf {
                     // The lookbehind is evaluated only under the Crlf policy.
                     let preceded_by_cr = index >= 1
-                        && budget
-                            .byte_at(raw, index - 1)
-                            .map_err(|stop| table_budget_error(stop, limits, RecordLocator::default()))?
-                            == b'\r';
+                        && budget.byte_at(raw, index - 1).map_err(|stop| {
+                            table_budget_error(stop, limits, RecordLocator::default())
+                        })? == b'\r';
                     if !preceded_by_cr {
                         return Err(TableError::violation(
                             reason_code::TABLE_DIALECT_UNSUPPORTED,
@@ -1983,9 +1945,7 @@ pub(crate) fn parse_table_with_clock(
                     Some(
                         budget
                             .byte_at(raw, index)
-                            .map_err(|stop| {
-                                table_budget_error(stop, limits, builder.locator())
-                            })?,
+                            .map_err(|stop| table_budget_error(stop, limits, builder.locator()))?,
                     )
                 } else {
                     None
@@ -2142,7 +2102,10 @@ pub(crate) fn table_parse_observation(
     error: &TableError,
 ) -> CheckObservation {
     let attributed_detail = match input {
-        ParseInput::Source => format!("冻结参考表格无法由当前检查器解释，候选未判定：{}", error.detail()),
+        ParseInput::Source => format!(
+            "冻结参考表格无法由当前检查器解释，候选未判定：{}",
+            error.detail()
+        ),
         ParseInput::Candidate => error.detail().to_owned(),
     };
     match (input, error.kind()) {
@@ -2162,26 +2125,15 @@ pub(crate) fn table_parse_observation(
             observation
         }
         (ParseInput::Candidate, ParseFailureKind::Unsupported) => {
-            let mut observation = unverified(
-                rule_id,
-                check,
-                error.code(),
-                binding,
-                attributed_detail,
-            );
+            let mut observation =
+                unverified(rule_id, check, error.code(), binding, attributed_detail);
             // Keep the position the parser had reached (e.g. the illegal byte
             // or the lone CR); this is evidence, not a fabricated location.
             observation.locator = Some(error.locator().clone());
             observation
         }
         (ParseInput::Candidate, ParseFailureKind::Violation) => {
-            let mut observation = failed(
-                rule_id,
-                check,
-                error.code(),
-                binding,
-                attributed_detail,
-            );
+            let mut observation = failed(rule_id, check, error.code(), binding, attributed_detail);
             observation.locator = Some(error.locator().clone());
             observation
         }
@@ -2190,13 +2142,8 @@ pub(crate) fn table_parse_observation(
         // code/limit and a *reference* locator (callers must not label it a
         // candidate position); Resource keeps its limit for diagnostics.
         (ParseInput::Source, _) => {
-            let mut observation = unverified(
-                rule_id,
-                check,
-                error.code(),
-                binding,
-                attributed_detail,
-            );
+            let mut observation =
+                unverified(rule_id, check, error.code(), binding, attributed_detail);
             observation.locator = Some(error.locator().clone());
             observation.limit = error.limit();
             observation
@@ -2262,7 +2209,11 @@ pub(crate) fn check_table_columns(request: &TableCheckRequest<'_>) -> CheckObser
         };
 
         // Empty header names are reported only because a header exists at all.
-        if let Some(empty) = header.fields.iter().find(|field| field.value.trim().is_empty()) {
+        if let Some(empty) = header
+            .fields
+            .iter()
+            .find(|field| field.value.trim().is_empty())
+        {
             let mut observation = failed(
                 request.rule_id,
                 check,
@@ -2270,9 +2221,8 @@ pub(crate) fn check_table_columns(request: &TableCheckRequest<'_>) -> CheckObser
                 binding,
                 format!("表头第 {} 个字段为空", empty.field),
             );
-            observation.locator = Some(
-                RecordLocator::cell(header.record, empty.field, None).at_line(header.line),
-            );
+            observation.locator =
+                Some(RecordLocator::cell(header.record, empty.field, None).at_line(header.line));
             observation.expected = Some("非空列名".to_owned());
             observation.actual = Some("空列名".to_owned());
             return observation;
@@ -2523,9 +2473,16 @@ mod tests {
 
         // The same two extra LFs under the permissive policy: still refused,
         // because the tolerance is exactly one LF.
-        let permissive = check(&v2_text(EofPolicy::AllowSingleTrailingLf), &segments, b"a.txt\nalpha\n\n");
+        let permissive = check(
+            &v2_text(EofPolicy::AllowSingleTrailingLf),
+            &segments,
+            b"a.txt\nalpha\n\n",
+        );
         assert_eq!(permissive.state, CheckState::Failed);
-        assert_ne!(permissive.equivalence.as_deref(), Some(equivalence::OPTIONAL_FINAL_LF));
+        assert_ne!(
+            permissive.equivalence.as_deref(),
+            Some(equivalence::OPTIONAL_FINAL_LF)
+        );
     }
 
     #[test]
@@ -2553,10 +2510,10 @@ mod tests {
         let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
 
         for actual in [
-            &b"a.txt\nalph"[..],           // a character deleted
-            &b"a.txt\nalpha "[..],         // trailing whitespace added (trim-equal)
-            &b"a.txt\n alpha"[..],         // indentation added
-            &b"a.txt\nalphA"[..],          // a digit/letter changed
+            &b"a.txt\nalph"[..],   // a character deleted
+            &b"a.txt\nalpha "[..], // trailing whitespace added (trim-equal)
+            &b"a.txt\n alpha"[..], // indentation added
+            &b"a.txt\nalphA"[..],  // a digit/letter changed
         ] {
             let observation = check(&envelope, &segments, actual);
             assert_eq!(
@@ -2569,7 +2526,10 @@ mod tests {
                 Some(reason_code::TEXT_CONTENT_MISMATCH),
                 "{actual:?} must be located as a content difference"
             );
-            assert!(observation.locator.is_some(), "the difference must be located");
+            assert!(
+                observation.locator.is_some(),
+                "the difference must be located"
+            );
         }
     }
 
@@ -2580,7 +2540,10 @@ mod tests {
 
         // Correct: "a.txt\nalpha" + "\n" (body lacks LF) + "\n" + "b.txt\nbeta".
         let correct = b"a.txt\nalpha\n\nb.txt\nbeta";
-        assert_eq!(check(&envelope, &segments, correct).state, CheckState::Passed);
+        assert_eq!(
+            check(&envelope, &segments, correct).state,
+            CheckState::Passed
+        );
 
         // The inter-segment blank line was dropped, but both payloads survive.
         let missing_blank = b"a.txt\nalpha\nb.txt\nbeta";
@@ -2644,12 +2607,18 @@ mod tests {
         // "报告.md" and "附录.md" are different names of equal byte length: a
         // naive byte-length sort would be unstable here, so the frozen order must
         // be honoured as given.
-        let segments = [segment("in/报告.md", "正文".as_bytes()), segment("in/附录.md", b"x")];
+        let segments = [
+            segment("in/报告.md", "正文".as_bytes()),
+            segment("in/附录.md", b"x"),
+        ];
         let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
         let actual = "报告.md\n正文\n\n附录.md\nx".as_bytes();
         let observation = check(&envelope, &segments, actual);
         assert_eq!(observation.state, CheckState::Passed);
-        assert!(observation.equivalence.is_none(), "a byte-exact match needs no equivalence");
+        assert!(
+            observation.equivalence.is_none(),
+            "a byte-exact match needs no equivalence"
+        );
     }
 
     // ---- R05: declared line endings, never a silent conversion ----
@@ -2715,7 +2684,11 @@ mod tests {
         let csv = b"name,note\nAlice,\"a,b\"\nBob,\"he said \"\"hi\"\"\"\nCara,\"line1\nline2\"\n";
         let parsed = parse_table(csv, &TableDialect::default(), &CheckLimits::P0).expect("parses");
 
-        assert_eq!(parsed.records.len(), 4, "a quoted newline is not a record break");
+        assert_eq!(
+            parsed.records.len(),
+            4,
+            "a quoted newline is not a record break"
+        );
         let alice = &parsed.records[1];
         assert_eq!(alice.fields.len(), 2, "a quoted comma is not a field break");
         assert_eq!(alice.fields[1].value, "a,b");
@@ -2729,7 +2702,8 @@ mod tests {
     #[test]
     fn r07_bom_crlf_and_tsv_all_parse_under_their_own_dialect() {
         let bom_crlf = b"\xEF\xBB\xBFname,qty\r\nwidget,3\r\n";
-        let parsed = parse_table(bom_crlf, &TableDialect::default(), &CheckLimits::P0).expect("parses");
+        let parsed =
+            parse_table(bom_crlf, &TableDialect::default(), &CheckLimits::P0).expect("parses");
         assert!(parsed.bom_stripped);
         assert_eq!(parsed.header().unwrap().fields[0].value, "name");
         assert_eq!(parsed.data_records().len(), 1);
@@ -2738,9 +2712,14 @@ mod tests {
             delimiter: Delimiter::Tab,
             ..TableDialect::default()
         };
-        let parsed = parse_table(b"a\tb\n1\t2\t3\n", &tsv_dialect, &CheckLimits::P0).expect("parses");
+        let parsed =
+            parse_table(b"a\tb\n1\t2\t3\n", &tsv_dialect, &CheckLimits::P0).expect("parses");
         assert_eq!(parsed.header().unwrap().fields.len(), 2);
-        assert_eq!(parsed.data_records()[0].fields.len(), 3, "a real TSV width error");
+        assert_eq!(
+            parsed.data_records()[0].fields.len(),
+            3,
+            "a real TSV width error"
+        );
     }
 
     #[test]
@@ -2782,7 +2761,8 @@ mod tests {
         assert_eq!(observation.locator.as_ref().unwrap().line, Some(2));
 
         // The invalid input is refused, and a run with the same width passes.
-        let ok = b"name,email,phone,company,title,city,country,industry\nAnn,a@x,1,Acme,CTO,SH,CN,X\n";
+        let ok =
+            b"name,email,phone,company,title,city,country,industry\nAnn,a@x,1,Acme,CTO,SH,CN,X\n";
         let parsed = parse_table(ok, &dialect, &CheckLimits::P0).expect("parses");
         assert_eq!(
             check_table_columns(&TableCheckRequest {
@@ -2799,23 +2779,35 @@ mod tests {
 
     #[test]
     fn r08_an_unterminated_quote_is_a_parse_finding_not_a_width_finding() {
-        let error = parse_table(b"a,b\n\"unclosed\n", &TableDialect::default(), &CheckLimits::P0)
-            .expect_err("unterminated");
+        let error = parse_table(
+            b"a,b\n\"unclosed\n",
+            &TableDialect::default(),
+            &CheckLimits::P0,
+        )
+        .expect_err("unterminated");
         assert_eq!(error.code, reason_code::TABLE_UNTERMINATED_QUOTE);
     }
 
     #[test]
     fn r08_an_unescaped_quote_is_reported_with_its_position() {
-        let error = parse_table(b"a,b\nab\"cd,e\n", &TableDialect::default(), &CheckLimits::P0)
-            .expect_err("unescaped");
+        let error = parse_table(
+            b"a,b\nab\"cd,e\n",
+            &TableDialect::default(),
+            &CheckLimits::P0,
+        )
+        .expect_err("unescaped");
         assert_eq!(error.code, reason_code::TABLE_UNESCAPED_QUOTE);
         assert!(error.locator.byte_offset.is_some());
     }
 
     #[test]
     fn r08_duplicate_headers_are_refused_only_when_the_rule_declares_uniqueness() {
-        let parsed =
-            parse_table(b"name,name\n1,2\n", &TableDialect::default(), &CheckLimits::P0).expect("parses");
+        let parsed = parse_table(
+            b"name,name\n1,2\n",
+            &TableDialect::default(),
+            &CheckLimits::P0,
+        )
+        .expect("parses");
 
         let undeclared = check_table_columns(&TableCheckRequest {
             rule_id: "r",
@@ -2847,8 +2839,8 @@ mod tests {
 
     #[test]
     fn r08_an_empty_header_field_is_reported() {
-        let parsed =
-            parse_table(b"name,\n1,2\n", &TableDialect::default(), &CheckLimits::P0).expect("parses");
+        let parsed = parse_table(b"name,\n1,2\n", &TableDialect::default(), &CheckLimits::P0)
+            .expect("parses");
         let observation = check_table_columns(&TableCheckRequest {
             rule_id: "r",
             parsed: &parsed,
@@ -2914,10 +2906,15 @@ mod tests {
 
     #[test]
     fn r09_whitespace_only_fields_keep_their_value() {
-        let parsed =
-            parse_table(b"a,b\n\" \",2\n", &TableDialect::default(), &CheckLimits::P0).expect("parses");
+        let parsed = parse_table(
+            b"a,b\n\" \",2\n",
+            &TableDialect::default(),
+            &CheckLimits::P0,
+        )
+        .expect("parses");
         assert_eq!(
-            parsed.data_records()[0].fields[0].value, " ",
+            parsed.data_records()[0].fields[0].value,
+            " ",
             "the parser must not drop or trim a value"
         );
     }
@@ -2946,7 +2943,8 @@ mod tests {
             max_bytes: 4,
             ..CheckLimits::P0
         };
-        let error = parse_table(b"a,b,c\nd,e,f\n", &TableDialect::default(), &small).expect_err("bytes");
+        let error =
+            parse_table(b"a,b,c\nd,e,f\n", &TableDialect::default(), &small).expect_err("bytes");
         assert_eq!(error.limit, Some(LimitKind::Bytes));
     }
 
@@ -3075,7 +3073,11 @@ mod tests {
         let actual = b"a.txt\nalpha\r\n"; // byte-identical to `expected_concat`
         let mut expected = Vec::new();
         expected_concat(&segments, MergeRule::current(), &mut expected);
-        assert_eq!(actual.as_slice(), expected.as_slice(), "the counterexample must be byte-identical");
+        assert_eq!(
+            actual.as_slice(),
+            expected.as_slice(),
+            "the counterexample must be byte-identical"
+        );
 
         let observation = check(&envelope, &segments, actual);
         assert_ne!(
@@ -3088,7 +3090,10 @@ mod tests {
             observation.reason_code.as_deref(),
             Some(reason_code::TEXT_LINE_ENDING_UNSUPPORTED)
         );
-        assert!(!observation.blocking, "a contradictory contract is not a candidate error");
+        assert!(
+            !observation.blocking,
+            "a contradictory contract is not a candidate error"
+        );
         assert!(
             observation
                 .detail
@@ -3339,10 +3344,7 @@ mod tests {
             Some(reason_code::TEXT_CONTENT_MISMATCH),
             "the accurate content finding must be kept"
         );
-        assert!(
-            observation.locator.is_some(),
-            "the location must be kept"
-        );
+        assert!(observation.locator.is_some(), "the location must be kept");
         assert!(
             observation
                 .detail
@@ -3451,48 +3453,348 @@ mod tests {
     fn r7_mandatory_and_optional_eof_matrix() {
         let cases = vec![
             // ---- RequireTrailingLf, no conflict (declared Any) ----
-            EofCase { label: "REQ/any/src0lf/cand0", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Any, source: b"alpha", candidate_eof: 0, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
-            EofCase { label: "REQ/any/src0lf/cand1", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Any, source: b"alpha", candidate_eof: 1, state: CheckState::Passed, blocking: false, equivalence: None, eof_code: false },
-            EofCase { label: "REQ/any/src0lf/cand2", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Any, source: b"alpha", candidate_eof: 2, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
-            EofCase { label: "REQ/any/src1lf/cand0", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Any, source: b"alpha\n", candidate_eof: 0, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
-            EofCase { label: "REQ/any/src1lf/cand1", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Any, source: b"alpha\n", candidate_eof: 1, state: CheckState::Passed, blocking: false, equivalence: None, eof_code: false },
-            EofCase { label: "REQ/any/src1lf/cand2", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Any, source: b"alpha\n", candidate_eof: 2, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+            EofCase {
+                label: "REQ/any/src0lf/cand0",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha",
+                candidate_eof: 0,
+                state: CheckState::Failed,
+                blocking: true,
+                equivalence: None,
+                eof_code: true,
+            },
+            EofCase {
+                label: "REQ/any/src0lf/cand1",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha",
+                candidate_eof: 1,
+                state: CheckState::Passed,
+                blocking: false,
+                equivalence: None,
+                eof_code: false,
+            },
+            EofCase {
+                label: "REQ/any/src0lf/cand2",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha",
+                candidate_eof: 2,
+                state: CheckState::Failed,
+                blocking: true,
+                equivalence: None,
+                eof_code: true,
+            },
+            EofCase {
+                label: "REQ/any/src1lf/cand0",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha\n",
+                candidate_eof: 0,
+                state: CheckState::Failed,
+                blocking: true,
+                equivalence: None,
+                eof_code: true,
+            },
+            EofCase {
+                label: "REQ/any/src1lf/cand1",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha\n",
+                candidate_eof: 1,
+                state: CheckState::Passed,
+                blocking: false,
+                equivalence: None,
+                eof_code: false,
+            },
+            EofCase {
+                label: "REQ/any/src1lf/cand2",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha\n",
+                candidate_eof: 2,
+                state: CheckState::Failed,
+                blocking: true,
+                equivalence: None,
+                eof_code: true,
+            },
             // ---- RequireTrailingLf under a source-body conflict (declared Lf) ----
-            EofCase { label: "REQ/srcConflict/cand0", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Lf, source: b"alpha\r\n", candidate_eof: 0, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
-            EofCase { label: "REQ/srcConflict/cand1-identical", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Lf, source: b"alpha\r\n", candidate_eof: 1, state: CheckState::Unverified, blocking: false, equivalence: None, eof_code: false },
+            EofCase {
+                label: "REQ/srcConflict/cand0",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Lf,
+                source: b"alpha\r\n",
+                candidate_eof: 0,
+                state: CheckState::Failed,
+                blocking: true,
+                equivalence: None,
+                eof_code: true,
+            },
+            EofCase {
+                label: "REQ/srcConflict/cand1-identical",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Lf,
+                source: b"alpha\r\n",
+                candidate_eof: 1,
+                state: CheckState::Unverified,
+                blocking: false,
+                equivalence: None,
+                eof_code: false,
+            },
             // The "candidate keeps exactly the mandated LF but ends the body with
             // LF only" variant is not expressible as a trailing-LF count from the
             // construction, so it is covered separately by
             // `r7_a_satisfied_mandatory_eof_with_an_lf_ending_stays_undecided`.
-            EofCase { label: "REQ/srcConflict/cand2", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Lf, source: b"alpha\r\n", candidate_eof: 2, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+            EofCase {
+                label: "REQ/srcConflict/cand2",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Lf,
+                source: b"alpha\r\n",
+                candidate_eof: 2,
+                state: CheckState::Failed,
+                blocking: true,
+                equivalence: None,
+                eof_code: true,
+            },
             // ---- RequireTrailingLf + conflict where the construction has NO trailing LF ----
             // This is the row that proves narrowing the discount to
             // `AllowSingleTrailingLf` alone would be wrong: the candidate satisfied
             // the mandated LF, so the single LF is what the contract asked for and
             // must not be reported as an independent body difference.
-            EofCase { label: "REQ/srcConflictMid/cand0", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Lf, source: b"alpha\r\nbeta", candidate_eof: 0, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
-            EofCase { label: "REQ/srcConflictMid/cand1", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Lf, source: b"alpha\r\nbeta", candidate_eof: 1, state: CheckState::Unverified, blocking: false, equivalence: None, eof_code: false },
-            EofCase { label: "REQ/srcConflictMid/cand2", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Lf, source: b"alpha\r\nbeta", candidate_eof: 2, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+            EofCase {
+                label: "REQ/srcConflictMid/cand0",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Lf,
+                source: b"alpha\r\nbeta",
+                candidate_eof: 0,
+                state: CheckState::Failed,
+                blocking: true,
+                equivalence: None,
+                eof_code: true,
+            },
+            EofCase {
+                label: "REQ/srcConflictMid/cand1",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Lf,
+                source: b"alpha\r\nbeta",
+                candidate_eof: 1,
+                state: CheckState::Unverified,
+                blocking: false,
+                equivalence: None,
+                eof_code: false,
+            },
+            EofCase {
+                label: "REQ/srcConflictMid/cand2",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Lf,
+                source: b"alpha\r\nbeta",
+                candidate_eof: 2,
+                state: CheckState::Failed,
+                blocking: true,
+                equivalence: None,
+                eof_code: true,
+            },
             // ---- RequireTrailingLf under a constructor-format conflict (declared Crlf) ----
-            EofCase { label: "REQ/ctorConflict/src0lf/cand0", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Crlf, source: b"alpha", candidate_eof: 0, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
-            EofCase { label: "REQ/ctorConflict/src0lf/cand1", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Crlf, source: b"alpha", candidate_eof: 1, state: CheckState::Unverified, blocking: false, equivalence: None, eof_code: false },
-            EofCase { label: "REQ/ctorConflict/src0lf/cand2", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Crlf, source: b"alpha", candidate_eof: 2, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
-            EofCase { label: "REQ/ctorConflict/src1lf/cand0", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Crlf, source: b"alpha\n", candidate_eof: 0, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
-            EofCase { label: "REQ/ctorConflict/src1lf/cand1", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Crlf, source: b"alpha\n", candidate_eof: 1, state: CheckState::Unverified, blocking: false, equivalence: None, eof_code: false },
-            EofCase { label: "REQ/ctorConflict/src1lf/cand2", policy: EofPolicy::RequireTrailingLf, declared: LineEnding::Crlf, source: b"alpha\n", candidate_eof: 2, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+            EofCase {
+                label: "REQ/ctorConflict/src0lf/cand0",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Crlf,
+                source: b"alpha",
+                candidate_eof: 0,
+                state: CheckState::Failed,
+                blocking: true,
+                equivalence: None,
+                eof_code: true,
+            },
+            EofCase {
+                label: "REQ/ctorConflict/src0lf/cand1",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Crlf,
+                source: b"alpha",
+                candidate_eof: 1,
+                state: CheckState::Unverified,
+                blocking: false,
+                equivalence: None,
+                eof_code: false,
+            },
+            EofCase {
+                label: "REQ/ctorConflict/src0lf/cand2",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Crlf,
+                source: b"alpha",
+                candidate_eof: 2,
+                state: CheckState::Failed,
+                blocking: true,
+                equivalence: None,
+                eof_code: true,
+            },
+            EofCase {
+                label: "REQ/ctorConflict/src1lf/cand0",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Crlf,
+                source: b"alpha\n",
+                candidate_eof: 0,
+                state: CheckState::Failed,
+                blocking: true,
+                equivalence: None,
+                eof_code: true,
+            },
+            EofCase {
+                label: "REQ/ctorConflict/src1lf/cand1",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Crlf,
+                source: b"alpha\n",
+                candidate_eof: 1,
+                state: CheckState::Unverified,
+                blocking: false,
+                equivalence: None,
+                eof_code: false,
+            },
+            EofCase {
+                label: "REQ/ctorConflict/src1lf/cand2",
+                policy: EofPolicy::RequireTrailingLf,
+                declared: LineEnding::Crlf,
+                source: b"alpha\n",
+                candidate_eof: 2,
+                state: CheckState::Failed,
+                blocking: true,
+                equivalence: None,
+                eof_code: true,
+            },
             // ---- AllowSingleTrailingLf controls: the existing window is unchanged ----
-            EofCase { label: "ALLOW/any/src0lf/cand0", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Any, source: b"alpha", candidate_eof: 0, state: CheckState::Passed, blocking: false, equivalence: None, eof_code: false },
-            EofCase { label: "ALLOW/any/src0lf/cand1", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Any, source: b"alpha", candidate_eof: 1, state: CheckState::Passed, blocking: false, equivalence: Some(equivalence::OPTIONAL_FINAL_LF), eof_code: false },
-            EofCase { label: "ALLOW/any/src0lf/cand2", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Any, source: b"alpha", candidate_eof: 2, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
-            EofCase { label: "ALLOW/any/src1lf/cand0", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Any, source: b"alpha\n", candidate_eof: 0, state: CheckState::Passed, blocking: false, equivalence: Some(equivalence::OPTIONAL_FINAL_LF), eof_code: false },
-            EofCase { label: "ALLOW/any/src1lf/cand1", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Any, source: b"alpha\n", candidate_eof: 1, state: CheckState::Passed, blocking: false, equivalence: None, eof_code: false },
-            EofCase { label: "ALLOW/any/src1lf/cand2", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Any, source: b"alpha\n", candidate_eof: 2, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
-            EofCase { label: "ALLOW/srcConflict/cand0", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Lf, source: b"alpha\r\n", candidate_eof: 0, state: CheckState::Unverified, blocking: false, equivalence: None, eof_code: false },
-            EofCase { label: "ALLOW/srcConflict/cand1", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Lf, source: b"alpha\r\n", candidate_eof: 1, state: CheckState::Unverified, blocking: false, equivalence: None, eof_code: false },
-            EofCase { label: "ALLOW/srcConflict/cand2", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Lf, source: b"alpha\r\n", candidate_eof: 2, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
-            EofCase { label: "ALLOW/ctorConflict/src0lf/cand0", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Crlf, source: b"alpha", candidate_eof: 0, state: CheckState::Unverified, blocking: false, equivalence: None, eof_code: false },
-            EofCase { label: "ALLOW/ctorConflict/src0lf/cand1", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Crlf, source: b"alpha", candidate_eof: 1, state: CheckState::Unverified, blocking: false, equivalence: None, eof_code: false },
-            EofCase { label: "ALLOW/ctorConflict/src0lf/cand2", policy: EofPolicy::AllowSingleTrailingLf, declared: LineEnding::Crlf, source: b"alpha", candidate_eof: 2, state: CheckState::Failed, blocking: true, equivalence: None, eof_code: true },
+            EofCase {
+                label: "ALLOW/any/src0lf/cand0",
+                policy: EofPolicy::AllowSingleTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha",
+                candidate_eof: 0,
+                state: CheckState::Passed,
+                blocking: false,
+                equivalence: None,
+                eof_code: false,
+            },
+            EofCase {
+                label: "ALLOW/any/src0lf/cand1",
+                policy: EofPolicy::AllowSingleTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha",
+                candidate_eof: 1,
+                state: CheckState::Passed,
+                blocking: false,
+                equivalence: Some(equivalence::OPTIONAL_FINAL_LF),
+                eof_code: false,
+            },
+            EofCase {
+                label: "ALLOW/any/src0lf/cand2",
+                policy: EofPolicy::AllowSingleTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha",
+                candidate_eof: 2,
+                state: CheckState::Failed,
+                blocking: true,
+                equivalence: None,
+                eof_code: true,
+            },
+            EofCase {
+                label: "ALLOW/any/src1lf/cand0",
+                policy: EofPolicy::AllowSingleTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha\n",
+                candidate_eof: 0,
+                state: CheckState::Passed,
+                blocking: false,
+                equivalence: Some(equivalence::OPTIONAL_FINAL_LF),
+                eof_code: false,
+            },
+            EofCase {
+                label: "ALLOW/any/src1lf/cand1",
+                policy: EofPolicy::AllowSingleTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha\n",
+                candidate_eof: 1,
+                state: CheckState::Passed,
+                blocking: false,
+                equivalence: None,
+                eof_code: false,
+            },
+            EofCase {
+                label: "ALLOW/any/src1lf/cand2",
+                policy: EofPolicy::AllowSingleTrailingLf,
+                declared: LineEnding::Any,
+                source: b"alpha\n",
+                candidate_eof: 2,
+                state: CheckState::Failed,
+                blocking: true,
+                equivalence: None,
+                eof_code: true,
+            },
+            EofCase {
+                label: "ALLOW/srcConflict/cand0",
+                policy: EofPolicy::AllowSingleTrailingLf,
+                declared: LineEnding::Lf,
+                source: b"alpha\r\n",
+                candidate_eof: 0,
+                state: CheckState::Unverified,
+                blocking: false,
+                equivalence: None,
+                eof_code: false,
+            },
+            EofCase {
+                label: "ALLOW/srcConflict/cand1",
+                policy: EofPolicy::AllowSingleTrailingLf,
+                declared: LineEnding::Lf,
+                source: b"alpha\r\n",
+                candidate_eof: 1,
+                state: CheckState::Unverified,
+                blocking: false,
+                equivalence: None,
+                eof_code: false,
+            },
+            EofCase {
+                label: "ALLOW/srcConflict/cand2",
+                policy: EofPolicy::AllowSingleTrailingLf,
+                declared: LineEnding::Lf,
+                source: b"alpha\r\n",
+                candidate_eof: 2,
+                state: CheckState::Failed,
+                blocking: true,
+                equivalence: None,
+                eof_code: true,
+            },
+            EofCase {
+                label: "ALLOW/ctorConflict/src0lf/cand0",
+                policy: EofPolicy::AllowSingleTrailingLf,
+                declared: LineEnding::Crlf,
+                source: b"alpha",
+                candidate_eof: 0,
+                state: CheckState::Unverified,
+                blocking: false,
+                equivalence: None,
+                eof_code: false,
+            },
+            EofCase {
+                label: "ALLOW/ctorConflict/src0lf/cand1",
+                policy: EofPolicy::AllowSingleTrailingLf,
+                declared: LineEnding::Crlf,
+                source: b"alpha",
+                candidate_eof: 1,
+                state: CheckState::Unverified,
+                blocking: false,
+                equivalence: None,
+                eof_code: false,
+            },
+            EofCase {
+                label: "ALLOW/ctorConflict/src0lf/cand2",
+                policy: EofPolicy::AllowSingleTrailingLf,
+                declared: LineEnding::Crlf,
+                source: b"alpha",
+                candidate_eof: 2,
+                state: CheckState::Failed,
+                blocking: true,
+                equivalence: None,
+                eof_code: true,
+            },
         ];
 
         let mut mismatches: Vec<String> = Vec::new();
@@ -3602,8 +3904,16 @@ mod tests {
 
         // Unsatisfied (0) and excess (2) are hard violations.
         for count in [0usize, 2] {
-            let observation = check(&required, &segments, &eof_counted(&concat_of(&segments), count));
-            assert_eq!(observation.state, CheckState::Failed, "{count} trailing LFs");
+            let observation = check(
+                &required,
+                &segments,
+                &eof_counted(&concat_of(&segments), count),
+            );
+            assert_eq!(
+                observation.state,
+                CheckState::Failed,
+                "{count} trailing LFs"
+            );
             assert!(observation.blocking, "{count} trailing LFs");
             assert_eq!(
                 observation.reason_code.as_deref(),
@@ -3991,7 +4301,10 @@ mod tests {
             Some(reason_code::TEXT_CONTENT_MISMATCH)
         );
         assert_eq!(observation.limit, None);
-        assert!(observation.locator.is_none(), "no unfunded scan for a locator");
+        assert!(
+            observation.locator.is_none(),
+            "no unfunded scan for a locator"
+        );
     }
 
     #[test]
@@ -4005,8 +4318,7 @@ mod tests {
         let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
         let clock = FakeClock::new();
         let too_small = limits_with(64 * 1024 * 1024, 30_000, 36, 64 * 1024 * 1024);
-        let observation =
-            check_budgeted(&envelope, &three, b"", &too_small, &clock);
+        let observation = check_budgeted(&envelope, &three, b"", &too_small, &clock);
         assert_eq!(observation.state, CheckState::Unverified);
         assert_eq!(observation.limit, Some(LimitKind::TextBytes));
         assert_eq!(observation.actual.as_deref(), Some("37"));
@@ -4035,8 +4347,7 @@ mod tests {
         let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
         let clock = FakeClock::new();
         let over = limits_with(64 * 1024 * 1024, 30_000, 32 * 1024 * 1024, 10);
-        let observation =
-            check_budgeted(&envelope, &segments, b"a.txt\nalpha", &over, &clock);
+        let observation = check_budgeted(&envelope, &segments, b"a.txt\nalpha", &over, &clock);
         assert_eq!(observation.state, CheckState::Unverified);
         assert_eq!(observation.limit, Some(LimitKind::Bytes));
         assert_eq!(observation.actual.as_deref(), Some("11"));
@@ -4054,8 +4365,7 @@ mod tests {
         let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
         let limits = limits_with(64 * 1024 * 1024, 0, 32 * 1024 * 1024, 64 * 1024 * 1024);
         let clock = FakeClock::new();
-        let observation =
-            check_budgeted(&envelope, &segments, b"a.txt\nalpha", &limits, &clock);
+        let observation = check_budgeted(&envelope, &segments, b"a.txt\nalpha", &limits, &clock);
         assert_eq!(observation.state, CheckState::Unverified);
         assert_eq!(observation.limit, Some(LimitKind::Millis));
     }
@@ -4074,8 +4384,7 @@ mod tests {
 
         let run = |envelope: &RuleEnvelope, actual: &[u8]| {
             let clock = StepClock::expire_after_call(u32::MAX, 10);
-            let observation =
-                check_budgeted(envelope, &segments, actual, &clock_limits, &clock);
+            let observation = check_budgeted(envelope, &segments, actual, &clock_limits, &clock);
             (observation, clock.call_count())
         };
 
@@ -4084,8 +4393,13 @@ mod tests {
         assert_eq!((passed.state, count), (CheckState::Passed, 44));
         // Re-run with an expiring clock purely to read the phase at #44.
         let at_finalize = StepClock::expire_after_call(43, 10);
-        let observation =
-            check_budgeted(&allow, &segments, b"a.txt\nalpha", &clock_limits, &at_finalize);
+        let observation = check_budgeted(
+            &allow,
+            &segments,
+            b"a.txt\nalpha",
+            &clock_limits,
+            &at_finalize,
+        );
         assert_eq!(observation.state, CheckState::Unverified);
         assert_eq!(
             at_finalize.expired_phase(),
@@ -4121,8 +4435,13 @@ mod tests {
             Some(reason_code::TEXT_LINE_ENDING_UNSUPPORTED)
         );
         let at_finalize = StepClock::expire_after_call(79, 10);
-        let observation =
-            check_budgeted(&allow, &segments, b"a.txt\r\nalpha", &clock_limits, &at_finalize);
+        let observation = check_budgeted(
+            &allow,
+            &segments,
+            b"a.txt\r\nalpha",
+            &clock_limits,
+            &at_finalize,
+        );
         assert_eq!(observation.state, CheckState::Unverified);
         assert_eq!(observation.limit, Some(LimitKind::Millis));
         assert_eq!(at_finalize.expired_phase(), Some(Phase::Finalize));
@@ -4150,8 +4469,13 @@ mod tests {
         );
 
         let before_terminal = StepClock::expire_after_call(44, 10);
-        let observation =
-            check_budgeted(&envelope, &segments, b"a.txt\nalpha", &limits, &before_terminal);
+        let observation = check_budgeted(
+            &envelope,
+            &segments,
+            b"a.txt\nalpha",
+            &limits,
+            &before_terminal,
+        );
         assert_eq!(observation.state, CheckState::Passed);
     }
 
@@ -4172,8 +4496,13 @@ mod tests {
         let limits = limits_with(64 * 1024 * 1024, 10, 32 * 1024 * 1024, 64 * 1024 * 1024);
 
         let at_last_read = StepClock::expire_after_call(20, 10);
-        let observation =
-            check_budgeted(&envelope, &segments, b"a.txt\nalpha", &limits, &at_last_read);
+        let observation = check_budgeted(
+            &envelope,
+            &segments,
+            b"a.txt\nalpha",
+            &limits,
+            &at_last_read,
+        );
         assert_eq!(observation.state, CheckState::Unverified);
         assert_eq!(observation.limit, Some(LimitKind::Millis));
         assert_eq!(
@@ -4183,15 +4512,17 @@ mod tests {
         );
 
         let never = StepClock::expire_after_call(u32::MAX, 10);
-        let observation =
-            check_budgeted(&envelope, &segments, b"a.txt\nalpha", &limits, &never);
+        let observation = check_budgeted(&envelope, &segments, b"a.txt\nalpha", &limits, &never);
         assert_eq!(observation.state, CheckState::Failed);
         assert!(observation.blocking);
         assert_eq!(
             observation.reason_code.as_deref(),
             Some(reason_code::TEXT_EOF_MISMATCH)
         );
-        assert_eq!(observation.locator.and_then(|loc| loc.byte_offset), Some(11));
+        assert_eq!(
+            observation.locator.and_then(|loc| loc.byte_offset),
+            Some(11)
+        );
     }
 
     #[test]
@@ -4203,8 +4534,13 @@ mod tests {
         let limits = limits_with(64 * 1024 * 1024, 10, 32 * 1024 * 1024, 64 * 1024 * 1024);
 
         let at_terminal = StepClock::expire_after_call(79, 10);
-        let observation =
-            check_budgeted(&envelope, &segments, b"a.txt\r\nalpha", &limits, &at_terminal);
+        let observation = check_budgeted(
+            &envelope,
+            &segments,
+            b"a.txt\r\nalpha",
+            &limits,
+            &at_terminal,
+        );
         assert_eq!(observation.state, CheckState::Unverified);
         assert_eq!(
             observation.reason_code.as_deref(),
@@ -4215,8 +4551,13 @@ mod tests {
         assert_eq!(at_terminal.expired_phase(), Some(Phase::Finalize));
 
         let before_terminal = StepClock::expire_after_call(80, 10);
-        let observation =
-            check_budgeted(&envelope, &segments, b"a.txt\r\nalpha", &limits, &before_terminal);
+        let observation = check_budgeted(
+            &envelope,
+            &segments,
+            b"a.txt\r\nalpha",
+            &limits,
+            &before_terminal,
+        );
         assert_eq!(observation.state, CheckState::Unverified);
         assert_eq!(
             observation.reason_code.as_deref(),
@@ -4292,10 +4633,7 @@ mod tests {
         let limits = limits_with(64 * 1024, 30_000, 32 * 1024 * 1024, 64 * 1024 * 1024);
         let clock = FakeClock::new();
         let error = parse_with(b"\xFF", &limits, &clock).unwrap_err();
-        assert_eq!(
-            error.code,
-            reason_code::TABLE_ENCODING_UNSUPPORTED
-        );
+        assert_eq!(error.code, reason_code::TABLE_ENCODING_UNSUPPORTED);
         assert_eq!(error.limit, None);
         assert_eq!(error.locator.byte_offset, Some(0));
     }
@@ -4339,10 +4677,7 @@ mod tests {
     // =======================================================================
 
     fn k2_segments() -> [TextSegment<'static>; 2] {
-        [
-            segment("in/a.txt", b"alpha"),
-            segment("in/b.txt", b"beta"),
-        ]
+        [segment("in/a.txt", b"alpha"), segment("in/b.txt", b"beta")]
     }
 
     fn k2_run_scan(
@@ -4361,8 +4696,8 @@ mod tests {
     fn k2_order_proven_then_display_window_stop_keeps_order() {
         let segs = k2_segments();
         let actual = b"b.txt\nbeta\n\na.txt\nalpha"; // 22 bytes, reordered
-        // 101: ORDER proven via the reordering search; the bounded display
-        // window cannot be rendered.
+                                                     // 101: ORDER proven via the reordering search; the bounded display
+                                                     // window cannot be rendered.
         let stopped = k2_run_scan(&segs, actual, 101, EofPolicy::AllowSingleTrailingLf);
         assert_eq!(stopped.state, CheckState::Failed);
         assert!(stopped.blocking, "K2 stays blocking");
@@ -4372,8 +4707,14 @@ mod tests {
             Some(reason_code::TEXT_ORDER_MISMATCH),
             "the proven ORDER code survives the display-window stop"
         );
-        assert!(stopped.expected.is_some(), "the non-window expected list is kept");
-        assert!(stopped.actual.is_none(), "the unrendered display field is None");
+        assert!(
+            stopped.expected.is_some(),
+            "the non-window expected list is kept"
+        );
+        assert!(
+            stopped.actual.is_none(),
+            "the unrendered display field is None"
+        );
 
         // 117: every display window fits — normal path unchanged.
         let rendered = k2_run_scan(&segs, actual, 117, EofPolicy::AllowSingleTrailingLf);
@@ -4389,7 +4730,10 @@ mod tests {
             incomplete.reason_code.as_deref(),
             Some(reason_code::TEXT_ORDER_MISMATCH)
         );
-        assert!(incomplete.locator.is_none(), "no locator before the fact is proven");
+        assert!(
+            incomplete.locator.is_none(),
+            "no locator before the fact is proven"
+        );
     }
 
     #[test]
@@ -4470,7 +4814,10 @@ mod tests {
         );
         assert_eq!(at_136.locator.and_then(|loc| loc.byte_offset), Some(10));
         assert!(
-            at_136.detail.as_deref().is_some_and(|detail| detail.contains("字节 10")),
+            at_136
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("字节 10")),
             "window-free detail"
         );
         assert!(at_136.expected.is_none());
@@ -4490,13 +4837,19 @@ mod tests {
                 .is_some_and(|detail| detail.contains('「')),
             "window-version detail is set"
         );
-        assert!(at_147.expected.is_none(), "window 2 has not filled expected yet");
+        assert!(
+            at_147.expected.is_none(),
+            "window 2 has not filled expected yet"
+        );
         assert!(at_147.actual.is_none());
 
         // scan 158: window 2 completed (expected filled); window 3 not yet.
         let at_158 = k2_run_scan(&segs, candidate, 158, EofPolicy::AllowSingleTrailingLf);
         assert!(at_158.expected.is_some());
-        assert!(at_158.actual.is_none(), "window 3 has not filled actual yet");
+        assert!(
+            at_158.actual.is_none(),
+            "window 3 has not filled actual yet"
+        );
 
         // scan 169: window 3 completed — the normal, fully-rendered path
         // (3 × 11 display bytes), code/locator unchanged.
@@ -4587,7 +4940,10 @@ mod tests {
         let clock = ContentMillisClock::at(99);
         let o = k2_run_millis(&segs, candidate, &clock);
         assert_eq!(o.state, CheckState::Failed);
-        assert_eq!(o.reason_code.as_deref(), Some(reason_code::TEXT_CONTENT_MISMATCH));
+        assert_eq!(
+            o.reason_code.as_deref(),
+            Some(reason_code::TEXT_CONTENT_MISMATCH)
+        );
         assert_eq!(o.locator.and_then(|loc| loc.byte_offset), Some(10));
         assert!(o.detail.as_deref().is_some_and(|d| d.contains("字节 10")));
         assert!(o.detail.as_deref().is_none_or(|d| !d.contains('「')));
@@ -4600,7 +4956,10 @@ mod tests {
         // total 112 time checks; window 3 not started.
         let clock = ContentMillisClock::at(110);
         let o = k2_run_millis(&segs, candidate, &clock);
-        assert_eq!(o.reason_code.as_deref(), Some(reason_code::TEXT_CONTENT_MISMATCH));
+        assert_eq!(
+            o.reason_code.as_deref(),
+            Some(reason_code::TEXT_CONTENT_MISMATCH)
+        );
         assert!(o.detail.as_deref().is_some_and(|d| d.contains('「')));
         assert!(o.expected.is_none());
         assert!(o.actual.is_none());
@@ -4648,7 +5007,10 @@ mod tests {
         // A new clock sees a fresh phase sequence starting with Entry.
         let clock_c = StepClock::expire_after_call(u32::MAX, 10);
         let _ = check_budgeted(&envelope, &segs, b"a.txt\nalpha", &limits, &clock_c);
-        assert_eq!(clock_c.recorded_phases().first().copied(), Some(Phase::Entry));
+        assert_eq!(
+            clock_c.recorded_phases().first().copied(),
+            Some(Phase::Entry)
+        );
         // The earlier expired clock A is unaffected by later runs.
         assert_eq!(clock_a.expired_phase(), Some(Phase::Finalize));
     }
@@ -4820,7 +5182,8 @@ mod tests {
     }
 
     #[test]
-    fn candidate_resource_maps_to_unverified_budget_with_limit() {        let limits = limits_with(12, 30_000, 32 * 1024 * 1024, 64 * 1024 * 1024);
+    fn candidate_resource_maps_to_unverified_budget_with_limit() {
+        let limits = limits_with(12, 30_000, 32 * 1024 * 1024, 64 * 1024 * 1024);
         let clock = FakeClock::new();
         let error = parse_table_with_clock(b"a,b\n", &TableDialect::default(), &limits, &clock)
             .expect_err("scan budget");
@@ -4850,8 +5213,9 @@ mod tests {
         let mut limits = CheckLimits::P0;
         limits.max_records = 1;
         let clock = FakeClock::new();
-        let error = parse_table_with_clock(b"a,b\nc,d\n", &TableDialect::default(), &limits, &clock)
-            .expect_err("records budget");
+        let error =
+            parse_table_with_clock(b"a,b\nc,d\n", &TableDialect::default(), &limits, &clock)
+                .expect_err("records budget");
         assert_eq!(error.kind(), ParseFailureKind::Resource);
         assert_eq!(error.limit(), Some(LimitKind::Records));
         // Assert the parser locator shape (record/line present), whatever the
@@ -4875,7 +5239,10 @@ mod tests {
         );
         assert_eq!(observation.limit, Some(LimitKind::Records));
         assert_eq!(
-            observation.locator.as_ref().map(|loc| (loc.record, loc.line)),
+            observation
+                .locator
+                .as_ref()
+                .map(|loc| (loc.record, loc.line)),
             Some((parser_record, parser_line)),
             "the builder record/line locator must survive the mapping"
         );
@@ -4896,7 +5263,9 @@ mod tests {
             &default_err,
         );
         assert_eq!(
-            default_obs.locator.map(|loc| (loc.record, loc.line, loc.byte_offset)),
+            default_obs
+                .locator
+                .map(|loc| (loc.record, loc.line, loc.byte_offset)),
             Some((None, None, None))
         );
     }
@@ -4997,7 +5366,10 @@ mod tests {
                 &error,
             );
             assert_eq!(observation.state, CheckState::Unverified);
-            assert!(!observation.blocking, "source errors never repair the candidate");
+            assert!(
+                !observation.blocking,
+                "source errors never repair the candidate"
+            );
             assert!(
                 observation
                     .detail
@@ -5182,23 +5554,53 @@ mod tests {
     #[test]
     fn d1_length_twin_agrees_with_the_written_bytes() {
         let shapes: [&[TextSegment<'static>]; 5] = [
-            &[TextSegment { path: "in/a.txt", bytes: b"" }],
+            &[TextSegment {
+                path: "in/a.txt",
+                bytes: b"",
+            }],
             &[
-                TextSegment { path: "in/a.txt", bytes: b"alpha" },
-                TextSegment { path: "in/b.txt", bytes: b"beta" },
+                TextSegment {
+                    path: "in/a.txt",
+                    bytes: b"alpha",
+                },
+                TextSegment {
+                    path: "in/b.txt",
+                    bytes: b"beta",
+                },
             ],
             &[
-                TextSegment { path: "in/a.txt", bytes: b"alpha\n" },
-                TextSegment { path: "in/b.txt", bytes: b"beta\n" },
+                TextSegment {
+                    path: "in/a.txt",
+                    bytes: b"alpha\n",
+                },
+                TextSegment {
+                    path: "in/b.txt",
+                    bytes: b"beta\n",
+                },
             ],
             &[
-                TextSegment { path: "in/a.txt", bytes: b"" },
-                TextSegment { path: "in/b.txt", bytes: b"beta" },
+                TextSegment {
+                    path: "in/a.txt",
+                    bytes: b"",
+                },
+                TextSegment {
+                    path: "in/b.txt",
+                    bytes: b"beta",
+                },
             ],
             &[
-                TextSegment { path: "in/a.txt", bytes: b"" },
-                TextSegment { path: "in/b.txt", bytes: b"" },
-                TextSegment { path: "in/c.txt", bytes: b"" },
+                TextSegment {
+                    path: "in/a.txt",
+                    bytes: b"",
+                },
+                TextSegment {
+                    path: "in/b.txt",
+                    bytes: b"",
+                },
+                TextSegment {
+                    path: "in/c.txt",
+                    bytes: b"",
+                },
             ],
         ];
         let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
@@ -5252,7 +5654,10 @@ mod tests {
         // not being normalised anywhere downstream either.
         let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
         let expected = concat_of(&segments);
-        assert_eq!(check(&envelope, &segments, &expected).state, CheckState::Passed);
+        assert_eq!(
+            check(&envelope, &segments, &expected).state,
+            CheckState::Passed
+        );
     }
 
     /// A body that already carries trailing blank lines keeps them; the
@@ -5279,7 +5684,10 @@ mod tests {
         assert_eq!(&expected[14..20], b"b.txt\n");
 
         let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
-        assert_eq!(check(&envelope, &segments, &expected).state, CheckState::Passed);
+        assert_eq!(
+            check(&envelope, &segments, &expected).state,
+            CheckState::Passed
+        );
     }
 
     /// The construction copies the exact source bytes, so a body with CRLF,
@@ -5317,7 +5725,10 @@ mod tests {
         );
 
         let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
-        assert_eq!(check(&envelope, &segments, &expected).state, CheckState::Passed);
+        assert_eq!(
+            check(&envelope, &segments, &expected).state,
+            CheckState::Passed
+        );
     }
 
     /// The metered length twin must equal the number of bytes the writer emits,
@@ -5328,32 +5739,68 @@ mod tests {
     fn d1_length_twin_equals_written_bytes_for_boundary_shapes() {
         let shapes: [&[TextSegment<'static>]; 6] = [
             // single empty body
-            &[TextSegment { path: "in/a.txt", bytes: b"" }],
+            &[TextSegment {
+                path: "in/a.txt",
+                bytes: b"",
+            }],
             // empty followed by empty
             &[
-                TextSegment { path: "in/a.txt", bytes: b"" },
-                TextSegment { path: "in/b.txt", bytes: b"" },
+                TextSegment {
+                    path: "in/a.txt",
+                    bytes: b"",
+                },
+                TextSegment {
+                    path: "in/b.txt",
+                    bytes: b"",
+                },
             ],
             // interior newlines
             &[
-                TextSegment { path: "in/a.txt", bytes: b"alpha\nbeta" },
-                TextSegment { path: "in/b.txt", bytes: b"one\ntwo" },
+                TextSegment {
+                    path: "in/a.txt",
+                    bytes: b"alpha\nbeta",
+                },
+                TextSegment {
+                    path: "in/b.txt",
+                    bytes: b"one\ntwo",
+                },
             ],
             // several trailing LFs
             &[
-                TextSegment { path: "in/a.txt", bytes: b"alpha\n\n" },
-                TextSegment { path: "in/b.txt", bytes: b"beta" },
+                TextSegment {
+                    path: "in/a.txt",
+                    bytes: b"alpha\n\n",
+                },
+                TextSegment {
+                    path: "in/b.txt",
+                    bytes: b"beta",
+                },
             ],
             // CRLF and trailing spaces preserved
             &[
-                TextSegment { path: "in/a.txt", bytes: b"alpha\r\n" },
-                TextSegment { path: "in/b.txt", bytes: b"beta  " },
+                TextSegment {
+                    path: "in/a.txt",
+                    bytes: b"alpha\r\n",
+                },
+                TextSegment {
+                    path: "in/b.txt",
+                    bytes: b"beta  ",
+                },
             ],
             // empty inside a non-empty run
             &[
-                TextSegment { path: "in/a.txt", bytes: b"alpha" },
-                TextSegment { path: "in/b.txt", bytes: b"" },
-                TextSegment { path: "in/c.txt", bytes: b"gamma\n" },
+                TextSegment {
+                    path: "in/a.txt",
+                    bytes: b"alpha",
+                },
+                TextSegment {
+                    path: "in/b.txt",
+                    bytes: b"",
+                },
+                TextSegment {
+                    path: "in/c.txt",
+                    bytes: b"gamma\n",
+                },
             ],
         ];
         let clock = SystemClock;
@@ -5389,8 +5836,14 @@ mod tests {
         let new = concat_of_with(&b4, MergeRule::SeparatorV2);
         assert_eq!(old.len(), 46, "the historical construction is 46 bytes");
         assert_eq!(new.len(), 44, "the corrected construction is 44 bytes");
-        assert_eq!(old, "01_周一.txt\n\n\n02_周二.txt\n\n\n03_周三.txt\n".as_bytes());
-        assert_eq!(new, "01_周一.txt\n\n02_周二.txt\n\n03_周三.txt\n".as_bytes());
+        assert_eq!(
+            old,
+            "01_周一.txt\n\n\n02_周二.txt\n\n\n03_周三.txt\n".as_bytes()
+        );
+        assert_eq!(
+            new,
+            "01_周一.txt\n\n02_周二.txt\n\n03_周三.txt\n".as_bytes()
+        );
 
         // A shape with no 0-byte body must be byte-identical under both rules,
         // which is what keeps the marker from reaching any other artifact.
@@ -5500,8 +5953,14 @@ mod tests {
                 rule.as_str()
             );
             // Either way, what comes back is the rule that went in.
-            let restored = RuleEnvelope::from_spec(&spec).expect("a written envelope must read back");
-            assert_eq!(restored.merge_rule, rule, "{} must round-trip", rule.as_str());
+            let restored =
+                RuleEnvelope::from_spec(&spec).expect("a written envelope must read back");
+            assert_eq!(
+                restored.merge_rule,
+                rule,
+                "{} must round-trip",
+                rule.as_str()
+            );
         }
     }
 
@@ -5538,7 +5997,9 @@ mod tests {
             "policy": {"comparison": "textSegments"},
         });
         assert_eq!(
-            RuleEnvelope::from_spec(&spec).expect("an absent marker is legal").merge_rule,
+            RuleEnvelope::from_spec(&spec)
+                .expect("an absent marker is legal")
+                .merge_rule,
             MergeRule::SeparatorV1
         );
     }
@@ -5582,7 +6043,6 @@ mod tests {
             "the fixture must be able to tell the rules apart"
         );
     }
-
 
     // ---- D2: diagnostic truthfulness -------------------------------------
     //
@@ -5726,10 +6186,7 @@ mod tests {
     /// finding just because the bodies happen to match.
     #[test]
     fn d2_wrong_header_order_is_still_an_order_finding() {
-        let segments = [
-            segment("in/a.txt", b""),
-            segment("in/b.txt", b""),
-        ];
+        let segments = [segment("in/a.txt", b""), segment("in/b.txt", b"")];
         let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
         // Both headers present, reversed, with correct separator density.
         let observation = check(&envelope, &segments, b"b.txt\n\na.txt\n");
@@ -5747,10 +6204,7 @@ mod tests {
     /// even when the separators also differ.
     #[test]
     fn d2_changed_body_is_not_reported_as_a_separator_difference() {
-        let segments = [
-            segment("in/a.txt", b"alpha"),
-            segment("in/b.txt", b"beta"),
-        ];
+        let segments = [segment("in/a.txt", b"alpha"), segment("in/b.txt", b"beta")];
         let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
         let observation = check(&envelope, &segments, b"a.txt\nalpha\nb.txt\nBETA");
         assert_eq!(observation.state, CheckState::Failed);
@@ -5766,10 +6220,7 @@ mod tests {
     /// claim a file whose sources are genuinely wrong.
     #[test]
     fn d2_duplicate_header_or_header_like_body_is_not_a_separator_difference() {
-        let segments = [
-            segment("in/a.txt", b""),
-            segment("in/b.txt", b""),
-        ];
+        let segments = [segment("in/a.txt", b""), segment("in/b.txt", b"")];
         let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
 
         // A duplicated first header, then the separator defect.
@@ -5990,10 +6441,7 @@ mod tests {
     /// were byte-identical when they were not.
     #[test]
     fn m1_content_before_the_first_header_is_not_a_separator_finding() {
-        let segments = [
-            segment("in/a.txt", b""),
-            segment("in/b.txt", b""),
-        ];
+        let segments = [segment("in/a.txt", b""), segment("in/b.txt", b"")];
         let allow = v2_text(EofPolicy::AllowSingleTrailingLf);
 
         let prefixed = check(&allow, &segments, b"xxa.txt\nb.txt");
@@ -6025,10 +6473,7 @@ mod tests {
     /// not reject them: only non-newline bytes are real extra content.
     #[test]
     fn m1_leading_blank_lines_are_still_a_separator_finding() {
-        let segments = [
-            segment("in/a.txt", b""),
-            segment("in/b.txt", b""),
-        ];
+        let segments = [segment("in/a.txt", b""), segment("in/b.txt", b"")];
         let allow = v2_text(EofPolicy::AllowSingleTrailingLf);
         let observation = check(&allow, &segments, b"\na.txt\nb.txt");
         assert_eq!(observation.state, CheckState::Failed);
@@ -6044,15 +6489,16 @@ mod tests {
     /// header, a header-like body and a missing header stay as they were.
     #[test]
     fn m1_guard_does_not_widen_recognition() {
-        let segments = [
-            segment("in/a.txt", b"alpha"),
-            segment("in/b.txt", b"beta"),
-        ];
+        let segments = [segment("in/a.txt", b"alpha"), segment("in/b.txt", b"beta")];
         let allow = v2_text(EofPolicy::AllowSingleTrailingLf);
 
         // Duplicate header occurrence: separator density is wrong AND the body
         // area is disturbed; it must not become a pass.
-        let duplicate = check(&allow, &segments, b"a.txt\n\na.txt\n\nalpha\n\nb.txt\nbeta\n");
+        let duplicate = check(
+            &allow,
+            &segments,
+            b"a.txt\n\na.txt\n\nalpha\n\nb.txt\nbeta\n",
+        );
         assert_eq!(duplicate.state, CheckState::Failed);
 
         // A body that merely looks like a header must not be accepted.
@@ -6109,10 +6555,7 @@ mod tests {
     /// contract rather than becoming a pass or a fabricated separator claim.
     #[test]
     fn m1_prefix_guard_respects_the_scan_budget() {
-        let segments = [
-            segment("in/a.txt", b""),
-            segment("in/b.txt", b""),
-        ];
+        let segments = [segment("in/a.txt", b""), segment("in/b.txt", b"")];
         // Both headers are present, so no SOURCE finding is provable here: the
         // correct fallback for a rejected prefix is the generic content finding.
         let actual: &[u8] = b"xxa.txt\n\nb.txt\n";
@@ -6189,7 +6632,10 @@ mod tests {
         );
         // And the same record must not accept the corrected bytes, or the marker
         // would be decorative.
-        assert_eq!(check(&legacy, &segments, &corrected).state, CheckState::Failed);
+        assert_eq!(
+            check(&legacy, &segments, &corrected).state,
+            CheckState::Failed
+        );
     }
 
     /// The same historical artifact is a failure under the corrected rule, and the
@@ -6221,17 +6667,16 @@ mod tests {
     /// text is genuinely driven by the frozen value and not hard-coded.
     #[test]
     fn closeout_the_legacy_record_describes_the_historical_separator() {
-        let rule = separator_rule_diagnosis(
-            MergeRule::SeparatorV1,
-            EofPolicy::AllowSingleTrailingLf,
-        );
+        let rule =
+            separator_rule_diagnosis(MergeRule::SeparatorV1, EofPolicy::AllowSingleTrailingLf);
         assert!(rule.contains("相邻空段的段间是 2 个 LF"), "{rule}");
         assert!(!rule.contains("相邻空段的段间是 1 个 LF"), "{rule}");
-        let corrected = separator_rule_diagnosis(
-            MergeRule::SeparatorV2,
-            EofPolicy::AllowSingleTrailingLf,
+        let corrected =
+            separator_rule_diagnosis(MergeRule::SeparatorV2, EofPolicy::AllowSingleTrailingLf);
+        assert!(
+            corrected.contains("相邻空段的段间是 1 个 LF"),
+            "{corrected}"
         );
-        assert!(corrected.contains("相邻空段的段间是 1 个 LF"), "{corrected}");
         assert_ne!(rule, corrected, "the two rules must not read identically");
     }
 
@@ -6256,11 +6701,10 @@ mod tests {
             EofPolicy::AllowSingleTrailingLf
         )
         .contains("要求恰好一个终止 LF"));
-        assert!(separator_rule_diagnosis(
-            MergeRule::SeparatorV2,
-            EofPolicy::RequireTrailingLf
-        )
-        .contains("要求恰好一个终止 LF"));
+        assert!(
+            separator_rule_diagnosis(MergeRule::SeparatorV2, EofPolicy::RequireTrailingLf)
+                .contains("要求恰好一个终止 LF")
+        );
     }
 
     /// The empty-last-body attribution must not claim the same rule for both
@@ -6312,11 +6756,23 @@ mod tests {
         let current_bytes = concat_of_with(&segments, MergeRule::SeparatorV2);
         assert_ne!(legacy_bytes, current_bytes);
 
-        assert_eq!(check(&v1, &segments, &legacy_bytes).state, CheckState::Passed);
-        assert_eq!(check(&v2, &segments, &current_bytes).state, CheckState::Passed);
+        assert_eq!(
+            check(&v1, &segments, &legacy_bytes).state,
+            CheckState::Passed
+        );
+        assert_eq!(
+            check(&v2, &segments, &current_bytes).state,
+            CheckState::Passed
+        );
         // Cross-feeding them must fail in both directions: neither rule silently
         // accepts the other's bytes.
-        assert_eq!(check(&v1, &segments, &current_bytes).state, CheckState::Failed);
-        assert_eq!(check(&v2, &segments, &legacy_bytes).state, CheckState::Failed);
+        assert_eq!(
+            check(&v1, &segments, &current_bytes).state,
+            CheckState::Failed
+        );
+        assert_eq!(
+            check(&v2, &segments, &legacy_bytes).state,
+            CheckState::Failed
+        );
     }
 }

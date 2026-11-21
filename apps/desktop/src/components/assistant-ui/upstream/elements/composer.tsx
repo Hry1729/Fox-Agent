@@ -56,7 +56,7 @@ export interface ComposerCommand {
 
 export interface ComposerPerson {
   name: string;
-  role: "agent" | "human" | "file";
+  role: "agent" | "human" | "file" | "companion";
 }
 
 export interface ComposerModel {
@@ -284,13 +284,16 @@ export function ComposerPersonItem({
   person: ComposerPerson;
   active: boolean;
 }) {
+  const roleLabels: Record<ComposerPerson["role"], string> = {
+    agent: "助手", human: "成员", file: "文件", companion: "伙伴",
+  };
   return (
     <ComposerMenuItem active={active} {...props}>
       <span className="bg-foreground/[0.06] text-muted-foreground flex size-5 shrink-0 items-center justify-center rounded-full text-[9px] font-medium">
         {person.role === "file" ? <FileTextIcon className="size-3.5" /> : person.name[0]}
       </span>
       <span className="flex-1 truncate text-start">{person.name}</span>
-      <span className={cn(mono, "text-muted-foreground")}>{person.role === "file" ? "文件" : person.role === "agent" ? "助手" : "成员"}</span>
+      <span className={cn(mono, "text-muted-foreground")}>{roleLabels[person.role]}</span>
     </ComposerMenuItem>
   );
 }

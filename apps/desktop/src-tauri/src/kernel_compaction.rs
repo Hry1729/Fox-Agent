@@ -208,7 +208,10 @@ fn replace_long_strings(value: &Value, field_bytes: usize, preserve: bool) -> Va
         Value::Object(map) => Value::Object(
             map.iter()
                 .map(|(key, child)| {
-                    (key.clone(), replace_long_strings(child, field_bytes, preserve))
+                    (
+                        key.clone(),
+                        replace_long_strings(child, field_bytes, preserve),
+                    )
                 })
                 .collect(),
         ),
@@ -466,10 +469,7 @@ pub(crate) fn project_structured_text(
                     let mut advice = if resumable {
                         "用同一只读工具按 next 的页码继续查询即可取回".to_owned()
                     } else {
-                        format!(
-                            "{} ",
-                            retrieval_instruction(reference, None, retrievable)
-                        )
+                        format!("{} ", retrieval_instruction(reference, None, retrievable))
                     };
                     if resumable && retrievable {
                         if let Some(extra) = reference {
@@ -478,7 +478,9 @@ pub(crate) fn project_structured_text(
                             ));
                         }
                     }
-                    advice.push_str("；不要凭被省略的内容编造字段，也不要为读取历史结果而重放任何写操作。");
+                    advice.push_str(
+                        "；不要凭被省略的内容编造字段，也不要为读取历史结果而重放任何写操作。",
+                    );
                     dropped["reRead"] = json!(format!(
                         "本响应未包含 collectionKey={key} 的前 {keep} 项之后的记录；{advice}"
                     ));
@@ -555,8 +557,13 @@ pub(crate) fn bound_tool_text(
     let trimmed = text.trim_start();
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
         if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
-            return match project_structured_text(tool, &parsed, TOOL_VIEW_MAX_BYTES, reference, storage)
-            {
+            return match project_structured_text(
+                tool,
+                &parsed,
+                TOOL_VIEW_MAX_BYTES,
+                reference,
+                storage,
+            ) {
                 Some(projected) => Some(projected),
                 // No honest structured view: keep the payload intact. `next`
                 // alone may exceed the whole budget, and omitting records it
@@ -588,7 +595,8 @@ pub(crate) fn bound_tool_text(
     notice.push_str(
         "也可以按需用同一只读工具以更精确的 selector/页码重新查询——office_help 用 property=<属性名> 或 page=<页码>，office_read/read 用更精确的 selector 或更小范围；不要凭被省略的内容编造字段，也不要为读取历史结果而重复任何写操作。]",
     );
-    let mut out = format!("{head}\n\n{notice}\n…[省略 {omitted} 字节，可用同一只读工具按需取回]…\n\n{tail}");
+    let mut out =
+        format!("{head}\n\n{notice}\n…[省略 {omitted} 字节，可用同一只读工具按需取回]…\n\n{tail}");
     // Navigation is the one part that is kept outside the head/tail budget: a
     // text-bound view that drops `next` would silently hide the records it
     // claims are reachable.
@@ -697,21 +705,30 @@ pub(crate) fn model_view_keeps_every_byte(
     reference: Option<&str>,
     storage: &ToolResultStorage,
 ) -> bool {
-    let Some(blocks) = content.as_array() else { return false; };
+    let Some(blocks) = content.as_array() else {
+        return false;
+    };
     let mut text_bytes = 0usize;
     let mut text_blocks = 0usize;
     for block in blocks {
         if block["type"] == "text" {
-            let Some(text) = block["text"].as_str() else { return false; };
+            let Some(text) = block["text"].as_str() else {
+                return false;
+            };
             text_bytes = text_bytes.saturating_add(text.len());
             text_blocks += 1;
         }
     }
     text_bytes = text_bytes.saturating_add(text_blocks.saturating_sub(1));
-    if is_error || !is_boundable(tool) || text_blocks == 0 || reference.is_none()
-        || !storage.stored || storage.failure_reason.is_some()
+    if is_error
+        || !is_boundable(tool)
+        || text_blocks == 0
+        || reference.is_none()
+        || !storage.stored
+        || storage.failure_reason.is_some()
         || storage.retrievable_bytes != storage.stored_bytes
-        || !storage.covers(text_bytes) {
+        || !storage.covers(text_bytes)
+    {
         return false;
     }
     bound_tool_result_content_with_storage(tool, false, content, reference, storage).is_none()
@@ -723,8 +740,14 @@ pub(crate) fn model_view_keeps_every_byte(
 pub(crate) fn durable_result_content(raw: &Value) -> Option<&Value> {
     let content = raw.get("content")?;
     let blocks = content.as_array()?;
-    if blocks.is_empty() || !blocks.iter().any(|block| block["type"] == "text" && block["text"].is_string())
-        || blocks.iter().any(|block| block["type"] == "text" && !block["text"].is_string()) {
+    if blocks.is_empty()
+        || !blocks
+            .iter()
+            .any(|block| block["type"] == "text" && block["text"].is_string())
+        || blocks
+            .iter()
+            .any(|block| block["type"] == "text" && !block["text"].is_string())
+    {
         return None;
     }
     Some(content)
@@ -732,15 +755,23 @@ pub(crate) fn durable_result_content(raw: &Value) -> Option<&Value> {
 
 /// Largest UTF-8-safe prefix no longer than `max` bytes.
 fn bounded_prefix(text: &str, max: usize) -> &str {
-    if text.len() <= max { return text; }
+    if text.len() <= max {
+        return text;
+    }
     let mut end = max;
-    while end > 0 && !text.is_char_boundary(end) { end -= 1; }
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
     &text[..end]
 }
 fn bounded_suffix(text: &str, max: usize) -> &str {
-    if text.len() <= max { return text; }
+    if text.len() <= max {
+        return text;
+    }
     let mut start = text.len() - max;
-    while start < text.len() && !text.is_char_boundary(start) { start += 1; }
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
     &text[start..]
 }
 
@@ -763,31 +794,75 @@ mod tests {
     fn f1_replay_requires_complete_storage_and_valid_content() {
         let small = json!([{"type":"text","text":"small"}]);
         let empty = json!([{"type":"text","text":""}]);
-        assert!(model_view_keeps_every_byte("read", false, &small,
-            Some(TEST_REF), &stored_whole(5)));
-        assert!(model_view_keeps_every_byte("read", false, &empty,
-            Some(TEST_REF), &stored_whole(0)), "empty files are complete files");
-        assert!(!model_view_keeps_every_byte("read", false, &small,
-            Some(TEST_REF), &ToolResultStorage::unknown()));
+        assert!(model_view_keeps_every_byte(
+            "read",
+            false,
+            &small,
+            Some(TEST_REF),
+            &stored_whole(5)
+        ));
+        assert!(
+            model_view_keeps_every_byte("read", false, &empty, Some(TEST_REF), &stored_whole(0)),
+            "empty files are complete files"
+        );
+        assert!(!model_view_keeps_every_byte(
+            "read",
+            false,
+            &small,
+            Some(TEST_REF),
+            &ToolResultStorage::unknown()
+        ));
         let mut short_store = stored_whole(5);
         short_store.stored_bytes = 4;
-        assert!(!model_view_keeps_every_byte("read", false, &small,
-            Some(TEST_REF), &short_store));
+        assert!(!model_view_keeps_every_byte(
+            "read",
+            false,
+            &small,
+            Some(TEST_REF),
+            &short_store
+        ));
         let mut short_retrieval = stored_whole(5);
         short_retrieval.retrievable_bytes = 4;
-        assert!(!model_view_keeps_every_byte("read", false, &small,
-            Some(TEST_REF), &short_retrieval));
-        assert!(!model_view_keeps_every_byte("read", true, &small,
-            Some(TEST_REF), &stored_whole(5)));
-        assert!(!model_view_keeps_every_byte("unknown_reader", false, &small,
-            Some(TEST_REF), &stored_whole(5)));
-        assert!(!model_view_keeps_every_byte("read", false,
-            &json!([{"type":"text","text":null}]), Some(TEST_REF), &stored_whole(4)));
-        assert!(!model_view_keeps_every_byte("read", false, &Value::Null,
-            Some(TEST_REF), &stored_whole(4)));
+        assert!(!model_view_keeps_every_byte(
+            "read",
+            false,
+            &small,
+            Some(TEST_REF),
+            &short_retrieval
+        ));
+        assert!(!model_view_keeps_every_byte(
+            "read",
+            true,
+            &small,
+            Some(TEST_REF),
+            &stored_whole(5)
+        ));
+        assert!(!model_view_keeps_every_byte(
+            "unknown_reader",
+            false,
+            &small,
+            Some(TEST_REF),
+            &stored_whole(5)
+        ));
+        assert!(!model_view_keeps_every_byte(
+            "read",
+            false,
+            &json!([{"type":"text","text":null}]),
+            Some(TEST_REF),
+            &stored_whole(4)
+        ));
+        assert!(!model_view_keeps_every_byte(
+            "read",
+            false,
+            &Value::Null,
+            Some(TEST_REF),
+            &stored_whole(4)
+        ));
         assert!(durable_result_content(&json!({"content":null})).is_none());
         assert!(durable_result_content(&Value::Null).is_none());
-        assert!(durable_result_content(&json!({"content":[{"type":"text","text":null}]})).is_none());
+        assert!(
+            durable_result_content(&json!({"content":[{"type":"text","text":null}]})).is_none()
+        );
     }
 
     /// Test helper: the same call with the Host's complete-store fact, which is
@@ -886,8 +961,14 @@ mod tests {
         // decode a replacement character in its place.
         let input = format!("a{}", "中".repeat(5_000));
         let bounded = bounded_with_store("office_help", false, &input, Some(TEST_REF)).unwrap();
-        assert!(!bounded.contains('\u{FFFD}'), "introduced U+FFFD replacement characters");
-        assert!(bounded.len() <= TOOL_VIEW_MAX_BYTES, "bounded view stayed in budget");
+        assert!(
+            !bounded.contains('\u{FFFD}'),
+            "introduced U+FFFD replacement characters"
+        );
+        assert!(
+            bounded.len() <= TOOL_VIEW_MAX_BYTES,
+            "bounded view stayed in budget"
+        );
         // Emoji are 4-byte code points: the same rule must hold for surrogates.
         let emoji = "😀".repeat(4_000);
         let bounded = bounded_with_store("read", false, &emoji, Some(TEST_REF)).unwrap();
@@ -911,7 +992,10 @@ mod tests {
     fn structured_office_catalog_stays_valid_json_with_every_property_and_the_next_page() {
         let catalog = office_catalog();
         let text = catalog.canonical_string();
-        assert!(text.len() < 24 * 1024, "fixture must sit inside the Office page budget");
+        assert!(
+            text.len() < 24 * 1024,
+            "fixture must sit inside the Office page budget"
+        );
         let bounded = bounded_with_store("office_help", false, &text, Some(TEST_REF)).unwrap();
         assert!(
             bounded.len() <= TOOL_VIEW_MAX_BYTES,
@@ -920,14 +1004,20 @@ mod tests {
         );
         // Before this fix a character cut made this invalid JSON and lost the
         // middle of the catalog, including property20 and the next page entry.
-        let parsed: Value = serde_json::from_str(&bounded).expect("bounded catalog stays valid JSON");
+        let parsed: Value =
+            serde_json::from_str(&bounded).expect("bounded catalog stays valid JSON");
         let names = parsed["properties"]
             .as_array()
             .unwrap()
             .iter()
             .map(|item| item["name"].as_str().unwrap().to_string())
             .collect::<Vec<_>>();
-        assert_eq!(names, (0..40).map(|index| format!("property{index}")).collect::<Vec<_>>());
+        assert_eq!(
+            names,
+            (0..40)
+                .map(|index| format!("property{index}"))
+                .collect::<Vec<_>>()
+        );
         assert_eq!(parsed["next"]["arguments"], catalog["next"]["arguments"]);
         assert_eq!(parsed["next"]["tool"], "office_help");
         assert_eq!(parsed[STRUCT_VIEW_KEY]["bounded"], true);
@@ -936,14 +1026,26 @@ mod tests {
     #[test]
     fn structured_projection_keeps_navigation_verbatim_and_falls_back_to_valid_json() {
         let catalog = office_catalog();
-        let bounded = bounded_with_store("office_help", false, &catalog.canonical_string(), Some(TEST_REF)).unwrap();
+        let bounded = bounded_with_store(
+            "office_help",
+            false,
+            &catalog.canonical_string(),
+            Some(TEST_REF),
+        )
+        .unwrap();
         let parsed: Value = serde_json::from_str(&bounded).unwrap();
         assert_eq!(parsed["next"]["tool"], "office_help");
         // A payload with no shrinkable structure still yields parseable JSON.
         let rows = json!((0..200)
             .map(|index| json!({"name": format!("row-{index}"), "blob": "z".repeat(4_000)}))
             .collect::<Vec<_>>());
-        let bounded = bounded_with_store("list_mcp_tools", false, &rows.canonical_string(), Some(TEST_REF)).unwrap();
+        let bounded = bounded_with_store(
+            "list_mcp_tools",
+            false,
+            &rows.canonical_string(),
+            Some(TEST_REF),
+        )
+        .unwrap();
         assert!(bounded.len() <= TOOL_VIEW_MAX_BYTES);
         let parsed: Value = serde_json::from_str(&bounded).expect("fallback stays valid JSON");
         assert_eq!(parsed[STRUCT_VIEW_KEY]["bounded"], true);
@@ -959,7 +1061,10 @@ mod tests {
         let catalog = office_catalog().canonical_string();
         let bounded = bounded_with_store("office_help", false, &catalog, Some(&reference)).unwrap();
         let parsed: Value = serde_json::from_str(&bounded).unwrap();
-        assert_eq!(parsed[STRUCT_VIEW_KEY]["resultRef"], "fox-result://run-1/call-9");
+        assert_eq!(
+            parsed[STRUCT_VIEW_KEY]["resultRef"],
+            "fox-result://run-1/call-9"
+        );
         // Small content is returned untouched, not merely re-serialized.
         let small = json!({"ok": true, "value": "short"}).canonical_string();
         assert!(bounded_with_store("office_help", false, &small, None).is_none());
@@ -987,9 +1092,15 @@ mod tests {
                 "instruction":"page 1/7"},
         });
         let text = catalog.canonical_string();
-        assert!(text.len() > TOOL_VIEW_MAX_BYTES, "fixture must need a projection");
+        assert!(
+            text.len() > TOOL_VIEW_MAX_BYTES,
+            "fixture must need a projection"
+        );
         let bounded = bounded_with_store("office_help", false, &text, Some(TEST_REF)).unwrap();
-        assert!(bounded.len() <= TOOL_VIEW_MAX_BYTES, "projection must stay in budget");
+        assert!(
+            bounded.len() <= TOOL_VIEW_MAX_BYTES,
+            "projection must stay in budget"
+        );
         let parsed: Value = serde_json::from_str(&bounded).expect("bounded catalog is valid JSON");
         let kept: Vec<String> = parsed["properties"]
             .as_array()
@@ -1003,7 +1114,10 @@ mod tests {
         // Real paging contract of office.rs::shape_help: start = (page-1)*pageSize.
         let resume_page = parsed["next"]["arguments"]["page"].as_u64().unwrap();
         let resume_page_size = parsed["next"]["arguments"]["pageSize"].as_u64().unwrap();
-        assert!((1..=60).contains(&resume_page_size), "pageSize must satisfy the tool schema");
+        assert!(
+            (1..=60).contains(&resume_page_size),
+            "pageSize must satisfy the tool schema"
+        );
         assert!(resume_page >= 1);
         let resume_start = (resume_page - 1) * resume_page_size;
         assert_eq!(
@@ -1015,7 +1129,9 @@ mod tests {
         // property: nothing the projection dropped is unreachable. The returned
         // `pageSize` is kept — changing page size mid-walk would create gaps
         // that belong to the walk, not to the continuation.
-        let names: Vec<String> = (0..total).map(|index| format!("property{index:03}")).collect();
+        let names: Vec<String> = (0..total)
+            .map(|index| format!("property{index:03}"))
+            .collect();
         let mut reachable = std::collections::BTreeSet::new();
         let page_size = resume_page_size;
         let mut page = resume_page;
@@ -1041,7 +1157,13 @@ mod tests {
     fn navigation_survives_the_projection_or_the_result_is_left_unbounded() {
         // Structured path: navigation stays verbatim even when records are dropped.
         let catalog = office_catalog();
-        let bounded = bounded_with_store("office_help", false, &catalog.canonical_string(), Some(TEST_REF)).unwrap();
+        let bounded = bounded_with_store(
+            "office_help",
+            false,
+            &catalog.canonical_string(),
+            Some(TEST_REF),
+        )
+        .unwrap();
         let parsed: Value = serde_json::from_str(&bounded).unwrap();
         assert_eq!(parsed["next"]["tool"], "office_help");
 
@@ -1064,14 +1186,28 @@ mod tests {
             reviewed_paging_shape,
         ] {
             let text = payload.canonical_string();
-            assert!(text.len() > TOOL_VIEW_MAX_BYTES, "fixture must be over the view budget");
+            assert!(
+                text.len() > TOOL_VIEW_MAX_BYTES,
+                "fixture must be over the view budget"
+            );
             // No trusted storage fact here: the payload must come back whole.
-            let out = bound_tool_text("office_read", false, &text, None, &ToolResultStorage::unknown())
-                .unwrap();
-            assert_eq!(out, text, "an unaddressable payload must be returned unchanged");
+            let out = bound_tool_text(
+                "office_read",
+                false,
+                &text,
+                None,
+                &ToolResultStorage::unknown(),
+            )
+            .unwrap();
+            assert_eq!(
+                out, text,
+                "an unaddressable payload must be returned unchanged"
+            );
             let reparsed: Value = serde_json::from_str(&out).expect("still valid JSON");
-            assert_eq!(reparsed, payload, "no record and no navigation entry may be lost");
+            assert_eq!(
+                reparsed, payload,
+                "no record and no navigation entry may be lost"
+            );
         }
     }
-
 }

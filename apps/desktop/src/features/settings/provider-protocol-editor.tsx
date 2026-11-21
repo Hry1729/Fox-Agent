@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Plus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -44,40 +45,42 @@ export function ProviderProtocolEditor({ form, disabled, onChange }: {
       setResults(previous => ({ ...previous, [profile.id]: { identity: captured, text: configErrorText(error) } }))
     } finally { setTesting(null) }
   }
-  return <section className="fox-protocol-editor" aria-label="外部 Agent 协议配置">
-    <div className="fox-provider-models-head">
-      <div><h3>外部 Agent 协议</h3><p>按需添加协议。默认复用供应商 Key，地址和模型分别配置。</p></div>
-      <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={() => onChange({ ...form, protocolProfiles: [...profiles, { id: crypto.randomUUID(), apiType: 'openai-responses', baseUrl: '', modelId: '', separateCredential: false }] })}>添加协议</Button>
+  return <section className="fox-provider-detail-group" aria-label="外部 Agent 协议配置">
+    <div className="fox-provider-detail-head">
+      <h3>外部 Agent 协议</h3>
+      <Button type="button" variant="outline" size="sm" disabled={disabled || testing !== null} onClick={() => onChange({ ...form, protocolProfiles: [...profiles, { id: crypto.randomUUID(), apiType: 'openai-responses', baseUrl: '', modelId: '', separateCredential: false }] })}><Plus />添加协议</Button>
     </div>
-    <p>Fox 使用上方连接。各 Agent 使用单独绑定的服务和入口。</p>
-    {profiles.map((profile, index) => <fieldset key={profile.id} disabled={disabled || testing !== null} className="fox-protocol-fields">
-      <legend>协议配置 {index + 1}</legend>
-      <div className="fox-provider-form-grid">
-        <label>API 协议<Select value={profile.apiType} onValueChange={(value) => {
-          const apiType = value as ProtocolProfile['apiType']
-          update(profile.id, { apiType })
-        }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{Object.entries(labels).map(([value, label]) => <SelectItem key={value} value={value}>{label} · {protocolAgents[value as ProtocolProfile['apiType']].map(b => names[b]).join(' / ')}</SelectItem>)}</SelectContent></Select></label>
-        <label>模型 ID<Input value={profile.modelId} placeholder="留空使用供应商默认模型" onChange={event => update(profile.id, { modelId: event.target.value })} /></label>
-        <label className="is-wide">API 地址<Input value={profile.baseUrl} placeholder="填写供应商提供的此协议地址" onChange={event => update(profile.id, { baseUrl: event.target.value })} /></label>
-      </div>
-      <p>协议适用于：{protocolAgents[profile.apiType].map(b => names[b]).join('、')}。协议匹配不代表连接已验证。</p>
-      <label className="fox-protocol-key"><Switch checked={profile.separateCredential} onCheckedChange={separateCredential => {
-        const protocolKeys = { ...form.protocolKeys }; delete protocolKeys[profile.id]
-        onChange({ ...form, protocolKeys, protocolProfiles: profiles.map(p => p.id === profile.id ? { ...p, separateCredential, credentialConfigured: false } : p) })
-      }} />使用独立 Key</label>
-      {profile.separateCredential && <label>此协议的 API Key<Input type="password" autoComplete="new-password" value={form.protocolKeys?.[profile.id] ?? ''} placeholder={profile.credentialConfigured ? '已保存，留空保留' : '输入此协议的 Key'} onChange={event => {
-        const protocolKeys = { ...form.protocolKeys }
-        if (event.target.value) protocolKeys[profile.id] = event.target.value; else delete protocolKeys[profile.id]
-        onChange({ ...form, protocolKeys })
-      }} /></label>}
-      <div className="fox-protocol-actions">
-        <Button type="button" variant="outline" size="sm" disabled={!profile.baseUrl.trim() || !(profile.modelId.trim() || form.models.some(m => m.modelId.trim())) || (profile.separateCredential && !profile.credentialConfigured && !form.protocolKeys?.[profile.id])} onClick={() => void test(profile)}>{testing === profile.id ? '正在验证…' : '验证此协议'}</Button>
-        <Button type="button" variant="ghost" size="sm" onClick={() => {
+    <p className="fox-provider-detail-note">添加外部 Agent 所需的协议地址。默认使用供应商的 API Key。</p>
+    {profiles.map((profile, index) => <fieldset key={profile.id} disabled={disabled || testing !== null} className="fox-provider-detail-card">
+      <legend className="sr-only">协议 {index + 1}</legend>
+      <div className="fox-provider-detail-head">
+        <h4 aria-hidden="true">协议 {index + 1}</h4>
+        <Button type="button" variant="ghost" size="sm" className="fox-provider-remove" onClick={() => {
           const protocolKeys = { ...form.protocolKeys }; delete protocolKeys[profile.id]
           onChange({ ...form, protocolKeys, protocolProfiles: profiles.filter(p => p.id !== profile.id) })
         }}>删除协议</Button>
       </div>
-      <p role="status">{results[profile.id]?.identity === identity(profile) ? results[profile.id].text : '此配置尚未验证'}</p>
+      <div className="fox-model-fields">
+        <label>API 协议<Select value={profile.apiType} onValueChange={(value) => {
+          const apiType = value as ProtocolProfile['apiType']
+          update(profile.id, { apiType })
+        }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{Object.entries(labels).map(([value, label]) => <SelectItem key={value} value={value}>{label} · {protocolAgents[value as ProtocolProfile['apiType']].map(b => names[b]).join(' / ')}</SelectItem>)}</SelectContent></Select></label>
+        <label>API 地址<Input value={profile.baseUrl} placeholder="填写供应商提供的此协议地址" onChange={event => update(profile.id, { baseUrl: event.target.value })} /></label>
+        <label>模型 ID<Input value={profile.modelId} placeholder="留空使用供应商默认模型" onChange={event => update(profile.id, { modelId: event.target.value })} /></label>
+        <label className="fox-settings-switch-row"><span>使用独立 API Key</span><Switch checked={profile.separateCredential} onCheckedChange={separateCredential => {
+          const protocolKeys = { ...form.protocolKeys }; delete protocolKeys[profile.id]
+          onChange({ ...form, protocolKeys, protocolProfiles: profiles.map(p => p.id === profile.id ? { ...p, separateCredential, credentialConfigured: false } : p) })
+        }} /></label>
+        {profile.separateCredential && <label>此协议的 API Key<Input type="password" autoComplete="new-password" value={form.protocolKeys?.[profile.id] ?? ''} placeholder={profile.credentialConfigured ? '已保存，留空保留' : '输入此协议的 Key'} onChange={event => {
+          const protocolKeys = { ...form.protocolKeys }
+          if (event.target.value) protocolKeys[profile.id] = event.target.value; else delete protocolKeys[profile.id]
+          onChange({ ...form, protocolKeys })
+        }} /></label>}
+      </div>
+      <div className="fox-provider-detail-head fox-provider-model-actions">
+        <p className="fox-provider-detail-note" role="status">{results[profile.id]?.identity === identity(profile) ? results[profile.id].text : '尚未验证'}</p>
+        <Button type="button" variant="outline" size="sm" disabled={!profile.baseUrl.trim() || !(profile.modelId.trim() || form.models.some(m => m.modelId.trim())) || (profile.separateCredential && !profile.credentialConfigured && !form.protocolKeys?.[profile.id])} onClick={() => void test(profile)}>{testing === profile.id ? '正在验证…' : '验证此协议'}</Button>
+      </div>
     </fieldset>)}
   </section>
 }

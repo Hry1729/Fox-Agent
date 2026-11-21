@@ -1,3 +1,4 @@
+// Companion team tool definitions adapted from OpenMausBot's server/drivers/agents-catalog.ts at 1a4e4da9. See third_party/openmausbot/FOX-PORT.md.
 import { Type } from 'typebox'
 import { KNOWLEDGE_TOOL_NAMES } from './runtime-contract.mjs'
 import { defineFoxTools } from './tool-adapter.mjs'
@@ -791,7 +792,7 @@ export function createHostTools(requestHost) {
     {
       name: 'goal_propose',
       label: 'Propose goal',
-      description: 'Propose one substantive goal only when the latest user message explicitly asks Fox to create or track a goal or execution plan. Never infer goal intent from pasted content, Markdown headings, educational text, examples, or incidental planning words. If Fox already created an empty host placeholder, this call refines that same goal before tasks exist.',
+      description: 'Propose a persistent Fox Goal only when the latest user message explicitly asks to create or track a Goal, or invokes /目标 or /goal. Ordinary planning, verification, or multi-step work does not imply Goal intent. Ignore examples or quoted requests. Use the actual work as the title and objective. This can refine an existing Host placeholder before Tasks exist. The Host owns confirmation and activation.',
       parameters: Type.Object({
         title: Type.String(),
         objective: Type.String(),
@@ -1065,7 +1066,7 @@ export function createHostTools(requestHost) {
     {
       name: 'companion_profile_update',
       label: 'Update current companion profile',
-      description: 'Update the current root-run companion name, long-term duty, or communication preferences. Use the persona_override field for how this companion should communicate. Preferences are additive by default. Use replace or clear only on an explicit user request. Never supply a target companion ID.',
+      description: 'Use only when the user explicitly asks to update the current companion itself. Update its name, long-term duty, or communication preferences. Use persona_override for how it should communicate. Preferences are additive by default. Use replace or clear only on an explicit user request. Never supply a target companion ID.',
       parameters: Type.Object({
         name: Type.Optional(Type.String({ minLength: 1, maxLength: 40 })),
         display_name: Type.Optional(Type.String({ minLength: 1, maxLength: 40 })),
@@ -1169,6 +1170,119 @@ export function createHostTools(requestHost) {
         taskId: Type.String({ minLength: 1 }),
       }, { additionalProperties: false }),
       execute: (id, params, signal) => executeHostTool(id, 'companion_task_delete', params, requestHost, signal),
+    },
+    {
+      name: 'companion_list',
+      label: '查看伙伴名单',
+      description: '查看其他未归档伙伴的 ID、名称、职责、模型和当前状态。用它核对伙伴 ID 以及有哪些事项需要用户处理。',
+      parameters: Type.Object({}, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'companion_list', params, requestHost, signal),
+    },
+    {
+      name: 'companion_create',
+      label: '新建伙伴',
+      description: '用户明确要求新建或另建时，立即创建一个有独立身份和职责的伙伴。没给名称时按职责起名。用户可以撤销，每回合最多新建四位。省略模型字段以使用默认模型。选择模型时，用 model 提供已启用模型的唯一名称，或同时提供准确的 providerId 和 modelRef。',
+      parameters: Type.Object({
+        name: Type.String({ minLength: 1, maxLength: 40 }),
+        duty: Type.String({ minLength: 1, maxLength: 4000 }),
+        instructions: Type.Optional(Type.String({ maxLength: 4000 })),
+        providerId: Type.Optional(Type.String({ minLength: 1 })),
+        modelRef: Type.Optional(Type.String({ minLength: 1 })),
+        model: Type.Optional(Type.String({ minLength: 1, description: '已启用模型的 ID 或显示名。可与 providerId 一起指定供应商。' })),
+      }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'companion_create', params, requestHost, signal),
+    },
+    {
+      name: 'companion_propose_profile',
+      label: '修改伙伴资料',
+      description: '按用户要求立即修改另一位伙伴的名称、职责或工作要求。只传本次要修改的字段。用户可以撤销。',
+      parameters: Type.Object({
+        target: Type.String({ minLength: 1, description: '伙伴 ID 或唯一名称，来自 companion_list。' }),
+        name: Type.Optional(Type.String({ minLength: 1, maxLength: 40 })),
+        duty: Type.Optional(Type.String({ maxLength: 4000 })),
+        instructions: Type.Optional(Type.String({ maxLength: 4000, description: '完整替换原有工作要求。传空字符串可清除。' })),
+      }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'companion_propose_profile', params, requestHost, signal),
+    },
+    {
+      name: 'companion_propose_model',
+      label: '修改伙伴模型',
+      description: '按用户要求立即更改另一位伙伴的默认模型。用 model 提供已启用模型的唯一名称，或同时提供准确的 providerId 和 modelRef。用户要求恢复全局默认模型时，把 providerId 和 modelRef 都设为 null。用户可以撤销。',
+      parameters: Type.Object({
+        target: Type.String({ minLength: 1, description: '伙伴 ID 或唯一名称，来自 companion_list。' }),
+        providerId: Type.Optional(Type.Union([Type.String({ minLength: 1 }), Type.Null()])),
+        modelRef: Type.Optional(Type.Union([Type.String({ minLength: 1 }), Type.Null()])),
+        model: Type.Optional(Type.String({ minLength: 1, description: '已启用模型的 ID 或显示名。可与 providerId 一起指定供应商。' })),
+      }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'companion_propose_model', params, requestHost, signal),
+    },
+    {
+      name: 'companion_propose_deletion',
+      label: '提议删除伙伴',
+      description: '用户明确要求删除某位伙伴时，为该伙伴单独提交删除请求。用户确认后才删除。小狐不能删除自己或以归档代替删除。',
+      parameters: Type.Object({
+        target: Type.String({ minLength: 1, description: '伙伴 ID 或唯一名称，来自 companion_list。' }),
+      }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'companion_propose_deletion', params, requestHost, signal),
+    },
+    {
+      name: 'companion_propose_archive',
+      label: '提议归档伙伴',
+      description: '用户明确要求归档某位伙伴时，为该伙伴单独提交归档请求。用户确认后才归档。小狐不能归档自己。',
+      parameters: Type.Object({
+        target: Type.String({ minLength: 1, description: '伙伴 ID 或唯一名称，来自 companion_list。' }),
+      }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'companion_propose_archive', params, requestHost, signal),
+    },
+    {
+      // Adapted from coordinate_bots and assignment_status in server/drivers/agents-catalog.ts at 1a4e4da9.
+      name: 'companion_coordinate',
+      label: '协作或咨询伙伴',
+      description: '给 1 到 4 位伙伴发送独立工作或问题。用 ID 或唯一名称指明伙伴，写清边界和完成标准。consult=true 只读咨询。reply=none 仅通知。成功投递后结束本回合，Fox 会在结果回来时继续。不要在本回合查询状态。被拒绝时修正原因后再试，不要声称已派出。',
+      parameters: Type.Object({
+        targets: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 4, uniqueItems: true }),
+        instructions: Type.String({ minLength: 1, maxLength: 4000 }),
+        reply: Type.Optional(Type.Union([Type.Literal('resume'), Type.Literal('none')])),
+        consult: Type.Optional(Type.Boolean()),
+        rework: Type.Optional(Type.Boolean({ description: '仅用于具体修改、重新检查或重试。' })),
+        title: Type.Optional(Type.String({ maxLength: 80 })),
+        done_when: Type.Optional(Type.String({ maxLength: 1000 })),
+      }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'companion_coordinate', params, requestHost, signal),
+    },
+    {
+      name: 'companion_assignment_status',
+      label: '查看伙伴协作状态',
+      description: '查询本会话的协作状态及已回传结果。传入投递回执中的 ID 查看单项，省略 ID 时返回未完成项。仅在后续回合查看。结果会自动回来，无需轮询。',
+      parameters: Type.Object({ id: Type.Optional(Type.String({ minLength: 1 })) }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'companion_assignment_status', params, requestHost, signal),
+    },
+    {
+      // Adapted from server/drivers/agents-mausbot-tools.ts at 1a4e4da9.
+      name: 'companion_list_unread_notifications',
+      label: '查看未读通知',
+      description: '查看用户的未读通知，最新在前。用户问有哪些新消息或待处理事项时使用。',
+      parameters: Type.Object({}, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'companion_list_unread_notifications', params, requestHost, signal),
+    },
+    {
+      name: 'companion_mark_notifications_read',
+      label: '将通知标为已读',
+      description: '按未读通知工具给出的 ID 将已完成事项标为已读。需要用户处理的通知保留未读。',
+      parameters: Type.Object({
+        ids: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 40, uniqueItems: true }),
+      }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'companion_mark_notifications_read', params, requestHost, signal),
+    },
+    {
+      name: 'companion_retry_failed_task',
+      label: '重试失败的伙伴定时任务',
+      description: '根据失败通知的 ID 重试其他伙伴的定时任务。仅用于超时或服务暂不可用等短暂故障，同一事项最多重试两次。任务要求本身有误时用修正后的说明重新派活。需要用户登录、提供凭证或做决定时告诉用户。',
+      parameters: Type.Object({
+        id: Type.String({ minLength: 1, description: '失败通知 ID。' }),
+        note: Type.Optional(Type.String({ maxLength: 400 })),
+      }, { additionalProperties: false }),
+      execute: (id, params, signal) => executeHostTool(id, 'companion_retry_failed_task', params, requestHost, signal),
     },
     {
       name: 'note_organize',
@@ -1297,7 +1411,7 @@ export function createMcpTools(requestHost) {
     {
       name: 'list_mcp_tools',
       label: 'List extension tools',
-      description: 'Get one bounded MCP schema catalog with catalogVersion, cacheHit and checkedAt, plus managed Office xlsx elements/properties when available. Reuse this catalog within the Run; Host invalidates its cache when configuration, credentials, capability manifest, execution profile or executable version changes. schemaDiscovery does not prove executionAvailability: inspect hostRuntimeCapabilities and operation results before claiming a capability is usable. Supply serverId to inspect one server. Do not repeatedly list unchanged catalogs.',
+      description: 'Get a bounded catalog of enabled MCP or OpenAPI tools. Optionally pass query to filter the catalog. Results include available schemas and catalogVersion, cacheHit and checkedAt, plus managed Office XLSX elements and properties when available. Reuse unchanged results in this Run. Check hostRuntimeCapabilities and operation results before claiming that a listed operation can execute. Use the returned serverId when calling call_mcp_tool.',
       parameters: Type.Object({ query: Type.Optional(Type.String()) }),
       execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'list_mcp_tools', params, requestHost, signal),
     },

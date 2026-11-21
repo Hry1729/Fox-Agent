@@ -39,7 +39,10 @@ pub(crate) fn setup_failure_message(data_dir: Option<&Path>, error: &str) -> Str
 /// Log the message and, on Windows, show it in a native message box (the
 /// webview is not available yet).
 pub(crate) fn report(message: &str) {
-    eprintln!("fox.startup error setup_failed message={}", message.replace('\n', " | "));
+    eprintln!(
+        "fox.startup error setup_failed message={}",
+        message.replace('\n', " | ")
+    );
     #[cfg(windows)]
     {
         use windows::core::HSTRING;
@@ -62,11 +65,13 @@ mod tests {
 
     #[test]
     fn unreadable_database_reports_chinese_message_with_path() {
-        let root = std::env::temp_dir().join(format!("fox-startup-corrupt-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("fox-startup-corrupt-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("fox.db");
         std::fs::write(&path, vec![0x5au8; 8192]).unwrap();
-        let error = match Database::open_with_migration_backup(path.clone(), &root.join("backups")) {
+        let error = match Database::open_with_migration_backup(path.clone(), &root.join("backups"))
+        {
             Ok(_) => panic!("a garbage file must not open as a database"),
             Err(error) => error,
         };
@@ -77,14 +82,21 @@ mod tests {
         assert!(message.contains("无法打开 Fox 数据库"), "{message}");
         assert!(message.contains(&path.display().to_string()), "{message}");
         assert!(!message.contains("Query is not read-only"), "{message}");
-        assert_eq!(std::fs::read(&path).unwrap(), vec![0x5au8; 8192], "the file is left untouched");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            vec![0x5au8; 8192],
+            "the file is left untouched"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn setup_failure_message_names_data_dir_once() {
         let dir = Path::new("/data/fox");
-        assert_eq!(setup_failure_message(Some(dir), "x"), "Fox 启动失败：x\n数据目录：/data/fox");
+        assert_eq!(
+            setup_failure_message(Some(dir), "x"),
+            "Fox 启动失败：x\n数据目录：/data/fox"
+        );
         assert_eq!(
             setup_failure_message(Some(dir), "无法打开 Fox 数据库：/data/fox/fox.db"),
             "Fox 启动失败：无法打开 Fox 数据库：/data/fox/fox.db"

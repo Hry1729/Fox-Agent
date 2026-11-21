@@ -161,11 +161,11 @@ describe('被拒绝的增长只回滚请求者（缺口 A 的 DOM 侧）', () =>
 describe('workbench 真的接上了这两个提取出来的部件', () => {
   const workbench = readFileSync(new URL('../src/features/chat/workbench.tsx', import.meta.url), 'utf8')
 
-  test('联系人卡的开关先看 activeView；回报进来的是一组 refusal 而不是整份声明', () => {
+  test('联系人卡的开关先看 activeView，并且不再请求原生窗口增长', () => {
     expect(workbench).toContain('useChatWorkspaceSideCard(activeView, closeContactCard)')
     expect(workbench).toContain('const contactCardOpen = insideChatWorkspace && Boolean(')
-    expect(workbench).toContain('const handleSidebarGrowthRefused = useStableCallback((refusals: SidebarGrowthRefusal[])')
-    expect(workbench).toContain('sideCardGrowthRollback(refusals)')
+    expect(workbench).not.toContain('useSidebarWindowGrowth')
+    expect(workbench).not.toContain('sideCardGrowthRollback(refusals)')
     // 旧的「按渲染顺序关掉最后一张」已经没有了。
     expect(workbench.includes('entries[entries.length - 1]')).toBe(false)
   })

@@ -206,6 +206,19 @@
 .is-contact-chat .fox-contact-user-row .fox-user-meta[data-menu-open="true"] { opacity: 1; }
 .fox-contact-ended { color: var(--muted-foreground); font-size: var(--fox-type-caption); }
 
+.fox-contact-message.has-guide { width: var(--fox-bubble-width); }
+.fox-companion-guide { display: grid; gap: 10px; width: 100%; margin-top: 8px; padding: 14px 14px 12px; border-radius: var(--fox-radius-large); background: var(--fox-canvas); box-shadow: inset 0 0 0 1px var(--border), var(--fox-shadow-sm); }
+.fox-companion-guide > strong { margin: 0 2px; font-size: 13.5px; font-weight: 600; }
+.fox-companion-guide > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.fox-companion-guide button { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 8px 12px; border: 0; border-radius: var(--fox-radius-control); background: var(--muted); color: var(--foreground); font-size: 13px; text-align: left; }
+.fox-companion-guide button svg { flex: none; color: var(--muted-foreground); }
+.fox-companion-guide button:hover { background: var(--accent); box-shadow: inset 0 0 0 1px var(--border); }
+.fox-companion-guide button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.fox-companion-guide button:disabled { opacity: .6; }
+.fox-companion-guide.is-collapsed { display: inline-flex; align-items: center; gap: 6px; width: auto; margin: 2px 0 0 2px; padding: 0; background: none; box-shadow: none; color: var(--muted-foreground); font-size: 12px; }
+.fox-companion-guide.is-collapsed svg { color: var(--success); }
+@container fox-chat (max-width: 480px) { .fox-companion-guide > div { grid-template-columns: 1fr; } }
+
 @container fox-chat (max-width: 480px) {
   .fox-contact-message, .fox-contact-user-row { padding-bottom: 26px; }
   .fox-contact-message-meta {
@@ -246,6 +259,13 @@
 }
 .fox-contact-decision header { display: grid; gap: var(--fox-space-xs); }
 .fox-contact-decision header strong { font-weight: 600; }
+.fox-contact-decision.is-resolved { padding:var(--fox-space-l) var(--fox-space-xl); gap:var(--fox-space-s); background:var(--fox-card); border:1px solid var(--fox-border); }
+.fox-contact-decision.is-resolved header { color:var(--fox-muted); }
+.fox-contact-answer-choice { display:flex; align-items:center; gap:var(--fox-space-s); margin:0; min-height:32px; }
+.fox-contact-answer-choice .fox-contact-choice-key { background:var(--fox-accent); color:var(--primary-foreground); }
+.fox-contact-receipt-details { color:var(--fox-muted); font-size:var(--fox-type-caption); }
+.fox-contact-receipt-details summary { cursor:pointer; width:fit-content; }
+.fox-contact-receipt-details summary:focus-visible { outline:2px solid var(--ring); outline-offset:2px; }
 /* 直接挂在 run-body / thread 消息下的写入确认组也走同一 token（百分比只作用一层）。 */
 .fox-contact-write-results { width: var(--fox-bubble-width); min-width: 0; }
 .fox-contact-decision header p,

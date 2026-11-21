@@ -42,7 +42,9 @@ impl AccessMode {
             "ask" => Ok(Self::Ask),
             "allow" if full_access => Ok(Self::FullAccess),
             "allow" => Ok(Self::Auto),
-            other => Err(format!("permission.invalid_mode: unknown stored permission mode {other}")),
+            other => Err(format!(
+                "permission.invalid_mode: unknown stored permission mode {other}"
+            )),
         }
     }
 
@@ -53,7 +55,9 @@ impl AccessMode {
             "ask" => Ok(Self::Ask),
             "auto" | "allow" => Ok(Self::Auto),
             "full_access" => Ok(Self::FullAccess),
-            other => Err(format!("permission.invalid_mode: unknown access mode {other}")),
+            other => Err(format!(
+                "permission.invalid_mode: unknown access mode {other}"
+            )),
         }
     }
 
@@ -94,7 +98,9 @@ impl RuleEffect {
             "allow" => Ok(Self::Allow),
             "ask" => Ok(Self::Ask),
             "block" => Ok(Self::Block),
-            other => Err(format!("permission.invalid_rule: unknown rule effect {other}")),
+            other => Err(format!(
+                "permission.invalid_rule: unknown rule effect {other}"
+            )),
         }
     }
     pub fn as_str(self) -> &'static str {
@@ -164,8 +170,14 @@ impl ToolClass {
 #[derive(Debug, Clone)]
 pub enum ToolSubject {
     Read,
-    Write { target: PathBuf },
-    Command { command: String, cwd: PathBuf, model_risk: Option<String> },
+    Write {
+        target: PathBuf,
+    },
+    Command {
+        command: String,
+        cwd: PathBuf,
+        model_risk: Option<String>,
+    },
     Network,
     Other,
 }
@@ -179,18 +191,37 @@ pub fn is_command_tool(tool: &str) -> bool {
 /// Classify a tool by name and input. `command`/`cwd` come from the Host's
 /// prepared preview (for capability process tools this is the exact program
 /// line the Host will run).
-pub fn subject_for(tool: &str, input: &Value, command: Option<&str>, cwd: Option<&Path>, write_target: Option<&Path>) -> ToolSubject {
+pub fn subject_for(
+    tool: &str,
+    input: &Value,
+    command: Option<&str>,
+    cwd: Option<&Path>,
+    write_target: Option<&Path>,
+) -> ToolSubject {
     let model_risk = input.get("risk").and_then(Value::as_str).map(str::to_owned);
     match tool {
-        "read" | "list" | "search" | "glob" | "grep" | "git_read" | "sqlite_read" | "structured_data"
-        | "tabular_data" | "read_tool_result" => ToolSubject::Read,
-        "run_command" if matches!(input.get("action").and_then(Value::as_str), Some("status" | "output" | "cancel")) => ToolSubject::Read,
+        "read" | "list" | "search" | "glob" | "grep" | "git_read" | "sqlite_read"
+        | "structured_data" | "tabular_data" | "read_tool_result" => ToolSubject::Read,
+        "run_command"
+            if matches!(
+                input.get("action").and_then(Value::as_str),
+                Some("status" | "output" | "cancel")
+            ) =>
+        {
+            ToolSubject::Read
+        }
         "write_file" | "edit_file" => match write_target {
-            Some(target) => ToolSubject::Write { target: target.to_path_buf() },
+            Some(target) => ToolSubject::Write {
+                target: target.to_path_buf(),
+            },
             None => ToolSubject::Other,
         },
         tool if is_command_tool(tool) => match (command, cwd) {
-            (Some(command), Some(cwd)) => ToolSubject::Command { command: command.to_owned(), cwd: cwd.to_path_buf(), model_risk },
+            (Some(command), Some(cwd)) => ToolSubject::Command {
+                command: command.to_owned(),
+                cwd: cwd.to_path_buf(),
+                model_risk,
+            },
             _ => ToolSubject::Other,
         },
         "web_search" | "web_read" | "http_request" | "system_info" => ToolSubject::Network,
@@ -332,7 +363,10 @@ pub fn decide(request: &PolicyRequest<'_>) -> PolicyDecision {
         rule_eligible: false,
         inner_command: None,
     };
-    let deny = |code: &str, message: String| Verdict::Deny { code: code.to_owned(), message };
+    let deny = |code: &str, message: String| Verdict::Deny {
+        code: code.to_owned(),
+        message,
+    };
     match request.subject {
         ToolSubject::Read => {
             decision.class = ToolClass::Read;
@@ -343,7 +377,11 @@ pub fn decide(request: &PolicyRequest<'_>) -> PolicyDecision {
             decision.class = ToolClass::Network;
             if matches!(mode, AccessMode::Auto | AccessMode::FullAccess) {
                 decision.verdict = Verdict::Allow;
-                decision.allow_reason = Some(if mode.full_access() { AllowReason::FullAccess } else { AllowReason::Mode });
+                decision.allow_reason = Some(if mode.full_access() {
+                    AllowReason::FullAccess
+                } else {
+                    AllowReason::Mode
+                });
             }
         }
         ToolSubject::Other => {
@@ -361,7 +399,10 @@ pub fn decide(request: &PolicyRequest<'_>) -> PolicyDecision {
                 decision.risk = Risk::High;
                 decision.findings.push(finding.to_owned());
                 decision.verdict = match mode {
-                    AccessMode::ReadOnly => deny("permission.read_only", format!("tool {} is blocked in read-only mode", request.tool)),
+                    AccessMode::ReadOnly => deny(
+                        "permission.read_only",
+                        format!("tool {} is blocked in read-only mode", request.tool),
+                    ),
                     AccessMode::FullAccess => {
                         decision.allow_reason = Some(AllowReason::FullAccess);
                         Verdict::Allow
@@ -371,7 +412,10 @@ pub fn decide(request: &PolicyRequest<'_>) -> PolicyDecision {
             } else {
                 decision.class = ToolClass::ProjectWrite;
                 decision.verdict = match mode {
-                    AccessMode::ReadOnly => deny("permission.read_only", format!("tool {} is blocked in read-only mode", request.tool)),
+                    AccessMode::ReadOnly => deny(
+                        "permission.read_only",
+                        format!("tool {} is blocked in read-only mode", request.tool),
+                    ),
                     AccessMode::Ask => Verdict::Ask,
                     AccessMode::Auto => {
                         decision.allow_reason = Some(AllowReason::Mode);
@@ -384,7 +428,11 @@ pub fn decide(request: &PolicyRequest<'_>) -> PolicyDecision {
                 };
             }
         }
-        ToolSubject::Command { command, cwd, model_risk } => {
+        ToolSubject::Command {
+            command,
+            cwd,
+            model_risk,
+        } => {
             decide_command(request, &mut decision, command, cwd, model_risk.as_deref());
         }
     }
@@ -422,11 +470,22 @@ struct RecognizedWrapper {
 
 /// 只在命令完全是「cd 到当前 cwd，然后执行内层，最后 echo 一个含 $? 的标记」时返回内层原文。
 /// 任何对不齐的写法都返回 None，调用方按整条原文处理（fail-closed）。
-fn unwrap_exit_marker_wrapper(command: &str, cwd: &Path, project_root: Option<&Path>, home: Option<&Path>) -> Option<String> {
-    recognize_exit_marker_wrapper(command, cwd, project_root, home).map(|recognized| recognized.inner)
+fn unwrap_exit_marker_wrapper(
+    command: &str,
+    cwd: &Path,
+    project_root: Option<&Path>,
+    home: Option<&Path>,
+) -> Option<String> {
+    recognize_exit_marker_wrapper(command, cwd, project_root, home)
+        .map(|recognized| recognized.inner)
 }
 
-fn recognize_exit_marker_wrapper(command: &str, cwd: &Path, project_root: Option<&Path>, home: Option<&Path>) -> Option<RecognizedWrapper> {
+fn recognize_exit_marker_wrapper(
+    command: &str,
+    cwd: &Path,
+    project_root: Option<&Path>,
+    home: Option<&Path>,
+) -> Option<RecognizedWrapper> {
     // 整条命令里出现换行或回车，直接不认。
     if command.chars().any(|ch| ch == '\n' || ch == '\r') {
         return None;
@@ -481,7 +540,10 @@ fn recognize_exit_marker_wrapper(command: &str, cwd: &Path, project_root: Option
     collapsed.push_str(&command[target.end..marker_start]);
     collapsed.push('x');
     collapsed.push_str(&command[marker_end..]);
-    Some(RecognizedWrapper { inner: inner.to_owned(), collapsed })
+    Some(RecognizedWrapper {
+        inner: inner.to_owned(),
+        collapsed,
+    })
 }
 
 /// bash 引号规则下的顶层运算符。`escapes == false` 时反斜杠不转义（cmd 方言，与 `tokenize_with(_, false)` 一致）。
@@ -510,21 +572,41 @@ fn scan_toplevel_ops(command: &str, escapes: bool) -> Option<Vec<TopOp>> {
         }
         match ch {
             '\'' | '"' => quote = Some(ch),
-            ';' => ops.push(TopOp { kind: TopOpKind::Semi, start: idx, end: idx + 1 }),
+            ';' => ops.push(TopOp {
+                kind: TopOpKind::Semi,
+                start: idx,
+                end: idx + 1,
+            }),
             '|' => {
                 if chars.peek().is_some_and(|(_, next)| *next == '|') {
                     let (next_idx, next) = chars.next().unwrap();
-                    ops.push(TopOp { kind: TopOpKind::OrOr, start: idx, end: next_idx + next.len_utf8() });
+                    ops.push(TopOp {
+                        kind: TopOpKind::OrOr,
+                        start: idx,
+                        end: next_idx + next.len_utf8(),
+                    });
                 } else {
-                    ops.push(TopOp { kind: TopOpKind::Pipe, start: idx, end: idx + 1 });
+                    ops.push(TopOp {
+                        kind: TopOpKind::Pipe,
+                        start: idx,
+                        end: idx + 1,
+                    });
                 }
             }
             '&' => {
                 if chars.peek().is_some_and(|(_, next)| *next == '&') {
                     let (next_idx, next) = chars.next().unwrap();
-                    ops.push(TopOp { kind: TopOpKind::AndAnd, start: idx, end: next_idx + next.len_utf8() });
+                    ops.push(TopOp {
+                        kind: TopOpKind::AndAnd,
+                        start: idx,
+                        end: next_idx + next.len_utf8(),
+                    });
                 } else {
-                    ops.push(TopOp { kind: TopOpKind::Amp, start: idx, end: idx + 1 });
+                    ops.push(TopOp {
+                        kind: TopOpKind::Amp,
+                        start: idx,
+                        end: idx + 1,
+                    });
                 }
             }
             '>' => {
@@ -597,7 +679,11 @@ fn bash_ws_words(text: &str) -> Option<Vec<BashWord>> {
         if quote.is_some() {
             return None;
         }
-        words.push(BashWord { start, end: i, decoded });
+        words.push(BashWord {
+            start,
+            end: i,
+            decoded,
+        });
     }
     Some(words)
 }
@@ -621,7 +707,8 @@ fn inner_command_slice(region: &str) -> Option<&str> {
     let mut end = region.len();
     if let Some(last) = words.last() {
         let raw = &region[last.start..last.end];
-        let preceded_by_ws = last.start > 0 && matches!(region[..last.start].chars().next_back(), Some(' ' | '\t'));
+        let preceded_by_ws =
+            last.start > 0 && matches!(region[..last.start].chars().next_back(), Some(' ' | '\t'));
         if raw == "2>&1" && preceded_by_ws {
             end = last.start;
         }
@@ -651,22 +738,44 @@ fn marker_ok(decoded: &str) -> bool {
     }
     rest.chars().all(|ch| {
         ch.is_ascii_alphanumeric()
-            || matches!(ch, ' ' | '_' | ':' | '=' | '-' | '[' | ']' | '(' | ')' | '.' | ',' | '#' | '/')
+            || matches!(
+                ch,
+                ' ' | '_' | ':' | '=' | '-' | '[' | ']' | '(' | ')' | '.' | ',' | '#' | '/'
+            )
     })
 }
 
-fn decide_command(request: &PolicyRequest<'_>, decision: &mut PolicyDecision, command: &str, cwd: &Path, model_risk: Option<&str>) {
+fn decide_command(
+    request: &PolicyRequest<'_>,
+    decision: &mut PolicyDecision,
+    command: &str,
+    cwd: &Path,
+    model_risk: Option<&str>,
+) {
     let mode = request.mode;
     let analysis = analyze_command(command, cwd, request.project_root, request.home);
-    let recognized = recognize_exit_marker_wrapper(command, cwd, request.project_root, request.home);
-    let inner_analysis = recognized.as_ref().map(|recognized| analyze_command(&recognized.inner, cwd, request.project_root, request.home));
+    let recognized =
+        recognize_exit_marker_wrapper(command, cwd, request.project_root, request.home);
+    let inner_analysis = recognized.as_ref().map(|recognized| {
+        analyze_command(&recognized.inner, cwd, request.project_root, request.home)
+    });
     // Linux 默认方言会吃掉双引号里的反斜杠，把已经等于 cwd 的 cd 目标误判成越界。
     // 目标换成 `.` 后仍解析回同一个 cwd，越界结论不会因此变松。
-    let collapsed_analysis = recognized.as_ref().map(|recognized| analyze_command(&recognized.collapsed, cwd, request.project_root, request.home));
+    let collapsed_analysis = recognized.as_ref().map(|recognized| {
+        analyze_command(
+            &recognized.collapsed,
+            cwd,
+            request.project_root,
+            request.home,
+        )
+    });
     let whole_view = collapsed_analysis.as_ref().unwrap_or(&analysis);
     decision.class = ToolClass::Command;
     decision.inner_command = recognized.map(|recognized| recognized.inner);
-    let host_risk = inner_analysis.as_ref().map(|inner| inner.risk).unwrap_or(analysis.risk);
+    let host_risk = inner_analysis
+        .as_ref()
+        .map(|inner| inner.risk)
+        .unwrap_or(analysis.risk);
     decision.risk = host_risk;
     decision.findings = whole_view.findings.clone();
     if let Some(inner) = &inner_analysis {
@@ -677,14 +786,20 @@ fn decide_command(request: &PolicyRequest<'_>, decision: &mut PolicyDecision, co
         }
         decision.findings.push("exit_marker_wrapper".into());
     }
-    if model_risk.is_some_and(|risk| risk.eq_ignore_ascii_case("high")) && decision.risk < Risk::High {
+    if model_risk.is_some_and(|risk| risk.eq_ignore_ascii_case("high"))
+        && decision.risk < Risk::High
+    {
         decision.risk = Risk::High;
         decision.findings.push("model_declared_high".into());
     }
     // 1. block: built-in dangerous deletions, then project block rules.
     // block 先于 path_boundary，class 保持 Command。内置 block 始终看整条原文；
     // 识别出包装时，内层单独分析命中的 block 也算（只会更严）。
-    let builtin_block = analysis.block.as_ref().or_else(|| inner_analysis.as_ref().and_then(|inner| inner.block.as_ref()));
+    let builtin_block = analysis.block.as_ref().or_else(|| {
+        inner_analysis
+            .as_ref()
+            .and_then(|inner| inner.block.as_ref())
+    });
     if let Some(block) = builtin_block {
         decision.findings.push("builtin_block".into());
         decision.verdict = Verdict::Deny {
@@ -693,29 +808,54 @@ fn decide_command(request: &PolicyRequest<'_>, decision: &mut PolicyDecision, co
         };
         return;
     }
-    let segments = inner_analysis.as_ref().map(|inner| inner.segments.as_slice()).unwrap_or(analysis.segments.as_slice());
-    if let Some(rule) = request.rules.iter().filter(|rule| rule.effect == RuleEffect::Block && rule_names_tool(rule, request.tool))
+    let segments = inner_analysis
+        .as_ref()
+        .map(|inner| inner.segments.as_slice())
+        .unwrap_or(analysis.segments.as_slice());
+    if let Some(rule) = request
+        .rules
+        .iter()
+        .filter(|rule| rule.effect == RuleEffect::Block && rule_names_tool(rule, request.tool))
         .find(|rule| {
-            analysis.segments.iter().any(|segment| rule_prefix_matches(rule, segment))
-                || inner_analysis.as_ref().is_some_and(|inner| inner.segments.iter().any(|segment| rule_prefix_matches(rule, segment)))
+            analysis
+                .segments
+                .iter()
+                .any(|segment| rule_prefix_matches(rule, segment))
+                || inner_analysis.as_ref().is_some_and(|inner| {
+                    inner
+                        .segments
+                        .iter()
+                        .any(|segment| rule_prefix_matches(rule, segment))
+                })
         })
     {
         decision.forcing_rule = Some(rule.clone());
         decision.findings.push("project_block_rule".into());
         decision.verdict = Verdict::Deny {
             code: "permission.blocked".into(),
-            message: format!("[permission.blocked] 本项目的禁止规则「{}」命中了这条命令，命令没有执行。", rule.pattern),
+            message: format!(
+                "[permission.blocked] 本项目的禁止规则「{}」命中了这条命令，命令没有执行。",
+                rule.pattern
+            ),
         };
         return;
     }
     // 2. protected / outside paths: only full access lets them through.
     // 包装时取折叠后的整条命令与内层的或，只会更严，不会把 cd 到 cwd 误判成越界。
-    let path_boundary = whole_view.path_boundary || inner_analysis.as_ref().is_some_and(|inner| inner.path_boundary);
-    let opaque = analysis.opaque || whole_view.opaque || inner_analysis.as_ref().is_some_and(|inner| inner.opaque);
+    let path_boundary = whole_view.path_boundary
+        || inner_analysis
+            .as_ref()
+            .is_some_and(|inner| inner.path_boundary);
+    let opaque = analysis.opaque
+        || whole_view.opaque
+        || inner_analysis.as_ref().is_some_and(|inner| inner.opaque);
     if path_boundary {
         decision.class = ToolClass::PathBoundary;
         decision.verdict = match mode {
-            AccessMode::ReadOnly => Verdict::Deny { code: "permission.read_only".into(), message: format!("tool {} is blocked in read-only mode", request.tool) },
+            AccessMode::ReadOnly => Verdict::Deny {
+                code: "permission.read_only".into(),
+                message: format!("tool {} is blocked in read-only mode", request.tool),
+            },
             AccessMode::FullAccess => {
                 decision.allow_reason = Some(AllowReason::FullAccess);
                 Verdict::Allow
@@ -727,7 +867,10 @@ fn decide_command(request: &PolicyRequest<'_>, decision: &mut PolicyDecision, co
     // 3. mode.
     match mode {
         AccessMode::ReadOnly => {
-            decision.verdict = Verdict::Deny { code: "permission.read_only".into(), message: format!("tool {} is blocked in read-only mode", request.tool) };
+            decision.verdict = Verdict::Deny {
+                code: "permission.read_only".into(),
+                message: format!("tool {} is blocked in read-only mode", request.tool),
+            };
             return;
         }
         AccessMode::FullAccess => {
@@ -738,21 +881,41 @@ fn decide_command(request: &PolicyRequest<'_>, decision: &mut PolicyDecision, co
         AccessMode::Ask | AccessMode::Auto => {}
     }
     decision.rule_eligible = !opaque && !segments.is_empty();
-    decision.suggested_prefix = if decision.rule_eligible { suggested_prefix(segments) } else { None };
+    decision.suggested_prefix = if decision.rule_eligible {
+        suggested_prefix(segments)
+    } else {
+        None
+    };
     // 4. ask rules force a prompt; allow rules cover segment by segment.
-    if let Some(rule) = request.rules.iter().filter(|rule| rule.effect == RuleEffect::Ask && rule_names_tool(rule, request.tool))
-        .find(|rule| segments.iter().any(|segment| rule_prefix_matches(rule, segment)))
+    if let Some(rule) = request
+        .rules
+        .iter()
+        .filter(|rule| rule.effect == RuleEffect::Ask && rule_names_tool(rule, request.tool))
+        .find(|rule| {
+            segments
+                .iter()
+                .any(|segment| rule_prefix_matches(rule, segment))
+        })
     {
         decision.forcing_rule = Some(rule.clone());
         decision.verdict = Verdict::Ask;
         return;
     }
-    if decision.rule_eligible && !(model_risk.is_some_and(|risk| risk.eq_ignore_ascii_case("high")) && host_risk < Risk::High) {
-        let allow_rules: Vec<&PolicyRule> = request.rules.iter()
-            .filter(|rule| rule.effect == RuleEffect::Allow && rule_names_tool(rule, request.tool)).collect();
+    if decision.rule_eligible
+        && !(model_risk.is_some_and(|risk| risk.eq_ignore_ascii_case("high"))
+            && host_risk < Risk::High)
+    {
+        let allow_rules: Vec<&PolicyRule> = request
+            .rules
+            .iter()
+            .filter(|rule| rule.effect == RuleEffect::Allow && rule_names_tool(rule, request.tool))
+            .collect();
         let mut used: Vec<PolicyRule> = Vec::new();
         let covered = segments.iter().all(|segment| {
-            match allow_rules.iter().find(|rule| rule_covers_segment(rule, segment)) {
+            match allow_rules
+                .iter()
+                .find(|rule| rule_covers_segment(rule, segment))
+            {
                 Some(rule) => {
                     if !used.iter().any(|known| known.id == rule.id) {
                         used.push((*rule).clone());
@@ -784,13 +947,23 @@ fn rule_names_tool(rule: &PolicyRule, tool: &str) -> bool {
 /// Token-prefix match: every rule token equals the segment's token at the same
 /// position (`npm test` matches `npm test -- foo`, never `npm testx`).
 fn rule_prefix_matches(rule: &PolicyRule, segment: &Segment) -> bool {
-    let Ok(pattern) = parse_rule_pattern(&rule.pattern) else { return false };
+    let Ok(pattern) = parse_rule_pattern(&rule.pattern) else {
+        return false;
+    };
     if pattern.len() > segment.words.len() || segment.substitution {
         return false;
     }
-    pattern.iter().zip(segment.words.iter()).enumerate().all(|(index, (want, have))| {
-        if index == 0 { command_name(want) == command_name(have) } else { want == have }
-    })
+    pattern
+        .iter()
+        .zip(segment.words.iter())
+        .enumerate()
+        .all(|(index, (want, have))| {
+            if index == 0 {
+                command_name(want) == command_name(have)
+            } else {
+                want == have
+            }
+        })
 }
 
 /// An allow rule covers a segment when it prefix-matches and, for a high-risk
@@ -803,10 +976,15 @@ fn rule_covers_segment(rule: &PolicyRule, segment: &Segment) -> bool {
     if segment.risk == Risk::Low {
         return true;
     }
-    let Ok(pattern) = parse_rule_pattern(&rule.pattern) else { return false };
+    let Ok(pattern) = parse_rule_pattern(&rule.pattern) else {
+        return false;
+    };
     let mut findings = Vec::new();
     segment_risk(&pattern, &mut findings) == Risk::High
-        && segment.findings.iter().all(|finding| findings.contains(finding))
+        && segment
+            .findings
+            .iter()
+            .all(|finding| findings.contains(finding))
 }
 
 /// Validate a rule pattern: one plain command segment, no operators, no
@@ -818,7 +996,9 @@ pub fn parse_rule_pattern(pattern: &str) -> Result<Vec<String>, String> {
     }
     let parsed = tokenize(trimmed);
     if parsed.len() != 1 {
-        return Err("permission.invalid_rule: 规则前缀只能是一条命令，不能包含 &&、;、| 等连接符".into());
+        return Err(
+            "permission.invalid_rule: 规则前缀只能是一条命令，不能包含 &&、;、| 等连接符".into(),
+        );
     }
     let segment = &parsed[0];
     if segment.substitution || !segment.redirects.is_empty() || segment.words.is_empty() {
@@ -829,23 +1009,54 @@ pub fn parse_rule_pattern(pattern: &str) -> Result<Vec<String>, String> {
 
 /// Whether `pattern` (an allow rule) covers every segment of `command`.
 /// 识别出退出码包装时，覆盖的是内层每一段；整条命令的 block 仍要为空，两次分析都不能越界或 opaque。
-pub fn pattern_covers_command(pattern: &str, command: &str, cwd: &Path, project_root: Option<&Path>, home: Option<&Path>) -> bool {
-    let rule = PolicyRule { id: "candidate".into(), effect: RuleEffect::Allow, tool: "*".into(), pattern: pattern.to_owned() };
+pub fn pattern_covers_command(
+    pattern: &str,
+    command: &str,
+    cwd: &Path,
+    project_root: Option<&Path>,
+    home: Option<&Path>,
+) -> bool {
+    let rule = PolicyRule {
+        id: "candidate".into(),
+        effect: RuleEffect::Allow,
+        tool: "*".into(),
+        pattern: pattern.to_owned(),
+    };
     let analysis = analyze_command(command, cwd, project_root, home);
     if analysis.block.is_some() {
         return false;
     }
     let recognized = recognize_exit_marker_wrapper(command, cwd, project_root, home);
-    let inner_analysis = recognized.as_ref().map(|recognized| analyze_command(&recognized.inner, cwd, project_root, home));
-    if inner_analysis.as_ref().is_some_and(|inner| inner.block.is_some()) {
+    let inner_analysis = recognized
+        .as_ref()
+        .map(|recognized| analyze_command(&recognized.inner, cwd, project_root, home));
+    if inner_analysis
+        .as_ref()
+        .is_some_and(|inner| inner.block.is_some())
+    {
         return false;
     }
-    let collapsed_analysis = recognized.as_ref().map(|recognized| analyze_command(&recognized.collapsed, cwd, project_root, home));
+    let collapsed_analysis = recognized
+        .as_ref()
+        .map(|recognized| analyze_command(&recognized.collapsed, cwd, project_root, home));
     let whole = collapsed_analysis.as_ref().unwrap_or(&analysis);
-    let path_boundary = whole.path_boundary || inner_analysis.as_ref().is_some_and(|inner| inner.path_boundary);
-    let opaque = analysis.opaque || whole.opaque || inner_analysis.as_ref().is_some_and(|inner| inner.opaque);
-    let segments = inner_analysis.as_ref().map(|inner| inner.segments.as_slice()).unwrap_or(analysis.segments.as_slice());
-    !path_boundary && !opaque && !segments.is_empty() && segments.iter().all(|segment| rule_covers_segment(&rule, segment))
+    let path_boundary = whole.path_boundary
+        || inner_analysis
+            .as_ref()
+            .is_some_and(|inner| inner.path_boundary);
+    let opaque = analysis.opaque
+        || whole.opaque
+        || inner_analysis.as_ref().is_some_and(|inner| inner.opaque);
+    let segments = inner_analysis
+        .as_ref()
+        .map(|inner| inner.segments.as_slice())
+        .unwrap_or(analysis.segments.as_slice());
+    !path_boundary
+        && !opaque
+        && !segments.is_empty()
+        && segments
+            .iter()
+            .all(|segment| rule_covers_segment(&rule, segment))
 }
 
 fn suggested_prefix(segments: &[Segment]) -> Option<String> {
@@ -857,7 +1068,10 @@ fn suggested_prefix(segments: &[Segment]) -> Option<String> {
     }
     let mut prefix = vec![head.clone()];
     if let Some(second) = words.get(1) {
-        let plain = !second.starts_with('-') && !second.starts_with('/') && !looks_like_path(second) && !second.contains('=');
+        let plain = !second.starts_with('-')
+            && !second.starts_with('/')
+            && !looks_like_path(second)
+            && !second.contains('=');
         if plain {
             prefix.push(second.clone());
         }
@@ -921,17 +1135,18 @@ fn tokenize_with(command: &str, escapes: bool) -> Vec<Segment> {
     let mut redirect_next = false;
     let mut chars = command.chars().peekable();
     let mut quote: Option<char> = None;
-    let flush_word = |current: &mut Segment, word: &mut String, started: &mut bool, redirect_next: &mut bool| {
-        if *started {
-            if *redirect_next {
-                current.redirects.push(std::mem::take(word));
-                *redirect_next = false;
-            } else {
-                current.words.push(std::mem::take(word));
+    let flush_word =
+        |current: &mut Segment, word: &mut String, started: &mut bool, redirect_next: &mut bool| {
+            if *started {
+                if *redirect_next {
+                    current.redirects.push(std::mem::take(word));
+                    *redirect_next = false;
+                } else {
+                    current.words.push(std::mem::take(word));
+                }
+                *started = false;
             }
-            *started = false;
-        }
-    };
+        };
     while let Some(ch) = chars.next() {
         if let Some(q) = quote {
             if ch == q {
@@ -959,20 +1174,40 @@ fn tokenize_with(command: &str, escapes: bool) -> Vec<Segment> {
                     word_started = true;
                 }
             }
-            ' ' | '\t' => flush_word(&mut current, &mut word, &mut word_started, &mut redirect_next),
+            ' ' | '\t' => flush_word(
+                &mut current,
+                &mut word,
+                &mut word_started,
+                &mut redirect_next,
+            ),
             '\n' | '\r' | ';' => {
-                flush_word(&mut current, &mut word, &mut word_started, &mut redirect_next);
+                flush_word(
+                    &mut current,
+                    &mut word,
+                    &mut word_started,
+                    &mut redirect_next,
+                );
                 push_segment(&mut segments, &mut current, false);
             }
             '&' => {
-                flush_word(&mut current, &mut word, &mut word_started, &mut redirect_next);
+                flush_word(
+                    &mut current,
+                    &mut word,
+                    &mut word_started,
+                    &mut redirect_next,
+                );
                 if chars.peek() == Some(&'&') {
                     chars.next();
                 }
                 push_segment(&mut segments, &mut current, false);
             }
             '|' => {
-                flush_word(&mut current, &mut word, &mut word_started, &mut redirect_next);
+                flush_word(
+                    &mut current,
+                    &mut word,
+                    &mut word_started,
+                    &mut redirect_next,
+                );
                 if chars.peek() == Some(&'|') {
                     chars.next();
                     push_segment(&mut segments, &mut current, false);
@@ -986,7 +1221,12 @@ fn tokenize_with(command: &str, escapes: bool) -> Vec<Segment> {
                     word.clear();
                     word_started = false;
                 } else {
-                    flush_word(&mut current, &mut word, &mut word_started, &mut redirect_next);
+                    flush_word(
+                        &mut current,
+                        &mut word,
+                        &mut word_started,
+                        &mut redirect_next,
+                    );
                 }
                 if ch == '<' && chars.peek() == Some(&'(') {
                     current.substitution = true;
@@ -1023,7 +1263,12 @@ fn tokenize_with(command: &str, escapes: bool) -> Vec<Segment> {
             }
         }
     }
-    flush_word(&mut current, &mut word, &mut word_started, &mut redirect_next);
+    flush_word(
+        &mut current,
+        &mut word,
+        &mut word_started,
+        &mut redirect_next,
+    );
     push_segment(&mut segments, &mut current, false);
     segments
 }
@@ -1038,7 +1283,11 @@ fn push_segment(segments: &mut Vec<Segment>, current: &mut Segment, next_piped: 
 
 /// `C:\tools\Git.EXE` → `git`.
 fn command_name(word: &str) -> String {
-    let base = word.rsplit(['/', '\\']).next().unwrap_or(word).to_ascii_lowercase();
+    let base = word
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(word)
+        .to_ascii_lowercase();
     for suffix in [".exe", ".cmd", ".bat", ".com", ".ps1"] {
         if let Some(stripped) = base.strip_suffix(suffix) {
             return stripped.to_owned();
@@ -1047,16 +1296,93 @@ fn command_name(word: &str) -> String {
     base
 }
 
-const SHELLS: [&str; 9] = ["sh", "bash", "zsh", "dash", "fish", "cmd", "powershell", "pwsh", "ksh"];
-const DELETE_COMMANDS: [&str; 8] = ["rm", "del", "erase", "rd", "rmdir", "remove-item", "ri", "rimraf"];
+const SHELLS: [&str; 9] = [
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "fish",
+    "cmd",
+    "powershell",
+    "pwsh",
+    "ksh",
+];
+const DELETE_COMMANDS: [&str; 8] = [
+    "rm",
+    "del",
+    "erase",
+    "rd",
+    "rmdir",
+    "remove-item",
+    "ri",
+    "rimraf",
+];
 /// cmd 内建和常见 Windows 程序。这些命令的 `/x`、`//x` 是开关，不是路径。
 const WINDOWS_NATIVE_COMMANDS: [&str; 44] = [
-    "dir", "del", "erase", "rd", "rmdir", "copy", "xcopy", "robocopy", "move", "ren", "rename", "type", "more", "findstr", "where",
-    "attrib", "tree", "cmd", "start", "tasklist", "taskkill", "ipconfig", "ping", "net", "sc", "reg", "icacls", "takeown", "cacls",
-    "fc", "comp", "chcp", "cls", "cd", "chdir", "pushd", "popd", "timeout", "schtasks", "wmic", "certutil", "bitsadmin", "shutdown", "format",
+    "dir",
+    "del",
+    "erase",
+    "rd",
+    "rmdir",
+    "copy",
+    "xcopy",
+    "robocopy",
+    "move",
+    "ren",
+    "rename",
+    "type",
+    "more",
+    "findstr",
+    "where",
+    "attrib",
+    "tree",
+    "cmd",
+    "start",
+    "tasklist",
+    "taskkill",
+    "ipconfig",
+    "ping",
+    "net",
+    "sc",
+    "reg",
+    "icacls",
+    "takeown",
+    "cacls",
+    "fc",
+    "comp",
+    "chcp",
+    "cls",
+    "cd",
+    "chdir",
+    "pushd",
+    "popd",
+    "timeout",
+    "schtasks",
+    "wmic",
+    "certutil",
+    "bitsadmin",
+    "shutdown",
+    "format",
 ];
-const FETCHERS: [&str; 7] = ["curl", "wget", "iwr", "invoke-webrequest", "irm", "invoke-restmethod", "fetch"];
-const INTERPRETERS: [&str; 8] = ["python", "python3", "node", "perl", "ruby", "iex", "invoke-expression", "php"];
+const FETCHERS: [&str; 7] = [
+    "curl",
+    "wget",
+    "iwr",
+    "invoke-webrequest",
+    "irm",
+    "invoke-restmethod",
+    "fetch",
+];
+const INTERPRETERS: [&str; 8] = [
+    "python",
+    "python3",
+    "node",
+    "perl",
+    "ruby",
+    "iex",
+    "invoke-expression",
+    "php",
+];
 
 /// Skip leading wrappers (`env`, `nohup`, `time`, assignments) to the command
 /// that actually runs.
@@ -1067,7 +1393,10 @@ fn effective_words(words: &[String]) -> &[String] {
         let name = command_name(word);
         if is_assignment(word) {
             index += 1;
-        } else if matches!(name.as_str(), "env" | "nohup" | "time" | "nice" | "command" | "exec" | "xargs" | "call" | "start") {
+        } else if matches!(
+            name.as_str(),
+            "env" | "nohup" | "time" | "nice" | "command" | "exec" | "xargs" | "call" | "start"
+        ) {
             index += 1;
             while index < words.len() && words[index].starts_with('-') {
                 index += 1;
@@ -1081,7 +1410,11 @@ fn effective_words(words: &[String]) -> &[String] {
 
 fn is_assignment(word: &str) -> bool {
     match word.split_once('=') {
-        Some((name, _)) => !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !name.starts_with(|c: char| c.is_ascii_digit()),
+        Some((name, _)) => {
+            !name.is_empty()
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+        }
         None => false,
     }
 }
@@ -1091,9 +1424,14 @@ fn segment_risk(words: &[String], findings: &mut Vec<String>) -> Risk {
     segment_risk_with_signature(words, findings).0
 }
 
-fn segment_risk_with_signature(words: &[String], findings: &mut Vec<String>) -> (Risk, Option<Vec<String>>) {
+fn segment_risk_with_signature(
+    words: &[String],
+    findings: &mut Vec<String>,
+) -> (Risk, Option<Vec<String>>) {
     let words = effective_words(words);
-    let Some(head) = words.first() else { return (Risk::Low, None) };
+    let Some(head) = words.first() else {
+        return (Risk::Low, None);
+    };
     let name = command_name(head);
     let lower: Vec<String> = words.iter().map(|word| word.to_ascii_lowercase()).collect();
     let mut high = |finding: &str, signature: Vec<String>| {
@@ -1101,12 +1439,19 @@ fn segment_risk_with_signature(words: &[String], findings: &mut Vec<String>) -> 
         (Risk::High, Some(signature))
     };
     match name.as_str() {
-        "sudo" | "doas" | "su" | "runas" | "gsudo" | "pkexec" => return high("elevation", vec![head.clone()]),
+        "sudo" | "doas" | "su" | "runas" | "gsudo" | "pkexec" => {
+            return high("elevation", vec![head.clone()])
+        }
         "git" => {
             let mut index = 1;
             while index < words.len() {
                 let word = &lower[index];
-                if word == "-c" || word == "-C" || word == "--git-dir" || word == "--work-tree" || words[index] == "-C" {
+                if word == "-c"
+                    || word == "-C"
+                    || word == "--git-dir"
+                    || word == "--work-tree"
+                    || words[index] == "-C"
+                {
                     index += 2;
                 } else if word.starts_with('-') {
                     index += 1;
@@ -1116,26 +1461,44 @@ fn segment_risk_with_signature(words: &[String], findings: &mut Vec<String>) -> 
             }
             match lower.get(index).map(String::as_str) {
                 Some("push") => return high("git_push", vec![head.clone(), words[index].clone()]),
-                Some("clean") => return high("git_clean", vec![head.clone(), words[index].clone()]),
+                Some("clean") => {
+                    return high("git_clean", vec![head.clone(), words[index].clone()])
+                }
                 Some("reset") if lower[index..].iter().any(|word| word == "--hard") => {
-                    return high("git_reset_hard", vec![head.clone(), words[index].clone(), "--hard".into()])
+                    return high(
+                        "git_reset_hard",
+                        vec![head.clone(), words[index].clone(), "--hard".into()],
+                    )
                 }
                 _ => {}
             }
         }
         "rm" => {
             let recursive = lower[1..].iter().any(|word| {
-                word == "--recursive" || word == "-recurse" || word.starts_with("-rec")
-                    || (word.starts_with('-') && !word.starts_with("--") && word[1..].chars().any(|c| c == 'r'))
-            }) || words[1..].iter().any(|word| word.starts_with('-') && !word.starts_with("--") && word[1..].contains('R'));
+                word == "--recursive"
+                    || word == "-recurse"
+                    || word.starts_with("-rec")
+                    || (word.starts_with('-')
+                        && !word.starts_with("--")
+                        && word[1..].chars().any(|c| c == 'r'))
+            }) || words[1..].iter().any(|word| {
+                word.starts_with('-') && !word.starts_with("--") && word[1..].contains('R')
+            });
             if recursive {
-                let flag = words[1..].iter().find(|word| word.starts_with('-')).cloned().unwrap_or_default();
+                let flag = words[1..]
+                    .iter()
+                    .find(|word| word.starts_with('-'))
+                    .cloned()
+                    .unwrap_or_default();
                 return high("recursive_delete", vec![head.clone(), flag]);
             }
         }
         "del" | "erase" | "rd" | "rmdir" => {
             // `/s` 与 MSYS 双斜杠 `//s` 都是递归删除。
-            if lower[1..].iter().any(|word| is_recursive_windows_switch(word)) {
+            if lower[1..]
+                .iter()
+                .any(|word| is_recursive_windows_switch(word))
+            {
                 return high("recursive_delete", vec![head.clone(), "/s".into()]);
             }
         }
@@ -1150,20 +1513,27 @@ fn segment_risk_with_signature(words: &[String], findings: &mut Vec<String>) -> 
         "rimraf" => return high("recursive_delete", vec![head.clone()]),
         "iex" | "invoke-expression" => return high("remote_script", vec![head.clone()]),
         "npm" | "pnpm" | "yarn" | "bun" | "cnpm" => {
-            if lower[1..].iter().any(|word| word == "-g" || word == "--global" || word == "--location=global")
+            if lower[1..]
+                .iter()
+                .any(|word| word == "-g" || word == "--global" || word == "--location=global")
                 || lower.get(1).map(String::as_str) == Some("global")
             {
                 return high("global_install", vec![head.clone()]);
             }
         }
-        "cargo" | "go" | "gem" | "pipx" | "brew" | "choco" | "winget" | "scoop" | "apt" | "apt-get" | "yum" | "dnf" | "pacman" | "snap" | "port" => {
-            if matches!(lower.get(1).map(String::as_str), Some("install")) || (name == "pacman" && words.get(1).is_some_and(|word| word.starts_with("-S"))) {
+        "cargo" | "go" | "gem" | "pipx" | "brew" | "choco" | "winget" | "scoop" | "apt"
+        | "apt-get" | "yum" | "dnf" | "pacman" | "snap" | "port" => {
+            if matches!(lower.get(1).map(String::as_str), Some("install"))
+                || (name == "pacman" && words.get(1).is_some_and(|word| word.starts_with("-S")))
+            {
                 return high("global_install", vec![head.clone(), words[1].clone()]);
             }
         }
         "pip" | "pip3" => {
             if lower.get(1).map(String::as_str) == Some("install")
-                && lower[2..].iter().any(|word| word == "--user" || word == "--system" || word == "--break-system-packages")
+                && lower[2..].iter().any(|word| {
+                    word == "--user" || word == "--system" || word == "--break-system-packages"
+                })
             {
                 return high("global_install", vec![head.clone(), words[1].clone()]);
             }
@@ -1205,7 +1575,9 @@ fn is_recursive_windows_switch(word: &str) -> bool {
 /// The arguments a delete command removes (options and their values skipped).
 fn delete_targets(words: &[String]) -> Vec<String> {
     let words = effective_words(words);
-    let Some(head) = words.first() else { return Vec::new() };
+    let Some(head) = words.first() else {
+        return Vec::new();
+    };
     let name = command_name(head);
     if !DELETE_COMMANDS.contains(&name.as_str()) {
         return Vec::new();
@@ -1240,10 +1612,21 @@ fn delete_targets(words: &[String]) -> Vec<String> {
 
 /// `cd` / `chdir` / `pushd` / `set-location` / `sl` 的下一工作目录。
 /// `None` 表示这段不是切目录。无法解析（`-`、未知变量）时用文件系统根 `/`。
-fn directory_change(words: &[String], cwd: &Path, project_root: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+fn directory_change(
+    words: &[String],
+    cwd: &Path,
+    project_root: Option<&Path>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
     let words = effective_words(words);
-    let name = words.first().map(|word| command_name(word)).unwrap_or_default();
-    if !matches!(name.as_str(), "cd" | "chdir" | "pushd" | "set-location" | "sl") {
+    let name = words
+        .first()
+        .map(|word| command_name(word))
+        .unwrap_or_default();
+    if !matches!(
+        name.as_str(),
+        "cd" | "chdir" | "pushd" | "set-location" | "sl"
+    ) {
         return None;
     }
     let fallback = home.map(normalize).unwrap_or_else(|| PathBuf::from("/"));
@@ -1263,7 +1646,9 @@ fn directory_change(words: &[String], cwd: &Path, project_root: Option<&Path>, h
         }
         // `cd /d X` (cmd) skips the switch; a lone `/d` with nothing after it
         // is an MSYS drive path in Git Bash (`cd /d` = `D:\`), so it is the target.
-        let more = words[index + 1..].iter().any(|next| !is_windows_switch(next) && !next.starts_with('-'));
+        let more = words[index + 1..]
+            .iter()
+            .any(|next| !is_windows_switch(next) && !next.starts_with('-'));
         if (is_windows_switch(word) && more) || lower.starts_with('-') {
             index += 1;
             continue;
@@ -1274,7 +1659,12 @@ fn directory_change(words: &[String], cwd: &Path, project_root: Option<&Path>, h
 }
 
 /// `cd -` 和无法解析的变量都把后续 cwd 定为文件系统根。
-fn cwd_after_cd(target: &str, cwd: &Path, project_root: Option<&Path>, home: Option<&Path>) -> PathBuf {
+fn cwd_after_cd(
+    target: &str,
+    cwd: &Path,
+    project_root: Option<&Path>,
+    home: Option<&Path>,
+) -> PathBuf {
     if target == "-" {
         PathBuf::from("/")
     } else {
@@ -1282,14 +1672,41 @@ fn cwd_after_cd(target: &str, cwd: &Path, project_root: Option<&Path>, home: Opt
     }
 }
 
-fn analyze_command(command: &str, cwd: &Path, project_root: Option<&Path>, home: Option<&Path>) -> CommandAnalysis {
-    let mut analysis = CommandAnalysis { segments: Vec::new(), risk: Risk::Low, findings: Vec::new(), block: None, path_boundary: false, opaque: false };
+fn analyze_command(
+    command: &str,
+    cwd: &Path,
+    project_root: Option<&Path>,
+    home: Option<&Path>,
+) -> CommandAnalysis {
+    let mut analysis = CommandAnalysis {
+        segments: Vec::new(),
+        risk: Risk::Low,
+        findings: Vec::new(),
+        block: None,
+        path_boundary: false,
+        opaque: false,
+    };
     let escapes = !windows_syntax();
     analyze_into(&mut analysis, command, cwd, project_root, home, 0, escapes);
     // 默认方言没命中 block 时，用另一种方言只补 block（路径边界和风险仍按默认方言）。
     if analysis.block.is_none() {
-        let mut alternate = CommandAnalysis { segments: Vec::new(), risk: Risk::Low, findings: Vec::new(), block: None, path_boundary: false, opaque: false };
-        analyze_into(&mut alternate, command, cwd, project_root, home, 0, !escapes);
+        let mut alternate = CommandAnalysis {
+            segments: Vec::new(),
+            risk: Risk::Low,
+            findings: Vec::new(),
+            block: None,
+            path_boundary: false,
+            opaque: false,
+        };
+        analyze_into(
+            &mut alternate,
+            command,
+            cwd,
+            project_root,
+            home,
+            0,
+            !escapes,
+        );
         if alternate.block.is_some() {
             analysis.block = alternate.block;
         }
@@ -1297,7 +1714,15 @@ fn analyze_command(command: &str, cwd: &Path, project_root: Option<&Path>, home:
     analysis
 }
 
-fn analyze_into(analysis: &mut CommandAnalysis, command: &str, cwd: &Path, project_root: Option<&Path>, home: Option<&Path>, depth: usize, escapes: bool) {
+fn analyze_into(
+    analysis: &mut CommandAnalysis,
+    command: &str,
+    cwd: &Path,
+    project_root: Option<&Path>,
+    home: Option<&Path>,
+    depth: usize,
+    escapes: bool,
+) {
     let mut segments = tokenize_with(command, escapes);
     let mut cwd_now = cwd.to_path_buf();
     let mut previous_head: Option<String> = None;
@@ -1306,10 +1731,17 @@ fn analyze_into(analysis: &mut CommandAnalysis, command: &str, cwd: &Path, proje
         let (mut risk, signature) = segment_risk_with_signature(&segment.words, &mut findings);
         segment.high_signature = signature;
         let words = effective_words(&segment.words).to_vec();
-        let head = words.first().map(|word| command_name(word)).unwrap_or_default();
+        let head = words
+            .first()
+            .map(|word| command_name(word))
+            .unwrap_or_default();
         if segment.piped {
-            let from_fetcher = previous_head.as_deref().is_some_and(|prev| FETCHERS.contains(&prev));
-            if from_fetcher && (SHELLS.contains(&head.as_str()) || INTERPRETERS.contains(&head.as_str())) {
+            let from_fetcher = previous_head
+                .as_deref()
+                .is_some_and(|prev| FETCHERS.contains(&prev));
+            if from_fetcher
+                && (SHELLS.contains(&head.as_str()) || INTERPRETERS.contains(&head.as_str()))
+            {
                 risk = Risk::High;
                 findings.push("remote_script".into());
                 segment.high_signature = None;
@@ -1324,7 +1756,8 @@ fn analyze_into(analysis: &mut CommandAnalysis, command: &str, cwd: &Path, proje
         // the home directory (or anything above them), or a system directory.
         if analysis.block.is_none() {
             for target in delete_targets(&segment.words) {
-                if let Some(reason) = dangerous_delete_target(&target, &cwd_now, project_root, home) {
+                if let Some(reason) = dangerous_delete_target(&target, &cwd_now, project_root, home)
+                {
                     analysis.block = Some(reason);
                     break;
                 }
@@ -1367,8 +1800,23 @@ fn analyze_into(analysis: &mut CommandAnalysis, command: &str, cwd: &Path, proje
                 }
                 Some(NestedScript::Script(script)) => {
                     analysis.opaque = true;
-                    let mut nested = CommandAnalysis { segments: Vec::new(), risk: Risk::Low, findings: Vec::new(), block: None, path_boundary: false, opaque: false };
-                    analyze_into(&mut nested, &script, &cwd_now, project_root, home, depth + 1, escapes);
+                    let mut nested = CommandAnalysis {
+                        segments: Vec::new(),
+                        risk: Risk::Low,
+                        findings: Vec::new(),
+                        block: None,
+                        path_boundary: false,
+                        opaque: false,
+                    };
+                    analyze_into(
+                        &mut nested,
+                        &script,
+                        &cwd_now,
+                        project_root,
+                        home,
+                        depth + 1,
+                        escapes,
+                    );
                     if nested.block.is_some() && analysis.block.is_none() {
                         analysis.block = nested.block;
                     }
@@ -1424,7 +1872,10 @@ fn nested_script(head: &str, words: &[String]) -> Option<NestedScript> {
         if powershell && matches!(normalized.as_str(), "-encodedcommand" | "-enc" | "-e") {
             return Some(NestedScript::Opaque);
         }
-        if matches!(normalized.as_str(), "-c" | "-lc" | "-ic" | "/c" | "/k" | "-command" | "-commandwithargs") {
+        if matches!(
+            normalized.as_str(),
+            "-c" | "-lc" | "-ic" | "/c" | "/k" | "-command" | "-commandwithargs"
+        ) {
             let rest = words[index + 1..].join(" ");
             return (!rest.trim().is_empty()).then_some(NestedScript::Script(rest));
         }
@@ -1443,11 +1894,20 @@ fn looks_like_path(word: &str) -> bool {
         return false;
     }
     let lower = word.to_ascii_lowercase();
-    if matches!(lower.as_str(), "/dev/null" | "/dev/stdout" | "/dev/stderr" | "nul" | "con") {
+    if matches!(
+        lower.as_str(),
+        "/dev/null" | "/dev/stdout" | "/dev/stderr" | "nul" | "con"
+    ) {
         return false;
     }
-    word.contains('/') || word.contains('\\') || word.starts_with('~') || word == ".." || word == "."
-        || is_drive_path(word) || word.starts_with('%') || word.starts_with('$')
+    word.contains('/')
+        || word.contains('\\')
+        || word.starts_with('~')
+        || word == ".."
+        || word == "."
+        || is_drive_path(word)
+        || word.starts_with('%')
+        || word.starts_with('$')
 }
 
 fn is_drive_path(word: &str) -> bool {
@@ -1462,17 +1922,38 @@ fn is_absolute_word(word: &str) -> bool {
 /// Expand `~`, `$HOME`, `%USERPROFILE%`, `$env:USERPROFILE` and resolve the
 /// word lexically against `cwd`.
 /// 当前目录或项目根是盘符路径时，把 MSYS / Cygwin / WSL 盘符路径映射成 `X:/...`。
-fn resolve_word(word: &str, cwd: &Path, home: Option<&Path>, project_root: Option<&Path>) -> PathBuf {
+fn resolve_word(
+    word: &str,
+    cwd: &Path,
+    home: Option<&Path>,
+    project_root: Option<&Path>,
+) -> PathBuf {
     let home_text = home.map(|home| home.to_string_lossy().into_owned());
     let mut text = word.to_owned();
-    for variable in ["${HOME}", "$HOME", "%USERPROFILE%", "%HOMEPATH%", "$env:USERPROFILE", "$env:HOME", "%HOME%"] {
+    for variable in [
+        "${HOME}",
+        "$HOME",
+        "%USERPROFILE%",
+        "%HOMEPATH%",
+        "$env:USERPROFILE",
+        "$env:HOME",
+        "%HOME%",
+    ] {
         if let Some(rest) = strip_prefix_ignore_case(&text, variable) {
-            text = format!("{}{}", home_text.clone().unwrap_or_else(|| "/".into()), rest);
+            text = format!(
+                "{}{}",
+                home_text.clone().unwrap_or_else(|| "/".into()),
+                rest
+            );
             break;
         }
     }
     if text == "~" || text.starts_with("~/") || text.starts_with("~\\") {
-        text = format!("{}{}", home_text.clone().unwrap_or_else(|| "/".into()), &text[1..]);
+        text = format!(
+            "{}{}",
+            home_text.clone().unwrap_or_else(|| "/".into()),
+            &text[1..]
+        );
     }
     if text.starts_with('$') || (text.starts_with('%') && text[1..].contains('%')) {
         // An unknown variable: the Host cannot tell where it points.
@@ -1500,7 +1981,9 @@ fn path_is_drive(path: &Path) -> bool {
     if is_drive_path(&text) {
         return true;
     }
-    text.to_ascii_lowercase().strip_prefix("//?/").is_some_and(is_drive_path)
+    text.to_ascii_lowercase()
+        .strip_prefix("//?/")
+        .is_some_and(is_drive_path)
 }
 
 /// `/x`、`/x/...`、`/cygdrive/x/...`、`/mnt/x/...` → `X:/...`。`x` 必须是单个字母。
@@ -1540,7 +2023,10 @@ fn drive_from_rest(rest: &str) -> Option<String> {
 }
 
 fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
-    (text.len() >= prefix.len() && text.is_char_boundary(prefix.len()) && text[..prefix.len()].eq_ignore_ascii_case(prefix)).then(|| &text[prefix.len()..])
+    (text.len() >= prefix.len()
+        && text.is_char_boundary(prefix.len())
+        && text[..prefix.len()].eq_ignore_ascii_case(prefix))
+    .then(|| &text[prefix.len()..])
 }
 
 /// Lexical normalization over both separators (`.` and `..` folded).
@@ -1556,7 +2042,10 @@ fn normalize(path: &Path) -> PathBuf {
         text
     };
     let (prefix, rest) = if is_drive_path(&text) {
-        (format!("{}/", &text[..2].to_ascii_uppercase()), text[2..].to_owned())
+        (
+            format!("{}/", &text[..2].to_ascii_uppercase()),
+            text[2..].to_owned(),
+        )
     } else if text.starts_with('/') {
         ("/".to_owned(), text.clone())
     } else {
@@ -1587,9 +2076,17 @@ fn components(path: &Path) -> Vec<String> {
     } else if text.starts_with('/') {
         parts.push("/".into());
     }
-    let body = if is_drive_path(&text) { &text[2..] } else { text.as_str() };
+    let body = if is_drive_path(&text) {
+        &text[2..]
+    } else {
+        text.as_str()
+    };
     parts.extend(body.split('/').filter(|part| !part.is_empty()).map(|part| {
-        if casefold { part.to_lowercase() } else { part.to_owned() }
+        if casefold {
+            part.to_lowercase()
+        } else {
+            part.to_owned()
+        }
     }));
     parts
 }
@@ -1615,12 +2112,24 @@ fn is_filesystem_root(path: &Path) -> bool {
 }
 
 const SHELL_PROFILES: [&str; 10] = [
-    ".bashrc", ".bash_profile", ".bash_login", ".profile", ".zshrc", ".zprofile", ".zshenv",
-    "microsoft.powershell_profile.ps1", "profile.ps1", "config.fish",
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".profile",
+    ".zshrc",
+    ".zprofile",
+    ".zshenv",
+    "microsoft.powershell_profile.ps1",
+    "profile.ps1",
+    "config.fish",
 ];
 
 /// `Some(finding)` when the path is outside the project or protected.
-pub(crate) fn path_boundary(path: &Path, project_root: Option<&Path>, _home: Option<&Path>) -> Option<&'static str> {
+pub(crate) fn path_boundary(
+    path: &Path,
+    project_root: Option<&Path>,
+    _home: Option<&Path>,
+) -> Option<&'static str> {
     let normalized = normalize(path);
     match project_root {
         Some(root) if !is_within(&normalized, root) => return Some("outside_project"),
@@ -1636,23 +2145,50 @@ pub(crate) fn path_boundary(path: &Path, project_root: Option<&Path>, _home: Opt
     if inside.iter().any(|part| part.eq_ignore_ascii_case(".fox")) {
         return Some("protected_fox_config");
     }
-    if inside.last().is_some_and(|name| SHELL_PROFILES.iter().any(|profile| name.eq_ignore_ascii_case(profile))) {
+    if inside.last().is_some_and(|name| {
+        SHELL_PROFILES
+            .iter()
+            .any(|profile| name.eq_ignore_ascii_case(profile))
+    }) {
         return Some("protected_shell_config");
     }
     None
 }
 
 /// 本身及其内部都禁止删除的 POSIX 目录。
-const POSIX_SYSTEM_TREE: [&str; 13] = ["bin", "boot", "dev", "etc", "lib", "lib32", "lib64", "libx32", "proc", "sbin", "sys", "usr", "System"];
+const POSIX_SYSTEM_TREE: [&str; 13] = [
+    "bin", "boot", "dev", "etc", "lib", "lib32", "lib64", "libx32", "proc", "sbin", "sys", "usr",
+    "System",
+];
 /// 只禁止删除目录本身（其上级已被根目录规则覆盖）。
-const POSIX_SYSTEM_SELF: [&str; 12] = ["var", "opt", "home", "Users", "root", "Applications", "Library", "private", "srv", "mnt", "media", "snap"];
+const POSIX_SYSTEM_SELF: [&str; 12] = [
+    "var",
+    "opt",
+    "home",
+    "Users",
+    "root",
+    "Applications",
+    "Library",
+    "private",
+    "srv",
+    "mnt",
+    "media",
+    "snap",
+];
 
 /// Built-in block for one delete target.
-fn dangerous_delete_target(target: &str, cwd: &Path, project_root: Option<&Path>, home: Option<&Path>) -> Option<String> {
+fn dangerous_delete_target(
+    target: &str,
+    cwd: &Path,
+    project_root: Option<&Path>,
+    home: Option<&Path>,
+) -> Option<String> {
     // `*`, `./*`, `~/*`, `/*`: a glob that empties the directory it names.
     let trimmed = target.trim_end_matches(['/', '\\']);
     let (dir_part, glob) = match trimmed.strip_suffix('*') {
-        Some(prefix) if prefix.is_empty() || prefix.ends_with('/') || prefix.ends_with('\\') => (if prefix.is_empty() { "." } else { prefix }, true),
+        Some(prefix) if prefix.is_empty() || prefix.ends_with('/') || prefix.ends_with('\\') => {
+            (if prefix.is_empty() { "." } else { prefix }, true)
+        }
         _ => (trimmed, false),
     };
     let dir_part = if dir_part.is_empty() { "/" } else { dir_part };
@@ -1695,8 +2231,14 @@ fn is_system_directory(path: &Path) -> bool {
 
 fn windows_system_directory(parts: &[String]) -> bool {
     let rest = &parts[1..];
-    let Some(first) = rest.first() else { return false };
-    if first.eq_ignore_ascii_case("windows") || first.eq_ignore_ascii_case("programdata") || first.eq_ignore_ascii_case("program files") || first.eq_ignore_ascii_case("program files (x86)") {
+    let Some(first) = rest.first() else {
+        return false;
+    };
+    if first.eq_ignore_ascii_case("windows")
+        || first.eq_ignore_ascii_case("programdata")
+        || first.eq_ignore_ascii_case("program files")
+        || first.eq_ignore_ascii_case("program files (x86)")
+    {
         return true;
     }
     // `X:/Users` 本身，以及 `X:/Users/<用户>` 这一层（用户目录本身，不含其内部）。
@@ -1705,17 +2247,27 @@ fn windows_system_directory(parts: &[String]) -> bool {
 
 fn posix_system_directory(parts: &[String]) -> bool {
     let rest = &parts[1..];
-    let Some(first) = rest.first() else { return false };
-    if POSIX_SYSTEM_TREE.iter().any(|name| first.eq_ignore_ascii_case(name)) {
+    let Some(first) = rest.first() else {
+        return false;
+    };
+    if POSIX_SYSTEM_TREE
+        .iter()
+        .any(|name| first.eq_ignore_ascii_case(name))
+    {
         return true;
     }
-    POSIX_SYSTEM_SELF.iter().any(|name| first.eq_ignore_ascii_case(name)) && rest.len() == 1
+    POSIX_SYSTEM_SELF
+        .iter()
+        .any(|name| first.eq_ignore_ascii_case(name))
+        && rest.len() == 1
 }
 
 /// The current user's home directory, as the Host sees it.
 pub fn host_home() -> Option<PathBuf> {
     let variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    std::env::var_os(variable).filter(|value| !value.is_empty()).map(PathBuf::from)
+    std::env::var_os(variable)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -1724,46 +2276,119 @@ mod tests {
 
     #[test]
     fn a1_verbatim_host_paths_compare_as_the_plain_path() {
-        assert!(is_within(Path::new(r"\\?\C:\work\proj\note.txt"), Path::new(r"C:\work\proj")));
-        assert_eq!(path_boundary(Path::new(r"\\?\C:\work\proj\note.txt"), Some(Path::new("C:/work/proj")), None), None);
-        assert_eq!(normalize(Path::new(r"\\?\C:\Work\a\..\b")), PathBuf::from("C:/Work/b"));
+        assert!(is_within(
+            Path::new(r"\\?\C:\work\proj\note.txt"),
+            Path::new(r"C:\work\proj")
+        ));
+        assert_eq!(
+            path_boundary(
+                Path::new(r"\\?\C:\work\proj\note.txt"),
+                Some(Path::new("C:/work/proj")),
+                None
+            ),
+            None
+        );
+        assert_eq!(
+            normalize(Path::new(r"\\?\C:\Work\a\..\b")),
+            PathBuf::from("C:/Work/b")
+        );
         // UNC targets compare with a plain `\\srv\share` root the same way.
-        assert!(is_within(Path::new(r"\\?\UNC\srv\share\x"), Path::new(r"\\srv\share")));
+        assert!(is_within(
+            Path::new(r"\\?\UNC\srv\share\x"),
+            Path::new(r"\\srv\share")
+        ));
     }
 
     fn root() -> PathBuf {
-        if cfg!(windows) { PathBuf::from("C:/work/proj") } else { PathBuf::from("/work/proj") }
+        if cfg!(windows) {
+            PathBuf::from("C:/work/proj")
+        } else {
+            PathBuf::from("/work/proj")
+        }
     }
     fn home() -> PathBuf {
-        if cfg!(windows) { PathBuf::from("C:/Users/fox") } else { PathBuf::from("/home/fox") }
+        if cfg!(windows) {
+            PathBuf::from("C:/Users/fox")
+        } else {
+            PathBuf::from("/home/fox")
+        }
     }
     fn rule(id: &str, effect: RuleEffect, tool: &str, pattern: &str) -> PolicyRule {
-        PolicyRule { id: id.into(), effect, tool: tool.into(), pattern: pattern.into() }
+        PolicyRule {
+            id: id.into(),
+            effect,
+            tool: tool.into(),
+            pattern: pattern.into(),
+        }
     }
-    fn command(tool: &str, command: &str, mode: AccessMode, rules: &[PolicyRule]) -> PolicyDecision {
+    fn command(
+        tool: &str,
+        command: &str,
+        mode: AccessMode,
+        rules: &[PolicyRule],
+    ) -> PolicyDecision {
         command_risk(tool, command, None, mode, rules)
     }
-    fn command_risk(tool: &str, command: &str, risk: Option<&str>, mode: AccessMode, rules: &[PolicyRule]) -> PolicyDecision {
+    fn command_risk(
+        tool: &str,
+        command: &str,
+        risk: Option<&str>,
+        mode: AccessMode,
+        rules: &[PolicyRule],
+    ) -> PolicyDecision {
         let root = root();
         let home = home();
-        let subject = ToolSubject::Command { command: command.into(), cwd: root.clone(), model_risk: risk.map(str::to_owned) };
-        decide(&PolicyRequest { tool, subject: &subject, mode, project_root: Some(&root), home: Some(&home), rules })
+        let subject = ToolSubject::Command {
+            command: command.into(),
+            cwd: root.clone(),
+            model_risk: risk.map(str::to_owned),
+        };
+        decide(&PolicyRequest {
+            tool,
+            subject: &subject,
+            mode,
+            project_root: Some(&root),
+            home: Some(&home),
+            rules,
+        })
     }
     fn subject(subject: ToolSubject, mode: AccessMode) -> PolicyDecision {
         let root = root();
         let home = home();
-        decide(&PolicyRequest { tool: "write_file", subject: &subject, mode, project_root: Some(&root), home: Some(&home), rules: &[] })
+        decide(&PolicyRequest {
+            tool: "write_file",
+            subject: &subject,
+            mode,
+            project_root: Some(&root),
+            home: Some(&home),
+            rules: &[],
+        })
     }
     fn verdict(decision: &PolicyDecision) -> &'static str {
-        match decision.verdict { Verdict::Allow => "allow", Verdict::Ask => "ask", Verdict::Deny { .. } => "deny" }
+        match decision.verdict {
+            Verdict::Allow => "allow",
+            Verdict::Ask => "ask",
+            Verdict::Deny { .. } => "deny",
+        }
     }
-    const MODES: [AccessMode; 4] = [AccessMode::ReadOnly, AccessMode::Ask, AccessMode::Auto, AccessMode::FullAccess];
+    const MODES: [AccessMode; 4] = [
+        AccessMode::ReadOnly,
+        AccessMode::Ask,
+        AccessMode::Auto,
+        AccessMode::FullAccess,
+    ];
 
     #[test]
     fn a1_policy_four_modes_by_six_tool_classes() {
-        let write = || ToolSubject::Write { target: root().join("src/main.rs") };
-        let outside = || ToolSubject::Write { target: root().join("../other/x.txt") };
-        let protected = || ToolSubject::Write { target: root().join(".git/config") };
+        let write = || ToolSubject::Write {
+            target: root().join("src/main.rs"),
+        };
+        let outside = || ToolSubject::Write {
+            target: root().join("../other/x.txt"),
+        };
+        let protected = || ToolSubject::Write {
+            target: root().join(".git/config"),
+        };
         let table: [(&str, [&str; 4]); 7] = [
             ("read", ["allow", "allow", "allow", "allow"]),
             ("write", ["deny", "ask", "allow", "allow"]),
@@ -1783,8 +2408,16 @@ mod tests {
                     "network" => subject(ToolSubject::Network, *mode),
                     "boundary" => {
                         let decision = subject(outside(), *mode);
-                        assert_eq!(verdict(&subject(protected(), *mode)), want, "protected {mode:?}");
-                        assert_eq!(verdict(&command("run_command", "cat ../secret.txt", *mode, &[])), want, "outside command {mode:?}");
+                        assert_eq!(
+                            verdict(&subject(protected(), *mode)),
+                            want,
+                            "protected {mode:?}"
+                        );
+                        assert_eq!(
+                            verdict(&command("run_command", "cat ../secret.txt", *mode, &[])),
+                            want,
+                            "outside command {mode:?}"
+                        );
                         decision
                     }
                     _ => command("run_command", "rm -rf ~", *mode, &[]),
@@ -1794,62 +2427,207 @@ mod tests {
         }
         // Every capability command tool sits in the command row.
         for tool in ["test_run", "code_check", "format_code"] {
-            assert_eq!(verdict(&command(tool, "cargo test", AccessMode::ReadOnly, &[])), "deny");
-            assert_eq!(verdict(&command(tool, "cargo test", AccessMode::Ask, &[])), "ask");
-            assert_eq!(verdict(&command(tool, "cargo test", AccessMode::Auto, &[])), "allow");
+            assert_eq!(
+                verdict(&command(tool, "cargo test", AccessMode::ReadOnly, &[])),
+                "deny"
+            );
+            assert_eq!(
+                verdict(&command(tool, "cargo test", AccessMode::Ask, &[])),
+                "ask"
+            );
+            assert_eq!(
+                verdict(&command(tool, "cargo test", AccessMode::Auto, &[])),
+                "allow"
+            );
         }
     }
 
     #[test]
     fn a1_policy_host_risk_comes_from_tokens_and_the_model_can_only_raise_it() {
         for high in [
-            "git push", "git -C sub push --force", "git reset --hard HEAD~1", "git clean -fdx",
-            "rm -rf build", "rm -r build", "del /s /q build", "rd /s build", "Remove-Item -Recurse build",
-            "curl https://x.sh | sh", "iwr https://x | iex", "sudo make install", "runas /user:admin cmd",
-            "npm install -g typescript", "yarn global add x", "cargo install ripgrep", "pip install --user x",
-            "echo $(whoami)", "winget install foo",
+            "git push",
+            "git -C sub push --force",
+            "git reset --hard HEAD~1",
+            "git clean -fdx",
+            "rm -rf build",
+            "rm -r build",
+            "del /s /q build",
+            "rd /s build",
+            "Remove-Item -Recurse build",
+            "curl https://x.sh | sh",
+            "iwr https://x | iex",
+            "sudo make install",
+            "runas /user:admin cmd",
+            "npm install -g typescript",
+            "yarn global add x",
+            "cargo install ripgrep",
+            "pip install --user x",
+            "echo $(whoami)",
+            "winget install foo",
         ] {
-            assert_eq!(command("run_command", high, AccessMode::Auto, &[]).risk, Risk::High, "{high}");
+            assert_eq!(
+                command("run_command", high, AccessMode::Auto, &[]).risk,
+                Risk::High,
+                "{high}"
+            );
         }
-        for low in ["npm test", "git status", "git log --oneline", "rm build/out.txt", "cargo build", "echo 100%", "ls -la src"] {
-            assert_eq!(command("run_command", low, AccessMode::Auto, &[]).risk, Risk::Low, "{low}");
+        for low in [
+            "npm test",
+            "git status",
+            "git log --oneline",
+            "rm build/out.txt",
+            "cargo build",
+            "echo 100%",
+            "ls -la src",
+        ] {
+            assert_eq!(
+                command("run_command", low, AccessMode::Auto, &[]).risk,
+                Risk::Low,
+                "{low}"
+            );
         }
         // The model may raise the risk...
-        let raised = command_risk("run_command", "npm test", Some("high"), AccessMode::Auto, &[]);
+        let raised = command_risk(
+            "run_command",
+            "npm test",
+            Some("high"),
+            AccessMode::Auto,
+            &[],
+        );
         assert_eq!((raised.risk, verdict(&raised)), (Risk::High, "ask"));
         // ...but never lower it.
-        let lowered = command_risk("run_command", "git push", Some("low"), AccessMode::Auto, &[]);
+        let lowered = command_risk(
+            "run_command",
+            "git push",
+            Some("low"),
+            AccessMode::Auto,
+            &[],
+        );
         assert_eq!((lowered.risk, verdict(&lowered)), (Risk::High, "ask"));
     }
 
     #[test]
     fn a1_policy_builtin_dangerous_deletes_are_blocked_even_in_full_access() {
         for danger in [
-            "rm -rf /", "rm -rf ~", "rm -rf $HOME", "rm -rf ~/*", "rm -rf .", "rm -rf *", "rm -rf ..",
-            "Remove-Item -Recurse -Force %USERPROFILE%", "rd /s /q C:\\", "bash -c \"rm -rf ~\"",
+            "rm -rf /",
+            "rm -rf ~",
+            "rm -rf $HOME",
+            "rm -rf ~/*",
+            "rm -rf .",
+            "rm -rf *",
+            "rm -rf ..",
+            "Remove-Item -Recurse -Force %USERPROFILE%",
+            "rd /s /q C:\\",
+            "bash -c \"rm -rf ~\"",
             "cd sub && rm -rf /*",
         ] {
-            let decision = command("run_command", danger, AccessMode::FullAccess, &[rule("r", RuleEffect::Allow, "*", "rm -rf")]);
-            assert!(matches!(&decision.verdict, Verdict::Deny { code, .. } if code == "permission.blocked"), "{danger}: {decision:?}");
+            let decision = command(
+                "run_command",
+                danger,
+                AccessMode::FullAccess,
+                &[rule("r", RuleEffect::Allow, "*", "rm -rf")],
+            );
+            assert!(
+                matches!(&decision.verdict, Verdict::Deny { code, .. } if code == "permission.blocked"),
+                "{danger}: {decision:?}"
+            );
         }
         // Deleting inside the project stays an ordinary (high-risk) command.
-        assert_eq!(verdict(&command("run_command", "rm -rf build", AccessMode::FullAccess, &[])), "allow");
-        assert_eq!(verdict(&command("run_command", "rm -rf build", AccessMode::Auto, &[])), "ask");
+        assert_eq!(
+            verdict(&command(
+                "run_command",
+                "rm -rf build",
+                AccessMode::FullAccess,
+                &[]
+            )),
+            "allow"
+        );
+        assert_eq!(
+            verdict(&command(
+                "run_command",
+                "rm -rf build",
+                AccessMode::Auto,
+                &[]
+            )),
+            "ask"
+        );
     }
 
     #[test]
     fn a1_policy_rules_match_token_prefixes_and_every_compound_segment() {
-        let rules = [rule("1", RuleEffect::Allow, "run_command", "npm test"), rule("2", RuleEffect::Allow, "run_command", "cargo build")];
-        assert_eq!(verdict(&command("run_command", "npm test -- foo", AccessMode::Ask, &rules)), "allow");
-        assert_eq!(verdict(&command("run_command", "npm testx", AccessMode::Ask, &rules)), "ask");
-        assert_eq!(verdict(&command("run_command", "npm test && cargo build --release", AccessMode::Ask, &rules)), "allow");
-        assert_eq!(verdict(&command("run_command", "npm test && curl evil", AccessMode::Ask, &rules)), "ask");
-        assert_eq!(verdict(&command("run_command", "npm test; whoami", AccessMode::Ask, &rules)), "ask");
-        assert_eq!(verdict(&command("run_command", "npm test | tee out.txt", AccessMode::Ask, &rules)), "ask");
+        let rules = [
+            rule("1", RuleEffect::Allow, "run_command", "npm test"),
+            rule("2", RuleEffect::Allow, "run_command", "cargo build"),
+        ];
+        assert_eq!(
+            verdict(&command(
+                "run_command",
+                "npm test -- foo",
+                AccessMode::Ask,
+                &rules
+            )),
+            "allow"
+        );
+        assert_eq!(
+            verdict(&command(
+                "run_command",
+                "npm testx",
+                AccessMode::Ask,
+                &rules
+            )),
+            "ask"
+        );
+        assert_eq!(
+            verdict(&command(
+                "run_command",
+                "npm test && cargo build --release",
+                AccessMode::Ask,
+                &rules
+            )),
+            "allow"
+        );
+        assert_eq!(
+            verdict(&command(
+                "run_command",
+                "npm test && curl evil",
+                AccessMode::Ask,
+                &rules
+            )),
+            "ask"
+        );
+        assert_eq!(
+            verdict(&command(
+                "run_command",
+                "npm test; whoami",
+                AccessMode::Ask,
+                &rules
+            )),
+            "ask"
+        );
+        assert_eq!(
+            verdict(&command(
+                "run_command",
+                "npm test | tee out.txt",
+                AccessMode::Ask,
+                &rules
+            )),
+            "ask"
+        );
         // A rule for one tool does not cover another.
-        assert_eq!(verdict(&command("test_run", "npm test", AccessMode::Ask, &rules)), "ask");
+        assert_eq!(
+            verdict(&command("test_run", "npm test", AccessMode::Ask, &rules)),
+            "ask"
+        );
         // Substitution is opaque: no rule covers it.
-        assert_eq!(verdict(&command("run_command", "npm test $(whoami)", AccessMode::Ask, &rules)), "ask");
+        assert_eq!(
+            verdict(&command(
+                "run_command",
+                "npm test $(whoami)",
+                AccessMode::Ask,
+                &rules
+            )),
+            "ask"
+        );
         let decision = command("run_command", "npm test", AccessMode::Ask, &rules);
         assert_eq!(decision.rule_ids(), vec!["1".to_owned()]);
     }
@@ -1857,26 +2635,109 @@ mod tests {
     #[test]
     fn a1_policy_a_broad_prefix_never_covers_a_high_risk_command() {
         let broad = [rule("git", RuleEffect::Allow, "run_command", "git")];
-        assert_eq!(verdict(&command("run_command", "git status", AccessMode::Ask, &broad)), "allow");
-        assert_eq!(verdict(&command("run_command", "git push origin main", AccessMode::Ask, &broad)), "ask");
-        assert_eq!(verdict(&command("run_command", "git push origin main", AccessMode::Auto, &broad)), "ask");
+        assert_eq!(
+            verdict(&command(
+                "run_command",
+                "git status",
+                AccessMode::Ask,
+                &broad
+            )),
+            "allow"
+        );
+        assert_eq!(
+            verdict(&command(
+                "run_command",
+                "git push origin main",
+                AccessMode::Ask,
+                &broad
+            )),
+            "ask"
+        );
+        assert_eq!(
+            verdict(&command(
+                "run_command",
+                "git push origin main",
+                AccessMode::Auto,
+                &broad
+            )),
+            "ask"
+        );
         let explicit = [rule("push", RuleEffect::Allow, "run_command", "git push")];
-        assert_eq!(verdict(&command("run_command", "git push origin main", AccessMode::Auto, &explicit)), "allow");
-        assert_eq!(verdict(&command("run_command", "git reset --hard", AccessMode::Auto, &explicit)), "ask");
+        assert_eq!(
+            verdict(&command(
+                "run_command",
+                "git push origin main",
+                AccessMode::Auto,
+                &explicit
+            )),
+            "allow"
+        );
+        assert_eq!(
+            verdict(&command(
+                "run_command",
+                "git reset --hard",
+                AccessMode::Auto,
+                &explicit
+            )),
+            "ask"
+        );
         // Rules never open a path boundary.
         let cat = [rule("cat", RuleEffect::Allow, "run_command", "cat")];
-        assert_eq!(verdict(&command("run_command", "cat ../../etc/passwd", AccessMode::Auto, &cat)), "ask");
-        assert_eq!(verdict(&command("run_command", "cat .git/config", AccessMode::Ask, &cat)), "ask");
+        assert_eq!(
+            verdict(&command(
+                "run_command",
+                "cat ../../etc/passwd",
+                AccessMode::Auto,
+                &cat
+            )),
+            "ask"
+        );
+        assert_eq!(
+            verdict(&command(
+                "run_command",
+                "cat .git/config",
+                AccessMode::Ask,
+                &cat
+            )),
+            "ask"
+        );
     }
 
     #[test]
     fn a1_policy_ask_and_block_rules() {
-        let rules = [rule("a", RuleEffect::Ask, "run_command", "npm publish"), rule("b", RuleEffect::Block, "*", "terraform destroy")];
-        assert_eq!(verdict(&command("run_command", "npm publish --tag next", AccessMode::Auto, &rules)), "ask");
-        assert_eq!(verdict(&command("run_command", "npm run build", AccessMode::Auto, &rules)), "allow");
-        let blocked = command("run_command", "terraform destroy -auto-approve", AccessMode::FullAccess, &rules);
+        let rules = [
+            rule("a", RuleEffect::Ask, "run_command", "npm publish"),
+            rule("b", RuleEffect::Block, "*", "terraform destroy"),
+        ];
+        assert_eq!(
+            verdict(&command(
+                "run_command",
+                "npm publish --tag next",
+                AccessMode::Auto,
+                &rules
+            )),
+            "ask"
+        );
+        assert_eq!(
+            verdict(&command(
+                "run_command",
+                "npm run build",
+                AccessMode::Auto,
+                &rules
+            )),
+            "allow"
+        );
+        let blocked = command(
+            "run_command",
+            "terraform destroy -auto-approve",
+            AccessMode::FullAccess,
+            &rules,
+        );
         assert_eq!(verdict(&blocked), "deny");
-        assert_eq!(blocked.forcing_rule.as_ref().map(|rule| rule.id.as_str()), Some("b"));
+        assert_eq!(
+            blocked.forcing_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("b")
+        );
     }
 
     #[test]
@@ -1888,37 +2749,102 @@ mod tests {
         let rules = [rule("t", RuleEffect::Allow, "test_run", "npm test")];
         let decision = command("test_run", "npm test", AccessMode::Ask, &rules);
         assert!(decision.is_allow());
-        assert_eq!(decision.allow_reason.as_ref().map(AllowReason::as_str), Some("rule"));
+        assert_eq!(
+            decision.allow_reason.as_ref().map(AllowReason::as_str),
+            Some("rule")
+        );
         assert_eq!(decision.rule_ids(), vec!["t".to_owned()]);
-        assert_eq!(verdict(&command("test_run", "npm run test:e2e", AccessMode::Ask, &rules)), "ask");
+        assert_eq!(
+            verdict(&command(
+                "test_run",
+                "npm run test:e2e",
+                AccessMode::Ask,
+                &rules
+            )),
+            "ask"
+        );
     }
 
     #[test]
     fn a1_policy_suggested_prefix_and_pattern_validation() {
-        assert_eq!(command("run_command", "npm test -- --watch", AccessMode::Ask, &[]).suggested_prefix.as_deref(), Some("npm test"));
-        assert_eq!(command("run_command", "git push origin main", AccessMode::Auto, &[]).suggested_prefix.as_deref(), Some("git push"));
-        assert_eq!(command("run_command", "ls -la", AccessMode::Ask, &[]).suggested_prefix.as_deref(), Some("ls"));
+        assert_eq!(
+            command("run_command", "npm test -- --watch", AccessMode::Ask, &[])
+                .suggested_prefix
+                .as_deref(),
+            Some("npm test")
+        );
+        assert_eq!(
+            command("run_command", "git push origin main", AccessMode::Auto, &[])
+                .suggested_prefix
+                .as_deref(),
+            Some("git push")
+        );
+        assert_eq!(
+            command("run_command", "ls -la", AccessMode::Ask, &[])
+                .suggested_prefix
+                .as_deref(),
+            Some("ls")
+        );
         assert!(!command("run_command", "cat ../x", AccessMode::Ask, &[]).rule_eligible);
         assert!(parse_rule_pattern("npm test").is_ok());
-        for bad in ["", "npm test && rm x", "npm test > out", "echo $(id)", "a | b"] {
+        for bad in [
+            "",
+            "npm test && rm x",
+            "npm test > out",
+            "echo $(id)",
+            "a | b",
+        ] {
             assert!(parse_rule_pattern(bad).is_err(), "{bad}");
         }
         let root = root();
-        assert!(pattern_covers_command("npm test", "npm test -- a", &root, Some(&root), None));
-        assert!(!pattern_covers_command("npm", "npm test && whoami", &root, Some(&root), None));
-        assert!(!pattern_covers_command("git", "git push", &root, Some(&root), None));
+        assert!(pattern_covers_command(
+            "npm test",
+            "npm test -- a",
+            &root,
+            Some(&root),
+            None
+        ));
+        assert!(!pattern_covers_command(
+            "npm",
+            "npm test && whoami",
+            &root,
+            Some(&root),
+            None
+        ));
+        assert!(!pattern_covers_command(
+            "git",
+            "git push",
+            &root,
+            Some(&root),
+            None
+        ));
     }
 
     #[test]
     fn a1_policy_access_mode_storage_round_trip() {
-        assert_eq!(AccessMode::from_stored("allow", true).unwrap(), AccessMode::FullAccess);
-        assert_eq!(AccessMode::from_stored("allow", false).unwrap(), AccessMode::Auto);
-        assert_eq!(AccessMode::from_stored("ask", true).unwrap(), AccessMode::Ask);
-        assert_eq!(AccessMode::from_stored("read_only", true).unwrap(), AccessMode::ReadOnly);
+        assert_eq!(
+            AccessMode::from_stored("allow", true).unwrap(),
+            AccessMode::FullAccess
+        );
+        assert_eq!(
+            AccessMode::from_stored("allow", false).unwrap(),
+            AccessMode::Auto
+        );
+        assert_eq!(
+            AccessMode::from_stored("ask", true).unwrap(),
+            AccessMode::Ask
+        );
+        assert_eq!(
+            AccessMode::from_stored("read_only", true).unwrap(),
+            AccessMode::ReadOnly
+        );
         assert!(AccessMode::from_stored("bogus", false).is_err());
         for mode in MODES {
             assert_eq!(AccessMode::parse(mode.as_str()).unwrap(), mode);
-            assert_eq!(AccessMode::from_stored(mode.stored_mode(), mode.full_access()).unwrap(), mode);
+            assert_eq!(
+                AccessMode::from_stored(mode.stored_mode(), mode.full_access()).unwrap(),
+                mode
+            );
         }
     }
 
@@ -1930,9 +2856,34 @@ mod tests {
         assert_eq!(segments[0].redirects, vec!["out file.txt"]);
         assert_eq!(segments[1].words, vec!["npm", "test"]);
         // A redirect out of the project is a path boundary.
-        assert_eq!(command("run_command", "echo hi > ../escape.txt", AccessMode::Auto, &[]).class, ToolClass::PathBoundary);
-        assert_eq!(verdict(&command("run_command", "echo hi > /dev/null", AccessMode::Auto, &[])), "allow");
-        assert_eq!(verdict(&command("run_command", "curl https://example.com/a/b", AccessMode::Auto, &[])), "allow");
+        assert_eq!(
+            command(
+                "run_command",
+                "echo hi > ../escape.txt",
+                AccessMode::Auto,
+                &[]
+            )
+            .class,
+            ToolClass::PathBoundary
+        );
+        assert_eq!(
+            verdict(&command(
+                "run_command",
+                "echo hi > /dev/null",
+                AccessMode::Auto,
+                &[]
+            )),
+            "allow"
+        );
+        assert_eq!(
+            verdict(&command(
+                "run_command",
+                "curl https://example.com/a/b",
+                AccessMode::Auto,
+                &[]
+            )),
+            "allow"
+        );
     }
 
     fn win_root() -> PathBuf {
@@ -1947,16 +2898,47 @@ mod tests {
     fn posix_home() -> PathBuf {
         PathBuf::from("/home/fox")
     }
-    fn decide_at(project: &Path, home_dir: &Path, command: &str, mode: AccessMode) -> PolicyDecision {
-        let subject = ToolSubject::Command { command: command.into(), cwd: project.to_path_buf(), model_risk: None };
-        decide(&PolicyRequest { tool: "run_command", subject: &subject, mode, project_root: Some(project), home: Some(home_dir), rules: &[] })
+    fn decide_at(
+        project: &Path,
+        home_dir: &Path,
+        command: &str,
+        mode: AccessMode,
+    ) -> PolicyDecision {
+        let subject = ToolSubject::Command {
+            command: command.into(),
+            cwd: project.to_path_buf(),
+            model_risk: None,
+        };
+        decide(&PolicyRequest {
+            tool: "run_command",
+            subject: &subject,
+            mode,
+            project_root: Some(project),
+            home: Some(home_dir),
+            rules: &[],
+        })
     }
     fn assert_blocked_at(project: &Path, home_dir: &Path, command: &str) {
         for mode in MODES {
             let decision = decide_at(project, home_dir, command, mode);
-            assert!(decision.is_block(), "{command} in {mode:?} should block, got {:?}", decision.verdict);
-            assert_eq!(decision.class, ToolClass::Command, "{command} in {mode:?} stays Command");
-            assert!(decision.findings.iter().any(|finding| finding == "builtin_block"), "{command} findings {:?}", decision.findings);
+            assert!(
+                decision.is_block(),
+                "{command} in {mode:?} should block, got {:?}",
+                decision.verdict
+            );
+            assert_eq!(
+                decision.class,
+                ToolClass::Command,
+                "{command} in {mode:?} stays Command"
+            );
+            assert!(
+                decision
+                    .findings
+                    .iter()
+                    .any(|finding| finding == "builtin_block"),
+                "{command} findings {:?}",
+                decision.findings
+            );
         }
     }
 
@@ -2000,16 +2982,39 @@ mod tests {
             assert_blocked_at(&project, &home_dir, command);
         }
         // 项目内部的删除不是 block：完全访问放行，自动档按高风险询问。
-        for command in ["rd /s /q build", "rm -rf node_modules", r"del /s /q dist\*.tmp", r"Remove-Item -Recurse .\out"] {
+        for command in [
+            "rd /s /q build",
+            "rm -rf node_modules",
+            r"del /s /q dist\*.tmp",
+            r"Remove-Item -Recurse .\out",
+        ] {
             for (mode, want) in MODES.iter().zip(["deny", "ask", "ask", "allow"]) {
                 let decision = decide_at(&project, &home_dir, command, *mode);
-                assert!(!decision.is_block(), "{command} in {mode:?} must not be a block");
+                assert!(
+                    !decision.is_block(),
+                    "{command} in {mode:?} must not be a block"
+                );
                 assert_eq!(verdict(&decision), want, "{command} in {mode:?}");
             }
         }
-        for command in ["dir", "dir /b", "dir /a /s src", "cmd /c dir", "cmd //c dir", "ls -la", "type README.md", "findstr /i foo *.txt"] {
+        for command in [
+            "dir",
+            "dir /b",
+            "dir /a /s src",
+            "cmd /c dir",
+            "cmd //c dir",
+            "ls -la",
+            "type README.md",
+            "findstr /i foo *.txt",
+        ] {
             let decision = decide_at(&project, &home_dir, command, AccessMode::Auto);
-            assert_eq!(verdict(&decision), "allow", "{command} should be a low-risk allow, class {:?} findings {:?}", decision.class, decision.findings);
+            assert_eq!(
+                verdict(&decision),
+                "allow",
+                "{command} should be a low-risk allow, class {:?} findings {:?}",
+                decision.class,
+                decision.findings
+            );
             assert_eq!(decision.risk, Risk::Low, "{command}");
             assert_ne!(decision.class, ToolClass::PathBoundary, "{command}");
         }
@@ -2019,14 +3024,28 @@ mod tests {
             assert_eq!(decision.class, ToolClass::PathBoundary, "{command}");
             assert!(!decision.is_block(), "{command}");
         }
-        let encoded = decide_at(&project, &home_dir, "powershell -EncodedCommand ZQBjAGgAbwA=", AccessMode::Auto);
+        let encoded = decide_at(
+            &project,
+            &home_dir,
+            "powershell -EncodedCommand ZQBjAGgAbwA=",
+            AccessMode::Auto,
+        );
         assert_eq!(verdict(&encoded), "ask");
         assert_eq!(encoded.risk, Risk::High);
-        assert!(encoded.findings.iter().any(|finding| finding == "encoded_command"));
+        assert!(encoded
+            .findings
+            .iter()
+            .any(|finding| finding == "encoded_command"));
         assert!(!encoded.is_block());
         // 盘符 / UNC 比较大小写不敏感。
-        assert!(is_within(Path::new(r"D:\FOX-TEST\测试项目\a.txt"), Path::new(r"d:/fox-test/测试项目")));
-        assert!(is_within(Path::new(r"\\SRV\Share\X"), Path::new(r"\\srv\share")));
+        assert!(is_within(
+            Path::new(r"D:\FOX-TEST\测试项目\a.txt"),
+            Path::new(r"d:/fox-test/测试项目")
+        ));
+        assert!(is_within(
+            Path::new(r"\\SRV\Share\X"),
+            Path::new(r"\\srv\share")
+        ));
     }
 
     #[test]
@@ -2049,12 +3068,26 @@ mod tests {
     #[test]
     fn project_block_rules_are_marked_for_the_audit() {
         let rules = [rule("b", RuleEffect::Block, "*", "terraform destroy")];
-        let decision = command("run_command", "terraform destroy -auto-approve", AccessMode::FullAccess, &rules);
+        let decision = command(
+            "run_command",
+            "terraform destroy -auto-approve",
+            AccessMode::FullAccess,
+            &rules,
+        );
         assert!(decision.is_block());
-        assert!(decision.findings.iter().any(|finding| finding == "project_block_rule"));
-        assert!(!decision.findings.iter().any(|finding| finding == "builtin_block"));
+        assert!(decision
+            .findings
+            .iter()
+            .any(|finding| finding == "project_block_rule"));
+        assert!(!decision
+            .findings
+            .iter()
+            .any(|finding| finding == "builtin_block"));
         assert_eq!(decision.class, ToolClass::Command);
-        assert_eq!(decision.forcing_rule.as_ref().map(|rule| rule.id.as_str()), Some("b"));
+        assert_eq!(
+            decision.forcing_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("b")
+        );
     }
 
     /// A project under a system directory still deletes its own contents
@@ -2077,8 +3110,19 @@ mod tests {
     fn decide_win(command: &str, mode: AccessMode, rules: &[PolicyRule]) -> PolicyDecision {
         let project = win_root();
         let home_dir = win_home();
-        let subject = ToolSubject::Command { command: command.into(), cwd: project.clone(), model_risk: None };
-        decide(&PolicyRequest { tool: "run_command", subject: &subject, mode, project_root: Some(&project), home: Some(&home_dir), rules })
+        let subject = ToolSubject::Command {
+            command: command.into(),
+            cwd: project.clone(),
+            model_risk: None,
+        };
+        decide(&PolicyRequest {
+            tool: "run_command",
+            subject: &subject,
+            mode,
+            project_root: Some(&project),
+            home: Some(&home_dir),
+            rules,
+        })
     }
 
     /// 模型把命令包成 `cd "<cwd>" && … ; echo …$?` 时，只在语法完全对齐时剥出内层。
@@ -2086,10 +3130,21 @@ mod tests {
     fn exit_marker_wrapper_unwraps_cd_to_the_cwd_and_rejects_anything_else() {
         let project = win_root();
         let home_dir = win_home();
-        let unwrap = |command: &str| unwrap_exit_marker_wrapper(command, &project, Some(&project), Some(&home_dir));
-        assert_eq!(unwrap(r#"cd "D:\fox-test\测试项目" && dir 2>&1; echo "EXIT_CODE: $?""#).as_deref(), Some("dir"));
-        assert_eq!(unwrap(r#"cd 'D:/fox-test/测试项目' && npm test -- foo; echo $?"#).as_deref(), Some("npm test -- foo"));
-        assert_eq!(unwrap(r#"cd "d:\FOX-TEST\测试项目" && git status 2>&1; echo "[exit:$?]""#).as_deref(), Some("git status"));
+        let unwrap = |command: &str| {
+            unwrap_exit_marker_wrapper(command, &project, Some(&project), Some(&home_dir))
+        };
+        assert_eq!(
+            unwrap(r#"cd "D:\fox-test\测试项目" && dir 2>&1; echo "EXIT_CODE: $?""#).as_deref(),
+            Some("dir")
+        );
+        assert_eq!(
+            unwrap(r#"cd 'D:/fox-test/测试项目' && npm test -- foo; echo $?"#).as_deref(),
+            Some("npm test -- foo")
+        );
+        assert_eq!(
+            unwrap(r#"cd "d:\FOX-TEST\测试项目" && git status 2>&1; echo "[exit:$?]""#).as_deref(),
+            Some("git status")
+        );
         for command in [
             r#"cd "D:\fox-test" && dir 2>&1; echo "EXIT_CODE: $?""#,
             r#"cd /d "D:\fox-test\测试项目" && dir 2>&1; echo $?"#,
@@ -2116,16 +3171,29 @@ mod tests {
         assert!(asked.rule_eligible);
         assert_eq!(asked.suggested_prefix.as_deref(), Some("dir"));
         assert_eq!(asked.inner_command.as_deref(), Some("dir"));
-        assert!(asked.findings.iter().any(|finding| finding == "exit_marker_wrapper"), "{:?}", asked.findings);
+        assert!(
+            asked
+                .findings
+                .iter()
+                .any(|finding| finding == "exit_marker_wrapper"),
+            "{:?}",
+            asked.findings
+        );
         assert_eq!(asked.class, ToolClass::Command);
         assert_eq!(asked.card_json()["innerCommand"], "dir");
         let plain = decide_win("dir", AccessMode::Ask, &[]);
-        assert!(plain.card_json().get("innerCommand").is_none(), "没有包装时不加 innerCommand");
+        assert!(
+            plain.card_json().get("innerCommand").is_none(),
+            "没有包装时不加 innerCommand"
+        );
 
         let auto_dir = decide_win(wrapped_dir, AccessMode::Auto, &[]);
         assert!(auto_dir.is_allow(), "{:?}", auto_dir.verdict);
         assert_eq!(auto_dir.risk, Risk::Low);
-        assert_eq!(auto_dir.allow_reason.as_ref().map(AllowReason::as_str), Some("mode"));
+        assert_eq!(
+            auto_dir.allow_reason.as_ref().map(AllowReason::as_str),
+            Some("mode")
+        );
 
         let wrapped_push = r#"cd "D:\fox-test\测试项目" && git push 2>&1; echo $?"#;
         let auto_push = decide_win(wrapped_push, AccessMode::Auto, &[]);
@@ -2138,14 +3206,45 @@ mod tests {
         let project = win_root();
         let home_dir = win_home();
         let wrapped_dir = r#"cd "D:\fox-test\测试项目" && dir 2>&1; echo "EXIT_CODE: $?""#;
-        assert!(pattern_covers_command("dir", wrapped_dir, &project, Some(&project), Some(&home_dir)));
-        assert!(!pattern_covers_command("cd", wrapped_dir, &project, Some(&project), Some(&home_dir)));
+        assert!(pattern_covers_command(
+            "dir",
+            wrapped_dir,
+            &project,
+            Some(&project),
+            Some(&home_dir)
+        ));
+        assert!(!pattern_covers_command(
+            "cd",
+            wrapped_dir,
+            &project,
+            Some(&project),
+            Some(&home_dir)
+        ));
         let wrapped_push = r#"cd "D:\fox-test\测试项目" && git push 2>&1; echo $?"#;
-        assert!(!pattern_covers_command("git", wrapped_push, &project, Some(&project), Some(&home_dir)));
-        assert!(pattern_covers_command("git push", wrapped_push, &project, Some(&project), Some(&home_dir)));
-        let allowed = decide_win(wrapped_dir, AccessMode::Ask, &[rule("d", RuleEffect::Allow, "run_command", "dir")]);
+        assert!(!pattern_covers_command(
+            "git",
+            wrapped_push,
+            &project,
+            Some(&project),
+            Some(&home_dir)
+        ));
+        assert!(pattern_covers_command(
+            "git push",
+            wrapped_push,
+            &project,
+            Some(&project),
+            Some(&home_dir)
+        ));
+        let allowed = decide_win(
+            wrapped_dir,
+            AccessMode::Ask,
+            &[rule("d", RuleEffect::Allow, "run_command", "dir")],
+        );
         assert!(allowed.is_allow(), "{:?}", allowed.verdict);
-        assert_eq!(allowed.allow_reason.as_ref().map(AllowReason::as_str), Some("rule"));
+        assert_eq!(
+            allowed.allow_reason.as_ref().map(AllowReason::as_str),
+            Some("rule")
+        );
         let invalid = parse_rule_pattern(wrapped_dir).expect_err("整条包装不能当规则");
         assert!(invalid.starts_with("permission.invalid_rule"), "{invalid}");
 
@@ -2160,24 +3259,53 @@ mod tests {
         let block = [rule("c", RuleEffect::Block, "run_command", "curl")];
         for mode in MODES {
             let decision = decide_win(curl, mode, &block);
-            assert!(decision.is_block(), "{curl} in {mode:?}: {:?}", decision.verdict);
+            assert!(
+                decision.is_block(),
+                "{curl} in {mode:?}: {:?}",
+                decision.verdict
+            );
         }
-        let outside = decide_win(r#"cd "D:\fox-test\测试项目" && type D:\other\x.txt 2>&1; echo $?"#, AccessMode::Auto, &[]);
+        let outside = decide_win(
+            r#"cd "D:\fox-test\测试项目" && type D:\other\x.txt 2>&1; echo $?"#,
+            AccessMode::Auto,
+            &[],
+        );
         assert_eq!(verdict(&outside), "ask");
-        assert_eq!(outside.class, ToolClass::PathBoundary, "{:?}", outside.findings);
+        assert_eq!(
+            outside.class,
+            ToolClass::PathBoundary,
+            "{:?}",
+            outside.findings
+        );
     }
 
     /// 审查补充：包装里的删除，内层按 cwd 单独分析命中 block 也拒绝（任何方言下都不会漏）。
     #[test]
     fn exit_marker_wrapper_inner_block_is_enough_to_refuse() {
-        for mode in [AccessMode::ReadOnly, AccessMode::Ask, AccessMode::Auto, AccessMode::FullAccess] {
+        for mode in [
+            AccessMode::ReadOnly,
+            AccessMode::Ask,
+            AccessMode::Auto,
+            AccessMode::FullAccess,
+        ] {
             for command in [
                 r#"cd "D:\fox-test\测试项目" && rm -rf . 2>&1; echo "EXIT_CODE: $?""#,
                 r#"cd "D:\fox-test\测试项目" && rd /s /q . 2>&1; echo $?"#,
             ] {
                 let decision = decide_win(command, mode, &[]);
-                assert!(decision.is_block(), "{mode:?} {command}: {:?}", decision.verdict);
-                assert!(decision.findings.iter().any(|finding| finding == "builtin_block"), "{:?}", decision.findings);
+                assert!(
+                    decision.is_block(),
+                    "{mode:?} {command}: {:?}",
+                    decision.verdict
+                );
+                assert!(
+                    decision
+                        .findings
+                        .iter()
+                        .any(|finding| finding == "builtin_block"),
+                    "{:?}",
+                    decision.findings
+                );
             }
         }
     }
@@ -2188,13 +3316,24 @@ mod tests {
         let project = posix_root();
         let home_dir = posix_home();
         let command = r#"cd "/work/proj" && ls -la 2>&1; echo "EXIT_CODE: $?""#;
-        assert_eq!(unwrap_exit_marker_wrapper(command, &project, Some(&project), Some(&home_dir)).as_deref(), Some("ls -la"));
+        assert_eq!(
+            unwrap_exit_marker_wrapper(command, &project, Some(&project), Some(&home_dir))
+                .as_deref(),
+            Some("ls -la")
+        );
         let decision = decide_at(&project, &home_dir, command, AccessMode::Ask);
         assert!(decision.is_ask(), "{:?}", decision.verdict);
         assert!(decision.rule_eligible);
         assert_eq!(decision.suggested_prefix.as_deref(), Some("ls"));
         assert_eq!(decision.inner_command.as_deref(), Some("ls -la"));
-        assert!(decision.findings.iter().any(|finding| finding == "exit_marker_wrapper"));
-        assert_blocked_at(&project, &home_dir, r#"cd "/work/proj" && rm -rf . 2>&1; echo $?"#);
+        assert!(decision
+            .findings
+            .iter()
+            .any(|finding| finding == "exit_marker_wrapper"));
+        assert_blocked_at(
+            &project,
+            &home_dir,
+            r#"cd "/work/proj" && rm -rf . 2>&1; echo $?"#,
+        );
     }
 }

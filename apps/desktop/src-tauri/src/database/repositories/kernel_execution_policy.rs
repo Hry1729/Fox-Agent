@@ -31,7 +31,13 @@ impl Database {
         expected_version: u64,
         desired_mode: &str,
     ) -> Result<ExecutionPolicyState, String> {
-        self.change_execution_policy_with_access(conversation_id, request_id, expected_version, desired_mode, false)
+        self.change_execution_policy_with_access(
+            conversation_id,
+            request_id,
+            expected_version,
+            desired_mode,
+            false,
+        )
     }
 
     /// A1: the four-mode change. Full access is `allow` plus the conversation's
@@ -60,7 +66,10 @@ impl Database {
         if full_access {
             fields.push(("fullAccess", "1".to_owned()));
         }
-        let borrowed: Vec<(&str, &str)> = fields.iter().map(|(key, value)| (*key, value.as_str())).collect();
+        let borrowed: Vec<(&str, &str)> = fields
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect();
         let digest = fox_engine_protocol::canonical_digest(&borrowed);
         self.with_connection(|c| {
             let tx=c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;

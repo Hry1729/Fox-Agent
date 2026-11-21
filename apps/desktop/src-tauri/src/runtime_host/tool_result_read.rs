@@ -67,9 +67,7 @@ pub(super) fn prepare(input: &Value) -> Result<ReadToolResultRequest, String> {
             "reference is required and must be a fox-result://<runId>/<toolCallId> value".to_owned()
         })?;
     if crate::kernel_compaction::parse_tool_result_ref(reference).is_none() {
-        return Err(format!(
-            "'{reference}' is not a Fox tool result reference"
-        ));
+        return Err(format!("'{reference}' is not a Fox tool result reference"));
     }
     let offset = match input.get("offset") {
         None | Some(Value::Null) => 0usize,

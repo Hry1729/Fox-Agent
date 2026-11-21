@@ -12,11 +12,15 @@ import './fox-thread.css'
 import { ContactOrphanDecisions } from '@/features/companions/chat-decisions'
 import { useContacts } from '@/features/companions/context'
 import { ContactTimeGroups } from '@/features/companions/chat-time'
+import { CompanionTeamActionsProvider } from '@/features/companions/companion-team-cards'
+import { CompanionCommunicationBefore, CompanionCommunicationProvider } from '@/features/companions/assignment-timeline'
 
 export interface FoxThreadProps {
   statusBar?: import('react').ReactNode
   /** UI 1104-07：待处理的审批卡，排在消息之后、运行状态之前，跟着对话一起滚动。 */
   approvalSlot?: import('react').ReactNode
+  assignmentConversationId?: string | null
+  oldestMessageAt?: number | null
   fox: FoxThreadContextValue
   /** Opening suggestions for the empty state (expert-defined or default). */
   suggestions?: string[]
@@ -81,7 +85,7 @@ function FoxBottomDock({ plan }: { plan?: GoalProgressData['planRevisions'][numb
  * at the mount site, so switching conversations rebuilds the runtime state
  * instead of mixing message streams.
  */
-export default function FoxThread({ statusBar, approvalSlot, fox, suggestions, onStart, planRevision, turnRailMessages, turnRailArtifacts }: FoxThreadProps) {
+export default function FoxThread({ statusBar, approvalSlot, assignmentConversationId = null, oldestMessageAt = null, fox, suggestions, onStart, planRevision, turnRailMessages, turnRailArtifacts }: FoxThreadProps) {
   const contact = useContacts()
   // SPEC item 5: brief `.is-scrolling` state reveals the scrollbar thumb while
   // the list is actively scrolling (~800ms after the last scroll event).
@@ -97,6 +101,7 @@ export default function FoxThread({ statusBar, approvalSlot, fox, suggestions, o
   }
   return (
     <FoxThreadContext.Provider value={fox}>
+      <CompanionCommunicationProvider conversationId={assignmentConversationId} oldestMessageAt={oldestMessageAt}>
       <div className={`fox-thread${fox.contactChat ? ' is-contact-chat' : ''}`}>
         {!fox.contactChat && <ConversationTurnRail messages={turnRailMessages ?? []} artifacts={turnRailArtifacts ?? []} />}
         <ThreadPrimitive.Root className="fox-thread-root">
@@ -110,18 +115,22 @@ export default function FoxThread({ statusBar, approvalSlot, fox, suggestions, o
             {!contact?.privateChat && <ThreadPrimitive.Empty>
               <ConversationEmptyPrompt suggestions={suggestions} onStart={onStart ?? (() => undefined)} />
             </ThreadPrimitive.Empty>}
-            <FoxThreadLoadEarlier />
-            <ThreadPrimitive.If empty={false}>
-              {!fox.contactChat && <div className="fox-thread-date"><span>今天</span></div>}
-              <ContactTimeGroups><ThreadPrimitive.Messages components={{ UserMessage: FoxUserMessage, AssistantMessage: FoxAssistantMessage }} /></ContactTimeGroups>
-              {fox.contactChat && <ContactOrphanDecisions />}
-              {approvalSlot && <div className="fox-thread-approval">{approvalSlot}</div>}
-              {!fox.contactChat && statusBar}
-            </ThreadPrimitive.If>
+            <CompanionTeamActionsProvider>
+              <FoxThreadLoadEarlier />
+              <ThreadPrimitive.If empty={false}>
+                {!fox.contactChat && <div className="fox-thread-date"><span>今天</span></div>}
+                <ContactTimeGroups><ThreadPrimitive.Messages components={{ UserMessage: FoxUserMessage, AssistantMessage: FoxAssistantMessage }} /></ContactTimeGroups>
+                {fox.contactChat && <ContactOrphanDecisions />}
+                {approvalSlot && <div className="fox-thread-approval">{approvalSlot}</div>}
+                {!fox.contactChat && statusBar}
+              </ThreadPrimitive.If>
+            </CompanionTeamActionsProvider>
+            <CompanionCommunicationBefore />
           </ThreadPrimitive.Viewport>
           <FoxBottomDock plan={fox.contactChat ? undefined : planRevision} />
         </ThreadPrimitive.Root>
       </div>
+      </CompanionCommunicationProvider>
     </FoxThreadContext.Provider>
   )
 }

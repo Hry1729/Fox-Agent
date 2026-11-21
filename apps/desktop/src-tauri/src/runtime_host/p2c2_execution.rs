@@ -1,8 +1,8 @@
 //! Owns one controlled verification. Executable receipts never leave this module.
-#[allow(unused_imports)]
-use crate::canonical_json::CanonicalJson;
 use super::super::p2b_decision::{self as decision, DecisionFact, FactContext, FactOrigin};
 use super::*;
+#[allow(unused_imports)]
+use crate::canonical_json::CanonicalJson;
 use crate::runtime_host::attachment_compute::{
     authorized_delivery_root_typed, read_authorized_delivery_bytes_typed, DeliveryReadFailure,
 };

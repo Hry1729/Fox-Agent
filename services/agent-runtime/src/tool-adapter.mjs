@@ -1,4 +1,4 @@
-import { boundToolText, capModelToolResultContent, modelToolResultContent, toolResultRef, RECEIPT_MARKER, RESULT_REF_TOOL } from './tool-view.mjs'
+import { boundToolText, capModelToolResultContent, modelToolResultContent, toolResultRef, MAX_MODEL_TOOL_RESULT_BYTES, RECEIPT_MARKER, RESULT_REF_TOOL } from './tool-view.mjs'
 
 export const FOX_TOOL_DEFINITION_VERSION = 1
 
@@ -151,6 +151,25 @@ export function normalizeFoxToolResultForPi(toolName, result, viewContext = {}) 
   return enforceModelResultCap(normalizeUncapped(toolName, result, viewContext), viewContext, result)
 }
 
+function numberedReadContent({ content, details }) {
+  const body = content[0]
+  if (!body?.text || !details || details.lossyDecode
+      || (details.encoding && details.encoding !== 'utf-8')
+      || /\.(docx|xlsx|pptx)$/i.test(details.path ?? '')) return content
+  const firstLine = details.readMode === 'lines' ? details.startLine
+    : details.readMode === 'utf16' && details.offset === 0 ? 1 : null
+  if (!Number.isSafeInteger(firstLine) || firstLine < 1) return content
+  const expectedUnits = details.returnedUnits
+    ?? (details.readMode === 'utf16' ? (details.nextOffset ?? details.totalUnits) : null)
+  // Preserve Host previews and results already projected by the native bridge.
+  if (body.type !== 'text' || body.text.length !== expectedUnits) return content
+  const lines = body.text.match(/[^\n]*\n|[^\n]+$/g)
+  const text = lines.map((line, index) => `${firstLine + index}\t${line}`).join('')
+  const bytes = Buffer.byteLength(text) + content.slice(1)
+    .reduce((sum, block) => sum + (typeof block.text === 'string' ? Buffer.byteLength(block.text) : 0), 0)
+  return bytes <= MAX_MODEL_TOOL_RESULT_BYTES ? [{ ...body, text }, ...content.slice(1)] : content
+}
+
 // TB-2: whatever path produced the view, the model never receives more than
 // MAX_MODEL_TOOL_RESULT_BYTES of text for one call. The full value stays with
 // the Host (its result reference), and the oversized structured copy is not
@@ -177,6 +196,9 @@ function normalizeUncapped(toolName, result, viewContext) {
     // trailing text block so a multi-page Legacy read stays reachable.
     if (result.isError !== true && toolName === RESULT_REF_TOOL) {
       return { ...result, content: modelToolResultContent(toolName, result), details: result.details ?? {} }
+    }
+    if (result.isError !== true && toolName === 'read') {
+      return { ...result, content: numberedReadContent(result), details: result.details ?? {} }
     }
     return result.details === undefined ? { ...result, details: {} } : result
   }

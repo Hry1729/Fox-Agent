@@ -392,7 +392,11 @@ fn seed() -> Result<Value, String> {
         eprintln!(
             "single-pi fixture: knowledge base {} ({})",
             base.id,
-            if created { "created" } else { "already present" }
+            if created {
+                "created"
+            } else {
+                "already present"
+            }
         );
 
         // 2. Documents through the production import pipeline. A document that is
@@ -483,7 +487,11 @@ fn seed() -> Result<Value, String> {
         eprintln!(
             "single-pi fixture: expert {} ({})",
             expert.id,
-            if existing_expert.is_some() { "updated in place" } else { "created" }
+            if existing_expert.is_some() {
+                "updated in place"
+            } else {
+                "created"
+            }
         );
 
         // 4. One conversation per expert, `agent_backend = 'fox'`, with the expert
@@ -545,7 +553,9 @@ fn seed() -> Result<Value, String> {
             .conversation_knowledge_reference_bindings(&conversation.id)
             .map_err(|error| format!("cannot read the knowledge bindings: {error}"))?;
         let already_bound = bindings.iter().any(|binding| {
-            binding.enabled && binding.reference.source == "local" && binding.reference.id == base.id
+            binding.enabled
+                && binding.reference.source == "local"
+                && binding.reference.id == base.id
         });
         if !already_bound {
             let input = KnowledgeReferenceBindingInput {
@@ -571,7 +581,11 @@ fn seed() -> Result<Value, String> {
         eprintln!(
             "single-pi fixture: conversation {} for expert {}",
             conversation.id,
-            if existing_conversation.is_some() { "already present" } else { "created" }
+            if existing_conversation.is_some() {
+                "already present"
+            } else {
+                "created"
+            }
         );
     }
 
@@ -1021,8 +1035,12 @@ fn search_probes(
             .iter()
             .find(|plan| plan.key == expert_key)
             .ok_or_else(|| format!("isolation probe names unknown expert '{expert_key}'"))?;
-        let own_base = base_for_key(&plans, bases, &plan.knowledge_base_key)
-            .ok_or_else(|| format!("knowledge base '{}' is not present", plan.knowledge_base_name))?;
+        let own_base = base_for_key(&plans, bases, &plan.knowledge_base_key).ok_or_else(|| {
+            format!(
+                "knowledge base '{}' is not present",
+                plan.knowledge_base_name
+            )
+        })?;
         let other_base = plans
             .iter()
             .find(|other| other.knowledge_base_key != plan.knowledge_base_key)

@@ -207,7 +207,8 @@ impl ArtifactStore {
 /// Create a directory (and parents) and refuse a reparse point on the final
 /// component, mirroring the compute-workspace rule.
 fn create_dir_checked(path: &Path) -> Result<(), String> {
-    fs::create_dir_all(path).map_err(|error| format!("无法创建目录 {}: {error}", path.display()))?;
+    fs::create_dir_all(path)
+        .map_err(|error| format!("无法创建目录 {}: {error}", path.display()))?;
     let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(format!("{} 不是普通目录", path.display()));
@@ -430,8 +431,8 @@ pub(crate) fn commit(
     token: &str,
     ledger: Option<&StagingLedger>,
 ) -> Result<CommitOutcome, String> {
-    let metadata = fs::metadata(prepared)
-        .map_err(|error| format!("待提交的工作副本不可读: {error}"))?;
+    let metadata =
+        fs::metadata(prepared).map_err(|error| format!("待提交的工作副本不可读: {error}"))?;
     if !metadata.is_file() {
         return Err("待提交的工作副本不是普通文件".into());
     }
@@ -782,9 +783,8 @@ impl StagingLedger {
         // Written through a sibling temp name and renamed, so a crash can never
         // leave a half-written record that a later pass would misread.
         let staging = dir.join(format!(".{}.writing", record.token));
-        fs::write(&staging, &body).map_err(|error| {
-            format!("无法写入暂存台账 {}: {error}", path.display())
-        })?;
+        fs::write(&staging, &body)
+            .map_err(|error| format!("无法写入暂存台账 {}: {error}", path.display()))?;
         fs::rename(&staging, &path).map_err(|error| {
             let _ = fs::remove_file(&staging);
             format!("无法提交暂存台账 {}: {error}", path.display())
@@ -904,10 +904,7 @@ impl StagingLedger {
             .join(format!("{}.lease", record.execution_id));
         match lease_state(&lease) {
             LeaseState::Held => {
-                return Outcome::Kept(format!(
-                    "暂存记录仍归活跃执行 {} 所有",
-                    record.execution_id
-                ));
+                return Outcome::Kept(format!("暂存记录仍归活跃执行 {} 所有", record.execution_id));
             }
             // Permissions, I/O errors and malformed lease state are *not*
             // evidence that the owner is gone.
@@ -971,9 +968,7 @@ impl StagingLedger {
         match fs::remove_file(entry_path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!(
-                "暂存台账条目删除失败，残留记录仍可见: {error}"
-            )),
+            Err(error) => Err(format!("暂存台账条目删除失败，残留记录仍可见: {error}")),
         }
     }
 }
@@ -1180,7 +1175,10 @@ pub(crate) fn staging_entry_path_for_test(artifacts_dir: &Path, token: &str) -> 
 /// directories as a side effect, and a conversation without previews simply
 /// contributes no extra root.
 pub(crate) fn existing_preview_root(data_dir: &Path, conversation_id: &str) -> Option<PathBuf> {
-    let root = ArtifactStore::new(data_dir).root.join("previews").join(short_conversation_id(conversation_id));
+    let root = ArtifactStore::new(data_dir)
+        .root
+        .join("previews")
+        .join(short_conversation_id(conversation_id));
     let metadata = fs::symlink_metadata(&root).ok()?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return None;
@@ -1369,7 +1367,10 @@ mod tests {
         assert!(name.split('-').all(|part| !part.is_empty()), "{name}");
         // Reserved characters never survive.
         let win = store.deliverable_directory_name("a<b>c:d/e\\f|g?h*i", "conv-a");
-        assert!(!win.contains(['<', '>', ':', '/', '\\', '|', '?', '*']), "{win}");
+        assert!(
+            !win.contains(['<', '>', ':', '/', '\\', '|', '?', '*']),
+            "{win}"
+        );
         assert!(regex_like(&win), "{win}");
         // Two conversations never share a folder, even with one topic and day.
         assert_ne!(
@@ -1379,15 +1380,28 @@ mod tests {
         // An empty topic still yields a valid, conflict-resistant name.
         let bare = store.deliverable_directory_name("", "conv-a");
         assert!(regex_like(&bare), "{bare}");
-        assert!(bare.starts_with("20"), "a bare name starts with the date: {bare}");
+        assert!(
+            bare.starts_with("20"),
+            "a bare name starts with the date: {bare}"
+        );
         // Reserved device names are neutralized.
-        assert!(store.deliverable_directory_name("CON", "conv-a").starts_with("CON-dir"));
-        assert!(store.deliverable_directory_name("nul", "conv-a").starts_with("nul-dir"));
+        assert!(store
+            .deliverable_directory_name("CON", "conv-a")
+            .starts_with("CON-dir"));
+        assert!(store
+            .deliverable_directory_name("nul", "conv-a")
+            .starts_with("nul-dir"));
         // The suffix is derived from the conversation, so a task cannot be
         // redirected into another conversation's folder by naming a topic.
         let suffix = |value: &str| value.rsplit('-').next().unwrap_or_default().to_owned();
-        assert_eq!(suffix(&name), suffix(&store.deliverable_directory_name("other topic", "conv-a")));
-        assert_ne!(suffix(&name), suffix(&store.deliverable_directory_name("other topic", "conv-b")));
+        assert_eq!(
+            suffix(&name),
+            suffix(&store.deliverable_directory_name("other topic", "conv-a"))
+        );
+        assert_ne!(
+            suffix(&name),
+            suffix(&store.deliverable_directory_name("other topic", "conv-b"))
+        );
         assert_eq!(suffix(&name).len(), 12);
     }
 
@@ -1403,7 +1417,9 @@ mod tests {
         date.len() == 8
             && date.bytes().all(|b| b.is_ascii_digit())
             && id.len() == 12
-            && id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
     }
 
     #[test]
@@ -1436,7 +1452,8 @@ mod tests {
     }
 
     #[test]
-    fn commit_creates_a_new_target_and_replaces_an_existing_one_without_losing_bytes() {        let data = temp_root("commit-data");
+    fn commit_creates_a_new_target_and_replaces_an_existing_one_without_losing_bytes() {
+        let data = temp_root("commit-data");
         let project = temp_root("commit-project");
         let store = ArtifactStore::new(&data);
         let work = store.work_directory("conv-a").unwrap();
@@ -1549,7 +1566,12 @@ mod tests {
             );
         }
         assert_eq!(
-            classify(Some(root), Path::new(r"C:\proj\fox\case\预览.html"), "office_render", false),
+            classify(
+                Some(root),
+                Path::new(r"C:\proj\fox\case\预览.html"),
+                "office_render",
+                false
+            ),
             (ArtifactClass::Deliverable, ArtifactOrigin::Project),
             "a render that reached the project was explicitly exported"
         );
@@ -1571,7 +1593,12 @@ mod tests {
             (ArtifactClass::Deliverable, ArtifactOrigin::Project)
         );
         assert_eq!(
-            classify(Some(root), Path::new(r"C:\proj\notes.txt"), "write_file", false),
+            classify(
+                Some(root),
+                Path::new(r"C:\proj\notes.txt"),
+                "write_file",
+                false
+            ),
             (ArtifactClass::Process, ArtifactOrigin::Project)
         );
 
@@ -1581,7 +1608,12 @@ mod tests {
             (ArtifactClass::Process, ArtifactOrigin::HostPrivate)
         );
         assert_eq!(
-            classify(Some(root), Path::new(r"C:\elsewhere\report.docx"), "office_create", false),
+            classify(
+                Some(root),
+                Path::new(r"C:\elsewhere\report.docx"),
+                "office_create",
+                false
+            ),
             (ArtifactClass::Process, ArtifactOrigin::HostPrivate)
         );
     }
@@ -1612,7 +1644,10 @@ mod tests {
     #[test]
     fn deliverable_detection_survives_the_windows_verbatim_prefix() {
         let root = Path::new(r"C:\proj");
-        assert!(is_deliverable_path(root, Path::new(r"C:\proj\fox\case\a.xlsx")));
+        assert!(is_deliverable_path(
+            root,
+            Path::new(r"C:\proj\fox\case\a.xlsx")
+        ));
         assert!(is_deliverable_path(
             root,
             Path::new(r"\\?\C:\proj\fox\case\a.xlsx")
@@ -1622,10 +1657,16 @@ mod tests {
             Path::new(r"C:\proj\fox\a.xlsx")
         ));
         assert!(!is_deliverable_path(root, Path::new(r"C:\proj\a.xlsx")));
-        assert!(!is_deliverable_path(root, Path::new(r"C:\other\fox\a.xlsx")));
+        assert!(!is_deliverable_path(
+            root,
+            Path::new(r"C:\other\fox\a.xlsx")
+        ));
         // A sibling folder whose name merely starts with the same letters is
         // not the deliverable folder.
-        assert!(!is_deliverable_path(root, Path::new(r"C:\proj\foxes\a.xlsx")));
+        assert!(!is_deliverable_path(
+            root,
+            Path::new(r"C:\proj\foxes\a.xlsx")
+        ));
         // UNC shares keep working through the verbatim form.
         assert!(is_deliverable_path(
             Path::new(r"\\server\share\proj"),
@@ -1798,7 +1839,10 @@ mod tests {
 
         // A second pass is a no-op: the ledger really did converge.
         let again = collector.reclaim(&[project.as_path()], &|_| None);
-        assert!(again.removed.is_empty() && again.retired.is_empty() && again.kept.is_empty(), "{again:?}");
+        assert!(
+            again.removed.is_empty() && again.retired.is_empty() && again.kept.is_empty(),
+            "{again:?}"
+        );
         drop(collector);
         fs::remove_dir_all(&data).ok();
         fs::remove_dir_all(&project).ok();
@@ -1820,7 +1864,10 @@ mod tests {
         let report = collector.reclaim(&[project.as_path()], &|_| None);
         assert!(report.removed.is_empty(), "{report:?}");
         assert_eq!(report.kept.len(), 1, "{report:?}");
-        assert!(staging.is_file(), "bytes must survive an unanswerable probe");
+        assert!(
+            staging.is_file(),
+            "bytes must survive an unanswerable probe"
+        );
         assert!(staging_entry_path_for_test(&root, "unknowable").is_file());
         let diagnostics = report.diagnostics();
         assert!(
@@ -1915,7 +1962,8 @@ mod tests {
     /// registered belongs to the user and is byte-for-byte untouchable, however
     /// much its name looks like Host litter.
     #[test]
-    fn a_user_file_that_merely_looks_like_staging_is_never_deleted() {        let data = temp_root("manual-data");
+    fn a_user_file_that_merely_looks_like_staging_is_never_deleted() {
+        let data = temp_root("manual-data");
         let project = temp_root("manual-project");
         let manual = project.join(".fox-stage-notours.tmp");
         fs::write(&manual, b"user bytes").unwrap();
@@ -2020,7 +2068,15 @@ mod tests {
         let relative = Path::new("fox/case/out.bin");
 
         let ledger = open_ledger(&data, "conv").unwrap();
-        commit(&prepared, &target, &project, relative, "tok-a", Some(&ledger)).expect("commit");
+        commit(
+            &prepared,
+            &target,
+            &project,
+            relative,
+            "tok-a",
+            Some(&ledger),
+        )
+        .expect("commit");
         assert_eq!(fs::read(&target).unwrap(), b"payload");
         assert!(!ledger_dir(&data)
             .join(STAGING_ENTRY_DIR)
@@ -2035,10 +2091,20 @@ mod tests {
 
         // A staging name that already exists is refused, never overwritten, so
         // a foreign file cannot be clobbered by a token collision.
-        let squatter = project.join("fox").join("case").join(".fox-stage-tok-b.tmp");
+        let squatter = project
+            .join("fox")
+            .join("case")
+            .join(".fox-stage-tok-b.tmp");
         fs::write(&squatter, b"someone else's bytes").unwrap();
-        let error = commit(&prepared, &target, &project, relative, "tok-b", Some(&ledger))
-            .unwrap_err();
+        let error = commit(
+            &prepared,
+            &target,
+            &project,
+            relative,
+            "tok-b",
+            Some(&ledger),
+        )
+        .unwrap_err();
         assert!(error.contains("拒绝覆盖"), "{error}");
         assert_eq!(fs::read(&squatter).unwrap(), b"someone else's bytes");
         // The refused attempt registered nothing.
@@ -2084,7 +2150,10 @@ mod tests {
         }
         let data = temp_root("cross-data");
         let project = temp_root("cross-project");
-        let staging = project.join("fox").join("case").join(".fox-stage-crosstoken.tmp");
+        let staging = project
+            .join("fox")
+            .join("case")
+            .join(".fox-stage-crosstoken.tmp");
         fs::create_dir_all(staging.parent().unwrap()).unwrap();
         fs::write(&staging, b"payload").unwrap();
 

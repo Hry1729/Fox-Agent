@@ -1,6 +1,5 @@
-import { sidebarDateGroups } from '../sidebar-date-groups'
 import { useEffect, useRef, useState } from 'react'
-import { FolderOpen, MessageCircleMore } from 'lucide-react'
+import { FolderOpen } from 'lucide-react'
 import { AnimatedIconTrigger, Folders, MessageCircleMore as AnimatedMessageCircleMore } from '@/components/fox-ui/animated-icons'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuPortal, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import type { ConversationSummary } from '@/features/conversations/model/types'
@@ -48,7 +47,7 @@ export function SidebarCollapsedMenus({ projects, conversations, indicators, onO
             <DropdownMenuPortal><DropdownMenuSubContent className="fox-sidebar-flyout" sideOffset={4} collisionPadding={8} onMouseEnter={cancelClose} onMouseLeave={closeLater} aria-label={`${project.name} 对话`}>
               <DropdownMenuLabel>{project.name}</DropdownMenuLabel>{rows(project.items)}
             </DropdownMenuSubContent></DropdownMenuPortal>
-          </DropdownMenuSub>) : sidebarDateGroups(conversations).map(group => <div key={group.key}><DropdownMenuLabel className="fox-sidebar-date-heading"><MessageCircleMore size={14} />{group.label}</DropdownMenuLabel>{rows(group.items)}</div>)}
+          </DropdownMenuSub>) : rows(conversations)}
           {!count && <DropdownMenuItem disabled>{projectMenu ? '暂无项目' : '暂无对话'}</DropdownMenuItem>}
         </DropdownMenuContent>
       </DropdownMenu>

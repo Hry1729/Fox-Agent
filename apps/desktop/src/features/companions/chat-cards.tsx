@@ -64,6 +64,13 @@ function WriteResult({ contact, call }: { contact: Companion; call: ToolCallReco
     {questions.map(question => {
       const action = question.action === 'move' ? '移动' : question.action === 'remove' ? '删除' : '改写'
       const editable = question.status === 'open'
+      if (!editable) return <ContactDecision key={question.id} title={`可以${action}这条笔记吗？`} resolved>
+        <p className="fox-contact-receipt" role="status">{question.status === 'approved' ? `已确认${action}` : question.status === 'rejected' ? `已选择暂不${action}` : '此确认已过期，请查看最新笔记'}</p>
+        <details className="fox-contact-receipt-details"><summary>查看笔记详情</summary><p>{question.content}</p>
+          {question.action === 'patch' && <p>改为：{question.payload?.content}</p>}
+          {question.action === 'move' && <p>目标专题：{question.payload?.topic}</p>}
+        </details>
+      </ContactDecision>
       return <ContactDecision key={question.id} title={`可以${action}这条笔记吗？`}>
         <p>{question.content}</p>
         {question.action === 'patch' && <p>改为：{question.payload?.content}</p>}
@@ -76,7 +83,7 @@ function WriteResult({ contact, call }: { contact: Companion; call: ToolCallReco
         {!editable && <p className="fox-contact-receipt" role="status">{question.status === 'approved' ? `已确认${action}` : question.status === 'rejected' ? `已选择暂不${action}` : '此确认已过期，请查看最新笔记'}</p>}
       </ContactDecision>
     })}
-    {shared && <ContactDecision title="要记住这个偏好吗？">
+    {shared && <ContactDecision title="要记住这个偏好吗？" resolved={shared.status !== 'open'}>
       {shared.status === 'open' ? <SharedDecision chat request={shared} busy={busy} onChoose={(decision, replaceMemoryId) => void decide('companion_shared_request_resolve', { requestId: shared.id, decision, replaceMemoryId })} />
         : <><p>{shared.content}</p><p className="fox-contact-receipt">{({ added: '已选择记住这条', replaced: '已选择替换已有记忆', rejected: '已选择暂不记住', stale: '此确认已过期，请查看最新笔记' } as Record<string, string>)[shared.status]}</p></>}
     </ContactDecision>}

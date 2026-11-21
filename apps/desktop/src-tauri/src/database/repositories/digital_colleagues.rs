@@ -28,7 +28,8 @@ impl Database {
             .ok_or_else(|| "digital_colleague.companion_required".to_owned())?;
         let target = self.companion_background_target(companion_id)?;
         let id = self.with_connection(|connection| {
-            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let id = insert_owned_companion_task(&transaction, input, &target, now_ms())?;
             transaction.commit()?;
             Ok(id)
@@ -51,11 +52,18 @@ impl Database {
         let target = self.companion_background_target(companion_id)?;
         let now = now_ms();
         let (task_id, schedule_id) = self.with_connection(|connection| {
-            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let task_id = insert_owned_companion_task(&transaction, input, &target, now)?;
             let schedule_id = save_typed_schedule_in_transaction(
-                &transaction, None, &task_id, &input.name, spec,
-                crate::database::DEFAULT_SCHEDULE_CATCHUP_SECONDS, enabled, now,
+                &transaction,
+                None,
+                &task_id,
+                &input.name,
+                spec,
+                crate::database::DEFAULT_SCHEDULE_CATCHUP_SECONDS,
+                enabled,
+                now,
             )?;
             transaction.commit()?;
             Ok((task_id, schedule_id))
@@ -72,12 +80,15 @@ impl Database {
         update: crate::database::OwnedCompanionTaskUpdate,
     ) -> Result<crate::database::OwnedCompanionTask, String> {
         self.companion_background_target(companion_id)?;
-        let existing = self.owned_companion_task(companion_id, task_id)?
+        let existing = self
+            .owned_companion_task(companion_id, task_id)?
             .ok_or_else(|| "digital_colleague.not_found".to_owned())?;
         if let Some(spec) = update.schedule.as_ref() {
             let timezone = crate::database::canonical_timezone(spec.timezone())?;
             if timezone != existing.schedule.timezone {
-                return Err("companion.schedule_timezone_immutable: 现有计划必须保留原时区".to_owned());
+                return Err(
+                    "companion.schedule_timezone_immutable: 现有计划必须保留原时区".to_owned(),
+                );
             }
         }
         let now = now_ms();
@@ -135,7 +146,9 @@ impl Database {
         companion_id: &str,
         task_id: &str,
     ) -> Result<Option<crate::database::OwnedCompanionTask>, String> {
-        let Some(task) = self.get_digital_colleague(task_id)? else { return Ok(None) };
+        let Some(task) = self.get_digital_colleague(task_id)? else {
+            return Ok(None);
+        };
         if task.companion_id.as_deref() != Some(companion_id) || !task.companion_bound {
             return Ok(None);
         }
@@ -143,7 +156,10 @@ impl Database {
         if schedules.len() != 1 {
             return Err("digital_colleague.schedule_count_invalid".to_owned());
         }
-        Ok(Some(crate::database::OwnedCompanionTask { task, schedule: schedules.remove(0) }))
+        Ok(Some(crate::database::OwnedCompanionTask {
+            task,
+            schedule: schedules.remove(0),
+        }))
     }
 
     pub fn list_owned_companion_tasks(
@@ -152,8 +168,15 @@ impl Database {
     ) -> Result<Vec<crate::database::OwnedCompanionTask>, String> {
         self.list_digital_colleagues()?
             .into_iter()
-            .filter(|task| task.companion_id.as_deref() == Some(companion_id) && task.companion_bound && task.status != "revoked")
-            .map(|task| self.owned_companion_task(companion_id, &task.id)?.ok_or_else(|| "digital_colleague.not_found".to_owned()))
+            .filter(|task| {
+                task.companion_id.as_deref() == Some(companion_id)
+                    && task.companion_bound
+                    && task.status != "revoked"
+            })
+            .map(|task| {
+                self.owned_companion_task(companion_id, &task.id)?
+                    .ok_or_else(|| "digital_colleague.not_found".to_owned())
+            })
             .collect()
     }
 
@@ -312,10 +335,17 @@ impl Database {
         now: i64,
     ) -> Result<DigitalColleagueScheduleRecord, String> {
         let id = self.with_connection(|connection| {
-            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let id = save_typed_schedule_in_transaction(
-                &transaction, schedule_id, colleague_id, name, spec,
-                catchup_window_seconds, enabled, now,
+                &transaction,
+                schedule_id,
+                colleague_id,
+                name,
+                spec,
+                catchup_window_seconds,
+                enabled,
+                now,
             )?;
             transaction.commit()?;
             Ok(id)
@@ -812,13 +842,13 @@ impl Database {
             connection
                 .query_row(
                     "SELECT CAST(json_extract(r.budget_json, '$.maxToolCalls') AS INTEGER),
-                            (SELECT COUNT(*) FROM tool_calls calls JOIN runs member ON member.id = calls.run_id
-                             WHERE member.id = t.run_id OR (member.root_run_id = t.run_id AND member.run_kind = 'child')),
+                            (SELECT COUNT(*) FROM tool_calls calls JOIN run_usage_roots u ON u.run_id=calls.run_id
+                             WHERE u.usage_root_id=t.run_id),
                             CAST(json_extract(r.budget_json, '$.maxOutputTokens') AS INTEGER),
                             t.output_tokens
                      FROM digital_colleague_triggers t
                      JOIN runs r ON r.id = t.run_id
-                     WHERE t.run_id = (SELECT CASE WHEN run_kind = 'child' THEN root_run_id ELSE id END FROM runs WHERE id = ?1)",
+                     WHERE t.run_id = (SELECT usage_root_id FROM run_usage_roots WHERE run_id=?1)",
                     [run_id],
                     |row| {
                         Ok((
@@ -864,7 +894,7 @@ impl Database {
                           json_extract(r.budget_json, '$.dailyWindowStartMs') AS INTEGER
                       )
                       AND day_trigger.status NOT IN ('rejected', 'skipped')
-                     WHERE current_trigger.run_id = (SELECT CASE WHEN run_kind = 'child' THEN root_run_id ELSE id END FROM runs WHERE id = ?1)
+                     WHERE current_trigger.run_id = (SELECT usage_root_id FROM run_usage_roots WHERE run_id=?1)
                      GROUP BY r.budget_json, current_trigger.total_tokens,
                               current_trigger.output_tokens",
                     [run_id],
@@ -960,7 +990,9 @@ fn admit_trigger_in_transaction(
         Ok(Some(scope)) if colleague.companion_bound => scope.companion_id,
         result => {
             let code = super::companion_ownership::OWNERSHIP_MISSING;
-            let reason = result.err().unwrap_or_else(|| "定时任务未归属小 Fox，已停止执行。".to_owned());
+            let reason = result
+                .err()
+                .unwrap_or_else(|| "定时任务未归属小 Fox，已停止执行。".to_owned());
             return Ok(Err(TriggerConclusion {
                 status: "rejected",
                 code: code.to_owned(),
@@ -1296,14 +1328,15 @@ pub(super) fn project_digital_colleague_event(
                      SELECT COALESCE(SUM(CAST(json_extract(e.event_json, '$.inputTokens') AS INTEGER)), 0),
                             COALESCE(SUM(CAST(json_extract(e.event_json, '$.outputTokens') AS INTEGER)), 0),
                             COALESCE(SUM(CAST(json_extract(e.event_json, '$.totalTokens') AS INTEGER)), 0)
-                     FROM runs member JOIN run_events e ON e.id = (
+                     FROM run_usage_roots member
+                     JOIN run_events e ON e.id = (
                          SELECT latest.id FROM run_events latest
-                         WHERE latest.run_id = member.id AND latest.event_type = 'usage.updated'
+                         WHERE latest.run_id = member.run_id AND latest.event_type = 'usage.updated'
                          ORDER BY latest.seq DESC LIMIT 1
                      )
-                     WHERE member.id = t.run_id OR (member.root_run_id = t.run_id AND member.run_kind = 'child')
+                     WHERE member.usage_root_id=t.run_id
                  ), updated_at = ?2
-                 WHERE t.run_id = (SELECT CASE WHEN run_kind = 'child' THEN root_run_id ELSE id END FROM runs WHERE id = ?1)",
+                 WHERE t.run_id = (SELECT usage_root_id FROM run_usage_roots WHERE run_id=?1)",
                 params![run_id, now],
             )?;
         }
@@ -1316,8 +1349,8 @@ pub(super) fn project_digital_colleague_event(
             transaction.execute(
                 "UPDATE digital_colleague_triggers
                  SET status = ?2,
-                     tool_call_count = (SELECT COUNT(*) FROM tool_calls calls JOIN runs member ON member.id = calls.run_id
-                         WHERE member.id = ?1 OR (member.root_run_id = ?1 AND member.run_kind = 'child')),
+                     tool_call_count = (SELECT COUNT(*) FROM tool_calls calls JOIN run_usage_roots u ON u.run_id=calls.run_id
+                         WHERE u.usage_root_id=?1),
                      error_code = (SELECT error_code FROM runs WHERE id = ?1),
                      error_message = (SELECT error_message FROM runs WHERE id = ?1),
                      updated_at = ?3, completed_at = ?3
@@ -1484,9 +1517,7 @@ fn insert_owned_companion_task(
         return Err(rusqlite::Error::InvalidQuery);
     }
     let conversation_id = Uuid::new_v4().to_string();
-    let project_id = super::upsert_project(
-        transaction, &target.workspace_dir, "ask", now,
-    )?;
+    let project_id = super::upsert_project(transaction, &target.workspace_dir, "ask", now)?;
     transaction.execute(
         "INSERT INTO conversations(
             id, agent_id, title, project_id, project_root, permission_mode, status,
@@ -1501,7 +1532,12 @@ fn insert_owned_companion_task(
             now,
         ],
     )?;
-    replace_task_knowledge(transaction, &conversation_id, &input.knowledge_references, now)?;
+    replace_task_knowledge(
+        transaction,
+        &conversation_id,
+        &input.knowledge_references,
+        now,
+    )?;
     let id = Uuid::new_v4().to_string();
     let knowledge_json = crate::canonical_json::to_string(&input.knowledge_references)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
@@ -1515,15 +1551,32 @@ fn insert_owned_companion_task(
          ) VALUES (?1, ?2, NULL, NULL, NULL, NULL, ?3, ?4, ?5, ?6, ?7, 'active',
                    ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14, ?15, 1)",
         params![
-            id, input.name, conversation_id, input.objective, project_id,
-            target.workspace_dir, knowledge_json, input.max_runs_per_day,
-            input.max_tokens_per_day, input.max_duration_ms, input.max_output_tokens,
-            input.max_tool_calls, now, target.companion_id, target.report_conversation_id,
+            id,
+            input.name,
+            conversation_id,
+            input.objective,
+            project_id,
+            target.workspace_dir,
+            knowledge_json,
+            input.max_runs_per_day,
+            input.max_tokens_per_day,
+            input.max_duration_ms,
+            input.max_output_tokens,
+            input.max_tool_calls,
+            now,
+            target.companion_id,
+            target.report_conversation_id,
         ],
     )?;
     append_audit(
-        transaction, Some(&id), None, "colleague.created", "applied", "user",
-        &json!({"companionId": target.companion_id, "reportConversationId": target.report_conversation_id}), now,
+        transaction,
+        Some(&id),
+        None,
+        "colleague.created",
+        "applied",
+        "user",
+        &json!({"companionId": target.companion_id, "reportConversationId": target.report_conversation_id}),
+        now,
     )?;
     Ok(id)
 }
@@ -1536,11 +1589,19 @@ fn replace_task_knowledge(
 ) -> rusqlite::Result<()> {
     for reference in references {
         reference.validate().map_err(|error| {
-            rusqlite::Error::ToSqlConversionFailure(format!("invalid knowledge reference: {error}").into())
+            rusqlite::Error::ToSqlConversionFailure(
+                format!("invalid knowledge reference: {error}").into(),
+            )
         })?;
     }
-    transaction.execute("DELETE FROM knowledge_bindings_v2 WHERE conversation_id = ?1", [conversation_id])?;
-    transaction.execute("DELETE FROM knowledge_bindings WHERE conversation_id = ?1", [conversation_id])?;
+    transaction.execute(
+        "DELETE FROM knowledge_bindings_v2 WHERE conversation_id = ?1",
+        [conversation_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM knowledge_bindings WHERE conversation_id = ?1",
+        [conversation_id],
+    )?;
     for reference in references {
         transaction.execute(
             "INSERT INTO knowledge_bindings_v2(
@@ -1548,8 +1609,14 @@ fn replace_task_knowledge(
                 knowledge_base_id, knowledge_base_name, enabled, created_at, updated_at
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?8)",
             params![
-                Uuid::new_v4().to_string(), conversation_id, reference.source, reference.provider_key, reference.connection_id,
-                reference.id, reference.id, now,
+                Uuid::new_v4().to_string(),
+                conversation_id,
+                reference.source,
+                reference.provider_key,
+                reference.connection_id,
+                reference.id,
+                reference.id,
+                now,
             ],
         )?;
     }
@@ -1566,52 +1633,88 @@ fn save_typed_schedule_in_transaction(
     enabled: bool,
     now: i64,
 ) -> rusqlite::Result<String> {
-    let spec = spec.canonicalized().map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
-    spec.validate().map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
+    let spec = spec
+        .canonicalized()
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
+    spec.validate()
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
     validate_catchup_window(catchup_window_seconds)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
-    let id = schedule_id.map(str::to_owned).unwrap_or_else(|| Uuid::new_v4().to_string());
+    let id = schedule_id
+        .map(str::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
     let active: bool = transaction.query_row(
         "SELECT status = 'active' FROM digital_colleagues WHERE id = ?1",
-        [colleague_id], |row| row.get(0),
+        [colleague_id],
+        |row| row.get(0),
     )?;
     if enabled && !active {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let existing = query_schedule(transaction, &id).optional()?;
-    if existing.as_ref().is_some_and(|record| record.colleague_id != colleague_id) {
+    if existing
+        .as_ref()
+        .is_some_and(|record| record.colleague_id != colleague_id)
+    {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let unchanged = existing.as_ref().is_some_and(|record| {
-        DigitalColleagueScheduleSpec::from_record(record).ok().as_ref() == Some(&spec)
+        DigitalColleagueScheduleSpec::from_record(record)
+            .ok()
+            .as_ref()
+            == Some(&spec)
     });
     let anchor_at = match &spec {
-        DigitalColleagueScheduleSpec::Interval { .. } if unchanged => existing.as_ref().and_then(|record| record.anchor_at),
+        DigitalColleagueScheduleSpec::Interval { .. } if unchanged => {
+            existing.as_ref().and_then(|record| record.anchor_at)
+        }
         DigitalColleagueScheduleSpec::Interval { .. } => Some(now),
         _ => None,
     };
-    let recomputed = spec.next_after(anchor_at, now)
+    let recomputed = spec
+        .next_after(anchor_at, now)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
-    let next_due_at = if unchanged && existing.as_ref().is_some_and(|record| record.enabled || !enabled) {
-        existing.as_ref().map(|record| record.next_due_at).unwrap_or(now)
+    let next_due_at = if unchanged
+        && existing
+            .as_ref()
+            .is_some_and(|record| record.enabled || !enabled)
+    {
+        existing
+            .as_ref()
+            .map(|record| record.next_due_at)
+            .unwrap_or(now)
     } else {
         match recomputed {
             Some(next) => next,
             None if !enabled => match &spec {
                 DigitalColleagueScheduleSpec::Once { at_ms, .. } => *at_ms,
-                _ => existing.as_ref().map(|record| record.next_due_at).unwrap_or(now),
+                _ => existing
+                    .as_ref()
+                    .map(|record| record.next_due_at)
+                    .unwrap_or(now),
             },
             None => return Err(rusqlite::Error::InvalidQuery),
         }
     };
     let (interval_seconds, once_at, weekdays, local_time) = match &spec {
         DigitalColleagueScheduleSpec::Once { at_ms, .. } => (None, Some(*at_ms), None, None),
-        DigitalColleagueScheduleSpec::Interval { interval_seconds, .. } => (Some(*interval_seconds), None, None, None),
-        DigitalColleagueScheduleSpec::Daily { weekdays, local_time, .. }
-        | DigitalColleagueScheduleSpec::Weekly { weekdays, local_time, .. } =>
-            (None, None, Some(weekdays.clone()), Some(local_time.clone())),
+        DigitalColleagueScheduleSpec::Interval {
+            interval_seconds, ..
+        } => (Some(*interval_seconds), None, None, None),
+        DigitalColleagueScheduleSpec::Daily {
+            weekdays,
+            local_time,
+            ..
+        }
+        | DigitalColleagueScheduleSpec::Weekly {
+            weekdays,
+            local_time,
+            ..
+        } => (None, None, Some(weekdays.clone()), Some(local_time.clone())),
     };
-    let weekdays_json = weekdays.map(|days| serde_json::to_string(&days)).transpose()
+    let weekdays_json = weekdays
+        .map(|days| serde_json::to_string(&days))
+        .transpose()
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     transaction.execute(
         "INSERT INTO digital_colleague_schedules(
@@ -1633,8 +1736,16 @@ fn save_typed_schedule_in_transaction(
             weekdays_json, local_time, spec.timezone(), anchor_at,
             catchup_window_seconds, enabled, next_due_at, now],
     )?;
-    append_audit(transaction, Some(colleague_id), None, "schedule.saved", "applied", "user",
-        &json!({"scheduleId": id, "enabled": enabled, "kind": spec.kind(), "timezone": spec.timezone()}), now)?;
+    append_audit(
+        transaction,
+        Some(colleague_id),
+        None,
+        "schedule.saved",
+        "applied",
+        "user",
+        &json!({"scheduleId": id, "enabled": enabled, "kind": spec.kind(), "timezone": spec.timezone()}),
+        now,
+    )?;
     Ok(id)
 }
 
@@ -1878,7 +1989,9 @@ mod tests {
     fn create_colleague(database: &Database) -> DigitalColleagueRecord {
         let root = std::env::temp_dir().join(format!("fox-owned-task-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let owner = database.add_companion(&root, "fox-debugger").expect("create owner");
+        let owner = database
+            .add_companion(&root, "fox-debugger")
+            .expect("create owner");
         database
             .create_digital_colleague(&colleague_input(Some(owner.profile.id)))
             .expect("create digital colleague")
@@ -1899,10 +2012,12 @@ mod tests {
             .unwrap();
         let id = Uuid::new_v4().to_string();
         let now = now_ms();
-        let package_snapshot_json = crate::canonical_json::to_string(&binding.package_snapshot).unwrap();
-        database.with_connection(|connection| {
-            connection.execute(
-                "INSERT INTO digital_colleagues(
+        let package_snapshot_json =
+            crate::canonical_json::to_string(&binding.package_snapshot).unwrap();
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO digital_colleagues(
                     id, name, expert_id, expert_binding_id, package_hash, package_snapshot_json,
                     conversation_id, objective, project_id, project_root,
                     knowledge_references_json, status, max_runs_per_day, max_tokens_per_day,
@@ -1910,15 +2025,26 @@ mod tests {
                     companion_id, report_conversation_id, companion_bound
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, '[]', 'active',
                            ?9, ?10, ?11, ?12, ?13, ?14, ?14, NULL, NULL, 0)",
-                params![
-                    id, input.name, input.expert_id, binding.id, binding.package_hash,
-                    package_snapshot_json, conversation.id, input.objective,
-                    input.max_runs_per_day, input.max_tokens_per_day, input.max_duration_ms,
-                    input.max_output_tokens, input.max_tool_calls, now,
-                ],
-            )?;
-            Ok(())
-        }).unwrap();
+                    params![
+                        id,
+                        input.name,
+                        input.expert_id,
+                        binding.id,
+                        binding.package_hash,
+                        package_snapshot_json,
+                        conversation.id,
+                        input.objective,
+                        input.max_runs_per_day,
+                        input.max_tokens_per_day,
+                        input.max_duration_ms,
+                        input.max_output_tokens,
+                        input.max_tool_calls,
+                        now,
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
         database.get_digital_colleague(&id).unwrap().unwrap()
     }
 
@@ -1942,24 +2068,35 @@ mod tests {
         std::fs::create_dir_all(&other_root).unwrap();
         let other = database.add_companion(&other_root, "fox-debugger").unwrap();
         let before = now_ms();
-        let created = database.create_owned_companion_task(
-            &owned_task_input(&owner.profile.id),
-            DigitalColleagueScheduleSpec::Weekly {
-                weekdays: vec![5],
-                local_time: "15:00".to_owned(),
-                timezone: "Asia/Shanghai".to_owned(),
-            },
-            true,
-        ).unwrap();
-        assert_eq!(created.task.companion_id.as_deref(), Some(owner.profile.id.as_str()));
-        assert_eq!(created.task.report_conversation_id.as_deref(), Some(owner.conversation_id.as_str()));
+        let created = database
+            .create_owned_companion_task(
+                &owned_task_input(&owner.profile.id),
+                DigitalColleagueScheduleSpec::Weekly {
+                    weekdays: vec![5],
+                    local_time: "15:00".to_owned(),
+                    timezone: "Asia/Shanghai".to_owned(),
+                },
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            created.task.companion_id.as_deref(),
+            Some(owner.profile.id.as_str())
+        );
+        assert_eq!(
+            created.task.report_conversation_id.as_deref(),
+            Some(owner.conversation_id.as_str())
+        );
         assert_ne!(created.task.conversation_id, owner.conversation_id);
         assert!(created.task.companion_bound);
         assert_eq!(created.task.expert_id, None);
         assert_eq!(created.task.expert_binding_id, None);
         assert_eq!(created.task.package_hash, None);
         assert!(created.task.package_snapshot.is_null());
-        assert!(database.current_conversation_expert_binding(&created.task.conversation_id).unwrap().is_none());
+        assert!(database
+            .current_conversation_expert_binding(&created.task.conversation_id)
+            .unwrap()
+            .is_none());
         assert_eq!(created.task.max_runs_per_day, 8);
         assert_eq!(created.task.max_tokens_per_day, 128_000);
         assert_eq!(created.task.max_duration_ms, 300_000);
@@ -1968,31 +2105,64 @@ mod tests {
         assert_eq!(created.schedule.catchup_window_seconds, 3_600);
         assert_eq!(created.schedule.timezone, "Asia/Shanghai");
         assert!(created.schedule.next_due_at > before);
-        assert_eq!(database.list_owned_companion_tasks(&owner.profile.id).unwrap().len(), 1);
-        assert!(database.list_owned_companion_tasks(&other.profile.id).unwrap().is_empty());
-        assert!(database.owned_companion_task(&other.profile.id, &created.task.id).unwrap().is_none());
-        assert!(database.list_owned_companion_task_history(&other.profile.id, &created.task.id, 20).is_err());
+        assert_eq!(
+            database
+                .list_owned_companion_tasks(&owner.profile.id)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(database
+            .list_owned_companion_tasks(&other.profile.id)
+            .unwrap()
+            .is_empty());
+        assert!(database
+            .owned_companion_task(&other.profile.id, &created.task.id)
+            .unwrap()
+            .is_none());
+        assert!(database
+            .list_owned_companion_task_history(&other.profile.id, &created.task.id, 20)
+            .is_err());
 
         let changed_timezone = database.update_owned_companion_task(
             &owner.profile.id,
             &created.task.id,
             crate::database::OwnedCompanionTaskUpdate {
                 schedule: Some(DigitalColleagueScheduleSpec::Weekly {
-                    weekdays: vec![5], local_time: "15:00".to_owned(), timezone: "UTC".to_owned(),
+                    weekdays: vec![5],
+                    local_time: "15:00".to_owned(),
+                    timezone: "UTC".to_owned(),
                 }),
                 ..Default::default()
             },
         );
         assert!(changed_timezone.is_err());
-        assert_eq!(database.owned_companion_task(&owner.profile.id, &created.task.id).unwrap().unwrap().schedule.timezone, "Asia/Shanghai");
+        assert_eq!(
+            database
+                .owned_companion_task(&owner.profile.id, &created.task.id)
+                .unwrap()
+                .unwrap()
+                .schedule
+                .timezone,
+            "Asia/Shanghai"
+        );
 
         let task_count = database.list_digital_colleagues().unwrap().len();
-        assert!(database.create_owned_companion_task(
-            &owned_task_input(&owner.profile.id),
-            DigitalColleagueScheduleSpec::Interval { interval_seconds: 1, timezone: "UTC".to_owned() },
-            true,
-        ).is_err());
-        assert_eq!(database.list_digital_colleagues().unwrap().len(), task_count, "invalid schedules roll back task creation");
+        assert!(database
+            .create_owned_companion_task(
+                &owned_task_input(&owner.profile.id),
+                DigitalColleagueScheduleSpec::Interval {
+                    interval_seconds: 1,
+                    timezone: "UTC".to_owned()
+                },
+                true,
+            )
+            .is_err());
+        assert_eq!(
+            database.list_digital_colleagues().unwrap().len(),
+            task_count,
+            "invalid schedules roll back task creation"
+        );
         drop(database);
         let _ = std::fs::remove_file(path);
     }
@@ -2003,63 +2173,150 @@ mod tests {
         let root = std::env::temp_dir().join(format!("fox-owned-controls-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let owner = database.add_companion(&root, "fox-debugger").unwrap();
-        let owned = database.create_owned_companion_task(
-            &owned_task_input(&owner.profile.id),
-            DigitalColleagueScheduleSpec::Interval { interval_seconds: 3_600, timezone: "UTC".to_owned() },
-            true,
-        ).unwrap();
+        let owned = database
+            .create_owned_companion_task(
+                &owned_task_input(&owner.profile.id),
+                DigitalColleagueScheduleSpec::Interval {
+                    interval_seconds: 3_600,
+                    timezone: "UTC".to_owned(),
+                },
+                true,
+            )
+            .unwrap();
         let cursor = owned.schedule.next_due_at;
-        let accepted = database.accept_digital_colleague_trigger(
-            &owned.task.id, "manual", None, "owned:run-now", &json!({}), None, "user",
-        ).unwrap();
+        let accepted = database
+            .accept_digital_colleague_trigger(
+                &owned.task.id,
+                "manual",
+                None,
+                "owned:run-now",
+                &json!({}),
+                None,
+                "user",
+            )
+            .unwrap();
         assert!(accepted.prepared.is_some());
         complete_trigger(&database, &accepted.trigger);
-        let after_run = database.owned_companion_task(&owner.profile.id, &owned.task.id).unwrap().unwrap();
-        assert_eq!(after_run.schedule.next_due_at, cursor, "manual runs do not move the plan cursor");
-        assert_eq!(database.list_owned_companion_task_history(&owner.profile.id, &owned.task.id, 20).unwrap().len(), 1);
+        let after_run = database
+            .owned_companion_task(&owner.profile.id, &owned.task.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after_run.schedule.next_due_at, cursor,
+            "manual runs do not move the plan cursor"
+        );
+        assert_eq!(
+            database
+                .list_owned_companion_task_history(&owner.profile.id, &owned.task.id, 20)
+                .unwrap()
+                .len(),
+            1
+        );
 
-        let paused = database.update_owned_companion_task(
-            &owner.profile.id, &owned.task.id,
-            crate::database::OwnedCompanionTaskUpdate { enabled: Some(false), ..Default::default() },
-        ).unwrap();
+        let paused = database
+            .update_owned_companion_task(
+                &owner.profile.id,
+                &owned.task.id,
+                crate::database::OwnedCompanionTaskUpdate {
+                    enabled: Some(false),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         assert!(!paused.schedule.enabled);
         assert_eq!(paused.task.status, "paused");
         assert_eq!(paused.schedule.next_due_at, cursor);
-        let resumed = database.update_owned_companion_task(
-            &owner.profile.id, &owned.task.id,
-            crate::database::OwnedCompanionTaskUpdate { enabled: Some(true), ..Default::default() },
-        ).unwrap();
+        let resumed = database
+            .update_owned_companion_task(
+                &owner.profile.id,
+                &owned.task.id,
+                crate::database::OwnedCompanionTaskUpdate {
+                    enabled: Some(true),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         assert!(resumed.schedule.enabled);
 
         database.archive_companion(&owner.profile.id).unwrap();
-        let archived = database.owned_companion_task(&owner.profile.id, &owned.task.id).unwrap().unwrap();
+        let archived = database
+            .owned_companion_task(&owner.profile.id, &owned.task.id)
+            .unwrap()
+            .unwrap();
         assert!(!archived.schedule.enabled);
         database.restore_companion(&owner.profile.id).unwrap();
-        let restored = database.owned_companion_task(&owner.profile.id, &owned.task.id).unwrap().unwrap();
-        assert!(!restored.schedule.enabled, "restore never re-enables task plans");
-        database.update_owned_companion_task(
-            &owner.profile.id, &owned.task.id,
-            crate::database::OwnedCompanionTaskUpdate { enabled: Some(true), ..Default::default() },
-        ).unwrap();
-        database.revoke_digital_colleague(&owned.task.id, "test delete").unwrap();
-        let deleted = database.get_digital_colleague(&owned.task.id).unwrap().unwrap();
+        let restored = database
+            .owned_companion_task(&owner.profile.id, &owned.task.id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !restored.schedule.enabled,
+            "restore never re-enables task plans"
+        );
+        database
+            .update_owned_companion_task(
+                &owner.profile.id,
+                &owned.task.id,
+                crate::database::OwnedCompanionTaskUpdate {
+                    enabled: Some(true),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        database
+            .revoke_digital_colleague(&owned.task.id, "test delete")
+            .unwrap();
+        let deleted = database
+            .get_digital_colleague(&owned.task.id)
+            .unwrap()
+            .unwrap();
         assert_eq!(deleted.status, "revoked");
-        assert!(!database.list_digital_colleague_schedules(&owned.task.id).unwrap()[0].enabled);
-        assert_eq!(database.list_digital_colleague_triggers(&owned.task.id, 20).unwrap().len(), 1);
+        assert!(
+            !database
+                .list_digital_colleague_schedules(&owned.task.id)
+                .unwrap()[0]
+                .enabled
+        );
+        assert_eq!(
+            database
+                .list_digital_colleague_triggers(&owned.task.id, 20)
+                .unwrap()
+                .len(),
+            1
+        );
 
-        let past = database.create_owned_companion_task(
-            &owned_task_input(&owner.profile.id),
-            DigitalColleagueScheduleSpec::Once { at_ms: now_ms() + 60_000, timezone: "UTC".to_owned() },
-            false,
-        ).unwrap();
-        database.with_connection(|connection| {
-            connection.execute("UPDATE digital_colleague_schedules SET once_at=?2,next_due_at=?2 WHERE id=?1", params![past.schedule.id, now_ms() - 60_000])?;
-            Ok(())
-        }).unwrap();
-        assert!(database.update_owned_companion_task(
-            &owner.profile.id, &past.task.id,
-            crate::database::OwnedCompanionTaskUpdate { enabled: Some(true), ..Default::default() },
-        ).is_err(), "a past one-time instant cannot be silently re-enabled");
+        let past = database
+            .create_owned_companion_task(
+                &owned_task_input(&owner.profile.id),
+                DigitalColleagueScheduleSpec::Once {
+                    at_ms: now_ms() + 60_000,
+                    timezone: "UTC".to_owned(),
+                },
+                false,
+            )
+            .unwrap();
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE digital_colleague_schedules SET once_at=?2,next_due_at=?2 WHERE id=?1",
+                    params![past.schedule.id, now_ms() - 60_000],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            database
+                .update_owned_companion_task(
+                    &owner.profile.id,
+                    &past.task.id,
+                    crate::database::OwnedCompanionTaskUpdate {
+                        enabled: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .is_err(),
+            "a past one-time instant cannot be silently re-enabled"
+        );
         drop(database);
         let _ = std::fs::remove_file(path);
     }
@@ -2070,45 +2327,70 @@ mod tests {
         let root = std::env::temp_dir().join(format!("fox-owned-enablement-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let owner = database.add_companion(&root, "fox-debugger").unwrap();
-        let created = database.create_owned_companion_task(
-            &owned_task_input(&owner.profile.id),
-            DigitalColleagueScheduleSpec::Interval { interval_seconds: 3_600, timezone: "UTC".to_owned() },
-            false,
-        ).unwrap();
+        let created = database
+            .create_owned_companion_task(
+                &owned_task_input(&owner.profile.id),
+                DigitalColleagueScheduleSpec::Interval {
+                    interval_seconds: 3_600,
+                    timezone: "UTC".to_owned(),
+                },
+                false,
+            )
+            .unwrap();
         assert!(!created.schedule.enabled);
-        let edited = database.update_owned_companion_task(
-            &owner.profile.id,
-            &created.task.id,
-            crate::database::OwnedCompanionTaskUpdate {
-                schedule: Some(DigitalColleagueScheduleSpec::Interval {
-                    interval_seconds: 7_200, timezone: "UTC".to_owned(),
-                }),
-                ..Default::default()
-            },
-        ).unwrap();
-        assert!(!edited.schedule.enabled, "omitted enabled must keep a disabled plan disabled");
+        let edited = database
+            .update_owned_companion_task(
+                &owner.profile.id,
+                &created.task.id,
+                crate::database::OwnedCompanionTaskUpdate {
+                    schedule: Some(DigitalColleagueScheduleSpec::Interval {
+                        interval_seconds: 7_200,
+                        timezone: "UTC".to_owned(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            !edited.schedule.enabled,
+            "omitted enabled must keep a disabled plan disabled"
+        );
         assert_eq!(edited.schedule.interval_seconds, Some(7_200));
 
-        database.update_owned_companion_task(
-            &owner.profile.id,
-            &created.task.id,
-            crate::database::OwnedCompanionTaskUpdate { enabled: Some(true), ..Default::default() },
-        ).unwrap();
+        database
+            .update_owned_companion_task(
+                &owner.profile.id,
+                &created.task.id,
+                crate::database::OwnedCompanionTaskUpdate {
+                    enabled: Some(true),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         database.archive_companion(&owner.profile.id).unwrap();
         database.restore_companion(&owner.profile.id).unwrap();
-        let restored = database.owned_companion_task(&owner.profile.id, &created.task.id).unwrap().unwrap();
+        let restored = database
+            .owned_companion_task(&owner.profile.id, &created.task.id)
+            .unwrap()
+            .unwrap();
         assert!(!restored.schedule.enabled);
-        let after_restore_edit = database.update_owned_companion_task(
-            &owner.profile.id,
-            &created.task.id,
-            crate::database::OwnedCompanionTaskUpdate {
-                schedule: Some(DigitalColleagueScheduleSpec::Interval {
-                    interval_seconds: 1_800, timezone: "UTC".to_owned(),
-                }),
-                ..Default::default()
-            },
-        ).unwrap();
-        assert!(!after_restore_edit.schedule.enabled, "schedule edit after restore must not re-enable the plan");
+        let after_restore_edit = database
+            .update_owned_companion_task(
+                &owner.profile.id,
+                &created.task.id,
+                crate::database::OwnedCompanionTaskUpdate {
+                    schedule: Some(DigitalColleagueScheduleSpec::Interval {
+                        interval_seconds: 1_800,
+                        timezone: "UTC".to_owned(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            !after_restore_edit.schedule.enabled,
+            "schedule edit after restore must not re-enable the plan"
+        );
         assert_eq!(after_restore_edit.schedule.interval_seconds, Some(1_800));
         drop(database);
         let _ = std::fs::remove_file(path);
@@ -2159,32 +2441,85 @@ mod tests {
 
         let (database, path) = test_database();
         let colleague = create_colleague(&database);
-        let accepted = database.accept_digital_colleague_trigger(
-            &colleague.id, "manual", None, "budget:descendants", &json!({}), None, "user",
-        ).unwrap();
+        let accepted = database
+            .accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "budget:descendants",
+                &json!({}),
+                None,
+                "user",
+            )
+            .unwrap();
         let root = accepted.trigger.run_id.as_deref().unwrap();
-        database.apply_runtime_event(root, 1, &json!({"type":"run.started"})).unwrap();
-        database.create_host_tool_call(root, "delegate", "child_run_start", &json!({}), "running", false).unwrap();
-        let budget = ChildRunBudget { max_duration_ms: 30_000, max_total_tokens: 4_000, max_output_tokens: 1_000, max_tool_calls: 16 };
-        let (child, _, _) = database.create_child_run(CreateChildRunInput {
-            parent_run_id: root, tool_call_id: "delegate", worker_agent_id: "fox-general",
-            objective: "Inspect", context: "Inspect", budget: &budget,
-            team_run_id: None, team_member_id: None, allowed_tools: None,
-        }).unwrap();
+        database
+            .apply_runtime_event(root, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        database
+            .create_host_tool_call(
+                root,
+                "delegate",
+                "child_run_start",
+                &json!({}),
+                "running",
+                false,
+            )
+            .unwrap();
+        let budget = ChildRunBudget {
+            max_duration_ms: 30_000,
+            max_total_tokens: 4_000,
+            max_output_tokens: 1_000,
+            max_tool_calls: 16,
+        };
+        let (child, _, _) = database
+            .create_child_run(CreateChildRunInput {
+                parent_run_id: root,
+                tool_call_id: "delegate",
+                worker_agent_id: "fox-general",
+                objective: "Inspect",
+                context: "Inspect",
+                budget: &budget,
+                team_run_id: None,
+                team_member_id: None,
+                allowed_tools: None,
+            })
+            .unwrap();
         let child_id = &child.run.id;
-        database.apply_runtime_event(child_id, 1, &json!({"type":"run.started"})).unwrap();
-        for (run, seq, input, output) in [(root, 2, 10, 2), (root, 3, 20, 4), (child_id.as_str(), 2, 30, 6), (child_id.as_str(), 3, 40, 8)] {
+        database
+            .apply_runtime_event(child_id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        for (run, seq, input, output) in [
+            (root, 2, 10, 2),
+            (root, 3, 20, 4),
+            (child_id.as_str(), 2, 30, 6),
+            (child_id.as_str(), 3, 40, 8),
+        ] {
             database.apply_runtime_event(run, seq, &json!({"type":"usage.updated", "inputTokens":input, "outputTokens":output, "cacheReadTokens":0, "cacheWriteTokens":0, "totalTokens":input + output})).unwrap();
         }
-        let projected = database.list_digital_colleague_triggers(&colleague.id, 10).unwrap().remove(0);
-        assert_eq!((projected.input_tokens, projected.output_tokens, projected.total_tokens), (60, 12, 72));
+        let projected = database
+            .list_digital_colleague_triggers(&colleague.id, 10)
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            (
+                projected.input_tokens,
+                projected.output_tokens,
+                projected.total_tokens
+            ),
+            (60, 12, 72)
+        );
         assert!(database.is_digital_colleague_run(child_id).unwrap());
-        assert!(!database.digital_colleague_budget_exceeded(child_id).unwrap());
+        assert!(!database
+            .digital_colleague_budget_exceeded(child_id)
+            .unwrap());
         database.with_connection(|connection| {
             connection.execute("UPDATE runs SET budget_json = json_set(budget_json, '$.maxTotalTokens', 72) WHERE id = ?1", [root])?;
             Ok(())
         }).unwrap();
-        assert!(database.digital_colleague_budget_exceeded(child_id).unwrap());
+        assert!(database
+            .digital_colleague_budget_exceeded(child_id)
+            .unwrap());
         drop(database);
         let _ = std::fs::remove_file(path);
     }
@@ -2196,35 +2531,95 @@ mod tests {
         let workspace = std::env::temp_dir().join(format!("fox-budget-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&workspace).unwrap();
         let owner = database.add_companion(&workspace, "fox-debugger").unwrap();
-        let task = database.create_owned_companion_task(
-            &owned_task_input(&owner.profile.id),
-            DigitalColleagueScheduleSpec::Interval { interval_seconds: 3_600, timezone: "UTC".to_owned() }, true,
-        ).unwrap().task;
+        let task = database
+            .create_owned_companion_task(
+                &owned_task_input(&owner.profile.id),
+                DigitalColleagueScheduleSpec::Interval {
+                    interval_seconds: 3_600,
+                    timezone: "UTC".to_owned(),
+                },
+                true,
+            )
+            .unwrap()
+            .task;
         assert_eq!(task.max_tool_calls, 16);
-        let accepted = database.accept_digital_colleague_trigger(
-            &task.id, "manual", None, "budget:16", &json!({}), None, "user",
-        ).unwrap();
+        let accepted = database
+            .accept_digital_colleague_trigger(
+                &task.id,
+                "manual",
+                None,
+                "budget:16",
+                &json!({}),
+                None,
+                "user",
+            )
+            .unwrap();
         let root = accepted.trigger.run_id.as_deref().unwrap();
-        database.apply_runtime_event(root, 1, &json!({"type":"run.started"})).unwrap();
-        database.create_host_tool_call(root, "delegate", "child_run_start", &json!({}), "running", false).unwrap();
-        let budget = ChildRunBudget { max_duration_ms: 30_000, max_total_tokens: 4_000, max_output_tokens: 1_000, max_tool_calls: 16 };
-        let (child, _, _) = database.create_child_run(CreateChildRunInput {
-            parent_run_id: root, tool_call_id: "delegate", worker_agent_id: "fox-general",
-            objective: "Inspect", context: "Inspect", budget: &budget,
-            team_run_id: None, team_member_id: None, allowed_tools: None,
-        }).unwrap();
+        database
+            .apply_runtime_event(root, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        database
+            .create_host_tool_call(
+                root,
+                "delegate",
+                "child_run_start",
+                &json!({}),
+                "running",
+                false,
+            )
+            .unwrap();
+        let budget = ChildRunBudget {
+            max_duration_ms: 30_000,
+            max_total_tokens: 4_000,
+            max_output_tokens: 1_000,
+            max_tool_calls: 16,
+        };
+        let (child, _, _) = database
+            .create_child_run(CreateChildRunInput {
+                parent_run_id: root,
+                tool_call_id: "delegate",
+                worker_agent_id: "fox-general",
+                objective: "Inspect",
+                context: "Inspect",
+                budget: &budget,
+                team_run_id: None,
+                team_member_id: None,
+                allowed_tools: None,
+            })
+            .unwrap();
         let child = &child.run.id;
-        database.apply_runtime_event(child, 1, &json!({"type":"run.started"})).unwrap();
+        database
+            .apply_runtime_event(child, 1, &json!({"type":"run.started"}))
+            .unwrap();
         for index in 0..15 {
-            database.create_host_tool_call(child, &format!("child-{index}"), "read", &json!({}), "running", false).unwrap();
+            database
+                .create_host_tool_call(
+                    child,
+                    &format!("child-{index}"),
+                    "read",
+                    &json!({}),
+                    "running",
+                    false,
+                )
+                .unwrap();
         }
-        let error = database.create_host_tool_call(child, "child-16", "read", &json!({}), "running", false).unwrap_err();
-        assert!(error.contains("digital_colleague.tool_budget_exceeded"), "{error}");
-        let counts: (i64, i64) = database.with_connection(|connection| connection.query_row(
-            "SELECT (SELECT COUNT(*) FROM tool_calls WHERE run_id = ?1),
+        let error = database
+            .create_host_tool_call(child, "child-16", "read", &json!({}), "running", false)
+            .unwrap_err();
+        assert!(
+            error.contains("digital_colleague.tool_budget_exceeded"),
+            "{error}"
+        );
+        let counts: (i64, i64) = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT (SELECT COUNT(*) FROM tool_calls WHERE run_id = ?1),
                     (SELECT COUNT(*) FROM tool_calls WHERE run_id = ?2)",
-            params![root, child], |row| Ok((row.get(0)?, row.get(1)?)),
-        )).unwrap();
+                    params![root, child],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
         assert_eq!(counts, (1, 15), "第 17 次请求不得写入工具调用记录");
         drop(database);
         let _ = std::fs::remove_file(path);
@@ -2323,11 +2718,16 @@ mod tests {
         let root = std::env::temp_dir().join(format!("fox-owned-history-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let owner = database.add_companion(&root, "fox-debugger").unwrap();
-        let owned = database.create_owned_companion_task(
-            &owned_task_input(&owner.profile.id),
-            DigitalColleagueScheduleSpec::Interval { interval_seconds: 3_600, timezone: "UTC".to_owned() },
-            true,
-        ).unwrap();
+        let owned = database
+            .create_owned_companion_task(
+                &owned_task_input(&owner.profile.id),
+                DigitalColleagueScheduleSpec::Interval {
+                    interval_seconds: 3_600,
+                    timezone: "UTC".to_owned(),
+                },
+                true,
+            )
+            .unwrap();
         let queued_id = "trigger_queued_old".to_owned();
         database.with_connection(|connection| {
             connection.execute(
@@ -2351,17 +2751,32 @@ mod tests {
             }
             Ok(())
         }).unwrap();
-        let generic = database.list_digital_colleague_triggers(&owned.task.id, 20).unwrap();
+        let generic = database
+            .list_digital_colleague_triggers(&owned.task.id, 20)
+            .unwrap();
         assert_eq!(generic.len(), 20);
         assert!(generic.iter().all(|trigger| trigger.status == "skipped"));
         assert!(!generic.iter().any(|trigger| trigger.id == queued_id));
-        let history = database.list_owned_companion_task_history(&owner.profile.id, &owned.task.id, 20).unwrap();
-        assert_eq!(history.len(), 21, "active rows union the latest limit, never truncated");
+        let history = database
+            .list_owned_companion_task_history(&owner.profile.id, &owned.task.id, 20)
+            .unwrap();
+        assert_eq!(
+            history.len(),
+            21,
+            "active rows union the latest limit, never truncated"
+        );
         assert_eq!(history[0].status, "skipped");
         assert_eq!(history[20].id, queued_id);
         assert_eq!(history[20].status, "queued");
-        assert!(database.list_owned_companion_task_history(&owner.profile.id, &owned.task.id, 20).unwrap()
-            .iter().filter(|trigger| trigger.status == "queued").count() == 1);
+        assert!(
+            database
+                .list_owned_companion_task_history(&owner.profile.id, &owned.task.id, 20)
+                .unwrap()
+                .iter()
+                .filter(|trigger| trigger.status == "queued")
+                .count()
+                == 1
+        );
         drop(database);
         let _ = std::fs::remove_file(path);
     }
@@ -4209,9 +4624,9 @@ mod tests {
             "全局搜索不把后台执行会话当普通对话"
         );
         assert!(
-            hits.iter()
-                .any(|hit| hit.kind == "task" && hit.id == colleague.id
-                    && hit.entity_id.as_deref() == Some(contact.conversation_id.as_str())),
+            hits.iter().any(|hit| hit.kind == "task"
+                && hit.id == colleague.id
+                && hit.entity_id.as_deref() == Some(contact.conversation_id.as_str())),
             "定时任务搜索结果指向所属小 Fox 的固定私聊"
         );
         let legacy = create_legacy_colleague(&database);
@@ -4220,8 +4635,14 @@ mod tests {
             .unwrap();
         let now = now_ms();
         make_schedule_due(&database, &legacy_schedule.id, now);
-        assert!(database.claim_due_digital_colleague_triggers(now).unwrap().is_empty());
-        assert_eq!(conversation_run_count(&database, &legacy.conversation_id), 0);
+        assert!(database
+            .claim_due_digital_colleague_triggers(now)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            conversation_run_count(&database, &legacy.conversation_id),
+            0
+        );
         assert!(
             database
                 .list_conversations()

@@ -40,6 +40,7 @@ export interface FoxRuntimeOptions {
   pendingMessage?: ConversationMessage | null
   /** True while an approval/question/workflow gate is pending. */
   isSendDisabled?: boolean
+  stableAssistantTurns?: boolean
 }
 
 // Attachment rules, mirrored from the legacy composer (PromptInput props):
@@ -92,6 +93,15 @@ function convertFoxThreadMessage(message: FoxThreadMessage): ThreadMessageLike {
   }
 }
 
+function convertContactThreadMessage(message: FoxThreadMessage): ThreadMessageLike {
+  const converted = convertFoxThreadMessage(message)
+  if (message.role === 'assistant' && message.runId && message.source?.timelineKey) {
+    // A new Kernel checkpoint must not replace the mounted private-chat turn.
+    return { ...converted, id: message.source.timelineKey }
+  }
+  return converted
+}
+
 export function useFoxRuntime(
   conversation: DesktopConversationState,
   callbacks: FoxRuntimeCallbacks,
@@ -104,7 +114,7 @@ export function useFoxRuntime(
   const cacheRef = useRef(createFoxThreadCache())
   // Module-constant converter: unchanged messages keep their object identity,
   // which is what the runtime's internal conversion cache keys on.
-  const convert = useRef(convertFoxThreadMessage).current
+  const convert = options.stableAssistantTurns ? convertContactThreadMessage : convertFoxThreadMessage
 
   const isRunning = conversation.enabled && runIsActive(detail)
   const messages = useMemo(

@@ -6,72 +6,160 @@
 //! check results; repair rounds are counted here, never in model-failure
 //! retry counters.
 
+use super::*;
 #[allow(unused_imports)]
 use crate::canonical_json::CanonicalJson;
-use super::*;
 
 fn bounded_display_text(value: &str, limit: usize) -> String {
-    value.chars().filter(|c| !c.is_control() || matches!(c,'\n'|'\t')).take(limit).collect()
+    value
+        .chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .take(limit)
+        .collect()
 }
 
 fn safe_finding(value: &Value) -> Option<Value> {
-    let source=value.as_object()?;
-    let mut result=serde_json::Map::new();
-    let requirements=source.get("requirementFindings").or_else(||source.get("requirements")).and_then(Value::as_array);
-    let semantic=requirements.filter(|entries|!entries.is_empty()).map(|entries| {
-        if entries.iter().any(|entry|matches!(entry["state"].as_str().or_else(||entry["status"].as_str()),Some("failed"|"unmet"))) {"unmet"}
-        else if entries.iter().any(|entry|!matches!(entry["state"].as_str().or_else(||entry["status"].as_str()),Some("passed"|"met"))) {"unverified"}
-        else {"met"}
-    });
-    let mut requirements_truncated=requirements.is_some_and(|entries|entries.len()>16);
-    for key in ["reasonCode","verificationStatus","semanticStatus","reason","expectedTarget","targetDirectory",
-        "boundPath","managedVersionId","managedVersionNo","sourceRunId","sourceToolCallId","checkedHash","provenance","cancelled",
-        "actualWrittenPaths","requirementFindings"] {
-        let value=source.get(key).or_else(||(key=="requirementFindings").then(||source.get("requirements")).flatten());
-        let Some(value)=value else {continue;};
-        let projected=match value {
-            Value::String(text)=>Some(Value::String(bounded_display_text(text,if key=="reason" {1536}else{512}))),
-            Value::Number(number) if key=="managedVersionNo"=>Some(Value::Number(number.clone())),
-            Value::Bool(value) if key=="cancelled"=>Some(Value::Bool(*value)),
-            Value::Array(values) if key=="actualWrittenPaths"=>Some(json!(values.iter().take(8)
-                .filter_map(Value::as_str).map(|s|bounded_display_text(s,512)).collect::<Vec<_>>())),
-            Value::Array(values) if key=="requirementFindings"=>Some(Value::Array(values.iter().take(16).filter_map(|finding| {
-                let source=finding.as_object()?;let mut entry=serde_json::Map::new();
-                for field in ["id","requirementId","kind","check","status","state","reasonCode","reason","verificationStatus","sourcePath","sourceHash"] {
-                    if let Some(text)=source.get(field).and_then(Value::as_str) {entry.insert(field.into(),json!(bounded_display_text(text,512)));}
-                }
-                (!entry.is_empty()).then_some(Value::Object(entry))
-            }).collect())),
-            _=>None,
+    let source = value.as_object()?;
+    let mut result = serde_json::Map::new();
+    let requirements = source
+        .get("requirementFindings")
+        .or_else(|| source.get("requirements"))
+        .and_then(Value::as_array);
+    let semantic = requirements
+        .filter(|entries| !entries.is_empty())
+        .map(|entries| {
+            if entries.iter().any(|entry| {
+                matches!(
+                    entry["state"].as_str().or_else(|| entry["status"].as_str()),
+                    Some("failed" | "unmet")
+                )
+            }) {
+                "unmet"
+            } else if entries.iter().any(|entry| {
+                !matches!(
+                    entry["state"].as_str().or_else(|| entry["status"].as_str()),
+                    Some("passed" | "met")
+                )
+            }) {
+                "unverified"
+            } else {
+                "met"
+            }
+        });
+    let mut requirements_truncated = requirements.is_some_and(|entries| entries.len() > 16);
+    for key in [
+        "reasonCode",
+        "verificationStatus",
+        "semanticStatus",
+        "reason",
+        "expectedTarget",
+        "targetDirectory",
+        "boundPath",
+        "managedVersionId",
+        "managedVersionNo",
+        "sourceRunId",
+        "sourceToolCallId",
+        "checkedHash",
+        "provenance",
+        "cancelled",
+        "actualWrittenPaths",
+        "requirementFindings",
+    ] {
+        let value = source.get(key).or_else(|| {
+            (key == "requirementFindings")
+                .then(|| source.get("requirements"))
+                .flatten()
+        });
+        let Some(value) = value else {
+            continue;
         };
-        if let Some(projected)=projected {
-            result.insert(key.into(),projected);
-            if crate::canonical_json::to_vec(&result).map(|b|b.len()>7680).unwrap_or(true) {
+        let projected = match value {
+            Value::String(text) => Some(Value::String(bounded_display_text(
+                text,
+                if key == "reason" { 1536 } else { 512 },
+            ))),
+            Value::Number(number) if key == "managedVersionNo" => {
+                Some(Value::Number(number.clone()))
+            }
+            Value::Bool(value) if key == "cancelled" => Some(Value::Bool(*value)),
+            Value::Array(values) if key == "actualWrittenPaths" => Some(json!(values
+                .iter()
+                .take(8)
+                .filter_map(Value::as_str)
+                .map(|s| bounded_display_text(s, 512))
+                .collect::<Vec<_>>())),
+            Value::Array(values) if key == "requirementFindings" => Some(Value::Array(
+                values
+                    .iter()
+                    .take(16)
+                    .filter_map(|finding| {
+                        let source = finding.as_object()?;
+                        let mut entry = serde_json::Map::new();
+                        for field in [
+                            "id",
+                            "requirementId",
+                            "kind",
+                            "check",
+                            "status",
+                            "state",
+                            "reasonCode",
+                            "reason",
+                            "verificationStatus",
+                            "sourcePath",
+                            "sourceHash",
+                        ] {
+                            if let Some(text) = source.get(field).and_then(Value::as_str) {
+                                entry.insert(field.into(), json!(bounded_display_text(text, 512)));
+                            }
+                        }
+                        (!entry.is_empty()).then_some(Value::Object(entry))
+                    })
+                    .collect(),
+            )),
+            _ => None,
+        };
+        if let Some(projected) = projected {
+            result.insert(key.into(), projected);
+            if crate::canonical_json::to_vec(&result)
+                .map(|b| b.len() > 7680)
+                .unwrap_or(true)
+            {
                 result.remove(key);
-                if key=="requirementFindings" {requirements_truncated=true;}
+                if key == "requirementFindings" {
+                    requirements_truncated = true;
+                }
             }
         }
     }
-    if let Some(semantic)=semantic {
-        result.insert("semanticStatus".into(),json!(semantic));
-        if semantic=="unmet" {result.insert("verificationStatus".into(),json!("failed"));}
-        else if semantic=="unverified" {result.insert("verificationStatus".into(),json!("unverified"));}
+    if let Some(semantic) = semantic {
+        result.insert("semanticStatus".into(), json!(semantic));
+        if semantic == "unmet" {
+            result.insert("verificationStatus".into(), json!("failed"));
+        } else if semantic == "unverified" {
+            result.insert("verificationStatus".into(), json!("unverified"));
+        }
     }
-    if requirements_truncated {result.insert("requirementsTruncated".into(),json!(true));}
+    if requirements_truncated {
+        result.insert("requirementsTruncated".into(), json!(true));
+    }
     // Package 2-B2: a typed v2 verdict is whitelisted as a **bounded projection**,
     // never passed through whole. Passing it through would let an unbounded fact
     // list exceed the finding capacity silently, and dropping it would leave the
     // reader unable to tell a v2 record from a legacy one.
-    if let Some(projected)=project_verdict(source.get("deliveryVerdict")) {
-        let bounded=matches!(projected,Some(_));
-        if let Some(projected)=projected {
-            result.insert("deliveryVerdict".into(),projected);
+    if let Some(projected) = project_verdict(source.get("deliveryVerdict")) {
+        let bounded = matches!(projected, Some(_));
+        if let Some(projected) = projected {
+            result.insert("deliveryVerdict".into(), projected);
         }
         // Capacity is checked before accepting: an over-budget projection is
         // recorded as explicitly missing instead of being silently truncated.
-        if !bounded || crate::canonical_json::to_vec(&result).map(|b|b.len()>7680).unwrap_or(true) {
+        if !bounded
+            || crate::canonical_json::to_vec(&result)
+                .map(|b| b.len() > 7680)
+                .unwrap_or(true)
+        {
             result.remove("deliveryVerdict");
-            result.insert("deliveryVerdictOmitted".into(),json!(true));
+            result.insert("deliveryVerdictOmitted".into(), json!(true));
         }
     }
     Some(Value::Object(result))
@@ -84,73 +172,103 @@ fn safe_finding(value: &Value) -> Option<Value> {
 /// the caller records the second case as an explicit omission rather than
 /// pretending the record never had a verdict.
 fn project_verdict(value: Option<&Value>) -> Option<Option<Value>> {
-    let value=value?;
-    let envelope=value.as_object()?;
-    let mut result=serde_json::Map::new();
-    for field in ["verdictSchemaVersion","verdictEnvelopeVersion","itemCount"] {
-        if let Some(number)=envelope.get(field).and_then(Value::as_u64) {
-            result.insert(field.into(),json!(number));
+    let value = value?;
+    let envelope = value.as_object()?;
+    let mut result = serde_json::Map::new();
+    for field in [
+        "verdictSchemaVersion",
+        "verdictEnvelopeVersion",
+        "itemCount",
+    ] {
+        if let Some(number) = envelope.get(field).and_then(Value::as_u64) {
+            result.insert(field.into(), json!(number));
         }
     }
-    for field in ["itemKey","class","aggregateClass"] {
-        if let Some(text)=envelope.get(field).and_then(Value::as_str) {
-            result.insert(field.into(),json!(bounded_display_text(text,512)));
+    for field in ["itemKey", "class", "aggregateClass"] {
+        if let Some(text) = envelope.get(field).and_then(Value::as_str) {
+            result.insert(field.into(), json!(bounded_display_text(text, 512)));
         }
     }
-    for field in ["terminal","repairBudgetRemaining"] {
-        if let Some(flag)=envelope.get(field).and_then(Value::as_bool) {
-            result.insert(field.into(),json!(flag));
+    for field in ["terminal", "repairBudgetRemaining"] {
+        if let Some(flag) = envelope.get(field).and_then(Value::as_bool) {
+            result.insert(field.into(), json!(flag));
         }
     }
-    let facts=envelope.get("facts").and_then(Value::as_array);
-    if let Some(facts)=facts {
-        let total=facts.len();
+    let facts = envelope.get("facts").and_then(Value::as_array);
+    if let Some(facts) = facts {
+        let total = facts.len();
         // A bounded number of facts, each bounded field by field. `factCount` is
         // always recorded so a truncated list is never mistaken for a complete one.
-        let kept: Vec<Value>=facts.iter().take(32).filter_map(|fact| {
-            let source=fact.as_object()?;let mut entry=serde_json::Map::new();
-            for field in ["class","origin","ruleId","check","reasonCode","limitKind","equivalence","path","sha256","expected","actual"] {
-                if let Some(text)=source.get(field).and_then(Value::as_str) {
-                    entry.insert(field.into(),json!(bounded_display_text(text,512)));
+        let kept: Vec<Value> = facts
+            .iter()
+            .take(32)
+            .filter_map(|fact| {
+                let source = fact.as_object()?;
+                let mut entry = serde_json::Map::new();
+                for field in [
+                    "class",
+                    "origin",
+                    "ruleId",
+                    "check",
+                    "reasonCode",
+                    "limitKind",
+                    "equivalence",
+                    "path",
+                    "sha256",
+                    "expected",
+                    "actual",
+                ] {
+                    if let Some(text) = source.get(field).and_then(Value::as_str) {
+                        entry.insert(field.into(), json!(bounded_display_text(text, 512)));
+                    }
                 }
-            }
-            for field in ["checkerVersion","limit"] {
-                if let Some(number)=source.get(field).and_then(Value::as_u64) {
-                    entry.insert(field.into(),json!(number));
+                for field in ["checkerVersion", "limit"] {
+                    if let Some(number) = source.get(field).and_then(Value::as_u64) {
+                        entry.insert(field.into(), json!(number));
+                    }
                 }
-            }
-            for field in ["blocking","needsRepair"] {
-                if let Some(flag)=source.get(field).and_then(Value::as_bool) {
-                    entry.insert(field.into(),json!(flag));
+                for field in ["blocking", "needsRepair"] {
+                    if let Some(flag) = source.get(field).and_then(Value::as_bool) {
+                        entry.insert(field.into(), json!(flag));
+                    }
                 }
-            }
-            if let Some(detail)=source.get("detail").and_then(Value::as_str) {
-                entry.insert("detail".into(),json!(bounded_display_text(detail,512)));
-            }
-            if let Some(locator)=source.get("locator") {
-                if let Ok(text)=crate::canonical_json::to_string(locator) {
-                    entry.insert("locator".into(),json!(bounded_display_text(&text,512)));
+                if let Some(detail) = source.get("detail").and_then(Value::as_str) {
+                    entry.insert("detail".into(), json!(bounded_display_text(detail, 512)));
                 }
-            }
-            (!entry.is_empty()).then_some(Value::Object(entry))
-        }).collect();
-        result.insert("factCount".into(),json!(total));
-        result.insert("facts".into(),Value::Array(kept));
-        if facts.len()>32 {result.insert("factsTruncated".into(),json!(true));}
+                if let Some(locator) = source.get("locator") {
+                    if let Ok(text) = crate::canonical_json::to_string(locator) {
+                        entry.insert("locator".into(), json!(bounded_display_text(&text, 512)));
+                    }
+                }
+                (!entry.is_empty()).then_some(Value::Object(entry))
+            })
+            .collect();
+        result.insert("factCount".into(), json!(total));
+        result.insert("facts".into(), Value::Array(kept));
+        if facts.len() > 32 {
+            result.insert("factsTruncated".into(), json!(true));
+        }
     }
     Some(Some(Value::Object(result)))
 }
 
 /// A single latest Run, owned by this conversation. All callers use the same
 /// persisted rows; absent files and unbound/non-file items remain visible.
-pub(super) fn query_current_checklist_view(connection:&rusqlite::Connection,conversation:&str,run:Option<&str>)
-    ->rusqlite::Result<(Vec<super::super::DeliveryChecklistView>,bool)> {
-    let Some(run)=run else {return Ok((Vec::new(),false));};
-    let mut statement=connection.prepare("SELECT i.item_key,i.target_path,
+pub(super) fn query_current_checklist_view(
+    connection: &rusqlite::Connection,
+    conversation: &str,
+    run: Option<&str>,
+) -> rusqlite::Result<(Vec<super::super::DeliveryChecklistView>, bool)> {
+    let Some(run) = run else {
+        return Ok((Vec::new(), false));
+    };
+    let mut statement = connection.prepare(
+        "SELECT i.item_key,i.target_path,
         (SELECT a.id FROM artifacts a WHERE a.id=i.artifact_id AND a.conversation_id=?1),
         i.display_name,i.status,i.finding_json,i.checked_at,i.requirements_json
         FROM delivery_checklist_items i JOIN runs r ON r.id=i.run_id
-        WHERE r.conversation_id=?1 AND i.run_id=?2 ORDER BY i.item_key LIMIT 257")?;
+        WHERE r.conversation_id=?1 AND i.run_id=?2 ORDER BY i.item_key LIMIT 257",
+    )?;
     let mut rows=statement.query_map(params![conversation,run],|row| {
         let item_key:String=row.get(0)?;let target_path:Option<String>=row.get(1)?;
         let raw:Option<String>=row.get(5)?;
@@ -215,7 +333,9 @@ pub(super) fn query_current_checklist_view(connection:&rusqlite::Connection,conv
             target_path:target_path.map(|s|bounded_display_text(&s,2048)),artifact_id:row.get(2)?,read_version,
             status,finding,checked_at:row.get(6)?})
     })?.collect::<rusqlite::Result<Vec<_>>>()?;
-    let truncated=rows.len()>256;rows.truncate(256);Ok((rows,truncated))
+    let truncated = rows.len() > 256;
+    rows.truncate(256);
+    Ok((rows, truncated))
 }
 
 /// One structured, machine-decidable demand taken from the task text and stored
@@ -244,13 +364,19 @@ pub(crate) struct DeliveryRequirement {
 pub(crate) enum RequirementKind {
     /// Host placement metadata for an unnamed artifact. It is not a content
     /// requirement and must not replace or erase the other requirements.
-    TargetDirectory { directory: String },
+    TargetDirectory {
+        directory: String,
+    },
     /// A real file-output intent whose complete target set was not recognized.
     /// This is a non-file state, never an invented filename to repair.
-    RecognitionUnresolved { reason: String },
+    RecognitionUnresolved {
+        reason: String,
+    },
     /// Versioned Host-frozen content contract. The runtime consumer validates
     /// its finite schema; old semantic requirements remain separately readable.
-    ContentContract { spec: serde_json::Value },
+    ContentContract {
+        spec: serde_json::Value,
+    },
     Charts {
         count: usize,
         /// The task demanded the charts per worksheet ("每个 Sheet 配一张图表").
@@ -260,8 +386,13 @@ pub(crate) enum RequirementKind {
         #[serde(default)]
         per_sheet: bool,
     },
-    Sections { names: Vec<String> },
-    RatioConsistency { numerator: u64, total: u64 },
+    Sections {
+        names: Vec<String>,
+    },
+    RatioConsistency {
+        numerator: u64,
+        total: u64,
+    },
     /// A statistic that must be recomputed from the source data the task named:
     /// the row distribution of `label_header` in `source` (optionally restricted
     /// to one `sheet`). The expectation is derived from the source at check time
@@ -280,7 +411,9 @@ pub(crate) enum RequirementKind {
     /// The task demanded statistics but did not name both a source file and the
     /// column to aggregate, so no expectation can be derived. It is reported as
     /// 未核验 with the demand text rather than being quietly dropped.
-    SourceStatsUnbound { demand: String },
+    SourceStatsUnbound {
+        demand: String,
+    },
     /// A machine field convention the task stated for **one** JSON artifact.
     /// `target_path` is the declared artifact the rule was bound to; it is
     /// `None` when the Host could not identify one, and the rule is then
@@ -368,7 +501,7 @@ impl Database {
         now: i64,
     ) -> Result<(), String> {
         self.with_connection(|conn| {
-            let transaction=conn.unchecked_transaction()?;
+            let transaction = conn.unchecked_transaction()?;
             for seed in seeds {
                 transaction.execute(
                     "INSERT OR IGNORE INTO delivery_checklist_items(
@@ -381,8 +514,10 @@ impl Database {
                         seed.target_path,
                         seed.artifact_id,
                         seed.display_name,
-                        crate::canonical_json::to_string(&seed.checks).unwrap_or_else(|_| "[]".into()),
-                        crate::canonical_json::to_string(&seed.requirements).unwrap_or_else(|_| "[]".into()),
+                        crate::canonical_json::to_string(&seed.checks)
+                            .unwrap_or_else(|_| "[]".into()),
+                        crate::canonical_json::to_string(&seed.requirements)
+                            .unwrap_or_else(|_| "[]".into()),
                         now,
                     ],
                 )?;
@@ -391,7 +526,6 @@ impl Database {
             Ok(())
         })
     }
-
 
     /// Test-only stand-in for the decision commit's mark write.
     ///
@@ -466,5 +600,4 @@ impl Database {
             Ok(text)
         })
     }
-
 }

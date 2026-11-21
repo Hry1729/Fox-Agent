@@ -7124,6 +7124,8 @@ enum MigrationTarget {
     V113,
     #[cfg(test)]
     V114,
+    #[cfg(test)]
+    V118,
 }
 
 fn run_with_target(connection: &mut Connection, now: i64, target: MigrationTarget) -> Result<()> {
@@ -7789,6 +7791,42 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     schedule_result?;
     restore_result?;
     super::repositories::companions::convert_pending_read_cursors(&transaction)?;
+    // v116: work-page shortcuts are explicit and ordered; archiving keeps the
+    // value so restoring a companion also restores its previous shortcut.
+    apply_migration(
+        &transaction,
+        COMPANION_WORK_SHORTCUTS_SCHEMA_VERSION,
+        MIGRATION_116_COMPANION_WORK_SHORTCUTS,
+        now,
+    )?;
+    apply_migration(
+        &transaction,
+        COMPANION_TEAM_ACTIONS_SCHEMA_VERSION,
+        MIGRATION_117_COMPANION_TEAM_ACTIONS,
+        now,
+    )?;
+    apply_migration(
+        &transaction,
+        COMPANION_COORDINATION_SCHEMA_VERSION,
+        MIGRATION_118_COMPANION_COORDINATION,
+        now,
+    )?;
+    #[cfg(test)]
+    if matches!(_target, MigrationTarget::V118) {
+        return finish_transaction(transaction);
+    }
+    apply_migration(
+        &transaction,
+        COMPANION_PINNED_ORDER_SCHEMA_VERSION,
+        MIGRATION_119_COMPANION_PINNED_ORDER,
+        now,
+    )?;
+    apply_migration(
+        &transaction,
+        120,
+        "ALTER TABLE kernel_tool_calls ADD COLUMN mcp_recovery_binding_json TEXT;",
+        now,
+    )?;
     finish_transaction(transaction)
 }
 
@@ -9424,7 +9462,7 @@ mod stage_two_runtime_session_migration_tests {
         // database's current version, so a version bump is never silent.
         assert_eq!(
             crate::database::DATABASE_SCHEMA_VERSION,
-            super::TYPED_SCHEDULES_SCHEMA_VERSION
+            super::COMPANION_PINNED_ORDER_SCHEMA_VERSION
         );
 
         let database = crate::database::Database::open(std::path::PathBuf::from(":memory:"))
@@ -9491,7 +9529,7 @@ mod runtime_session_generation_migration_tests {
         assert_eq!(RUNTIME_SESSION_GENERATIONS_SCHEMA_VERSION, 99);
         assert_eq!(
             crate::database::DATABASE_SCHEMA_VERSION,
-            super::TYPED_SCHEDULES_SCHEMA_VERSION
+            super::COMPANION_WORK_SHORTCUTS_SCHEMA_VERSION
         );
     }
 
@@ -17387,7 +17425,10 @@ mod delivery_acceptance_migration_tests {
         assert_eq!(COMPANION_BACKGROUND_SCHEMA_VERSION, 111);
         assert_eq!(COMPANION_REMINDERS_SCHEMA_VERSION, 112);
         assert_eq!(CONTACT_MESSAGE_MARKS_SCHEMA_VERSION, 113);
-        assert_eq!(DATABASE_SCHEMA_VERSION, TYPED_SCHEDULES_SCHEMA_VERSION);
+        assert_eq!(
+            DATABASE_SCHEMA_VERSION,
+            COMPANION_WORK_SHORTCUTS_SCHEMA_VERSION
+        );
 
         // The old rows are untouched.
         let title: String = connection
@@ -18050,8 +18091,140 @@ fn materialize_companion_binding_skills(transaction: &rusqlite::Transaction<'_>)
     Ok(())
 }
 
+pub(crate) const COMPANION_WORK_SHORTCUTS_SCHEMA_VERSION: i64 = 116;
+const _: () = assert!(DATABASE_SCHEMA_VERSION >= COMPANION_WORK_SHORTCUTS_SCHEMA_VERSION);
+const MIGRATION_116_COMPANION_WORK_SHORTCUTS: &str = r#"
+ALTER TABLE companion_profiles ADD COLUMN work_shortcut_order INTEGER
+    CHECK(work_shortcut_order IS NULL OR work_shortcut_order BETWEEN 1 AND 3);
+"#;
+
 pub(crate) const TYPED_SCHEDULES_SCHEMA_VERSION: i64 = 115;
 const _: () = assert!(DATABASE_SCHEMA_VERSION >= TYPED_SCHEDULES_SCHEMA_VERSION);
+
+const COMPANION_TEAM_ACTIONS_SCHEMA_VERSION: i64 = 117;
+
+const MIGRATION_117_COMPANION_TEAM_ACTIONS: &str = r#"
+CREATE TABLE companion_team_actions (
+    id TEXT PRIMARY KEY NOT NULL,
+    companion_id TEXT NOT NULL REFERENCES companion_profiles(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('create', 'profile', 'model', 'delete', 'archive')),
+    record_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX idx_companion_team_actions_owner ON companion_team_actions(companion_id, created_at, id);
+CREATE INDEX idx_companion_team_actions_run ON companion_team_actions(run_id, kind);
+"#;
+
+const COMPANION_COORDINATION_SCHEMA_VERSION: i64 = 118;
+
+const MIGRATION_118_COMPANION_COORDINATION: &str = r#"
+CREATE TABLE companion_coordination_threads (
+    conversation_id TEXT PRIMARY KEY NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    source_key TEXT NOT NULL,
+    source_conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+    source_companion_id TEXT REFERENCES companion_profiles(id) ON DELETE SET NULL,
+    source_name TEXT NOT NULL,
+    recipient_companion_id TEXT NOT NULL REFERENCES companion_profiles(id) ON DELETE CASCADE,
+    UNIQUE(source_key, recipient_companion_id)
+);
+CREATE INDEX idx_coordination_threads_recipient ON companion_coordination_threads(recipient_companion_id);
+
+CREATE TABLE companion_assignments (
+    id TEXT PRIMARY KEY NOT NULL,
+    root_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    parent_id TEXT REFERENCES companion_assignments(id) ON DELETE CASCADE,
+    depth INTEGER NOT NULL CHECK(depth BETWEEN 1 AND 4),
+    source_conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    source_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    source_companion_id TEXT REFERENCES companion_profiles(id) ON DELETE SET NULL,
+    source_name TEXT NOT NULL,
+    recipient_conversation_id TEXT NOT NULL REFERENCES companion_coordination_threads(conversation_id) ON DELETE CASCADE,
+    recipient_companion_id TEXT NOT NULL REFERENCES companion_profiles(id) ON DELETE CASCADE,
+    recipient_name TEXT NOT NULL,
+    permission_mode TEXT NOT NULL CHECK(permission_mode IN ('read_only','ask','allow')),
+    source_permission_mode TEXT NOT NULL CHECK(source_permission_mode IN ('read_only','ask','allow')),
+    reply TEXT NOT NULL CHECK(reply IN ('resume','none')),
+    consult INTEGER NOT NULL CHECK(consult IN (0,1)),
+    rework INTEGER NOT NULL CHECK(rework IN (0,1)),
+    title TEXT NOT NULL,
+    instructions TEXT NOT NULL,
+    done_when TEXT,
+    status TEXT NOT NULL CHECK(status IN ('queued','running','needs_input','waiting','resume','completed','failed','cancelled')),
+    delivery_status TEXT NOT NULL CHECK(delivery_status IN ('queued','delivered','failed')),
+    recipient_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+    resume_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+    resume_error TEXT,
+    result TEXT,
+    question TEXT,
+    default_answer TEXT,
+    answer TEXT,
+    guard_json TEXT NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX idx_assignments_root ON companion_assignments(root_run_id);
+CREATE INDEX idx_assignments_source ON companion_assignments(source_conversation_id, source_run_id);
+CREATE INDEX idx_assignments_recipient ON companion_assignments(recipient_companion_id, status);
+CREATE INDEX idx_assignments_dispatch ON companion_assignments(status, updated_at, id);
+CREATE INDEX idx_assignments_current_run ON companion_assignments(recipient_run_id);
+CREATE INDEX idx_assignments_resume_run ON companion_assignments(resume_run_id);
+
+CREATE TABLE companion_coordination_runs (
+    run_id TEXT PRIMARY KEY NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    root_run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    assignment_id TEXT REFERENCES companion_assignments(id) ON DELETE SET NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('delivery','resume')),
+    permission_mode TEXT NOT NULL CHECK(permission_mode IN ('read_only','ask','allow')),
+    answer TEXT
+);
+CREATE INDEX idx_coordination_runs_root ON companion_coordination_runs(root_run_id, kind);
+
+CREATE VIEW run_usage_roots AS
+SELECT r.id AS run_id,
+       coalesce(cr.root_run_id, CASE WHEN r.run_kind='child' THEN r.root_run_id END, r.id) AS usage_root_id,
+       cr.run_id IS NOT NULL AS coordinated
+FROM runs r
+LEFT JOIN companion_coordination_runs cr ON cr.run_id=
+    coalesce(CASE WHEN r.run_kind='child' THEN r.root_run_id END, r.id);
+
+CREATE TABLE companion_failure_retries (
+    id TEXT PRIMARY KEY NOT NULL,
+    notification_id TEXT NOT NULL,
+    root_failure_id TEXT NOT NULL,
+    run_id TEXT,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX idx_companion_failure_retries_root ON companion_failure_retries(root_failure_id);
+"#;
+
+const COMPANION_PINNED_ORDER_SCHEMA_VERSION: i64 = 119;
+
+const MIGRATION_119_COMPANION_PINNED_ORDER: &str = r#"
+ALTER TABLE companion_profiles ADD COLUMN pinned_order INTEGER CHECK(pinned_order IS NULL OR pinned_order > 0);
+
+DROP TRIGGER memory_companion_notes_owner;
+CREATE TRIGGER memory_companion_notes_owner
+BEFORE INSERT ON memory_entities
+WHEN NEW.scope = 'agent' AND substr(NEW.scope_key, 1, 4) = 'cmp_' AND (
+       NOT EXISTS (SELECT 1 FROM companion_profiles p
+                   WHERE p.id = NEW.scope_key AND p.deleting_at IS NULL)
+    OR (NEW.source_conversation_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM conversations c
+            WHERE c.id = NEW.source_conversation_id AND c.companion_id = NEW.scope_key)
+        AND NOT EXISTS (
+            SELECT 1 FROM digital_colleagues dc
+            WHERE dc.conversation_id = NEW.source_conversation_id
+              AND dc.companion_bound = 1 AND dc.companion_id = NEW.scope_key)
+        AND NOT EXISTS (
+            SELECT 1 FROM companion_coordination_threads t
+            WHERE t.conversation_id = NEW.source_conversation_id
+              AND t.recipient_companion_id = NEW.scope_key))
+)
+BEGIN
+    SELECT RAISE(ABORT, 'memory_companion_owner_mismatch');
+END;
+"#;
 
 const MIGRATION_115_TYPED_SCHEDULES: &str = r#"
 CREATE TABLE digital_colleagues_v115 (
@@ -18188,14 +18361,24 @@ mod typed_schedule_migration_tests {
         "#).unwrap();
 
         run_with_target(&mut connection, 200, MigrationTarget::Latest).unwrap();
-        let task = connection.query_row(
-            "SELECT id, conversation_id, package_snapshot_json, companion_id,
+        let task = connection
+            .query_row(
+                "SELECT id, conversation_id, package_snapshot_json, companion_id,
                     report_conversation_id, companion_bound
              FROM digital_colleagues WHERE id='task-id'",
-            [], |row| Ok((row.get::<_,String>(0).unwrap(), row.get::<_,String>(1).unwrap(),
-                row.get::<_,String>(2).unwrap(), row.get::<_,String>(3).unwrap(),
-                row.get::<_,String>(4).unwrap(), row.get::<_,i64>(5).unwrap())),
-        ).unwrap();
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0).unwrap(),
+                        row.get::<_, String>(1).unwrap(),
+                        row.get::<_, String>(2).unwrap(),
+                        row.get::<_, String>(3).unwrap(),
+                        row.get::<_, String>(4).unwrap(),
+                        row.get::<_, i64>(5).unwrap(),
+                    ))
+                },
+            )
+            .unwrap();
         assert_eq!(
             task,
             (
@@ -18255,15 +18438,26 @@ mod typed_schedule_migration_tests {
                 .contains("package_snapshot_json TEXT DEFAULT '{}'"),
             true
         );
-        connection.execute("DELETE FROM conversation_expert_bindings WHERE id='source-binding'", []).unwrap();
+        connection
+            .execute(
+                "DELETE FROM conversation_expert_bindings WHERE id='source-binding'",
+                [],
+            )
+            .unwrap();
         connection.execute("UPDATE conversations SET agent_id='runtime-agent' WHERE id='execution-conversation'", []).unwrap();
-        connection.execute("DELETE FROM agents WHERE id='source-agent'", []).unwrap();
+        connection
+            .execute("DELETE FROM agents WHERE id='source-agent'", [])
+            .unwrap();
         let surviving_task = connection.query_row(
             "SELECT id, expert_id, expert_binding_id FROM digital_colleagues WHERE id='task-id'",
             [], |row| Ok((row.get::<_,String>(0).unwrap(), row.get::<_,Option<String>>(1).unwrap(), row.get::<_,Option<String>>(2).unwrap())),
         ).unwrap();
         assert_eq!(surviving_task, ("task-id".to_owned(), None, None));
-        let violations: i64 = connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0)).unwrap();
+        let violations: i64 = connection
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert_eq!(violations, 0);
     }
 }

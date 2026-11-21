@@ -24,7 +24,7 @@ const NOTIFICATION_REFRESH_RUNTIME_EVENTS = new Set([
 ])
 
 export interface InAppNotificationEventDetail {
-  notification: Pick<AppNotificationRecord, 'id' | 'kind' | 'title' | 'body'> & Partial<Pick<AppNotificationRecord, 'workspaceView' | 'entityId' | 'mergeKey'>>
+  notification: Pick<AppNotificationRecord, 'id' | 'kind' | 'title' | 'body'> & Partial<AppNotificationRecord>
   soundId?: NotificationSoundId
   forceSound?: boolean
 }
@@ -63,7 +63,12 @@ function showDirectToast(kind: AppNotificationRecord['kind'], title: string, bod
   for (const [key, at] of directToasts) if (now - at >= DIRECT_TOAST_WINDOW_MS) directToasts.delete(key)
   const detail: InAppNotificationEventDetail = {
     // A fresh id every time: the same refusal twice is two toasts, never a silent merge.
-    notification: { id: `direct-${options.mergeKey ?? 'notice'}-${now}-${Math.random().toString(36).slice(2, 6)}`, kind, title, body, workspaceView: options.workspaceView ?? null, entityId: options.entityId ?? null, mergeKey: options.mergeKey },
+    notification: {
+      id: `direct-${options.mergeKey ?? 'notice'}-${now}-${Math.random().toString(36).slice(2, 6)}`,
+      kind, title, body, workspaceView: options.workspaceView ?? null, entityId: options.entityId ?? null,
+      mergeKey: options.mergeKey, sourceType: options.sourceType, sourceId: options.sourceId,
+      status: options.status,
+    },
   }
   window.dispatchEvent(new CustomEvent<InAppNotificationEventDetail>(FOX_IN_APP_NOTIFICATION_EVENT, { detail }))
 }
@@ -82,10 +87,12 @@ export interface NotificationVisibilityContext {
  * they do not point at a page, their notification card is the only feedback.
  */
 export function notificationIsVisibleInContext(
-  item: Pick<AppNotificationRecord, 'workspaceView' | 'entityId'>,
+  item: Pick<AppNotificationRecord, 'workspaceView' | 'entityId'> & Partial<Pick<AppNotificationRecord, 'action'>>,
   context: NotificationVisibilityContext,
 ): boolean {
   if (!context.appVisible || !context.appFocused || !item.workspaceView) return false
+  const coordinationId = item.action?.coordinationConversationId
+  if (typeof coordinationId === 'string') return context.activeView === 'companions' && context.activeConversationId === coordinationId
   if (item.workspaceView === 'chat') {
     return context.activeView === 'chat'
       && Boolean(context.activeConversationId)

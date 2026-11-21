@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::database::{
-    now_ms, Database, ManagedFileSource, ManagedFileVersion, ManagedFileVersionInput,
-    RestoreClaim, RestoreRequestRecord,
+    now_ms, Database, ManagedFileSource, ManagedFileVersion, ManagedFileVersionInput, RestoreClaim,
+    RestoreRequestRecord,
 };
 
 pub(crate) fn hash_file(path: &Path) -> Option<(String, i64)> {
@@ -52,7 +52,9 @@ fn store_snapshot(backups_dir: &Path, source: &Path) -> Result<PathBuf, String> 
     let backup = backups_dir.join(format!("managed-{}.foxbak", uuid::Uuid::new_v4()));
     fs::copy(source, &backup)
         .map_err(|error| format!("failed to snapshot the managed file: {error}"))?;
-    fs::OpenOptions::new().write(true).open(&backup)
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&backup)
         .and_then(|file| file.sync_all())
         .map_err(|error| format!("failed to flush managed snapshot: {error}"))?;
     Ok(backup)
@@ -77,8 +79,8 @@ pub(crate) fn capture_before(
 ) -> Result<BeforeCapture, String> {
     let existed = target.is_file();
     let (before_hash, before_size, backup_path) = if existed {
-        let (hash, size) = hash_file(target)
-            .ok_or_else(|| "cannot hash the existing managed file".to_string())?;
+        let (hash, size) =
+            hash_file(target).ok_or_else(|| "cannot hash the existing managed file".to_string())?;
         let backup = store_snapshot(backups_dir, target)?;
         if hash_file(&backup) != Some((hash.clone(), size)) {
             return Err("managed pre-image changed during capture; snapshot retained".into());
@@ -123,8 +125,14 @@ pub(crate) fn record_after(
     let target = PathBuf::from(&capture.storage_path);
     let (after_hash, after_size) = hash_file(&target)
         .ok_or_else(|| "managed target is missing after the write".to_string())?;
-    if capture.expected_after_version.as_deref().is_some_and(|expected| expected != format!("sha256:{after_hash}")) {
-        return Err("managed target changed after commit; refusing to register external bytes".into());
+    if capture
+        .expected_after_version
+        .as_deref()
+        .is_some_and(|expected| expected != format!("sha256:{after_hash}"))
+    {
+        return Err(
+            "managed target changed after commit; refusing to register external bytes".into(),
+        );
     }
     // A missing content snapshot must not silently degrade the row into
     // "unrestorable": fail the registration so the caller logs an honest gap.
@@ -257,7 +265,10 @@ pub(crate) fn frozen_office_operation<'a>(
     if !scope.office_tools.contains(inner) {
         return None;
     }
-    if !matches!(inner, "office_create" | "office_edit" | "office_import_data") {
+    if !matches!(
+        inner,
+        "office_create" | "office_edit" | "office_import_data"
+    ) {
         return None;
     }
     Some((
@@ -281,13 +292,19 @@ pub(crate) fn verified_managed_write(
     let root_string = root.to_string_lossy().into_owned();
     match tool {
         "write_file" | "edit_file" => {
-            let prepared = if let Some(context) = context.filter(|c|c.sessions_dir.is_some()) {
-                crate::tool_host::prepare_with_artifact_context(tool,input,&root_string,context.database,context.sessions_dir.unwrap(),context.conversation_id)
-            } else {crate::tool_host::prepare(tool,input,&root_string)};
-            let target = prepared
-                .ok()?
-                .target_path()?
-                .to_path_buf();
+            let prepared = if let Some(context) = context.filter(|c| c.sessions_dir.is_some()) {
+                crate::tool_host::prepare_with_artifact_context(
+                    tool,
+                    input,
+                    &root_string,
+                    context.database,
+                    context.sessions_dir.unwrap(),
+                    context.conversation_id,
+                )
+            } else {
+                crate::tool_host::prepare(tool, input, &root_string)
+            };
+            let target = prepared.ok()?.target_path()?.to_path_buf();
             Some(ManagedWrite::HostFile {
                 verified: VerifiedWriteTarget::new(root, &target),
                 target,
@@ -307,9 +324,7 @@ pub(crate) fn verified_managed_write(
                     // Derived from the Host's own session store, exactly like
                     // `RuntimeHostState::managed_files_dir`, so the pre-flight
                     // resolves the same private roots as the execution.
-                    artifacts_dir: context
-                        .sessions_dir
-                        .and_then(std::path::Path::parent),
+                    artifacts_dir: context.sessions_dir.and_then(std::path::Path::parent),
                 })
             });
             let target = crate::office::prepare_with_context(
@@ -342,7 +357,9 @@ fn same_path(left: &Path, right: &Path) -> bool {
         crate::runtime_host::artifact_store::relative_to(left, right),
         crate::runtime_host::artifact_store::relative_to(right, left),
     ) {
-        (Some(forward), Some(backward)) => forward.as_os_str().is_empty() && backward.as_os_str().is_empty(),
+        (Some(forward), Some(backward)) => {
+            forward.as_os_str().is_empty() && backward.as_os_str().is_empty()
+        }
         _ => false,
     }
 }
@@ -413,22 +430,36 @@ pub(crate) struct ManagedExecutionContext<'a> {
 }
 
 /// Canonical target resolver used by the credential issuance transaction.
-pub(crate) struct HostFileTargetResolver<'a> { pub project_root: &'a Path }
-impl crate::database::kernel_execution_admission::FileTargetResolver for HostFileTargetResolver<'_> {
-    fn resolve(&self, class: fox_engine_protocol::ActionClass,
-        canonical_input_json: &str) -> Option<String> {
+pub(crate) struct HostFileTargetResolver<'a> {
+    pub project_root: &'a Path,
+}
+impl crate::database::kernel_execution_admission::FileTargetResolver
+    for HostFileTargetResolver<'_>
+{
+    fn resolve(
+        &self,
+        class: fox_engine_protocol::ActionClass,
+        canonical_input_json: &str,
+    ) -> Option<String> {
         use fox_engine_protocol::ActionClass;
-        if !matches!(class, ActionClass::Write | ActionClass::Destructive) { return None; }
+        if !matches!(class, ActionClass::Write | ActionClass::Destructive) {
+            return None;
+        }
         let input: serde_json::Value = serde_json::from_str(canonical_input_json).ok()?;
-        crate::tool_host::canonical_file_identity(self.project_root, input.get("path")?.as_str()?).ok()
+        crate::tool_host::canonical_file_identity(self.project_root, input.get("path")?.as_str()?)
+            .ok()
     }
 }
 
 #[cfg(test)]
 /// Construct an observation only from bytes actually read by the Host, never
 /// by reopening the file after the read (which could bind a different version).
-pub(crate) fn observation_from_read(root: &Path, path: &str, bytes: &[u8], tool_call_id: &str)
-    -> Result<fox_engine_protocol::HostObservation, String> {
+pub(crate) fn observation_from_read(
+    root: &Path,
+    path: &str,
+    bytes: &[u8],
+    tool_call_id: &str,
+) -> Result<fox_engine_protocol::HostObservation, String> {
     let target = crate::tool_host::canonical_file_identity(root, path)?;
     let total_units = String::from_utf8_lossy(bytes).encode_utf16().count() as u64;
     Ok(fox_engine_protocol::HostObservation {
@@ -450,28 +481,45 @@ pub(crate) fn observation_from_read(root: &Path, path: &str, bytes: &[u8], tool_
 /// Both desktop and Kernel call this seam. A missing read keeps its original
 /// failure while a positively verified absent target establishes the baseline.
 pub(crate) fn execute_observed_reader(
-    database: &Database, binding: &fox_engine_protocol::RunControlBinding,
-    tool: &str, input: &serde_json::Value, tool_call_id: &str,
-    cancellation: &crate::kernel::CancellationToken, budget: std::time::Duration,
+    database: &Database,
+    binding: &fox_engine_protocol::RunControlBinding,
+    tool: &str,
+    input: &serde_json::Value,
+    tool_call_id: &str,
+    cancellation: &crate::kernel::CancellationToken,
+    budget: std::time::Duration,
 ) -> Result<serde_json::Value, String> {
     let started = std::time::Instant::now();
     let outcome = crate::resource_gateway::execute_with_observation_budget(
-        binding, tool, input, cancellation, budget);
+        binding,
+        tool,
+        input,
+        cancellation,
+        budget,
+    );
     match outcome {
         Ok((result, observation)) => {
             cancellation.check()?;
             if let Some(observation) = observation {
-                database.record_host_observation(&binding.run_id, &binding.conversation_id,
-                    &observation.host_observation(tool_call_id))?;
+                database.record_host_observation(
+                    &binding.run_id,
+                    &binding.conversation_id,
+                    &observation.host_observation(tool_call_id),
+                )?;
             }
             Ok(result)
         }
         Err(error) => {
             if tool == "read" && started.elapsed() < budget && cancellation.check().is_ok() {
                 if let Some(path) = input.get("path").and_then(serde_json::Value::as_str) {
-                    if let Ok(observation) = crate::resource_gateway::observe_missing_file(binding, path, cancellation) {
-                        database.record_host_observation(&binding.run_id, &binding.conversation_id,
-                            &observation.host_observation(tool_call_id))?;
+                    if let Ok(observation) =
+                        crate::resource_gateway::observe_missing_file(binding, path, cancellation)
+                    {
+                        database.record_host_observation(
+                            &binding.run_id,
+                            &binding.conversation_id,
+                            &observation.host_observation(tool_call_id),
+                        )?;
                     }
                 }
             }
@@ -484,76 +532,176 @@ pub(crate) fn execute_observed_reader(
 /// pre-image capture, snapshot verification, final revalidation, replacement
 /// and version registration execute while the file lock remains held.
 pub(crate) fn execute_admitted_file(
-    context: ManagedExecutionContext<'_>, tool: &str, input: &serde_json::Value,
-    tool_call_id: &str, credential: &fox_engine_protocol::ExecutionCredential,
+    context: ManagedExecutionContext<'_>,
+    tool: &str,
+    input: &serde_json::Value,
+    tool_call_id: &str,
+    credential: &fox_engine_protocol::ExecutionCredential,
     cancellation: Option<&crate::kernel::CancellationToken>,
     revalidate: &mut dyn FnMut() -> Result<(), String>,
-) -> (Result<serde_json::Value, String>, fox_engine_protocol::ExecutionEvidence) {
+) -> (
+    Result<serde_json::Value, String>,
+    fox_engine_protocol::ExecutionEvidence,
+) {
     use fox_engine_protocol::{ExecutionCredential, ExecutionEvidence};
-    if credential.intent_digest != crate::database::kernel_execution_admission::launch_params_hash(tool, &input.canonical_string()) {
-        return (Err("credential_mismatch: file payload differs from the admitted intent".into()), ExecutionEvidence::NotStarted);
+    if credential.intent_digest
+        != crate::database::kernel_execution_admission::launch_params_hash(
+            tool,
+            &input.canonical_string(),
+        )
+    {
+        return (
+            Err("credential_mismatch: file payload differs from the admitted intent".into()),
+            ExecutionEvidence::NotStarted,
+        );
     }
     struct Hooks<'a, 'b> {
-        context: ManagedExecutionContext<'a>, tool: &'b str, tool_call_id: &'b str,
-        credential: &'b ExecutionCredential, before: Option<BeforeCapture>,
-        evidence: ExecutionEvidence, directory_side_effect: bool, expected_after_version: String,
+        context: ManagedExecutionContext<'a>,
+        tool: &'b str,
+        tool_call_id: &'b str,
+        credential: &'b ExecutionCredential,
+        before: Option<BeforeCapture>,
+        evidence: ExecutionEvidence,
+        directory_side_effect: bool,
+        expected_after_version: String,
         revalidate: &'b mut dyn FnMut() -> Result<(), String>,
     }
     impl crate::tool_host::FileCommitContext for Hooks<'_, '_> {
-        fn baseline(&self) -> &str { &self.credential.file_baseline.as_ref().expect("checked baseline").version }
-        fn dispatch_id(&self) -> &str { &self.credential.dispatch_id }
+        fn baseline(&self) -> &str {
+            &self
+                .credential
+                .file_baseline
+                .as_ref()
+                .expect("checked baseline")
+                .version
+        }
+        fn dispatch_id(&self) -> &str {
+            &self.credential.dispatch_id
+        }
         fn validate(&mut self, target: &Path) -> Result<(), String> {
-            self.context.database.verify_execution_credential(self.context.run_id, self.credential)?;
+            self.context
+                .database
+                .verify_execution_credential(self.context.run_id, self.credential)?;
             if self.credential.run_id != self.context.run_id
-                || self.credential.conversation_id != self.context.conversation_id {
+                || self.credential.conversation_id != self.context.conversation_id
+            {
                 return Err("credential_mismatch: file execution scope differs".into());
             }
-            let baseline = self.credential.file_baseline.as_ref().ok_or("observation_incomplete")?;
+            let baseline = self
+                .credential
+                .file_baseline
+                .as_ref()
+                .ok_or("observation_incomplete")?;
             let identity = crate::tool_host::canonical_file_identity(
-                Path::new(self.context.project_root.ok_or("file project root missing")?),
-                &target.to_string_lossy())?;
-            if baseline.target_identity != identity { return Err("credential_mismatch: file target differs".into()); }
+                Path::new(
+                    self.context
+                        .project_root
+                        .ok_or("file project root missing")?,
+                ),
+                &target.to_string_lossy(),
+            )?;
+            if baseline.target_identity != identity {
+                return Err("credential_mismatch: file target differs".into());
+            }
             (self.revalidate)()
         }
         fn capture_before(&mut self, target: &Path) -> Result<(), String> {
-            let mut capture = capture_before(self.context.backups_dir,
-                Path::new(self.context.project_root.ok_or("file project root missing")?), target)?;
+            let mut capture = capture_before(
+                self.context.backups_dir,
+                Path::new(
+                    self.context
+                        .project_root
+                        .ok_or("file project root missing")?,
+                ),
+                target,
+            )?;
             capture.expected_after_version = Some(self.expected_after_version.clone());
             self.before = Some(capture);
             Ok(())
         }
         fn record_committed(&mut self, _target: &Path) -> Result<(), String> {
-            record_after(self.context.database, self.context.backups_dir,
-                self.context.conversation_id, self.context.run_id, Some(self.tool_call_id),
-                self.tool, self.before.take().ok_or("missing pre-write capture")?).map(|_| ())
+            record_after(
+                self.context.database,
+                self.context.backups_dir,
+                self.context.conversation_id,
+                self.context.run_id,
+                Some(self.tool_call_id),
+                self.tool,
+                self.before.take().ok_or("missing pre-write capture")?,
+            )
+            .map(|_| ())
         }
-        fn mark_applying(&mut self) { self.evidence = ExecutionEvidence::Unknown; }
-        fn mark_committed(&mut self) { self.evidence = ExecutionEvidence::Started; }
+        fn mark_applying(&mut self) {
+            self.evidence = ExecutionEvidence::Unknown;
+        }
+        fn mark_committed(&mut self) {
+            self.evidence = ExecutionEvidence::Started;
+        }
         fn mark_directory_creation(&mut self) {
             self.directory_side_effect = true;
             self.evidence = ExecutionEvidence::Unknown;
         }
         fn mark_not_applied(&mut self) {
-            self.evidence = if self.directory_side_effect { ExecutionEvidence::Unknown } else { ExecutionEvidence::NotStarted };
+            self.evidence = if self.directory_side_effect {
+                ExecutionEvidence::Unknown
+            } else {
+                ExecutionEvidence::NotStarted
+            };
         }
     }
     let Some(baseline) = credential.file_baseline.as_ref() else {
-        return (Err("observation_incomplete".into()), ExecutionEvidence::NotStarted);
+        return (
+            Err("observation_incomplete".into()),
+            ExecutionEvidence::NotStarted,
+        );
     };
-    let prepare_result = if let Some(sessions)=context.sessions_dir {
-        crate::tool_host::prepare_admitted_file_with_artifact_context(tool,input,context.project_root.unwrap_or_default(),&baseline.version,context.database,sessions,context.conversation_id)
-    } else {crate::tool_host::prepare_admitted_file(tool,input,context.project_root.unwrap_or_default(),&baseline.version)};
+    let prepare_result = if let Some(sessions) = context.sessions_dir {
+        crate::tool_host::prepare_admitted_file_with_artifact_context(
+            tool,
+            input,
+            context.project_root.unwrap_or_default(),
+            &baseline.version,
+            context.database,
+            sessions,
+            context.conversation_id,
+        )
+    } else {
+        crate::tool_host::prepare_admitted_file(
+            tool,
+            input,
+            context.project_root.unwrap_or_default(),
+            &baseline.version,
+        )
+    };
     let prepared = match prepare_result {
         Ok(prepared) => prepared,
         Err(error) => return (Err(error), ExecutionEvidence::NotStarted),
     };
     let expected_after_version = match &prepared {
-        crate::tool_host::PreparedToolAction::WriteFile { content, .. } => crate::tool_host::file_version(content),
-        crate::tool_host::PreparedToolAction::EditFile { content, .. } => crate::tool_host::file_version(content),
-        _ => return (Err("file admission cannot execute a non-file action".into()), ExecutionEvidence::NotStarted),
+        crate::tool_host::PreparedToolAction::WriteFile { content, .. } => {
+            crate::tool_host::file_version(content)
+        }
+        crate::tool_host::PreparedToolAction::EditFile { content, .. } => {
+            crate::tool_host::file_version(content)
+        }
+        _ => {
+            return (
+                Err("file admission cannot execute a non-file action".into()),
+                ExecutionEvidence::NotStarted,
+            )
+        }
     };
-    let mut hooks = Hooks { context, tool, tool_call_id, credential, before: None,
-        evidence: ExecutionEvidence::NotStarted, directory_side_effect: false, expected_after_version, revalidate };
+    let mut hooks = Hooks {
+        context,
+        tool,
+        tool_call_id,
+        credential,
+        before: None,
+        evidence: ExecutionEvidence::NotStarted,
+        directory_side_effect: false,
+        expected_after_version,
+        revalidate,
+    };
     let result = crate::tool_host::execute_file_with_context(prepared, cancellation, &mut hooks);
     (result, hooks.evidence)
 }
@@ -682,9 +830,7 @@ impl RestoreBlocker {
             RestoreBlocker::LegacyWithoutSnapshot => {
                 "该版本记录于内容快照启用之前，其自身内容无法验证，不能用于恢复（记录保持不变）"
             }
-            RestoreBlocker::UnverifiedOrigin => {
-                "该版本的内容来源未经 Host 验证，不能用于恢复"
-            }
+            RestoreBlocker::UnverifiedOrigin => "该版本的内容来源未经 Host 验证，不能用于恢复",
             RestoreBlocker::SnapshotMissing => "该版本的内容快照文件已丢失或不可读",
             RestoreBlocker::SnapshotMismatch => {
                 "该版本的内容快照与登记的哈希/大小不一致，拒绝用不确定的内容覆盖文件"
@@ -707,18 +853,14 @@ pub(crate) fn resolve_restore_source(
     database: &Database,
     version: &ManagedFileVersion,
 ) -> Result<RestoreSource, String> {
-    resolve_restore_source_inner(database, version)
-        .map_err(|blocker| blocker.reason().to_owned())
+    resolve_restore_source_inner(database, version).map_err(|blocker| blocker.reason().to_owned())
 }
 
 /// Why one version cannot be restored, or `None` when its content resolves.
 ///
 /// The UI and the restore path call this same function, so a selectable version
 /// is always a restorable one.
-pub(crate) fn restore_blocker(
-    database: &Database,
-    version: &ManagedFileVersion,
-) -> Option<String> {
+pub(crate) fn restore_blocker(database: &Database, version: &ManagedFileVersion) -> Option<String> {
     resolve_restore_source_inner(database, version)
         .err()
         .map(|blocker| blocker.reason().to_owned())
@@ -846,7 +988,11 @@ impl RestoreFaultSeam for NoRestoreFault {}
 
 /// The canonical project root a restore may write under, after creating the
 /// target's missing folders level by level beneath it.
-fn restore_root_and_folders(database: &Database, conversation_id: &str, target: &Path) -> Result<PathBuf, String> {
+fn restore_root_and_folders(
+    database: &Database,
+    conversation_id: &str,
+    target: &Path,
+) -> Result<PathBuf, String> {
     let (project_root, _) = database
         .conversation_project_access(conversation_id)?
         .ok_or("restore refused: this conversation no longer has an authorized project folder")?;
@@ -856,19 +1002,24 @@ fn restore_root_and_folders(database: &Database, conversation_id: &str, target: 
     let relative = target
         .strip_prefix(&root)
         .or_else(|_| target.strip_prefix(&raw_root))
-        .map_err(|_| "restore refused: the recorded file is outside the authorized project folder".to_owned())?;
+        .map_err(|_| {
+            "restore refused: the recorded file is outside the authorized project folder".to_owned()
+        })?;
     let mut components = relative.components().collect::<Vec<_>>();
     components.pop();
     let mut current = root.clone();
     for component in components {
         match component {
             std::path::Component::Normal(name) => current.push(name),
-            _ => return Err("restore refused: the recorded path is not a plain project path".into()),
+            _ => {
+                return Err("restore refused: the recorded path is not a plain project path".into())
+            }
         }
         match fs::symlink_metadata(&current) {
             Ok(metadata) => ensure_plain_directory(&current, &metadata)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir(&current).map_err(|error| format!("cannot recreate the target folder: {error}"))?;
+                fs::create_dir(&current)
+                    .map_err(|error| format!("cannot recreate the target folder: {error}"))?;
                 let metadata = fs::symlink_metadata(&current).map_err(|error| error.to_string())?;
                 ensure_plain_directory(&current, &metadata)?;
             }
@@ -883,7 +1034,9 @@ fn restore_root_and_folders(database: &Database, conversation_id: &str, target: 
     let relative_text = relative.to_string_lossy();
     let identity = crate::tool_host::canonical_file_identity(&root, &relative_text)?;
     if Path::new(&identity) != root.join(relative) {
-        return Err("restore refused: the recorded file no longer resolves to the same project path".into());
+        return Err(
+            "restore refused: the recorded file no longer resolves to the same project path".into(),
+        );
     }
     Ok(root)
 }
@@ -894,14 +1047,23 @@ fn ensure_plain_directory(path: &Path, metadata: &fs::Metadata) -> Result<(), St
         use std::os::windows::fs::MetadataExt;
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
         if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err(format!("restore refused: {} is a junction or symbolic link", path.display()));
+            return Err(format!(
+                "restore refused: {} is a junction or symbolic link",
+                path.display()
+            ));
         }
     }
     if metadata.file_type().is_symlink() {
-        return Err(format!("restore refused: {} is a symbolic link", path.display()));
+        return Err(format!(
+            "restore refused: {} is a symbolic link",
+            path.display()
+        ));
     }
     if !metadata.is_dir() {
-        return Err(format!("restore refused: {} is not a folder", path.display()));
+        return Err(format!(
+            "restore refused: {} is not a folder",
+            path.display()
+        ));
     }
     Ok(())
 }
@@ -926,7 +1088,10 @@ fn existing_restore_result(
     // NULL is a v82 row: that schema never recorded `force`, so the intent
     // cannot be reconstructed safely even when its version_id happens to match.
     if row.intent_digest.as_deref() != Some(intent_digest) {
-        return Err("identity_conflict: restore request id belongs to another or unverifiable intent".into());
+        return Err(
+            "identity_conflict: restore request id belongs to another or unverifiable intent"
+                .into(),
+        );
     }
     match row.state.as_str() {
         "committed" => {
@@ -1042,7 +1207,9 @@ pub(crate) fn restore_version_with_seam(
         &intent_digest,
     )? {
         RestoreClaim::Claimed { attempt_owner } => attempt_owner,
-        RestoreClaim::Existing(row) => return existing_restore_result(database, conversation_id, row, &intent_digest),
+        RestoreClaim::Existing(row) => {
+            return existing_restore_result(database, conversation_id, row, &intent_digest)
+        }
     };
     seam.after_claim();
 
@@ -1074,11 +1241,19 @@ pub(crate) fn restore_version_with_seam(
     let root = match restore_root_and_folders(database, conversation_id, &target) {
         Ok(root) => root,
         Err(message) => {
-            database.settle_restore_request(
-                conversation_id, request_id, &attempt_owner, "not_applied", Some(&message),
-            ).map_err(|settle| format!(
+            database
+                .settle_restore_request(
+                    conversation_id,
+                    request_id,
+                    &attempt_owner,
+                    "not_applied",
+                    Some(&message),
+                )
+                .map_err(|settle| {
+                    format!(
                 "in_progress_or_uncertain: restore setup and settlement failed: {message}; {settle}"
-            ))?;
+            )
+                })?;
             return Err(message);
         }
     };
@@ -1102,18 +1277,19 @@ pub(crate) fn restore_version_with_seam(
     // record_committed while the file lock was held. A later legitimate write
     // may change the target; a lock-external hash cannot revise that receipt.
     if commit.is_ok() && hooks.outcome == RestoreOutcome::Committed {
-            let new_id = hooks
-                .registered_version_id
-                .clone()
-                .ok_or_else(|| "restore committed but no version was registered".to_string())?;
-            let row = database
-                .managed_file_version(&new_id)?
-                .ok_or_else(|| "restored version row vanished".to_string())?;
-            return Ok(row);
+        let new_id = hooks
+            .registered_version_id
+            .clone()
+            .ok_or_else(|| "restore committed but no version was registered".to_string())?;
+        let row = database
+            .managed_file_version(&new_id)?
+            .ok_or_else(|| "restored version row vanished".to_string())?;
+        return Ok(row);
     }
     let state = match (hooks.outcome, hooks.evidence, commit.is_ok()) {
-        (RestoreOutcome::NotApplied, fox_engine_protocol::ExecutionEvidence::NotStarted, false) =>
-            "not_applied",
+        (RestoreOutcome::NotApplied, fox_engine_protocol::ExecutionEvidence::NotStarted, false) => {
+            "not_applied"
+        }
         (RestoreOutcome::Indeterminate, _, _) | (_, _, true) => "indeterminate",
         _ => "recovery_required",
     };
@@ -1233,7 +1409,10 @@ impl crate::tool_host::FileCommitContext for RestoreCommitHooks<'_> {
         let after_backup = store_snapshot(self.backups_dir, target)?;
         let (safety_path, safety_hash, safety_size) = match &self.before {
             Some(capture) => (
-                capture.backup_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                capture
+                    .backup_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned()),
                 capture.before_hash.clone(),
                 capture.before_size,
             ),
@@ -1343,12 +1522,10 @@ impl VerifiedWriteTarget {
         // `root` is the Host's stored form, so the comparison tolerates the
         // verbatim prefix; otherwise every deliverable would be displayed as an
         // absolute path instead of a project-relative name.
-        let display_name = crate::runtime_host::artifact_store::relative_to(
-            root,
-            Path::new(&storage_path),
-        )
-        .map(|relative| relative.to_string_lossy().into_owned())
-        .unwrap_or_else(|| storage_path.clone());
+        let display_name =
+            crate::runtime_host::artifact_store::relative_to(root, Path::new(&storage_path))
+                .map(|relative| relative.to_string_lossy().into_owned())
+                .unwrap_or_else(|| storage_path.clone());
         VerifiedWriteTarget {
             storage_path,
             display_name,
@@ -1392,7 +1569,9 @@ pub(crate) fn verify_office_write(
         ));
     }
     if !matches!(tool, "office_create" | "office_edit" | "office_import_data") {
-        return Err("only office_create/office_edit/office_import_data produce managed versions".into());
+        return Err(
+            "only office_create/office_edit/office_import_data produce managed versions".into(),
+        );
     }
     let declared_path = string("storagePath").unwrap_or_default();
     let declared_path = PathBuf::from(declared_path);
@@ -1415,8 +1594,7 @@ pub(crate) fn verify_office_write(
     let declared_after_size = declared.get("afterSize").and_then(|value| value.as_i64());
     if declared_after != actual_hash || declared_after_size != Some(actual_size) {
         return Err(
-            "connector-declared content hash/size does not match the file the Host verified"
-                .into(),
+            "connector-declared content hash/size does not match the file the Host verified".into(),
         );
     }
     // 2) A declared pre-write backup must itself hold the declared before
@@ -1489,7 +1667,12 @@ mod tests {
             fs::create_dir_all(&root).unwrap();
             // A1 / DL-1: a restore is anchored at the conversation's project.
             let conversation = db
-                .create_conversation("fox-general", None, Some(root.to_str().unwrap()), Some("ask"))
+                .create_conversation(
+                    "fox-general",
+                    None,
+                    Some(root.to_str().unwrap()),
+                    Some("ask"),
+                )
                 .expect("create conversation")
                 .id;
             let backups = root.join("_backups");
@@ -1551,7 +1734,8 @@ mod tests {
             self.db
                 .managed_file_versions(
                     &self.conversation,
-                    path.map(|value| value.to_string_lossy().into_owned()).as_deref(),
+                    path.map(|value| value.to_string_lossy().into_owned())
+                        .as_deref(),
                 )
                 .expect("list versions")
         }
@@ -1629,7 +1813,10 @@ mod tests {
             .db
             .freeze_kernel_run_control(run_id, "durable", budgets)
             .expect("freeze real run control");
-        assert_eq!(binding.permission.project_root.as_deref(), Some(root.as_str()));
+        assert_eq!(
+            binding.permission.project_root.as_deref(),
+            Some(root.as_str())
+        );
 
         let observed_bytes = fs::read(harness.target(relative)).expect("read Host baseline");
         let observation = observation_from_read(
@@ -1688,12 +1875,11 @@ mod tests {
             .flatten()
             .filter_map(|entry| {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                (name.starts_with(".fox-replace-journal-") && name.ends_with(".json"))
-                    .then(|| {
-                        let path = entry.path();
-                        let value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-                        (path, value)
-                    })
+                (name.starts_with(".fox-replace-journal-") && name.ends_with(".json")).then(|| {
+                    let path = entry.path();
+                    let value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                    (path, value)
+                })
             })
             .collect::<Vec<_>>();
         records.sort_by(|left, right| left.0.cmp(&right.0));
@@ -1732,9 +1918,17 @@ mod tests {
             revalidation_count.set(revalidation_count.get() + 1);
             harness.db.revalidate_execution_credential(&credential)
         };
-        let forged = serde_json::json!({"path":"admitted.txt","content":"forged same-target bytes"});
-        let (refusal, evidence) = execute_admitted_file(context, "write_file", &forged,
-            "call-admitted", &credential, None, &mut revalidate);
+        let forged =
+            serde_json::json!({"path":"admitted.txt","content":"forged same-target bytes"});
+        let (refusal, evidence) = execute_admitted_file(
+            context,
+            "write_file",
+            &forged,
+            "call-admitted",
+            &credential,
+            None,
+            &mut revalidate,
+        );
         assert!(refusal.unwrap_err().contains("credential_mismatch"));
         assert_eq!(evidence, fox_engine_protocol::ExecutionEvidence::NotStarted);
         assert_eq!(contents_of(&target), "old bytes");
@@ -1754,7 +1948,11 @@ mod tests {
             fox_engine_protocol::ExecutionEvidence::Started,
             "only the committed atomic replacement may confirm execution"
         );
-        assert_eq!(revalidation_count.get(), 3, "every real pre-commit gate must run");
+        assert_eq!(
+            revalidation_count.get(),
+            3,
+            "every real pre-commit gate must run"
+        );
         assert_eq!(contents_of(&target), "new bytes");
         assert_eq!(
             result["details"]["readVersion"],
@@ -1769,11 +1967,8 @@ mod tests {
         let row = &rows[0];
         assert_eq!(
             row.storage_path,
-            crate::tool_host::canonical_file_identity(
-                &harness.root,
-                &target.to_string_lossy(),
-            )
-            .expect("canonical committed target identity")
+            crate::tool_host::canonical_file_identity(&harness.root, &target.to_string_lossy(),)
+                .expect("canonical committed target identity")
         );
         assert_eq!(row.tool, "write_file");
         assert_eq!(row.tool_call_id.as_deref(), Some("call-admitted"));
@@ -1788,12 +1983,16 @@ mod tests {
             Some(crate::tool_host::file_version(b"new bytes").trim_start_matches("sha256:"))
         );
         assert_eq!(
-            contents_of(Path::new(row.backup_path.as_deref().expect("pre-image backup"))),
+            contents_of(Path::new(
+                row.backup_path.as_deref().expect("pre-image backup")
+            )),
             "old bytes"
         );
         assert_eq!(
             contents_of(Path::new(
-                row.after_backup_path.as_deref().expect("committed snapshot")
+                row.after_backup_path
+                    .as_deref()
+                    .expect("committed snapshot")
             )),
             "new bytes"
         );
@@ -1811,7 +2010,10 @@ mod tests {
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .filter(|name| name.starts_with(".fox-replace-"))
             .collect::<Vec<_>>();
-        assert!(leftovers.is_empty(), "replace materials left behind: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "replace materials left behind: {leftovers:?}"
+        );
     }
 
     #[test]
@@ -1819,13 +2021,8 @@ mod tests {
         let harness = Harness::new();
         let target = harness.write_file("stale.txt", "observed bytes");
         let input = serde_json::json!({"path":"stale.txt","content":"proposed bytes"});
-        let (binding, credential) = admitted_file_authority(
-            &harness,
-            "run-stale",
-            "call-stale",
-            "stale.txt",
-            &input,
-        );
+        let (binding, credential) =
+            admitted_file_authority(&harness, "run-stale", "call-stale", "stale.txt", &input);
         let scope = file_scope();
         let root = harness.root.to_string_lossy().into_owned();
         let context = ManagedExecutionContext {
@@ -1853,7 +2050,10 @@ mod tests {
             &mut revalidate,
         );
         first.expect("the first admitted write commits");
-        assert_eq!(first_evidence, fox_engine_protocol::ExecutionEvidence::Started);
+        assert_eq!(
+            first_evidence,
+            fox_engine_protocol::ExecutionEvidence::Started
+        );
         assert_eq!(revalidation_count.get(), 3);
         assert_eq!(contents_of(&target), "proposed bytes");
         let journals_before_refusal = replace_journals(&harness.root);
@@ -1874,10 +2074,14 @@ mod tests {
             &mut revalidate,
         );
         let error = result.expect_err("the observed baseline is stale");
-        assert!(error.contains("tool.file_conflict"), "unexpected error: {error}");
+        assert!(
+            error.contains("tool.file_conflict"),
+            "unexpected error: {error}"
+        );
         assert_eq!(evidence, fox_engine_protocol::ExecutionEvidence::NotStarted);
         assert_eq!(
-            revalidation_count.get(), 3,
+            revalidation_count.get(),
+            3,
             "prepare rejects the stale baseline before any locked revalidation"
         );
         assert_eq!(contents_of(&target), "external bytes");
@@ -1890,11 +2094,8 @@ mod tests {
         assert_eq!(rows.len(), 1, "the refused second write adds no version");
         assert_eq!(
             rows[0].storage_path,
-            crate::tool_host::canonical_file_identity(
-                &harness.root,
-                &target.to_string_lossy(),
-            )
-            .expect("canonical committed target identity")
+            crate::tool_host::canonical_file_identity(&harness.root, &target.to_string_lossy(),)
+                .expect("canonical committed target identity")
         );
         assert_eq!(
             rows[0].after_hash.as_deref(),
@@ -2021,7 +2222,11 @@ mod tests {
         assert!(ran, "the seam must execute the dispatch it was given");
         assert_eq!(result["content"][0]["text"], "written");
         let rows = harness.versions(None);
-        assert_eq!(rows.len(), 1, "the executed write must be registered: {rows:?}");
+        assert_eq!(
+            rows.len(),
+            1,
+            "the executed write must be registered: {rows:?}"
+        );
         let row = &rows[0];
         assert_eq!(row.tool, "write_file");
         assert_eq!(row.tool_call_id.as_deref(), Some("call-seam"));
@@ -2099,7 +2304,9 @@ mod tests {
         // The created content itself is snapshotted and therefore restorable.
         let after_backup = row.after_backup_path.as_ref().expect("content snapshot");
         assert_eq!(contents_of(Path::new(after_backup)), "hello");
-        let restored = harness.restore(&id, false).expect("created version restores");
+        let restored = harness
+            .restore(&id, false)
+            .expect("created version restores");
         assert_eq!(restored.change_kind, "restored");
         assert_eq!(contents_of(&target), "hello");
     }
@@ -2196,7 +2403,9 @@ mod tests {
             .expect("restored row");
         assert_eq!(
             safety_row.before_hash.as_deref(),
-            hash_file(Path::new(overwritten)).map(|(hash, _)| hash).as_deref()
+            hash_file(Path::new(overwritten))
+                .map(|(hash, _)| hash)
+                .as_deref()
         );
 
         // And every row of the chain still resolves to its own content.
@@ -2229,7 +2438,9 @@ mod tests {
         let _second = harness.recorded_write("run-1", "doc.txt", "second edit");
         assert_eq!(fs::read_to_string(&target).unwrap(), "second edit");
 
-        let restored = harness.restore(&first, false).expect("restore first version");
+        let restored = harness
+            .restore(&first, false)
+            .expect("restore first version");
 
         assert_eq!(fs::read_to_string(&target).unwrap(), "first edit");
         assert_eq!(restored.change_kind, "restored");
@@ -2251,7 +2462,11 @@ mod tests {
         let rows = harness.versions(Some(&target));
         // Append-only: the restore preserves the content it replaced as its own
         // version row, then appends the restored row. Nothing is rewritten.
-        assert_eq!(rows.len(), 4, "append-only: replaced + restored are appended");
+        assert_eq!(
+            rows.len(),
+            4,
+            "append-only: replaced + restored are appended"
+        );
         assert_eq!(rows[2].change_kind, "replaced");
         assert_eq!(rows[3].id, restored.id);
         assert_eq!(rows[3].version_no, 4);
@@ -2319,14 +2534,19 @@ mod tests {
         let error = harness
             .restore(&first, false)
             .expect_err("drift must block restore");
-        assert!(error.contains("changed outside"), "unexpected error: {error}");
+        assert!(
+            error.contains("changed outside"),
+            "unexpected error: {error}"
+        );
         assert_eq!(
             fs::read_to_string(&target).unwrap(),
             "touched by another program",
             "blocked restore leaves the file untouched"
         );
 
-        let restored = harness.restore(&first, true).expect("force overrides drift");
+        let restored = harness
+            .restore(&first, true)
+            .expect("force overrides drift");
         assert_eq!(fs::read_to_string(&target).unwrap(), "first edit");
         let safety = restored.backup_path.expect("safety backup path");
         assert_eq!(
@@ -2374,13 +2594,20 @@ mod tests {
         std::os::unix::fs::symlink(&outside, harness.root.join("x")).unwrap();
         #[cfg(windows)]
         {
-            let status = std::process::Command::new("cmd").args(["/C", "mklink", "/J"])
-                .arg(harness.root.join("x")).arg(&outside).status().unwrap();
+            let status = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(harness.root.join("x"))
+                .arg(&outside)
+                .status()
+                .unwrap();
             assert!(status.success(), "mklink /J");
         }
         let error = harness.restore(&first, true).unwrap_err();
         assert!(error.contains("restore refused"), "{error}");
-        assert!(!outside.join("evil.txt").exists(), "nothing may be written through the link");
+        assert!(
+            !outside.join("evil.txt").exists(),
+            "nothing may be written through the link"
+        );
         let _ = fs::remove_dir_all(&outside);
     }
 
@@ -2395,15 +2622,12 @@ mod tests {
             .expect("second conversation")
             .id;
 
-        let error = restore_version(
-            &harness.db,
-            &harness.backups,
-            &other,
-            &first,
-            false,
-        )
-        .expect_err("cross-conversation restore must be refused");
-        assert!(error.contains("another conversation"), "unexpected error: {error}");
+        let error = restore_version(&harness.db, &harness.backups, &other, &first, false)
+            .expect_err("cross-conversation restore must be refused");
+        assert!(
+            error.contains("another conversation"),
+            "unexpected error: {error}"
+        );
 
         // Tamper with the registered content snapshot: integrity check must fire
         // even with force.
@@ -2432,7 +2656,10 @@ mod tests {
         let error = harness
             .restore(&untrusted, false)
             .expect_err("unverified provenance must be refused");
-        assert!(error.contains("未经 Host 验证"), "unexpected error: {error}");
+        assert!(
+            error.contains("未经 Host 验证"),
+            "unexpected error: {error}"
+        );
     }
 
     /// A snapshot that holds different bytes than the row records must never be
@@ -2497,11 +2724,22 @@ mod tests {
         let scope = frozen_office_scope(&["office_create", "office_edit", "office_read"]);
 
         // office_create: no source document.
-        let create = office_wrapper_input(crate::office::SERVER_ID, "office_create", "报告-新建.docx");
-        match verified_managed_write(&harness.root, "allow", &scope, "call_mcp_tool", &create, None)
-            .expect("a frozen office_create is a managed write")
+        let create =
+            office_wrapper_input(crate::office::SERVER_ID, "office_create", "报告-新建.docx");
+        match verified_managed_write(
+            &harness.root,
+            "allow",
+            &scope,
+            "call_mcp_tool",
+            &create,
+            None,
+        )
+        .expect("a frozen office_create is a managed write")
         {
-            ManagedWrite::Office { inner_tool, verified } => {
+            ManagedWrite::Office {
+                inner_tool,
+                verified,
+            } => {
                 assert_eq!(inner_tool, "office_create");
                 assert!(verified.storage_path.ends_with("报告-新建.docx"));
             }
@@ -2520,7 +2758,10 @@ mod tests {
             },
         });
         match verified_managed_write(&harness.root, "allow", &scope, "call_mcp_tool", &edit, None) {
-            Some(ManagedWrite::Office { inner_tool, verified }) => {
+            Some(ManagedWrite::Office {
+                inner_tool,
+                verified,
+            }) => {
                 assert_eq!(inner_tool, "office_edit");
                 assert!(verified.storage_path.ends_with("报告-编辑.docx"));
             }
@@ -2533,14 +2774,18 @@ mod tests {
     /// and a generic MCP result is never one — however its JSON is shaped.
     #[test]
     fn a_generic_or_unfrozen_connector_is_never_a_managed_write() {
-        let root = std::env::temp_dir().join(format!("fox-managed-office-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("fox-managed-office-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let scope = frozen_office_scope(&["office_create", "office_edit"]);
 
         // An ordinary MCP server with a document-shaped tool.
         let generic = office_wrapper_input("some-remote-mcp", "office_create", "报告.docx");
         assert!(frozen_office_operation(&scope, "call_mcp_tool", &generic).is_none());
-        assert!(verified_managed_write(&root, "allow", &scope, "call_mcp_tool", &generic, None).is_none());
+        assert!(
+            verified_managed_write(&root, "allow", &scope, "call_mcp_tool", &generic, None)
+                .is_none()
+        );
 
         // The built-in connector id, but not part of the Run's frozen scope.
         let unfrozen = crate::database::KernelHostScope {
@@ -2552,11 +2797,13 @@ mod tests {
             office_tools: ["office_create".to_owned()].into_iter().collect(),
             lifecycle_hooks: Vec::new(),
         };
-        let frozen_id = office_wrapper_input(crate::office::SERVER_ID, "office_create", "报告.docx");
+        let frozen_id =
+            office_wrapper_input(crate::office::SERVER_ID, "office_create", "报告.docx");
         assert!(frozen_office_operation(&unfrozen, "call_mcp_tool", &frozen_id).is_none());
 
         // An operation the frozen scope does not authorize.
-        let unauthorized = office_wrapper_input(crate::office::SERVER_ID, "office_merge", "报告.docx");
+        let unauthorized =
+            office_wrapper_input(crate::office::SERVER_ID, "office_merge", "报告.docx");
         assert!(frozen_office_operation(&scope, "call_mcp_tool", &unauthorized).is_none());
 
         // A non-mutating Office operation never produces a version.
@@ -2567,7 +2814,9 @@ mod tests {
         // The wrapper is required: a bare inner name is not a managed write
         // either, because no production dispatch uses that shape.
         let bare = serde_json::json!({"output": "报告.docx"});
-        assert!(verified_managed_write(&root, "allow", &scope, "office_create", &bare, None).is_none());
+        assert!(
+            verified_managed_write(&root, "allow", &scope, "office_create", &bare, None).is_none()
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2598,10 +2847,20 @@ mod tests {
         let scope = frozen_office_scope(&["office_create", "office_edit"]);
         let output = "报告.docx";
         let input = office_wrapper_input(crate::office::SERVER_ID, "office_create", output);
-        let managed = verified_managed_write(&harness.root, "allow", &scope, "call_mcp_tool", &input, None)
-            .expect("frozen office create");
+        let managed = verified_managed_write(
+            &harness.root,
+            "allow",
+            &scope,
+            "call_mcp_tool",
+            &input,
+            None,
+        )
+        .expect("frozen office create");
         let (inner_tool, verified) = match managed {
-            ManagedWrite::Office { inner_tool, verified } => (inner_tool, verified),
+            ManagedWrite::Office {
+                inner_tool,
+                verified,
+            } => (inner_tool, verified),
             other => panic!("expected an Office write, got {other:?}"),
         };
         // The connector then saves the document.
@@ -2645,7 +2904,9 @@ mod tests {
         assert_eq!(rows[0].after_hash.as_deref(), Some(after_hash.as_str()));
         // …and the registered content is selectable for restore.
         fs::write(&target, "later edit by the user").unwrap();
-        let restored = harness.restore(&rows[0].id, true).expect("restore the saved document");
+        let restored = harness
+            .restore(&rows[0].id, true)
+            .expect("restore the saved document");
         assert_eq!(contents_of(&target), "saved document bytes");
         assert_eq!(restored.after_hash.as_deref(), Some(after_hash.as_str()));
     }
@@ -2658,8 +2919,15 @@ mod tests {
         let harness = Harness::new();
         let scope = frozen_office_scope(&["office_create"]);
         let input = office_wrapper_input(crate::office::SERVER_ID, "office_create", "报告.docx");
-        let verified = match verified_managed_write(&harness.root, "allow", &scope, "call_mcp_tool", &input, None)
-            .expect("frozen office create")
+        let verified = match verified_managed_write(
+            &harness.root,
+            "allow",
+            &scope,
+            "call_mcp_tool",
+            &input,
+            None,
+        )
+        .expect("frozen office create")
         {
             ManagedWrite::Office { verified, .. } => verified,
             other => panic!("expected an Office write, got {other:?}"),
@@ -2687,10 +2955,22 @@ mod tests {
             serde_json::json!({"content": [], "isError": false, "details": {"foxManagedFile": meta}})
         };
         let cases: Vec<(&str, serde_json::Value)> = vec![
-            ("another target", serde_json::json!({"storagePath": harness.root.join("其他.docx").canonicalize().unwrap_or_else(|_| harness.root.join("其他.docx")).to_string_lossy()})),
-            ("another content hash", serde_json::json!({"afterHash": "0".repeat(64)})),
-            ("another operation", serde_json::json!({"tool": "office_edit"})),
-            ("a backup with no before hash", serde_json::json!({"backupPath": "/tmp/x.foxbak"})),
+            (
+                "another target",
+                serde_json::json!({"storagePath": harness.root.join("其他.docx").canonicalize().unwrap_or_else(|_| harness.root.join("其他.docx")).to_string_lossy()}),
+            ),
+            (
+                "another content hash",
+                serde_json::json!({"afterHash": "0".repeat(64)}),
+            ),
+            (
+                "another operation",
+                serde_json::json!({"tool": "office_edit"}),
+            ),
+            (
+                "a backup with no before hash",
+                serde_json::json!({"backupPath": "/tmp/x.foxbak"}),
+            ),
         ];
         for (label, over) in cases {
             let error = record_office_write_from_result(
@@ -2736,10 +3016,20 @@ mod tests {
             "tool": "office_import_data",
             "arguments": {"output": "汇总.xlsx", "sheet": "数据", "data": "name,value\nalpha,1"},
         });
-        let managed = verified_managed_write(&harness.root, "allow", &scope, "call_mcp_tool", &input, None)
-            .expect("frozen office import");
+        let managed = verified_managed_write(
+            &harness.root,
+            "allow",
+            &scope,
+            "call_mcp_tool",
+            &input,
+            None,
+        )
+        .expect("frozen office import");
         let (inner_tool, verified) = match managed {
-            ManagedWrite::Office { inner_tool, verified } => (inner_tool, verified),
+            ManagedWrite::Office {
+                inner_tool,
+                verified,
+            } => (inner_tool, verified),
             other => panic!("expected an Office write, got {other:?}"),
         };
         assert_eq!(inner_tool, "office_import_data");
@@ -2777,7 +3067,9 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].tool, "office_import_data");
         fs::write(&target, "overwritten later").unwrap();
-        harness.restore(&rows[0].id, true).expect("restore the imported workbook");
+        harness
+            .restore(&rows[0].id, true)
+            .expect("restore the imported workbook");
         assert_eq!(contents_of(&target), "workbook after the import");
     }
 
@@ -2805,8 +3097,7 @@ mod tests {
         let artifact_path = outputs.join("saved.csv");
         fs::write(&artifact_path, csv.as_bytes()).unwrap();
         let artifact_path_string = artifact_path.to_string_lossy().into_owned();
-        let artifact_id =
-            crate::database::Database::computed_artifact_id(&artifact_path_string);
+        let artifact_id = crate::database::Database::computed_artifact_id(&artifact_path_string);
         harness
             .db
             .with_connection(|connection| {
@@ -2851,7 +3142,10 @@ mod tests {
         )
         .expect("an artifactId import is admitted through the shared seam");
         let (inner_tool, verified) = match managed {
-            ManagedWrite::Office { inner_tool, verified } => (inner_tool, verified),
+            ManagedWrite::Office {
+                inner_tool,
+                verified,
+            } => (inner_tool, verified),
             other => panic!("expected an Office write, got {other:?}"),
         };
         assert_eq!(inner_tool, "office_import_data");
@@ -2892,7 +3186,10 @@ mod tests {
         harness
             .restore(&rows[0].id, true)
             .expect("the imported workbook version is restorable");
-        assert_eq!(contents_of(&target), "workbook written from the saved artifact");
+        assert_eq!(
+            contents_of(&target),
+            "workbook written from the saved artifact"
+        );
     }
 
     /// An import dispatch outside the frozen operation set is not even
@@ -2906,7 +3203,15 @@ mod tests {
             "tool": "office_import_data",
             "arguments": {"output": "汇总.xlsx", "sheet": "数据", "data": "a\n1"},
         });
-        assert!(verified_managed_write(&harness.root, "allow", &scope, "call_mcp_tool", &input, None).is_none());
+        assert!(verified_managed_write(
+            &harness.root,
+            "allow",
+            &scope,
+            "call_mcp_tool",
+            &input,
+            None
+        )
+        .is_none());
     }
 
     /// FULL Legacy production chain against the REAL pinned OfficeCLI — no mock
@@ -2934,8 +3239,7 @@ mod tests {
     fn real_legacy_chain_precheck_approval_execute_register_restore() {
         use crate::office::OfficeCallContext;
 
-        let root = std::env::temp_dir()
-            .join(format!("fox-legacy-chain-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("fox-legacy-chain-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let root_string = root.to_string_lossy().into_owned();
         let db = Database::open(root.join("legacy-chain.db")).unwrap();
@@ -2944,7 +3248,10 @@ mod tests {
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources"),
         )
         .unwrap();
-        let server = db.get_mcp_server(crate::office::SERVER_ID).unwrap().unwrap();
+        let server = db
+            .get_mcp_server(crate::office::SERVER_ID)
+            .unwrap()
+            .unwrap();
         let sessions = root.join("sessions");
         fs::create_dir_all(&sessions).unwrap();
         // A real project conversation in `ask` mode: mutations need approval.
@@ -2952,27 +3259,34 @@ mod tests {
             .create_conversation(db.default_agent_id(), None, Some(&root_string), Some("ask"))
             .unwrap()
             .id;
-        let run = db.create_run(&conversation, "legacy-chain", None).unwrap().run.id;
+        let run = db
+            .create_run(&conversation, "legacy-chain", None)
+            .unwrap()
+            .run
+            .id;
 
         // A genuinely saved AGV-scale compute artifact (~100 KB, 927 rows).
-        let outputs = crate::runtime_host::attachment_compute::safe_workspace(
-            &sessions,
-            &conversation,
-            &run,
-        )
-        .unwrap()
-        .join("outputs");
+        let outputs =
+            crate::runtime_host::attachment_compute::safe_workspace(&sessions, &conversation, &run)
+                .unwrap()
+                .join("outputs");
         fs::create_dir_all(&outputs).unwrap();
         const ROW_COUNT: usize = 927;
         let mut csv = String::from("id,tag,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10\n");
         for index in 0..ROW_COUNT {
-            csv.push_str(&format!("{index},agv-task-{index:05}-zone-{:02}", index % 24));
+            csv.push_str(&format!(
+                "{index},agv-task-{index:05}-zone-{:02}",
+                index % 24
+            ));
             for _ in 0..10 {
                 csv.push_str(&format!(",{}", 10_000 + index));
             }
             csv.push('\n');
         }
-        assert!(csv.len() > 64 * 1024, "fixture must exceed the inline result limit");
+        assert!(
+            csv.len() > 64 * 1024,
+            "fixture must exceed the inline result limit"
+        );
         let artifact_path = outputs.join("saved.csv");
         fs::write(&artifact_path, csv.as_bytes()).unwrap();
         let artifact_path_string = artifact_path.to_string_lossy().into_owned();
@@ -3037,7 +3351,10 @@ mod tests {
         // carry only the id — no body, no source path on the command line.
         assert_eq!(prepared.stdin_payload().expect("resolved payload"), csv);
         assert!(wrapper.canonical_string().contains(artifact_id.as_str()));
-        assert!(!wrapper.canonical_string().contains("agv-task-00500"), "the data body must not be re-copied through the request");
+        assert!(
+            !wrapper.canonical_string().contains("agv-task-00500"),
+            "the data body must not be re-copied through the request"
+        );
 
         // read-only is a hard refusal in pre-check, before any write.
         let read_only_error = crate::office::prepare_with_context(
@@ -3048,7 +3365,10 @@ mod tests {
             Some(&context),
         )
         .expect_err("a mutating import is refused under read-only permission");
-        assert!(!root.join("ro.xlsx").exists(), "read-only refusal writes nothing: {read_only_error}");
+        assert!(
+            !root.join("ro.xlsx").exists(),
+            "read-only refusal writes nothing: {read_only_error}"
+        );
 
         // --- 2) Permission / human approval -------------------------------
         let office_access = db.conversation_project_access(&conversation).unwrap();
@@ -3061,7 +3381,10 @@ mod tests {
         let granted_before = db
             .conversation_tool_permission_granted(&conversation, "call_mcp_tool", &scope)
             .unwrap();
-        assert!(!granted_before, "under ask mode a fresh mutation is not pre-authorised");
+        assert!(
+            !granted_before,
+            "under ask mode a fresh mutation is not pre-authorised"
+        );
         // The exact write a resolved "allow for this conversation" approval
         // performs (database/repositories.rs resolve_tool_approval).
         db.with_connection(|connection| {
@@ -3077,7 +3400,10 @@ mod tests {
         let granted_after = db
             .conversation_tool_permission_granted(&conversation, "call_mcp_tool", &scope)
             .unwrap();
-        assert!(granted_after, "the recorded conversation grant authorises this dispatch");
+        assert!(
+            granted_after,
+            "the recorded conversation grant authorises this dispatch"
+        );
 
         // --- 3) REAL pinned-CLI execution by reference --------------------
         let result = crate::office::execute_with_cancellation(
@@ -3105,10 +3431,8 @@ mod tests {
         // (the file now exists, so a post-execution prepare would refuse it).
         // `record_office_write_from_result` independently re-hashes the bytes
         // the real CLI actually left on disk and checks the genuine envelope.
-        let verified_target = VerifiedWriteTarget::new(
-            std::path::Path::new(&access_root),
-            &pre_execution_target,
-        );
+        let verified_target =
+            VerifiedWriteTarget::new(std::path::Path::new(&access_root), &pre_execution_target);
         let backups = root.join("managed-versions");
         record_office_write_from_result(
             &db,
@@ -3128,7 +3452,10 @@ mod tests {
         assert!(!versions.is_empty(), "a restorable version was registered");
         let first = versions.remove(0);
         assert_eq!(first.tool, "office_import_data");
-        assert!(first.source_verified, "the version's bytes were Host-verified");
+        assert!(
+            first.source_verified,
+            "the version's bytes were Host-verified"
+        );
         assert_eq!(first.after_hash.as_deref(), Some(genuine_hash.as_str()));
 
         // --- 5) Version recovery returns the exact CLI-produced bytes -----
@@ -3149,9 +3476,14 @@ mod tests {
             .unwrap()
             .id;
         let foreign_restore = restore_version(&db, &backups, &other_conversation, &first.id, true);
-        assert!(foreign_restore.is_err(), "cross-conversation restore must be refused: {foreign_restore:?}");
         assert!(
-            foreign_restore.unwrap_err().contains("another conversation"),
+            foreign_restore.is_err(),
+            "cross-conversation restore must be refused: {foreign_restore:?}"
+        );
+        assert!(
+            foreign_restore
+                .unwrap_err()
+                .contains("another conversation"),
             "cross-conversation restore must name the ownership boundary"
         );
 
@@ -3204,7 +3536,10 @@ mod tests {
             .target_path()
             .expect("overwrite admits the existing target")
             .to_path_buf();
-        assert_eq!(target2, pre_execution_target, "create and overwrite share one target");
+        assert_eq!(
+            target2, pre_execution_target,
+            "create and overwrite share one target"
+        );
         let result2 = crate::office::execute_with_cancellation(
             &server,
             "office_import_data",
@@ -3217,11 +3552,20 @@ mod tests {
         )
         .expect("the pinned CLI overwrites the workbook from the second artifact");
         let genuine2_bytes = fs::read(&target_path).unwrap();
-        assert_ne!(genuine2_bytes, genuine_bytes, "the revised import changes the file");
+        assert_ne!(
+            genuine2_bytes, genuine_bytes,
+            "the revised import changes the file"
+        );
         let verified2 = VerifiedWriteTarget::new(std::path::Path::new(&access_root), &target2);
         record_office_write_from_result(
-            &db, &backups, &conversation, &run, Some("call-legacy-chain-v2"),
-            &verified2, "office_import_data", &result2,
+            &db,
+            &backups,
+            &conversation,
+            &run,
+            Some("call-legacy-chain-v2"),
+            &verified2,
+            "office_import_data",
+            &result2,
         )
         .expect("the overwrite is registered as a second managed version");
         let mut import_versions: Vec<ManagedFileVersion> = db
@@ -3231,10 +3575,20 @@ mod tests {
             .filter(|v| v.tool == "office_import_data")
             .collect();
         import_versions.sort_by_key(|v| v.version_no);
-        assert_eq!(import_versions.len(), 2, "created + modified versions are both registered");
-        assert!(import_versions.iter().all(|v| v.source_verified), "both versions Host-verified");
+        assert_eq!(
+            import_versions.len(),
+            2,
+            "created + modified versions are both registered"
+        );
+        assert!(
+            import_versions.iter().all(|v| v.source_verified),
+            "both versions Host-verified"
+        );
         let (v1, v2) = (&import_versions[0], &import_versions[1]);
-        assert_ne!(v1.after_hash, v2.after_hash, "the two versions hold different content");
+        assert_ne!(
+            v1.after_hash, v2.after_hash,
+            "the two versions hold different content"
+        );
         // Restore the older created version, then the revised one: each returns
         // exactly the bytes its own CLI import wrote.
         restore_version(&db, &backups, &conversation, &v1.id, true)
@@ -3242,7 +3596,11 @@ mod tests {
         assert_eq!(fs::read(&target_path).unwrap(), genuine_bytes, "v1 restore");
         restore_version(&db, &backups, &conversation, &v2.id, true)
             .expect("the modified version restores");
-        assert_eq!(fs::read(&target_path).unwrap(), genuine2_bytes, "v2 restore");
+        assert_eq!(
+            fs::read(&target_path).unwrap(),
+            genuine2_bytes,
+            "v2 restore"
+        );
 
         // --- Rejections never write --------------------------------------
         // Tampered saved bytes (checksum mismatch) are refused at pre-check.

@@ -1,10 +1,38 @@
 import type { ArtifactRecord } from '../conversations/model/types'
 
+export function displayArtifactPath(path: string) {
+  return path.replace(/^[\\/]{2}\?[\\/]UNC[\\/]/iu, '\\\\').replace(/^[\\/]{2}\?[\\/]/u, '')
+}
+
+function normalizedArtifactPath(path: string) {
+  return displayArtifactPath(path).replaceAll('\\', '/').replace(/^\.\//u, '')
+}
+
+export function artifactRelativePath(artifact: ArtifactRecord, projectRoot: string | null | undefined) {
+  if (!projectRoot || artifact.artifactOrigin !== 'project') return undefined
+  const absolute = normalizedArtifactPath(artifact.storagePath)
+  const root = normalizedArtifactPath(projectRoot).replace(/\/$/u, '')
+  const windows = /^(?:[a-z]:\/|\/\/)/iu.test(absolute)
+  const prefix = `${root}/`
+  return (windows ? absolute.toLowerCase().startsWith(prefix.toLowerCase()) : absolute.startsWith(prefix))
+    ? absolute.slice(prefix.length)
+    : undefined
+}
+
 export function resolveFinalArtifactReference(href: string, artifacts: ArtifactRecord[]) {
   if (!href.startsWith('#fox-artifact=')) return undefined
   try {
     const id = decodeURIComponent(href.slice('#fox-artifact='.length))
-    return artifacts.find(artifact => artifact.id === id)
+    const exact = artifacts.find(artifact => artifact.id === id)
+    if (exact) return exact
+    const path = normalizedArtifactPath(id)
+    if (!path || path.split('/').some(part => part === '..')) return undefined
+    const matches = artifacts.filter(artifact => {
+      if (!path.includes('/')) return artifact.displayName === path
+      const storagePath = normalizedArtifactPath(artifact.storagePath)
+      return storagePath === path || (!/^(?:\/|[a-z]:)/iu.test(path) && storagePath.endsWith(`/${path}`))
+    })
+    if (matches.length === 1) return matches[0]
   } catch {
     return undefined
   }

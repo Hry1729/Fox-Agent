@@ -60,7 +60,10 @@ pub fn approve_read_only_tool(
         let has_line = fields.contains_key("startLine") || fields.contains_key("lineCount");
         let has_units = fields.contains_key("offset") || fields.contains_key("limit");
         if has_line && has_units {
-            return Err("startLine/lineCount and offset/limit are mutually exclusive; use one mode only".to_owned());
+            return Err(
+                "startLine/lineCount and offset/limit are mutually exclusive; use one mode only"
+                    .to_owned(),
+            );
         }
         if has_line {
             let positive_integer = |name: &str| {
@@ -71,7 +74,10 @@ pub fn approve_read_only_tool(
                     .is_some()
             };
             if !positive_integer("startLine") || !positive_integer("lineCount") {
-                return Err("startLine and lineCount must both be positive integers (startLine is 1-based)".to_owned());
+                return Err(
+                    "startLine and lineCount must both be positive integers (startLine is 1-based)"
+                        .to_owned(),
+                );
             }
         }
     }
@@ -204,22 +210,30 @@ mod tests {
             "read",
             &serde_json::json!({"path":"src/note.txt","startLine":1}),
             root_text,
-        ).unwrap_err().contains("positive integers"));
+        )
+        .unwrap_err()
+        .contains("positive integers"));
         assert!(approve_read_only_tool(
             "read",
             &serde_json::json!({"path":"src/note.txt","startLine":1,"lineCount":1,"offset":0}),
             root_text,
-        ).unwrap_err().contains("mutually exclusive"));
+        )
+        .unwrap_err()
+        .contains("mutually exclusive"));
         assert!(approve_read_only_tool(
             "grep",
             &serde_json::json!({"path":".","pattern":"hello","cursor":7}),
             root_text,
-        ).unwrap_err().contains("cursor"));
+        )
+        .unwrap_err()
+        .contains("cursor"));
         assert!(approve_read_only_tool(
             "find",
             &serde_json::json!({"path":".","pattern":"note","cursor":""}),
             root_text,
-        ).unwrap_err().contains("cursor"));
+        )
+        .unwrap_err()
+        .contains("cursor"));
         let _ = fs::remove_dir_all(root);
     }
 }
