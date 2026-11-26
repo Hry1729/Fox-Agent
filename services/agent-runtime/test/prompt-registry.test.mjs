@@ -187,7 +187,8 @@ test('pins stable_v1 Runtime prefix bytes and the knowledge-routing instruction 
   // the removed checklist/repair flow (4b54e68), so the hash moved again.
   // 2026-10-31：远程索引不可用改为不可重试的 index_unavailable，前缀哈希因此变化。
   // 2026-11-19：运行时前缀加入开放式汇总澄清和项目成果路径规则。
-  assert.equal(composed.stablePromptHash, '4c280dfcd8c403b9')
+  // 2026-11-23：计算、工作模式和专家编排细则移入工具或条件区块。
+  assert.equal(composed.stablePromptHash, '1ae5e66883b38782')
 })
 
 test('separates stable-prefix and dynamic-tail cache identities', () => {

@@ -1,10 +1,14 @@
 import { lazy, Suspense, type ReactNode } from 'react'
+import type { WorkspaceSchedules } from '@/features/companions/tasks'
+import { isCompanionWorkspaceView } from './types'
 import type { KnowledgeBaseRecord } from '@/features/conversations/model/types'
 import type { LocalKnowledgeGateway, LocalKnowledgeView } from '@/features/local-knowledge'
 import type { PluginCardView, PluginGateway } from '@/features/plugins'
+import { isPluginSection } from '@/features/plugins/plugin-browser-data'
 import type { KnowledgeSourceLocator, LocalKnowledgeDocumentAsk, NavigateWorkspace, WorkspaceView } from './types'
 import { isSettingsSectionAnchor, localKnowledgeBackRoute, localKnowledgeViewForWorkspace, settingsRouteRedirect, workspaceViewForLocalKnowledge } from './management-navigation'
 
+const CompanionWorkspace = lazy(() => import('@/features/companions/workspace'))
 const AgentListPage = lazy(() => import('@/features/agents/agent-pages').then((module) => ({ default: module.AgentListPage })))
 const AgentDetailPage = lazy(() => import('@/features/agents/agent-pages').then((module) => ({ default: module.AgentDetailPage })))
 const KnowledgeDetailPage = lazy(() => import('@/features/knowledge/knowledge-pages').then((module) => ({ default: module.KnowledgeDetailPage })))
@@ -21,6 +25,7 @@ const ExtensionsSettingsPage = lazy(() => import('@/features/settings/settings-p
 const ServicePage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.ServicePage })))
 const ModelServicePage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.ModelServicePage })))
 const LoginPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.LoginPage })))
+const PluginDetailPage = lazy(() => import('@/features/plugins/plugin-detail-page'))
 const PluginCenterPage = lazy(() => import('@/features/plugins').then((module) => ({ default: module.PluginCenterPage })))
 const LocalKnowledgeWorkspace = lazy(() => import('@/features/local-knowledge').then((module) => ({ default: module.LocalKnowledgeWorkspace })))
 
@@ -38,6 +43,7 @@ export interface WorkspaceShellProps {
   onAskLocalKnowledgeDocument: (payload: LocalKnowledgeDocumentAsk) => void
   localKnowledgeGateway?: LocalKnowledgeGateway
   pluginGateway?: PluginGateway
+  companionSchedules?: WorkspaceSchedules
   localKnowledgeCreateRequest?: number
   onLocalKnowledgeCreateRequestHandled?: () => void
   onConfigurePluginAgent?: (plugin: PluginCardView) => void
@@ -61,6 +67,7 @@ export function WorkspaceShell({
   onAskLocalKnowledgeDocument,
   localKnowledgeGateway,
   pluginGateway,
+  companionSchedules,
   localKnowledgeCreateRequest,
   onLocalKnowledgeCreateRequestHandled,
   onConfigurePluginAgent,
@@ -79,13 +86,15 @@ export function WorkspaceShell({
   const settingsRedirect = settingsRouteRedirect(activeView)
   const settingsView = settingsRedirect?.view ?? activeView
   const settingsSection = settingsRedirect?.section ?? (isSettingsSectionAnchor(activeDocumentId) ? activeDocumentId : undefined)
-  const initialPluginKind = activeEntityId === 'tool' || activeEntityId === 'skill' || activeEntityId === 'mcp'
-    ? activeEntityId
-    : undefined
+  const initialPluginKind = isPluginSection(activeEntityId) ? activeEntityId : undefined
 
   let rawWorkspacePage: ReactNode = null
-  if (activeView === 'plugins') {
-    rawWorkspacePage = <PluginCenterPage gateway={pluginGateway} initialKind={initialPluginKind} onConfigureAgent={onConfigurePluginAgent} />
+  if (isCompanionWorkspaceView(activeView) && activeView !== 'companions' && companionSchedules) {
+    rawWorkspacePage = <CompanionWorkspace view={activeView} schedules={companionSchedules} navigate={navigate} />
+  } else if (activeView === 'plugins' || (activeView === 'plugin-detail' && activeDocumentId === 'tool')) {
+    rawWorkspacePage = <PluginCenterPage gateway={pluginGateway} initialKind={initialPluginKind} initialCategory={activeView === 'plugins' && activeEntityId !== 'tool' ? activeDocumentId ?? undefined : undefined} navigate={navigate} onConfigureAgent={onConfigurePluginAgent} />
+  } else if ((activeView === 'plugin-detail' || activeView === 'settings-plugin-detail') && activeEntityId && isPluginSection(activeDocumentId)) {
+    rawWorkspacePage = <PluginDetailPage key={activeView + activeEntityId} id={activeEntityId} kind={activeDocumentId} fromSettings={activeView === 'settings-plugin-detail'} navigate={navigate} gateway={pluginGateway} />
   } else if (localKnowledgeView) {
     rawWorkspacePage = (
       <LocalKnowledgeWorkspace
@@ -103,7 +112,7 @@ export function WorkspaceShell({
       />
     )
   } else if (activeView === 'agents') {
-    rawWorkspacePage = <AgentListPage {...pageProps} />
+    rawWorkspacePage = <AgentListPage {...pageProps} initialCategory={activeEntityId ?? undefined} />
   } else if (activeView === 'agent-detail') {
     rawWorkspacePage = <AgentDetailPage {...pageProps} agentId={activeEntityId} section={activeDocumentId ?? 'home'} />
   } else if (activeView === 'knowledge') {
@@ -128,8 +137,8 @@ export function WorkspaceShell({
     rawWorkspacePage = <ConversationSettingsPage sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} section={settingsSection} />
   } else if (settingsView === 'settings-data') {
     rawWorkspacePage = <DataAboutSettingsPage {...pageProps} section={settingsSection} />
-  } else if (settingsView === 'settings-extensions') {
-    rawWorkspacePage = <ExtensionsSettingsPage {...pageProps} section={settingsSection} />
+  } else if (settingsView === 'settings-extensions' || (activeView === 'settings-plugin-detail' && activeDocumentId === 'tool')) {
+    rawWorkspacePage = <ExtensionsSettingsPage {...pageProps} section={settingsSection} initialKind={initialPluginKind} gateway={pluginGateway} />
   } else if (activeView === 'service') {
     rawWorkspacePage = <ServicePage {...pageProps} />
   } else if (activeView === 'model-service') {

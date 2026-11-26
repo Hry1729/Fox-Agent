@@ -729,7 +729,7 @@ function SidebarHome({ detail, managed, onMode, onOpenFile }: { detail: Conversa
 /** The right-hand sidebar: opened pages (including one tab per open file), the
  *  `＋` page menu, and the page body. Exported so its DOM can be driven directly by
  *  the acceptance tests without mounting the whole Workbench. */
-export function RightPanel({ onUnbindKnowledge, knowledgeBusy, mode, tabs, detail, activity, width, maximized = false, hidden = false, fileTabs, activeFileTabId, activeChildAgent, onMode, onCloseMode, onOpenFile, onActivateFile, onCloseFile, onOpenChildAgent, onBackChildAgent, onOpenEvidence, onToggleMaximized, onCollapse }: { onUnbindKnowledge?: (binding: ConversationDetail["knowledgeBindings"][number]) => Promise<boolean>; knowledgeBusy?: boolean; mode: RightMode | null; tabs: RightMode[]; detail: ConversationDetail | null; activity: Omit<ActivityDetailPanelProps, 'detail'>; width: number; maximized?: boolean; hidden?: boolean; fileTabs: OpenFileTab[]; activeFileTabId: string | null; activeChildAgent: ChildAgentSelection | null; onMode: (mode: RightMode) => void; onCloseMode: (mode: RightMode) => void; onOpenFile: (path: string, artifactId: string | null) => void; onActivateFile: (tabId: string) => void; onCloseFile: (tabId: string) => void; onOpenChildAgent: (run: ChildRunRecord, avatarIndex: number) => void; onBackChildAgent: () => void; onOpenEvidence?: (evidence: TaskEvidenceRecord) => void; onToggleMaximized: () => void; onCollapse: () => void }) {
+export function RightPanel({ onUnbindKnowledge, knowledgeBusy, mode, tabs, detail, activity, width, maximized = false, hidden = false, filePreviewOnly = false, fileTabs, activeFileTabId, activeChildAgent, onMode, onCloseMode, onOpenFile, onActivateFile, onCloseFile, onOpenChildAgent, onBackChildAgent, onOpenEvidence, onToggleMaximized, onCollapse }: { onUnbindKnowledge?: (binding: ConversationDetail["knowledgeBindings"][number]) => Promise<boolean>; knowledgeBusy?: boolean; mode: RightMode | null; tabs: RightMode[]; detail: ConversationDetail | null; activity: Omit<ActivityDetailPanelProps, 'detail'>; width: number; maximized?: boolean; hidden?: boolean; filePreviewOnly?: boolean; fileTabs: OpenFileTab[]; activeFileTabId: string | null; activeChildAgent: ChildAgentSelection | null; onMode: (mode: RightMode) => void; onCloseMode: (mode: RightMode) => void; onOpenFile: (path: string, artifactId: string | null) => void; onActivateFile: (tabId: string) => void; onCloseFile: (tabId: string) => void; onOpenChildAgent: (run: ChildRunRecord, avatarIndex: number) => void; onBackChildAgent: () => void; onOpenEvidence?: (evidence: TaskEvidenceRecord) => void; onToggleMaximized: () => void; onCollapse: () => void }) {
   const activeChildAgentRun = activeChildAgent
     ? detail?.childRuns.find((run) => run.childRunId === activeChildAgent.run.childRunId) ?? activeChildAgent.run
     : null
@@ -745,7 +745,8 @@ export function RightPanel({ onUnbindKnowledge, knowledgeBusy, mode, tabs, detai
     setTerminalKey(current => terminalActive ? terminalContext : hasTerminalTab && current === terminalContext ? current : null)
   }, [hasTerminalTab, terminalContext, terminalActive])
 
-  const managed = useManagedFiles(hidden ? null : conversationId, managedFilesRefreshKey(detail))
+  const managed = useManagedFiles(hidden || filePreviewOnly ? null : conversationId, managedFilesRefreshKey(detail))
+  const previewTab = filePreviewOnly ? fileTabs.find(tab => tab.id === activeFileTabId) : undefined
   const showingFilePreview = detail?.conversation.projectRoot && fileTabs.some(tab => tab.id === activeFileTabId && tab.path)
   const [versionsUnseen] = useManagedFileUnseen({
     surface: 'files',
@@ -782,7 +783,7 @@ export function RightPanel({ onUnbindKnowledge, knowledgeBusy, mode, tabs, detai
           })}
         </TabsList>
         <div className="fox-context-tab-actions">
-          <DropdownMenu>
+          {!filePreviewOnly && <DropdownMenu>
             <DropdownMenuTrigger asChild><button type="button" aria-label="打开页面" title="打开页面"><Plus size={14} />{versionsUnseen && mode && !hasFilesTab && <span className="fox-tab-dot" aria-hidden="true" />}</button></DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="fox-context-add-menu" onCloseAutoFocus={event => {
               if (openingTerminalFromMenu.current) event.preventDefault()
@@ -793,11 +794,13 @@ export function RightPanel({ onUnbindKnowledge, knowledgeBusy, mode, tabs, detai
                 onMode(id)
               }}>{icon}<span>{label}</span>{id === 'files' && versionsUnseen && <span className="fox-tab-dot is-inline" aria-hidden="true" />}</DropdownMenuItem>)}
             </DropdownMenuContent>
-          </DropdownMenu>
+          </DropdownMenu>}
           <button type="button" aria-label={maximized ? '还原右侧边栏' : '全屏显示右侧边栏'} title={maximized ? '还原' : '全屏'} onClick={onToggleMaximized}>{maximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</button>
         </div>
       </Tabs>)}
-      {!hidden && mode === 'agents' && activeChildAgent && activeChildAgentRun
+      {!hidden && previewTab && filePreviewOnly
+        ? <div className="fox-file-panel is-file-open"><ArtifactFilePreview detail={detail} artifactId={previewTab.artifactId} displayPath={previewTab.name} /></div>
+        : !hidden && mode === 'agents' && activeChildAgent && activeChildAgentRun
         ? <ChildAgentConversationPanel key={activeChildAgentRun.childRunId} run={activeChildAgentRun} avatarIndex={activeChildAgent.avatarIndex} onBack={onBackChildAgent} />
         : !hidden && mode && mode !== 'terminal'
         ? <ContextContent onUnbindKnowledge={onUnbindKnowledge} knowledgeBusy={knowledgeBusy} mode={mode} detail={detail} activity={activity} fileTabs={fileTabs} activeFileTabId={activeFileTabId} managed={managed} onOpenFile={onOpenFile} onOpenEvidence={onOpenEvidence} onOpenChildAgent={onOpenChildAgent} />

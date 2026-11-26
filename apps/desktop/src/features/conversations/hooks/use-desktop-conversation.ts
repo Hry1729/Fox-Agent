@@ -249,6 +249,9 @@ export function useDesktopConversation(): DesktopConversationState {
   const selectionVersionRef = useRef(0)
   const authoritativeRunIdRef = useRef<string | null>(null)
   authoritativeRunIdRef.current = detail ? snapshotForRun(detail)?.runId ?? null : null
+  const companionConversationId = detail?.companionId ? detail.conversation.id : null
+  const companionConversationIdRef = useRef<string | null>(null)
+  companionConversationIdRef.current = companionConversationId
   // The open conversation's frozen backend, read by cancel / approve without
   // widening their memo dependencies.
   const frozenBackendRef = useRef<{ conversationId: string; backend: AgentBackendId } | null>(null)
@@ -1044,6 +1047,7 @@ export function useDesktopConversation(): DesktopConversationState {
   useRuntimeEventStream({
     authoritativeRunIdRef,
     activeConversationIdRef,
+    companionConversationIdRef,
     runtimeListenerReadyRef,
     runtimeEventQueueRef,
     runtimeEventFrameRef,
@@ -1061,7 +1065,8 @@ export function useDesktopConversation(): DesktopConversationState {
     },
   })
   useKernelStateStream({ conversationId: detail?.conversation.id ?? null,
-    active: Boolean(detail && snapshotForRun(detail) && conversationRunIsActive(detail)), setDetail, setError, setErrorDetails })
+    active: Boolean(detail && snapshotForRun(detail) && conversationRunIsActive(detail)),
+    previewEnabled: !companionConversationId, setDetail, setError, setErrorDetails })
 
   useEffect(() => {
     if (!desktopRuntimeAvailable) return
@@ -1215,7 +1220,7 @@ export function useDesktopConversation(): DesktopConversationState {
         createdDraft = {
           draft: {
             agentId,
-            expertId: draft.expertId ?? draftExpertId ?? null,
+            expertId: draft.expertId,
             projectRoot: draft.projectRoot ?? draftProjectRoot ?? null,
             permissionMode: draft.permissionMode ?? draftPermissionMode ?? null,
             knowledgeBases: (draft.knowledgeBases.length ? draft.knowledgeBases : draftKnowledgeBases).slice(),
@@ -1227,7 +1232,7 @@ export function useDesktopConversation(): DesktopConversationState {
         }
         const conversation = await desktopClient.createConversation({
           agentId,
-          expertId: backend === 'fox' ? draft.expertId ?? draftExpertId ?? undefined : undefined,
+          expertId: backend === 'fox' ? draft.expertId ?? undefined : undefined,
           projectRoot: draft.projectRoot ?? draftProjectRoot ?? undefined,
           permissionMode: draft.permissionMode ?? draftPermissionMode ?? undefined,
           // Absent for Fox so an older Host sees exactly the old request.
@@ -1255,7 +1260,7 @@ export function useDesktopConversation(): DesktopConversationState {
         }
         if (selectionVersion === selectionVersionRef.current) applyDraft({
           agentId: active.conversation.agentId,
-          expertId: activeConversationExpertBinding(active)?.expertId ?? draft.expertId ?? draftExpertId,
+          expertId: activeConversationExpertBinding(active)?.expertId ?? draft.expertId,
           projectRoot: null,
           permissionMode: null,
           knowledgeBases: [],
@@ -1315,13 +1320,9 @@ export function useDesktopConversation(): DesktopConversationState {
       })
       const isYuxi = activeConversation.conversation.agentId.startsWith('yuxi:')
       const extractedContext = !isYuxi ? await extractedAttachmentContext(files) : ''
-      let attachmentNote = ''
-      if (attachments.length && activeConversation.companionId) {
-        const paths = attachments.map(item => JSON.stringify('收到的文件/' + item.displayName))
-        attachmentNote = '\n\n用户已加入以下工作目录文件。可用 read 按相对路径读取：\n' + paths.join('\n')
-      } else if (attachments.length && !isYuxi) {
-        attachmentNote = `\n\nFox attachments: use attachment_compute for whole-file code calculations; read_attachment for source text:\n${attachments.map((item) => `- ${item.id}: ${item.displayName}`).join('\n')}`
-      }
+      const attachmentNote = attachments.length && !isYuxi && !activeConversation.companionId
+        ? `\n\nFox 附件。需要全量统计或分析时，用 attachment_compute 按以下附件 ID 读取完整数据；read_attachment 用于查看原文片段：\n${attachments.map(item => `- ${item.id}: ${item.displayName}`).join('\n')}`
+        : ''
       await Promise.all([runtimeListenerReadyRef.current, workListenerReadyRef.current])
       uiDispatchStartedRef.current.set(activeConversation.conversation.id, performance.now())
       const started = await desktopClient.startRun({
@@ -1898,7 +1899,7 @@ export function useDesktopConversation(): DesktopConversationState {
       createdAt: 0,
       updatedAt: 0,
     })),
-    streamingText: detail?.lastRun
+    streamingText: !companionConversationId && detail?.lastRun
       ? [...detail.messages].reverse().find((message) => message.role === 'assistant' && message.runId === detail.lastRun?.id)?.content ?? ''
       : '',
     error,

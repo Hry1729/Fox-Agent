@@ -31,6 +31,163 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+#[tokio::test(flavor = "multi_thread")]
+async fn real_native_pi_keeps_file_tools_and_steers_before_settlement() {
+    use fox_agent_backend::acp::BackendEvent;
+    use fox_agent_backend::external::ExternalLauncher;
+    use fox_agent_backend::external_launch::{HostLaunchConfig, HostLauncher};
+    use fox_agent_backend::fox_mcp::{FoxToolHost, McpBridge, ToolCallContext, ToolError};
+    use futures::future::BoxFuture;
+    use std::sync::{Arc, Mutex};
+
+    let Some(runtime_root) = runtime_dir("real_native_pi_keeps_file_tools_and_steers_before_settlement") else { return };
+    struct Host(Arc<Mutex<Vec<String>>>);
+    impl FoxToolHost for Host {
+        fn call_tool(&self, _ctx: ToolCallContext, tool: String, _input: serde_json::Value)
+            -> BoxFuture<'static, Result<serde_json::Value, ToolError>>
+        {
+            self.0.lock().unwrap().push(tool);
+            Box::pin(async { Ok(json!({"recorded": true})) })
+        }
+    }
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let bridge = McpBridge::start(Arc::new(Host(calls.clone())), &tokio::runtime::Handle::current()).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let mut config = HostLaunchConfig::from_env(data.path());
+    config.runtime_root = runtime_root;
+    config.state_root = data.path().join("agent-state");
+    config.native_login_home = None;
+    let request = turn("native", "native-first", "GATEREAD:proof", project.path()).launch;
+    let home = config.private_dirs(&request).unwrap().private_home.join(".pi/agent");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("settings.json"), json!({
+        "defaultProvider": "foxscripted",
+        "defaultModel": "scripted",
+        "compaction": {"enabled": false, "keepRecentTokens": 1},
+        "extensions": [fixtures().join("scripted-provider.ts")]
+    }).to_string()).unwrap();
+    std::fs::write(home.join("models.json"), json!({"providers": {"foxscripted": {
+        "baseUrl": "http://127.0.0.1:1/v1", "api": "openai-completions", "apiKey": "local-test",
+        "models": [{"id": "scripted", "name": "scripted"}]
+    }}}).to_string()).unwrap();
+    std::fs::write(project.path().join("fox-write-proof.txt"), "original working data").unwrap();
+    let launcher = HostLauncher::with_mcp(config, bridge);
+    let mut launched = launcher.launch(request.clone()).await.unwrap();
+    let mut events = launched.connection.take_events();
+    let BackendEvent::Initialized { initialize_response, .. } = events.recv().await.unwrap() else { panic!("expected initialize") };
+    assert!(fox_agent_backend::backends::pi::native_rpc(&initialize_response));
+    let id = match launched.connection.new_session(project.path().to_path_buf()).await {
+        Ok(id) => id,
+        Err(error) => {
+            let (_, stderr) = launched.connection.close_with_report_and_tail().await;
+            panic!("{error}\n{stderr}");
+        }
+    };
+    assert_eq!(launched.fox_tools.as_ref().unwrap().progress(), fox_agent_backend::fox_mcp::McpProgress::Listed);
+    launched.connection.set_model(&id, "foxscripted/scripted").await.unwrap();
+    launched.connection.prompt(&id, "GATEREAD:proof").unwrap();
+    let approval = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            match events.recv().await.unwrap() {
+                BackendEvent::PermissionRequested { native_request_id, request, .. } => {
+                    let parsed = fox_agent_backend::backends::pi::parse_tool_approval(&request).unwrap();
+                    assert_eq!(parsed.tool_name, "read");
+                    break native_request_id;
+                }
+                BackendEvent::TurnFailed { error, .. } => panic!("{error}"),
+                _ => {}
+            }
+        }
+    }).await.unwrap();
+    {
+        let steering = launched.connection.steer(id.clone(), "corrected request".into(), true);
+        tokio::pin!(steering);
+        tokio::select! {
+            result = &mut steering => panic!("steering reported before tool approval: {result:?}"),
+            _ = tokio::time::sleep(Duration::from_millis(150)) => {}
+        }
+        launched.connection.answer_permission(&approval, Some("yes")).unwrap();
+        tokio::time::timeout(Duration::from_secs(15), steering).await.unwrap().unwrap();
+    }
+    wait_for_native_turn(&launched.connection, &mut events).await;
+    launched.connection.close_with_report().await;
+    launched.on_closed.take().unwrap()();
+
+    let saved = home.join("fox-sessions").join(format!("{id}.json"));
+    let entry: serde_json::Value = serde_json::from_slice(&std::fs::read(&saved).unwrap()).unwrap();
+    let legacy = home.parent().unwrap().join("pi-acp");
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join("session-map.json"), json!({
+        "version": 1, "sessions": { (id.clone()): entry }
+    }).to_string()).unwrap();
+    std::fs::remove_file(saved).unwrap();
+
+    let mut reopened = launcher.launch(request).await.unwrap();
+    let mut events = reopened.connection.take_events();
+    reopened.connection.load_session(&id, project.path().to_path_buf()).await.unwrap();
+    reopened.connection.prompt(&id, "FOXTOOL:present_files").unwrap();
+    wait_for_native_turn(&reopened.connection, &mut events).await;
+    reopened.connection.prompt(&id, "FOXTOOL:companion_list").unwrap();
+    wait_for_native_turn(&reopened.connection, &mut events).await;
+    reopened.connection.prompt(&id, "GATE:exit-zero").unwrap();
+    assert_eq!(wait_for_native_turn(&reopened.connection, &mut events).await, [("completed".to_owned(), 0)]);
+    reopened.connection.prompt(&id, "GATEEXIT:exit-two").unwrap();
+    assert_eq!(wait_for_native_turn(&reopened.connection, &mut events).await, [("failed".to_owned(), 2)]);
+    assert_eq!(&*calls.lock().unwrap(), &["present_files", "companion_list"]);
+    reopened.connection.prompt(&id, "/compact").unwrap();
+    tokio::time::timeout(Duration::from_secs(25), async {
+        let mut compacted = false;
+        loop {
+            match events.recv().await.unwrap() {
+                BackendEvent::Update { update, .. }
+                    if update.pointer("/_meta/fox/piCompaction").is_some() =>
+                {
+                    assert_eq!(update["_meta"]["fox"]["piCompaction"]["reason"], "manual");
+                    compacted = true;
+                }
+                BackendEvent::TurnEnded { stop_reason, .. } => {
+                    assert_eq!(stop_reason, "end_turn");
+                    assert!(compacted, "native compaction completion must arrive before the turn ends");
+                    break;
+                }
+                BackendEvent::TurnFailed { error, .. } => panic!("{error}"),
+                _ => {}
+            }
+        }
+    }).await.unwrap();
+    reopened.connection.close_with_report().await;
+    reopened.on_closed.take().unwrap()();
+}
+
+async fn wait_for_native_turn(
+    connection: &fox_agent_backend::acp::AcpConnection,
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<fox_agent_backend::acp::BackendEvent>,
+) -> Vec<(String, i64)> {
+    use fox_agent_backend::acp::BackendEvent;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let mut command_results = Vec::new();
+        loop {
+            match events.recv().await.unwrap() {
+                BackendEvent::PermissionRequested { native_request_id, .. } => {
+                    connection.answer_permission(&native_request_id, Some("yes")).unwrap();
+                }
+                BackendEvent::TurnEnded { stop_reason, .. } => {
+                    assert_eq!(stop_reason, "end_turn");
+                    return command_results;
+                }
+                BackendEvent::Update { update, .. } => {
+                    if let Some(code) = update.pointer("/_meta/terminal_exit/exit_code").and_then(serde_json::Value::as_i64) {
+                        command_results.push((update["status"].as_str().unwrap().to_owned(), code));
+                    }
+                }
+                BackendEvent::TurnFailed { error, .. } => panic!("{error}"),
+                _ => {}
+            }
+        }
+    }).await.unwrap()
+}
+
 /// The 13.32 blocker, on Linux: a whole conversation through real pi-acp +
 /// real gated pi 1.4.0 with the Fox tool extension: plain answer, a Fox tool
 /// call reaching the Host bound to this conversation and turn, ask_user

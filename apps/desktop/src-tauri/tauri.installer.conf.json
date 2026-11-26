@@ -1,6 +1,6 @@
 {
   "build": {
-    "beforeBuildCommand": "node ../../scripts/prepare-sandbox-installer.mjs && node ../../scripts/prepare-officecli.mjs && node ../../scripts/prepare-windows-runtime.mjs && pnpm build"
+    "beforeBuildCommand": "node ../../scripts/prepare-connector-auth.mjs && node ../../scripts/prepare-sandbox-installer.mjs && node ../../scripts/prepare-officecli.mjs && node ../../scripts/prepare-windows-runtime.mjs && pnpm build"
   },
   "bundle": {
     "windows": {

@@ -179,7 +179,7 @@ const clickItem = async (item: HTMLElement | undefined) => {
 afterEach(() => { cleanup(); clearMocks(); toasts.length = 0 })
 
 describe('C07 永久标记只接受已落库气泡', () => {
-  test('直播预览与乐观用户消息没有引用、收藏、表情入口，已落库气泡才有', async () => {
+  test('未提交的回复不可见，乐观用户消息没有永久标记入口', async () => {
     host()
     // 运行中：助手回复仍是可替换预览（没有 contact_bubbles 行），用户消息是乐观发送。
     const live = detail({
@@ -188,11 +188,11 @@ describe('C07 永久标记只接受已落库气泡', () => {
       lastRun: { ...detail().lastRun!, status: 'running' },
     })
     const view = renderChat(live)
-    await waitFor(() => expect(view.container.querySelector('[data-contact-message-id]')).toBeTruthy())
+    await waitFor(() => expect(view.container.querySelector('[data-turn-message-id="pending-message-1"]')).toBeTruthy())
+    expect(view.container.querySelector('.fox-contact-bubble')).toBeNull()
     expect(view.container.querySelector('[data-bubble-id]')).toBeNull()
     expect(view.container.querySelector('button[aria-label="更多消息操作"]')).toBeNull()
     expect(view.container.querySelector('button[aria-label="表情反馈"]')).toBeNull()
-    expect(view.container.querySelectorAll('.fox-thread-copy-button').length).toBeGreaterThan(0)
     view.unmount()
 
     // 落库后：双方气泡都拿到稳定身份与三个入口。
@@ -221,7 +221,12 @@ describe('C07 永久标记只接受已落库气泡', () => {
     host()
     const jumps: string[] = []
     const quoted: string[] = []
-    const view = renderChat(detail(), context({ jumpToMessage: id => jumps.push(id), quoteBubble: async id => { quoted.push(id) } }))
+    const reactions: Array<[string, string, string | null]> = []
+    const view = renderChat(detail(), context({
+      jumpToMessage: id => jumps.push(id),
+      quoteBubble: async id => { quoted.push(id) },
+      onReplyReaction: (...args) => { reactions.push(args) },
+    }))
     await waitFor(() => expect(view.container.querySelector('[data-bubble-id="run:response:2"]')).toBeTruthy())
 
     await clickItem(menuItems(await openMenu(view.container, 'run:response:2'))[0]) // 引用回复
@@ -249,6 +254,9 @@ describe('C07 永久标记只接受已落库气泡', () => {
     expect(marks['run:response:2'].reaction).toBeNull()
     expect(marks['run:response:2'].favoritedAt).toBeTruthy()
     expect(jumps).toEqual([])
+    expect(reactions.map(([, bubbleId, reaction]) => [bubbleId, reaction])).toEqual([
+      ['run:response:2', '👍'], ['run:response:2', '😂'], ['run:response:2', null],
+    ])
   })
 
   test('用户自己的消息同样可以引用、收藏与加表情', async () => {

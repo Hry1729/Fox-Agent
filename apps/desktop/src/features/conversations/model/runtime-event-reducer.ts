@@ -221,6 +221,8 @@ export function mergeConversationDetail(persisted: ConversationDetail, current: 
 }
 
 const processEventTypes = new Set([
+  'plan.updated',
+  'agent_goal.updated',
   'run.started',
   'run.request_snapshot',
   'run.phase',
@@ -302,12 +304,17 @@ function updateAssistantMessage(
   return [...messages, update(created)]
 }
 
+export function isAssistantPreviewEvent(type: string) {
+  return type === 'message.started' || type === 'message.delta' || type === 'reasoning.delta'
+}
+
 export function applyRuntimeNotification(
   current: ConversationDetail | null,
   notification: RuntimeEventNotification,
 ) {
   if (!current || current.conversation.id !== notification.conversationId) return current
   const event = notification.event
+  if (current.companionId && isAssistantPreviewEvent(event.type)) return current
   const eventData = objectValue(event.data)
   const goalEvent = objectValue(eventData?.goal) ?? event
   const taskEvent = objectValue(eventData?.task) ?? event
@@ -338,18 +345,19 @@ export function applyRuntimeNotification(
   const timestamp = Date.parse(notification.timestamp) || Date.now()
   const workTimestamp = notification.timestamp
   let messages = current.messages
-  if (updatesActiveRun && event.type === 'message.started') {
+  const updateLiveMessage = updatesActiveRun && !current.companionId
+  if (updateLiveMessage && event.type === 'message.started') {
     messages = updateAssistantMessage(messages, notification, (message) => ({ ...message, status: 'streaming', updatedAt: timestamp }))
-  } else if (updatesActiveRun && event.type === 'message.delta' && typeof event.delta === 'string') {
+  } else if (updateLiveMessage && event.type === 'message.delta' && typeof event.delta === 'string') {
     messages = updateAssistantMessage(messages, notification, (message) => ({
       ...message,
       content: message.content + event.delta,
       status: 'streaming',
       updatedAt: timestamp,
     }))
-  } else if (updatesActiveRun && (event.type === 'message.completed' || event.type === 'run.completed')) {
+  } else if (updateLiveMessage && (event.type === 'message.completed' || event.type === 'run.completed')) {
     messages = updateAssistantMessage(messages, notification, (message) => ({ ...message, status: 'completed', updatedAt: timestamp }))
-  } else if (updatesActiveRun && (event.type === 'run.cancelled' || event.type === 'run.failed' || event.type === 'run.interrupted')) {
+  } else if (updateLiveMessage && (event.type === 'run.cancelled' || event.type === 'run.failed' || event.type === 'run.interrupted')) {
     messages = updateAssistantMessage(messages, notification, (message) => ({ ...message, status: 'interrupted', updatedAt: timestamp }))
   }
 

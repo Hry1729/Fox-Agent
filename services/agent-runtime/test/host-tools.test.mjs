@@ -149,6 +149,11 @@ test('project compute and artifact publication preserve explicit Host inputs', a
   assert.deepEqual(requests[1].input, publication)
   const job = toolByName(tools, 'compute_job_start')
   assert.equal(Check(job.parameters, { idempotencyKey: 'job', params: { ...params, processing: 'chunked' } }), true)
+  for (const code of [compute.parameters.properties.code, job.parameters.properties.params.properties.code]) {
+    for (const rule of ['saveTable(', 'distinct_count:', 'daily_sum:', 'shareBasis:', 'totalColumn']) {
+      assert.ok(code.description.includes(rule), rule)
+    }
+  }
 })
 
 test('attachment pages retain continuation offsets and reject oversized page requests', async () => {

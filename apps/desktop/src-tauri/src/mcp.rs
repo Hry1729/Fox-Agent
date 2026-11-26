@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -43,7 +43,7 @@ struct ConnectionPool {
 static CONNECTION_POOL: OnceLock<Mutex<ConnectionPool>> = OnceLock::new();
 
 pub fn environment_configured(server_id: &str) -> bool {
-    load_environment(server_id).is_some()
+    load_environment(server_id).is_some() || crate::connector_oauth::configured(server_id)
 }
 
 pub fn save_environment(
@@ -270,8 +270,8 @@ impl McpSession {
         if server.command.trim().is_empty() {
             return Err("stdio MCP 缺少启动命令".to_owned());
         }
-        let mut command = Command::new(&server.command);
-        command.args(&server.args);
+        let mut command = crate::connector_catalog::command(server)?;
+        command.args(crate::connector_catalog::command_args(server)?);
         if let Some(environment) = load_environment(&server.id) {
             command.envs(environment);
         }
@@ -372,6 +372,7 @@ impl Drop for McpSession {
 }
 
 struct HttpMcpSession {
+    server_id: String,
     endpoint: Url,
     client: Client,
     credential_headers: HeaderMap,
@@ -387,6 +388,7 @@ impl HttpMcpSession {
     fn start(server: &McpServerRecord) -> Result<Self, String> {
         Ok(Self {
             endpoint: parse_endpoint(server.endpoint_url.as_deref(), "HTTP MCP")?,
+            server_id: server.id.clone(),
             client: http_client()?,
             credential_headers: credential_headers(&server.id)?,
             next_id: 1,
@@ -486,13 +488,29 @@ impl HttpMcpSession {
             .transpose()?
             .unwrap_or(TIMEOUT)
             .min(TIMEOUT);
+        let mut headers = self.credential_headers.clone();
+        let query_token = headers.remove("fox-query-key");
         let mut request = self
             .client
             .post(self.endpoint.clone())
             .timeout(timeout)
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json, text/event-stream")
-            .headers(self.credential_headers.clone());
+            .headers(headers);
+        if let Some(value) = query_token {
+            if self.server_id != "fox-catalog-didi" || self.endpoint.as_str() != "https://mcp.didichuxing.com/mcp-servers" {
+                return Err("查询凭证与连接器端点不匹配".to_owned());
+            }
+            request = request.query(&[("key", value.to_str().map_err(|_| "滴滴访问令牌的格式无效")?)]);
+        }
+        if let Some(token) = crate::connector_oauth::bearer(&self.server_id, &self.endpoint)? {
+            if self.server_id == "fox-catalog-feishu" {
+                request = request.header("X-Lark-MCP-UAT", token)
+                    .header("X-Lark-MCP-Allowed-Tools", "search-doc,fetch-doc,create-doc,update-doc");
+            } else {
+                request = request.bearer_auth(token);
+            }
+        }
         if self.initialized {
             request = request.header("MCP-Protocol-Version", &self.protocol_version);
         }
@@ -502,7 +520,7 @@ impl HttpMcpSession {
         let response = request
             .json(body)
             .send()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.without_url().to_string())?;
         if response.status().is_redirection() {
             return Err("HTTP MCP 禁止自动重定向；请配置最终端点".to_owned());
         }
@@ -751,6 +769,18 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         }
+    }
+
+    #[test]
+    #[ignore = "calls the public DeepWiki service"]
+    fn catalog_deepwiki_lists_and_reads_public_repository() {
+        let item = crate::connector_catalog::preset("fox-catalog-deepwiki").expect("catalog entry");
+        let mut server = http_server(item.setup.url.clone().expect("catalog endpoint"));
+        server.id = "fox-catalog-deepwiki".into();
+        assert!(list_tools(&server).unwrap().iter().any(|tool| tool["name"] == "read_wiki_structure"));
+        let result = call_tool(&server, "read_wiki_structure", &json!({"repoName":"modelcontextprotocol/typescript-sdk"})).unwrap();
+        assert_ne!(result["isError"], true);
+        assert!(result["content"].as_array().unwrap().iter().any(|part| part["text"].as_str().is_some_and(|s| s.to_lowercase().contains("sdk"))));
     }
 
     fn read_http_request(stream: &mut TcpStream) -> (HashMap<String, String>, Value) {

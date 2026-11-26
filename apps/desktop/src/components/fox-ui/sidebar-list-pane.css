@@ -9,7 +9,6 @@
 .fox-sidebar-list-pane > .fox-sidebar-scroll { flex: 1 1 0; min-height: 0; margin: 0; }
 .fox-sidebar-list-pane .fox-sidebar-scroll [data-slot='scroll-area-viewport'] > div { display: block !important; padding-inline: 0 var(--fox-sidebar-scroll-gutter); }
 .fox-sidebar-list-pane .fox-sidebar-scroll .fox-sidebar-section:first-child { padding-top: 0; }
-.fox-notification-sidebar.fox-sidebar-list-pane .fox-notification-list { display: flex; flex-direction: column; flex: none; min-height: 0; max-height: none; overflow: visible; padding: 0 0 var(--fox-space-m); scrollbar-gutter: auto; }
 
 .fox-sidebar-group-scroll .fox-sidebar-section { padding-top: 0; }
 .fox-sidebar-group-scroll :is(.fox-contact-sidebar, .fox-sidebar-section) + .fox-sidebar-section { margin-top: var(--fox-sidebar-section-gap); }
@@ -21,7 +20,7 @@
   top: 0;
   z-index: 3;
   height: var(--fox-sidebar-section-head-height);
-  background: var(--shell, var(--sidebar)) !important;
+  background: var(--fox-sidebar-surface, var(--shell)) !important;
 }
 
 .fox-sidebar-list-pane > .fox-section-head { margin-right: var(--fox-sidebar-scroll-gutter); }

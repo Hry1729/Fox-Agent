@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs'
 import { Check } from 'typebox/value'
 import { createHostTools } from '../src/host-tools.mjs'
 import { diagnoseToolsForAgentContext, selectToolsForProjectContext } from '../src/expert-package.mjs'
+import { selectCompanionTools } from '../src/companion-tools.mjs'
+import { scopedRuntimeGuidance } from '../src/runtime-guidance.mjs'
 
 const bundled=JSON.parse(readFileSync(new URL('../../../apps/desktop/src-tauri/resources/expert-library/bundled.json',import.meta.url),'utf8'))
 const data=bundled.find(entry=>entry.expertId==='fox-data-analyst').package
@@ -30,4 +32,33 @@ test('compute schema accepts bounded code and forwards attachment IDs intact',as
   const result=await tool.execute('call-compute',input,new AbortController().signal)
   assert.equal(result.details.result.count,927)
   assert.deepEqual(requests,[{type:'tool.execute',payload:{toolCallId:'call-compute',tool:'attachment_compute',input}}])
+})
+
+test('the same data expert can compute an upload in companion scope and reports preview-only coverage when compute is absent', () => {
+  const catalog = createHostTools(() => { throw new Error('description must not execute') })
+  const diagnosis = diagnoseToolsForAgentContext(catalog, defaultAssistant, expert)
+  const turn = { attachmentExtensions: ['xlsx'] }
+  const owner = { role: 'owner', allowedTools: ['read_attachment', 'attachment_compute', 'compute_job_start', 'compute_job_result'] }
+  const tools = selectCompanionTools(catalog, diagnosis, owner)
+  for (const name of owner.allowedTools) {
+    assert.ok(diagnosis.effectiveToolNames.includes(name))
+    assert.ok(tools.some(tool => tool.name === name))
+  }
+  assert.deepEqual(scopedRuntimeGuidance({ companionContext: owner }, turn).map(([id]) => id), ['data_guidance'])
+  const restricted = { ...owner, allowedTools: ['read_attachment'] }
+  const restrictedTools = selectCompanionTools(catalog, diagnosis, restricted)
+  assert.deepEqual(restrictedTools.map(({ name }) => name), ['read_attachment'])
+  const [fallback] = scopedRuntimeGuidance({ companionContext: restricted }, { ...turn, computeAvailable: false })
+  assert.equal(fallback[0], 'data_preview_only')
+  assert.match(fallback[1], /which sheets and rows/u)
+})
+
+test('companion report delivery guidance requires both the companion role and a writable file delivery route', () => {
+  const owner = { companionContext: { role: 'owner' } }
+  const turn = { reportDeliveryAvailable: true }
+  const [rule] = scopedRuntimeGuidance(owner, turn)
+  assert.equal(rule[0], 'companion_report_delivery')
+  assert.match(rule[1], /write_file.*present_files/u)
+  assert.deepEqual(scopedRuntimeGuidance(owner, { reportDeliveryAvailable: false }), [])
+  assert.deepEqual(scopedRuntimeGuidance({}, turn), [])
 })

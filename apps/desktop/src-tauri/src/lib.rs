@@ -4,6 +4,8 @@ mod app_state;
 mod artifact_gateway;
 mod canonical_json;
 mod commands;
+mod connector_catalog;
+mod connector_oauth;
 mod companion_notes_files;
 pub(crate) use database::companions::companion_team;
 mod companion_workspace;
@@ -241,6 +243,8 @@ pub fn run() {
             let skills_dir = app_data_dir.join("skills");
             std::fs::create_dir_all(&skills_dir)?;
             office::setup(&database, &app.path().resource_dir()?)?;
+            connector_oauth::setup(&app.path().resource_dir()?);
+            connector_catalog::setup(&app.path().resource_dir()?);
             skills::install_bundled_office_skills(&skills_dir)?;
             let yuxi_client = YuxiClient::new()?;
             let runtime_host = RuntimeHost::new(
@@ -403,6 +407,8 @@ pub fn run() {
             commands::skill_set_enabled,
             commands::mcp_servers_list,
             commands::mcp_server_save,
+            connector_oauth::connector_authorize,
+            connector_oauth::connector_authorization_ready,
             commands::mcp_server_test,
             commands::mcp_server_set_enabled,
             commands::mcp_server_delete,

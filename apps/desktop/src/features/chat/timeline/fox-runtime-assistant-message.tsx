@@ -3,7 +3,7 @@ import { useProcessDisplayMode } from '../process-display-mode'
 import { runPhaseTiming, runPhaseTitle } from '../run-phase'
 import { activeModelWaiting, compactionFailurePresentation, modelWaitingTitle } from '../run-status-facts'
 import { RuntimeArtifacts } from '../runtime-artifacts'
-import { resolveFinalArtifactReference } from '../final-artifact-references'
+import { FinalArtifactContext, normalizeFinalArtifactLinks, resolveFinalArtifactReference } from '../final-artifact-references'
 import { runtimeProcessActivity } from '../runtime-process-activity'
 import { toolAttemptState } from '../tool-attempt-status'
 import { TurnProcessHeader } from '../turn-process-header'
@@ -26,6 +26,21 @@ import { splitAssistantContent } from './fox-assistant-content'
 import { formatDateTime } from '@/lib/time-format'
 
 export type RuntimeGroupHelpers = typeof import('../runtime-process-groups')
+
+const nativeGoalLabels: Readonly<Record<string, string>> = {
+  active: '进行中', paused: '已暂停', blocked: '受阻', complete: '已完成', limited: '达到用量上限',
+}
+
+function NativeGoalStatus({ events }: { events: RunEventRecord[] }) {
+  const goalEvent = events.findLast(item => item.eventType === 'agent_goal.updated')
+  if (!goalEvent) return null
+  const goal = goalEvent.event.goal as { objective: string; status: string } | null
+  return <div className="mb-2 text-sm" aria-label="Codex 目标">
+    {goal
+      ? <p className="break-words"><strong>Codex 目标</strong> <span>{goal.objective}</span> <small className="text-muted-foreground">{nativeGoalLabels[goal.status] ?? '状态未知'}</small></p>
+      : <p className="text-muted-foreground">已清除 Codex 目标</p>}
+  </div>
+}
 
 function RuntimeAssistantMessage({ message, processEvents, toolCalls, groupHelpers, singleRunMessage, kernelMessages, running, runInProgress = false, hasInterleavedInput = false, artifacts, assistantName, modelName, knowledgeBindings, attachmentNames, onOpenSource, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer, onFork, failureReason, cancelled, queuedAt, hideFooter = false, onRetry }: { message: ConversationMessage; processEvents: RunEventRecord[]; toolCalls?: readonly ToolCallLike[]; groupHelpers: RuntimeGroupHelpers | null; singleRunMessage: boolean; kernelMessages?: ConversationMessage[]; running: boolean; runInProgress?: boolean; hasInterleavedInput?: boolean; artifacts: ArtifactRecord[]; assistantName: string; modelName?: string; knowledgeBindings?: KnowledgeBindingRecord[]; attachmentNames?: ReadonlyMap<string, string>; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void; onFork?: (messageId: string) => void; failureReason?: RunFailure; cancelled?: boolean; /** When the prompt that started this run was written, so queue wait is real. */ queuedAt?: number | null; hideFooter?: boolean; onRetry?: () => void }) {
   const { authoritativeRunId, authoritativeRunState } = useContext(TimelineRuntimeContext)
@@ -141,6 +156,7 @@ function RuntimeAssistantMessage({ message, processEvents, toolCalls, groupHelpe
   }
 
   return (
+    <FinalArtifactContext.Provider value={artifacts}>
     <div className="fox-turn-anchor" onClickCapture={event => {
       const target = event.target instanceof Element ? event.target.closest('a') : null
       const href = target?.getAttribute('href') ?? ''
@@ -153,6 +169,7 @@ function RuntimeAssistantMessage({ message, processEvents, toolCalls, groupHelpe
     }}>
       <Message from="assistant" className="fox-message fox-assistant-message">
         <MessageContent className="fox-assistant-content">
+          <NativeGoalStatus events={processEvents} />
             <RunActivity status={runAttemptState === 'completed' ? 'complete' : runAttemptState === 'failed' ? 'error' : runAttemptState} statusLabel={turnProcessStatus} open={!turnProcessCollapsed} onOpenChange={next => setTurnProcessChoice(next ? 'open' : 'closed')} className="fox-process-turn-content"
               header={
             <TurnProcessHeader events={processEvents} active={running || runInProgress}
@@ -174,11 +191,11 @@ function RuntimeAssistantMessage({ message, processEvents, toolCalls, groupHelpe
                     phaseTitle={phaseTitle}
                     onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer}
                   />
-                </div> : <div hidden={turnProcessCollapsed} className="fox-answer-body fox-answer-segment"><StreamingText className="fox-answer-response" text={group.text} streaming={false} /></div>,
+                </div> : <div hidden={turnProcessCollapsed} className="fox-answer-body fox-answer-segment"><StreamingText className="fox-answer-response" text={normalizeFinalArtifactLinks(group.text, artifacts)} streaming={false} /></div>,
               }])}
-              attention={renderGroups.filter(({ group }) => group.kind === 'notice').map(({ group }) => group.kind === 'notice' && <div key={group.key} className="fox-process-notice" role="status">{group.label}</div>)}
+              attention={renderGroups.map(({ group }) => group.kind === 'notice' && !group.eventType?.startsWith('user.question.') && <div key={group.key} className="fox-process-notice" role="status">{group.label}</div>)}
             >
-            {renderGroups.map(({ group }, index) => group.kind === 'response' && index === visibleResponseIndex && <div key={group.key} className="fox-answer-body fox-answer-segment is-final"><StreamingText className="fox-answer-response" text={group.text} streaming={running} /></div>)}
+            {renderGroups.map(({ group }, index) => group.kind === 'response' && index === visibleResponseIndex && <div key={group.key} className="fox-answer-body fox-answer-segment is-final"><StreamingText className="fox-answer-response" text={normalizeFinalArtifactLinks(group.text, artifacts)} streaming={running} /></div>)}
             </RunActivity>
           {compactionFailures.map(({ item, presentation }) => presentation && <div key={`compaction-failure-${item.seq}`} className="fox-process-notice" role="status">
             {presentation.label}
@@ -198,6 +215,7 @@ function RuntimeAssistantMessage({ message, processEvents, toolCalls, groupHelpe
       </Message>
       <FeedbackDialogSurface open={feedbackOpen} onOpenChange={setFeedbackOpen} category={feedbackCategory} onCategoryChange={setFeedbackCategory} note={feedbackComment} onNoteChange={setFeedbackComment} saving={feedbackSaving} onSubmit={() => void submitNegativeFeedback()} />
     </div>
+    </FinalArtifactContext.Provider>
   )
 }
 

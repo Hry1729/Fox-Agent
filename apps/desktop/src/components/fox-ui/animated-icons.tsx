@@ -4,13 +4,14 @@ import type { AnimateIconProps, IconProps } from '@/components/animate-ui/icons/
 import { deferredModule } from './use-deferred-module'
 import { MessageCircleMore as StaticMessageCircleMore } from 'lucide-react'
 import { ArrowLeft as StaticArrowLeft, ArrowRight as StaticArrowRight } from 'lucide-react'
+import { Archive as StaticArchive, CalendarClock as StaticCalendarClock, Inbox as StaticInbox, UserRoundPlus as StaticUserRoundPlus } from 'lucide-react'
 import { StaticCatPaw } from '@/components/animate-ui/icons/cat-paw-static'
 
 const implementation = deferredModule(() => import('./animated-icons-implementation'))
 export type { IconProps, AnimateIconProps } from '@/components/animate-ui/icons/icon'
 export type AnimatedIconTriggerProps = Omit<AnimateIconProps, 'asChild' | 'children' | 'loop' | 'animate' | 'animateOnView'> & { children: ReactElement }
 
-function icon(name: 'ArrowLeft' | 'ArrowRight' | 'MessageCirclePlus' | 'MessageCircleMore' | 'Users' | 'Blocks' | 'PanelLeft' | 'PanelLeftOpen' | 'PanelRight' | 'Settings' | 'SunMoon' | 'Maximize' | 'Minimize' | 'Search' | 'Bell' | 'Wallet' | 'Folders' | 'Library' | 'Orbit' | 'ListTodo' | 'BookCopy' | 'Home' | 'Sparkles' | 'AlignLeft' | 'SquareKanban' | 'CatPaw', Fallback: ComponentType<ComponentProps<typeof StaticBell>>) {
+function icon(name: 'ArrowLeft' | 'ArrowRight' | 'MessageCirclePlus' | 'MessageCircleMore' | 'Users' | 'Blocks' | 'PanelLeft' | 'PanelLeftOpen' | 'PanelRight' | 'Settings' | 'SunMoon' | 'Maximize' | 'Minimize' | 'Search' | 'Bell' | 'Wallet' | 'Folders' | 'Library' | 'Orbit' | 'ListTodo' | 'BookCopy' | 'Home' | 'Sparkles' | 'AlignLeft' | 'SquareKanban' | 'CatPaw' | 'Archive' | 'CalendarClock' | 'Inbox' | 'UserRoundPlus', Fallback: ComponentType<ComponentProps<typeof StaticBell>>) {
   return function DeferredIcon(props: IconProps<string>) {
     const loaded = implementation.useModule()
     if (loaded) { const Icon = loaded[name] as ComponentType<IconProps<string>>; return <Icon {...props} /> }
@@ -68,6 +69,10 @@ export const Sparkles = icon('Sparkles', StaticSparkles)
 export { Sparkles as SparklesIcon }
 export const AlignLeft = icon('AlignLeft', StaticAlignLeft)
 export { AlignLeft as AlignLeftIcon }
+export const Archive = icon('Archive', StaticArchive)
+export const CalendarClock = icon('CalendarClock', StaticCalendarClock)
+export const Inbox = icon('Inbox', StaticInbox)
+export const UserRoundPlus = icon('UserRoundPlus', StaticUserRoundPlus)
 
 export function AnimatedIconTrigger({ children, ...props }: AnimatedIconTriggerProps) {
   const loaded = implementation.useModule()

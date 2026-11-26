@@ -74,6 +74,7 @@ export const SETTINGS_WORKSPACE_VIEWS: readonly WorkspaceView[] = [
   'settings-shortcuts',
   'settings-usage',
   'settings-extensions',
+  'settings-plugin-detail',
   'settings-about',
   'settings-data',
   'model-service',
@@ -118,6 +119,7 @@ export function settingsNavigationView(view: WorkspaceView): WorkspaceView {
   const redirect = settingsRouteRedirect(view)
   if (redirect) return redirect.view
   if (view === 'onboarding') return 'settings'
+  if (view === 'settings-plugin-detail') return 'settings-extensions'
   if (view === 'model-service') return 'settings-models'
   if (view === 'service' || view === 'login') return 'settings-yuxi'
   return view

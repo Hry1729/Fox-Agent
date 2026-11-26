@@ -1,13 +1,73 @@
 use crate::app_state::AppState;
 use crate::data_paths::{companion_notes_dir, companion_workspace};
 use crate::database::{ApiResponse, Database};
+use rusqlite::{params, OptionalExtension};
+use sha2::{Digest, Sha256};
 use std::{
     ffi::OsString,
     fs::{self, File},
-    io::{self, ErrorKind, Read},
+    io::{self, ErrorKind, Read, Write},
     path::{Component, Path, PathBuf},
 };
 use tauri::State;
+
+pub(crate) fn save_long_reply_report(
+    database: &Database,
+    data_dir: &Path,
+    conversation_id: &str,
+    run_id: &str,
+) -> Result<(), String> {
+    let content: Option<String> = database.with_connection(|connection| {
+        connection.query_row(
+            "SELECT m.content FROM messages m
+             JOIN conversations c ON c.id = m.conversation_id
+             JOIN runs r ON r.id = m.run_id
+             WHERE c.id = ?1 AND c.companion_id IS NOT NULL AND m.run_id = ?2
+               AND m.id = 'assistant-' || ?2 AND m.status = 'completed' AND r.status = 'completed'
+               AND NOT EXISTS (
+                 SELECT 1 FROM artifacts a WHERE a.run_id = ?2 AND a.status = 'ready'
+                   AND a.declared_at IS NOT NULL AND (
+                     a.artifact_type = 'companion_report' OR lower(a.display_name) GLOB '*.md'
+                     OR lower(a.display_name) GLOB '*.markdown' OR lower(a.display_name) GLOB '*.docx'
+                     OR lower(a.display_name) GLOB '*.pdf' OR lower(a.display_name) GLOB '*.txt'
+                     OR lower(a.display_name) GLOB '*.html'
+                   )
+               )",
+            params![conversation_id, run_id],
+            |row| row.get(0),
+        ).optional()
+    })?;
+    let Some(content) = content else { return Ok(()) };
+    let report = crate::database::contact_visible_answer(&content);
+    if report.encode_utf16().count() <= 1000 && report.lines().count() <= 16 {
+        return Ok(());
+    }
+    let bytes = report.as_bytes();
+    let name = "完整回复.md";
+    let store = crate::runtime_host::artifact_store::ArtifactStore::new(data_dir);
+    let path = store.preview_path(conversation_id, Path::new(name), "md", run_id)?;
+    let mut file = File::create_new(&path).map_err(|error| error.to_string())?;
+    let written = file.write_all(bytes).map_err(|error| error.to_string());
+    drop(file);
+    let result = written.and_then(|()| database.with_connection(|connection| {
+        connection.execute(
+            "INSERT INTO artifacts (
+               id, conversation_id, run_id, display_name, artifact_type, artifact_class,
+               artifact_origin, storage_path, media_type, byte_size, sha256, status,
+               created_at, updated_at, declared_at, declared_description
+             ) VALUES (?1, ?2, ?3, ?4, 'companion_report', 'deliverable', 'host_private',
+               ?5, 'text/markdown', ?6, ?7, 'ready', ?8, ?8, ?8, '本轮完整回复')",
+            params![format!("companion-report:{run_id}"), conversation_id, run_id, name,
+                path.to_string_lossy(), bytes.len() as i64, hex::encode(Sha256::digest(bytes)),
+                crate::database::now_ms()],
+        )?;
+        Ok(())
+    }));
+    if result.is_err() {
+        let _ = fs::remove_file(&path);
+    }
+    result
+}
 
 fn profile_workspace(
     database: &Database,
@@ -117,6 +177,13 @@ pub(crate) fn allows_tool(tool: &str) -> bool {
             | "find"
             | "grep"
             | "present_files"
+            | "read_attachment"
+            | "read_tool_result"
+            | "attachment_compute"
+            | "compute_job_start"
+            | "compute_job_status"
+            | "compute_job_result"
+            | "compute_job_cancel"
             | "write_file"
             | "edit_file"
             | "memory_search"
@@ -428,6 +495,36 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn long_committed_companion_reply_delivers_a_scoped_markdown_report() {
+        let data = std::env::temp_dir().join(format!("fox-reply-report-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&data).unwrap();
+        let db = Database::open(data.join("fox.db")).unwrap();
+        let companion = db.seed_default_companion(&data).unwrap();
+        repair(&db, &data, &companion.profile.id).unwrap();
+        let chat = &companion.conversation_id;
+        let run = db.create_run(chat, "汇总订单", None).unwrap().run.id;
+        let report_id = format!("companion-report:{run}");
+        let report = format!("已核对订单。\n\n{}", "这是全部订单的分析明细。\n".repeat(100));
+        let raw = format!("<think>内部思考</think>{report}");
+        db.apply_runtime_event(&run, 1, &json!({"type":"run.started"})).unwrap();
+        db.apply_runtime_event(&run, 2, &json!({"type":"message.started"})).unwrap();
+        db.apply_runtime_event(&run, 3, &json!({"type":"message.delta","delta":raw})).unwrap();
+        save_long_reply_report(&db, &data, chat, &run).unwrap();
+        assert!(db.artifact_for_conversation(chat, &report_id).unwrap().is_none());
+        db.apply_runtime_event(&run, 4, &json!({"type":"message.completed"})).unwrap();
+        db.apply_runtime_event(&run, 5, &json!({"type":"run.completed"})).unwrap();
+        save_long_reply_report(&db, &data, chat, &run).unwrap();
+        save_long_reply_report(&db, &data, chat, &run).unwrap();
+        let artifact = db.artifact_for_conversation(chat, &report_id).unwrap().unwrap();
+        assert_eq!(artifact.display_name, "完整回复.md");
+        assert!(artifact.declared_at.is_some());
+        let path = crate::artifact_gateway::validated_path(&db, &data, chat, &report_id).unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), report.trim_end());
+        drop(db);
+        fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
     fn companion_team_tools_require_default_root_and_frozen_catalog() {
         use crate::database::{ChildRunBudget, CreateChildRunInput};
         let data = std::env::temp_dir().join(format!("fox-team-gate-{}", uuid::Uuid::new_v4()));
@@ -707,7 +804,6 @@ mod tests {
             "run_command",
             "call_mcp_tool",
             "http_request",
-            "attachment_compute",
         ] {
             assert_eq!(
                 check_run_tool(&db, &data, &run, tool, Some(&json!({"path":b_root})), None)
@@ -716,6 +812,7 @@ mod tests {
                 "companion.tool_not_available"
             );
         }
+        check_run_tool(&db, &data, &run, "attachment_compute", None, None).unwrap();
         let ordinary = db
             .create_conversation("fox-general", Some("普通对话"), None, None)
             .unwrap();

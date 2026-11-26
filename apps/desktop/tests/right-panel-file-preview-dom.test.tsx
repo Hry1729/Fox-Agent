@@ -90,3 +90,23 @@ test('截断提示位于文件头部下方，不占用预览内容区', async ()
   expect(view.getByText('预览已截断，只显示前 512 KB。').closest('.fox-file-head')).not.toBeNull()
   expect(view.container.querySelector('.fox-file-body')?.textContent).toBe('截断的内容')
 })
+
+test('伙伴的完整报告在专用文件预览中显示，并能关闭标签', async () => {
+  const report = { ...artifact, artifactType: 'companion_report', artifactOrigin: 'host_private', displayName: '完整回复.md' }
+  inspect = async () => ({ artifact: report, capabilities: { preview: true }, applications: [], preview: {
+    kind: 'markdown', available: true, content: '# 完整报告\n\n这里是报告的最后一段。', truncated: false, byteSize: 80, reason: null,
+  } })
+  const tab = createOpenFileTab('完整回复.md', report.id)
+  const companion = { ...detail, companionId: 'partner', artifacts: [report] } as ConversationDetail
+  const closed: string[] = []
+  const view = render(<TooltipProvider><RightPanel mode="files" tabs={[]} filePreviewOnly detail={companion}
+    activity={{ goal: null, focusedEvidence: null }} width={320} fileTabs={[tab]} activeFileTabId={tab.id}
+    activeChildAgent={null} onMode={() => {}} onCloseMode={() => {}} onOpenFile={() => {}} onActivateFile={() => {}}
+    onCloseFile={id => closed.push(id)} onOpenChildAgent={() => {}} onBackChildAgent={() => {}} onToggleMaximized={() => {}} onCollapse={() => {}} /></TooltipProvider>)
+  await waitFor(() => expect(view.container.querySelector('.fox-file-body')?.textContent)
+    .toBe('# 完整报告\n\n这里是报告的最后一段。'))
+  expect(view.queryByRole('button', { name: '打开页面' })).toBeNull()
+  fireEvent.click(view.getByRole('button', { name: '关闭 完整回复.md' }))
+  expect(closed).toEqual([tab.id])
+  expect(calls).toEqual(['inspectArtifact'])
+})

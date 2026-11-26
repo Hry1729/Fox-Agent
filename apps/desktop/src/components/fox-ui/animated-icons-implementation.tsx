@@ -1,6 +1,7 @@
 import type { ReactElement } from 'react'
-import { useReducedMotion } from 'motion/react'
-import { AnimateIcon, type AnimateIconProps } from '@/components/animate-ui/icons/icon'
+import { motion, useReducedMotion, type Variant } from 'motion/react'
+import { Archive as StaticArchive, CalendarClock as StaticCalendarClock, Inbox as StaticInbox, UserRoundPlus as StaticUserRoundPlus, type LucideIcon } from 'lucide-react'
+import { AnimateIcon, IconWrapper, useAnimateIconContext, type AnimateIconProps, type IconProps } from '@/components/animate-ui/icons/icon'
 
 export { ArrowLeft, ArrowRight } from '@/components/animate-ui/icons/navigation-arrow'
 
@@ -34,6 +35,23 @@ export { Home, Home as HomeIcon } from '@/components/animate-ui/icons/home'
 export { Sparkles, Sparkles as SparklesIcon } from '@/components/animate-ui/icons/sparkles'
 export { AlignLeft, AlignLeft as AlignLeftIcon } from '@/components/animate-ui/icons/align-left'
 export type { IconProps, AnimateIconProps } from '@/components/animate-ui/icons/icon'
+
+function animatedNavigationIcon(Icon: LucideIcon, animate: Variant) {
+  const Animated = motion.create(Icon)
+  const variants = { initial: { y: 0, rotate: 0, scale: 1 }, animate }
+  function Glyph({ size, className }: IconProps<'default'>) {
+    const { controls } = useAnimateIconContext()
+    return <Animated size={size} className={typeof className === 'string' ? className : undefined} aria-hidden="true" initial="initial" animate={controls} variants={variants} />
+  }
+  return function NavigationIcon(props: IconProps<'default'>) {
+    return <IconWrapper icon={Glyph} {...props} />
+  }
+}
+
+export const UserRoundPlus = animatedNavigationIcon(StaticUserRoundPlus, { scale: [1, 1.15, 1], transition: { duration: 0.36 } })
+export const Inbox = animatedNavigationIcon(StaticInbox, { y: [0, 2, -1, 0], transition: { duration: 0.36 } })
+export const CalendarClock = animatedNavigationIcon(StaticCalendarClock, { rotate: [0, -9, 6, 0], transition: { duration: 0.42 } })
+export const Archive = animatedNavigationIcon(StaticArchive, { y: [0, -2, 0], transition: { duration: 0.32 } })
 
 export type AnimatedIconTriggerProps = Omit<AnimateIconProps, 'asChild' | 'children' | 'loop' | 'animate' | 'animateOnView'> & {
   children: ReactElement

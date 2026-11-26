@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import { answerDeltaFingerprint } from '../src/features/conversations/model/runtime-delta-fingerprint'
-import { applyWorkEvent, mergeConversationDetail, reduceRuntimeNotifications } from '../src/features/conversations/model/runtime-event-reducer'
+import { applyRuntimeNotification, applyWorkEvent, isAssistantPreviewEvent, mergeConversationDetail, reduceRuntimeNotifications } from '../src/features/conversations/model/runtime-event-reducer'
+import { loadConversationWithRetry } from '../src/features/conversations/model/conversation-reload'
 import { pendingRuntimeQuestion } from '../src/features/conversations/model/pending-interactions'
 import { enqueueRuntimeEvent, takeRuntimeEventFrame } from '../src/features/conversations/model/runtime-event-queue'
 import type { ConversationDetail, RuntimeEventNotification, WorkEventRecord } from '../src/features/conversations/model/types'
@@ -35,6 +37,15 @@ function notification(seq: number, event: RuntimeEventNotification['event']): Ru
 }
 
 describe('runtime event reducer', () => {
+  test('keeps native goal and plan events without creating Fox work records', () => {
+    const nativeGoal = { type: 'agent_goal.updated', goal: { objective: 'Check the index', status: 'active' } }
+    const nativePlan = { type: 'plan.updated', entries: [{ content: 'Read the index', status: 'in_progress' }] }
+    const result = reduceRuntimeNotifications(detail(), [notification(1, nativeGoal), notification(2, nativePlan)])
+    expect(result?.runtimeEvents.map(record => record.event)).toEqual([nativeGoal, nativePlan])
+    expect(result?.goals).toHaveLength(0)
+    expect(result?.tasks).toHaveLength(0)
+  })
+
   test('retains only answer offsets while preserving the live assistant text', () => {
     const result = reduceRuntimeNotifications(detail(), [
       notification(1, { type: 'run.started' }),
@@ -46,6 +57,65 @@ describe('runtime event reducer', () => {
       type: 'message.delta', deltaLength: 3, deltaFingerprint: answerDeltaFingerprint('狐🦊'),
     })
     expect(reduceRuntimeNotifications(result, [notification(3, { type: 'message.delta', delta: '狐🦊' })])).toBe(result)
+  })
+  test('companion deltas leave conversation state unchanged and only a committed message reveals the reply', () => {
+    const seed = { ...detail(), companionId: 'fox-companion' }
+    const running = applyRuntimeNotification(seed, notification(1, { type: 'run.started' }))!
+    const events = Array.from({ length: 1000 }, (_, index) => notification(index + 2, { type: 'message.delta', delta: '一个片段' }))
+    expect(reduceRuntimeNotifications(running, events)).toBe(running)
+    const result = applyRuntimeNotification(running, notification(1002, { type: 'message.completed' }))!
+    expect(result.messages).toBe(running.messages)
+    const persisted = {
+      ...result,
+      messages: [...result.messages, {
+        id: 'assistant-run-1', conversationId: 'conversation-1', runId: 'run-1', role: 'assistant' as const, kind: 'text' as const,
+        status: 'completed' as const, content: '完整回复', ordinal: 2, createdAt: 2, updatedAt: 1002,
+      }],
+    }
+    expect(mergeConversationDetail(persisted, result).messages.at(-1)?.content).toBe('完整回复')
+  })
+  test('companion text deltas do not schedule rendering; message completion reloads the committed reply', async () => {
+    const source = readFileSync(new URL('../src/features/conversations/hooks/use-runtime-event-stream.ts', import.meta.url), 'utf8')
+    const body = new Bun.Transpiler({ loader: 'ts' }).transformSync(source.slice(source.indexOf('const terminalEventTypes')).replace('export function', 'function'))
+    let receive!: (notice: RuntimeEventNotification) => void
+    let updates = 0
+    let loads = 0
+    const frames: Array<() => void> = []
+    let state = { ...detail(), companionId: 'fox-companion' }
+    const answer = { ...state.messages[0], id: 'assistant-run-1', role: 'assistant' as const, content: '完整回复' }
+    const env = {
+      useEffect: (effect: () => void) => { effect() },
+      flushSync: (apply: () => void) => apply(),
+      desktopRuntimeAvailable: true,
+      desktopClient: {
+        listenRuntimeEvents: async (callback: typeof receive) => { receive = callback; return () => {} },
+        loadConversation: async () => { loads++; return { ...state, messages: [...state.messages, answer] } },
+      },
+      window: { requestAnimationFrame: (callback: () => void) => frames.push(callback) },
+      enqueueRuntimeEvent, takeRuntimeEventFrame, loadConversationWithRetry, isAssistantPreviewEvent,
+      mergeConversationDetail, reduceRuntimeNotifications,
+    }
+    const hook = new Function(...Object.keys(env), `${body}; return useRuntimeEventStream`)(...Object.values(env))
+    const ref = <T,>(current: T) => ({ current })
+    hook({
+      authoritativeRunIdRef: ref(null), activeConversationIdRef: ref('conversation-1'),
+      companionConversationIdRef: ref('conversation-1'), runtimeListenerReadyRef: ref(null),
+      runtimeEventQueueRef: ref([]), runtimeEventFrameRef: ref(null), lastRuntimeEventAtRef: ref(0),
+      uiDispatchStartedRef: ref(new Map()), runtimeEventReceivedAtRef: ref(new Map()),
+      setDetail: (apply: (current: typeof state) => typeof state) => { updates++; state = apply(state) },
+      setError: () => {}, setErrorDetails: () => {}, refreshList: async () => {},
+    })
+    for (let index = 1; index <= 1000; index++) receive(notification(index, { type: 'message.delta', delta: '一个片段' }))
+    expect(frames).toHaveLength(0)
+    expect(updates).toBe(0)
+    expect(loads).toBe(0)
+    receive(notification(1001, { type: 'message.completed' }))
+    expect(frames).toHaveLength(1)
+    frames.shift()!()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(loads).toBe(1)
+    expect(state.messages.at(-1)?.content).toBe('完整回复')
   })
   test('a known authoritative run ignores late Legacy lifecycle and text events', () => {
     const current = detail()

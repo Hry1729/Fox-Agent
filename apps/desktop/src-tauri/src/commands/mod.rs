@@ -1149,6 +1149,11 @@ pub fn mcp_server_save(
         }
     }
     crate::mcp::invalidate_connection(&id);
+    if request.clear_environment || !request.environment.is_empty() {
+        if let Err(error) = crate::connector_oauth::clear(&id) {
+            return ApiResponse::failure("connector.logout", error, true);
+        }
+    }
     match state.database.save_mcp_server(
         &id,
         name,
@@ -1247,6 +1252,9 @@ pub fn mcp_server_delete(
     request: McpServerIdRequest,
 ) -> ApiResponse<bool> {
     let _ = crate::mcp::clear_environment(&request.server_id);
+    if let Err(error) = crate::connector_oauth::clear(&request.server_id) {
+        return ApiResponse::failure("connector.logout", error, true);
+    }
     crate::mcp::invalidate_connection(&request.server_id);
     match state.database.delete_mcp_server(&request.server_id) {
         Ok(deleted) => {
@@ -3020,7 +3028,7 @@ pub fn run_start(
     state: State<'_, AppState>,
     request: StartRunRequest,
 ) -> ApiResponse<StartRunResult> {
-    match state
+    let companion_chat = match state
         .database
         .companion_chat_state(&request.conversation_id)
     {
@@ -3060,10 +3068,11 @@ pub fn run_start(
                 Err(error) => return storage_error(error),
                 Ok(None) => {}
             }
+            true
         }
         Err(error) => return storage_error(error),
-        _ => {}
-    }
+        _ => false,
+    };
     // Plan 5.4: route by the conversation's frozen backend before any run row
     // or attachment binding is written. A non-Fox conversation is refused here
     // (disabled / not yet wired); a mismatched `agentBackend` is misrouted.
@@ -3245,6 +3254,20 @@ pub fn run_start(
             return ApiResponse::failure("attachment.bind_failed", error, false);
         }
     };
+    if companion_chat && !attachments.is_empty() {
+        match deliver_companion_attachments(
+            &state.database,
+            &state.data_dir,
+            &request.conversation_id,
+            &attachments,
+        ) {
+            Ok(note) => runtime_text.push_str(&note),
+            Err(error) => {
+                let _ = state.database.mark_run_failed(&started.run.id, "companion.import_failed", &error);
+                return ApiResponse::failure("companion.import_failed", error, true);
+            }
+        }
+    }
 
     dispatch_started_run(
         &app,
@@ -3831,14 +3854,8 @@ fn save_attachments(
     request: SaveAttachmentsRequest,
     created: &mut Vec<PathBuf>,
 ) -> ApiResponse<Vec<AttachmentRecord>> {
-    let inbox = match database.conversation_companion_id(&request.conversation_id) {
-        Ok(Some(id)) => match crate::companion_workspace::inbox(database, data_dir, &id) {
-            Ok(path) => Some(path),
-            Err(error) => {
-                return ApiResponse::failure("companion.workspace_unavailable", error, true)
-            }
-        },
-        Ok(None) => None,
+    let companion_chat = match database.conversation_companion_id(&request.conversation_id) {
+        Ok(companion) => companion.is_some(),
         Err(error) => return storage_error(error),
     };
     let directory = data_dir.join("attachments").join(&request.conversation_id);
@@ -3864,27 +3881,15 @@ fn save_attachments(
         }
         let id = Uuid::new_v4().to_string();
         let filename_path = Path::new(&file.filename);
-        let display_name = if let Some(inbox) = &inbox {
-            if crate::local_knowledge_import::validate_path_component(
+        if companion_chat
+            && crate::local_knowledge_import::validate_path_component(
                 filename_path,
                 "attachment name",
             )
             .is_err()
-            {
-                return ApiResponse::failure("attachment.invalid_name", "附件文件名无效", false);
-            }
-            match crate::companion_workspace::copy_to_inbox(inbox, filename_path, bytes.as_slice())
-            {
-                Ok(path) => {
-                    let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                    created.push(path);
-                    name
-                }
-                Err(error) => return ApiResponse::failure("companion.import_failed", error, true),
-            }
-        } else {
-            file.filename.clone()
-        };
+        {
+            return ApiResponse::failure("attachment.invalid_name", "附件文件名无效", false);
+        }
         let extension = filename_path
             .extension()
             .and_then(|value| value.to_str())
@@ -3899,7 +3904,7 @@ fn save_attachments(
             id,
             conversation_id: request.conversation_id.clone(),
             message_id: request.message_id.clone(),
-            display_name,
+            display_name: file.filename,
             storage_path: path.to_string_lossy().into_owned(),
             media_type: file.media_type,
             byte_size: bytes.len() as i64,
@@ -3911,6 +3916,87 @@ fn save_attachments(
     match database.add_attachments(&records) {
         Ok(()) => ApiResponse::success(records),
         Err(error) => storage_error(error),
+    }
+}
+
+fn deliver_companion_attachments(
+    database: &crate::database::Database,
+    data_dir: &Path,
+    conversation_id: &str,
+    attachments: &[AttachmentRecord],
+) -> Result<String, String> {
+    let id = database
+        .conversation_companion_id(conversation_id)?
+        .ok_or("找不到这个伙伴")?;
+    let inbox = crate::companion_workspace::inbox(database, data_dir, &id)?;
+    let mut created = Vec::new();
+    let mut note = String::from(
+        "\n\nFox 附件。全量统计和表格分析用 attachment_compute 按以下附件 ID 读取完整数据。read_attachment 用于查看文件片段。\n",
+    );
+    for attachment in attachments {
+        let filename = Path::new(&attachment.display_name);
+        let copy = fs::File::open(&attachment.storage_path)
+            .map_err(|error| error.to_string())
+            .and_then(|file| crate::companion_workspace::copy_to_inbox(&inbox, filename, file));
+        match copy {
+            Ok(path) => {
+                let name = path.file_name().unwrap().to_string_lossy();
+                note.push_str(&format!("- {}: 收到的文件/{name}\n", attachment.id));
+                created.push(path);
+            }
+            Err(error) => {
+                for path in created {
+                    if let Err(cleanup) = fs::remove_file(&path) {
+                        eprintln!("Fox could not remove an incomplete attachment {}: {cleanup}", path.display());
+                    }
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(note)
+}
+
+#[cfg(test)]
+mod companion_attachment_tests {
+    use super::*;
+    use crate::database::{Database, SaveAttachmentInput};
+
+    #[test]
+    fn attachment_reaches_companion_inbox_only_after_message_binding() {
+        let directory = std::env::temp_dir().join(format!("fox-companion-attachment-{}", Uuid::new_v4()));
+        let data_dir = directory.as_path();
+        fs::create_dir(data_dir).unwrap();
+        let database = Database::open(data_dir.join("fox.db")).unwrap();
+        let companion = database.create_blank_companion(data_dir).unwrap();
+        crate::companion_workspace::repair(&database, data_dir, &companion.profile.id).unwrap();
+        let inbox = crate::companion_workspace::inbox(&database, data_dir, &companion.profile.id).unwrap();
+        fs::write(inbox.join("orders.csv"), b"older file").unwrap();
+        let records = save_attachments(
+            &database, data_dir,
+            SaveAttachmentsRequest {
+                conversation_id: companion.conversation_id.clone(),
+                message_id: None,
+                files: vec![SaveAttachmentInput {
+                    filename: "orders.csv".into(),
+                    media_type: Some("text/csv".into()),
+                    data_url: "data:text/csv;base64,YQoxCg==".into(),
+                }],
+            },
+            &mut Vec::new(),
+        ).data.unwrap();
+        assert_eq!(fs::read_dir(&inbox).unwrap().count(), 1);
+        let started = database.create_run(&companion.conversation_id, "分析订单", None).unwrap();
+        let bound = database.bind_attachments_to_message(
+            &companion.conversation_id, &started.user_message.id, &[records[0].id.clone()],
+        ).unwrap();
+        let note = deliver_companion_attachments(&database, data_dir, &companion.conversation_id, &bound).unwrap();
+        assert!(note.contains("attachment_compute"));
+        assert!(note.contains(&format!("{}: 收到的文件/orders (1).csv", records[0].id)));
+        assert_eq!(fs::read(inbox.join("orders.csv")).unwrap(), b"older file");
+        assert_eq!(fs::read(inbox.join("orders (1).csv")).unwrap(), b"a\n1\n");
+        drop(database);
+        fs::remove_dir_all(data_dir).unwrap();
     }
 }
 
@@ -4244,10 +4330,13 @@ pub struct RunSteeringDiscardResponse {
 /// authoritative Run. The text is not executed, does not grant tools, and is
 /// spliced into model input only at the next safe dispatch boundary.
 #[tauri::command]
-pub fn run_steering_enqueue(
-    state: State<'_, AppState>,
+pub async fn run_steering_enqueue(
+    app: AppHandle,
     request: RunSteeringEnqueueRequest,
 ) -> ApiResponse<RunSteeringEnqueueResponse> {
+    use tauri::Manager;
+    let state = app.state::<AppState>();
+    let external = app.state::<crate::external_backend::ExternalBackendHost>();
     let message_id = request
         .message_id
         .filter(|value| !value.trim().is_empty())
@@ -4265,6 +4354,59 @@ pub fn run_steering_enqueue(
             "无法识别的补充要求投递方式。",
             false,
         );
+    }
+    let backend = match state.database.conversation_agent_backend(&request.conversation_id) {
+        Ok(backend) => backend,
+        Err(error) => return ApiResponse::failure("steering.lookup_failed", error, true),
+    };
+    if backend.as_deref().is_some_and(|backend| backend != "fox") {
+        if !matches!(backend.as_deref(), Some("pi" | "codex")) || lane != crate::database::STEERING_LANE_CURRENT {
+            return ApiResponse::failure(
+                "steering.unsupported",
+                "此外部路由不支持这种追加指令。",
+                false,
+            );
+        }
+        let Some(run_id) = external.steering_run(&request.conversation_id) else {
+            return ApiResponse::failure(
+                "steering.no_active_run",
+                "当前没有可接收追加指令的外部 Agent 回合。",
+                false,
+            );
+        };
+        let (seq, inserted) = match state.database.enqueue_external_steering(
+            &run_id,
+            &message_id,
+            &request.content,
+        ) {
+            Ok(accepted) => accepted,
+            Err(error) => return ApiResponse::failure("steering.enqueue_failed", error, false),
+        };
+        if inserted {
+            let outcome = external
+                .steer(&request.conversation_id, &run_id, request.content.trim().to_owned())
+                .await;
+            if let Err(error) = state.database.settle_external_steering(&run_id, seq, outcome.is_ok()) {
+                return ApiResponse::failure("steering.save_failed", error, false);
+            }
+            if let Err(error) = outcome {
+                return ApiResponse::failure("steering.delivery_failed", error, false);
+            }
+        }
+        let status = state
+            .database
+            .run_steering_messages(&run_id)
+            .ok()
+            .and_then(|rows| rows.into_iter().find(|row| row.seq == seq))
+            .map(|row| row.status)
+            .unwrap_or_else(|| "received".to_owned());
+        return ApiResponse::success(RunSteeringEnqueueResponse {
+            run_id,
+            seq,
+            message_id,
+            status,
+            lane,
+        });
     }
     let run_id = match state
         .database
@@ -4347,13 +4489,14 @@ pub fn run_steering_discard(
 #[tauri::command]
 pub fn run_steering_list(
     state: State<'_, AppState>,
+    external: State<'_, crate::external_backend::ExternalBackendHost>,
     conversation_id: String,
 ) -> ApiResponse<RunSteeringListResponse> {
     let active = match state
         .database
         .active_steerable_run_for_conversation(&conversation_id)
     {
-        Ok(active) => active,
+        Ok(active) => active.or_else(|| external.steering_run(&conversation_id)),
         Err(error) => return ApiResponse::failure("steering.lookup_failed", error, true),
     };
     let (run_id, accepts_steering) = match active {
@@ -4363,7 +4506,10 @@ pub fn run_steering_list(
             .latest_steerable_run_for_conversation(&conversation_id)
         {
             Ok(Some((run_id, _state))) => (Some(run_id), false),
-            Ok(None) => (None, false),
+            Ok(None) => match state.database.latest_external_steering_run(&conversation_id) {
+                Ok(run_id) => (run_id, false),
+                Err(error) => return ApiResponse::failure("steering.lookup_failed", error, true),
+            },
             Err(error) => return ApiResponse::failure("steering.lookup_failed", error, true),
         },
     };
@@ -4666,6 +4812,33 @@ pub fn work_mode_confirmation_resolve(
                         )
                     }
                 };
+                let run_id = pending.started.run.id.clone();
+                let route = agent_backend_routing::gate_conversation::<crate::database::GoalRecord>(
+                    &state.database,
+                    fox_agent_backend::host_routing::HostEntry::Start,
+                    &request.conversation_id,
+                    Some(&run_id),
+                    None,
+                );
+                match route {
+                    Ok(agent_backend_routing::Route::External(backend)) => {
+                        use tauri::Manager;
+                        let result = app.state::<crate::external_backend::ExternalBackendHost>()
+                            .resume_work_mode_run(pending, backend);
+                        if let Some(error) = result.error {
+                            let _ = state.database.mark_run_failed(&run_id, &error.code, &error.message);
+                            return ApiResponse::failure(&error.code, error.message, error.retryable);
+                        }
+                        return ApiResponse::success(goal);
+                    }
+                    Ok(agent_backend_routing::Route::Fox) => {}
+                    Err(failure) => {
+                        if let Some(error) = &failure.error {
+                            let _ = state.database.mark_run_failed(&run_id, &error.code, &error.message);
+                        }
+                        return failure;
+                    }
+                }
                 let runtime = match state
                     .database
                     .conversation_runtime(&request.conversation_id)

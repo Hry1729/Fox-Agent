@@ -15,8 +15,12 @@
 //!   as PiNative);
 //! * offers the commands' entry points (start / cancel / approve / close /
 //!   capabilities) and the startup / exit hooks.
-use crate::database::{ApiResponse, ApprovalDecision, Database, StartRunRequest, StartRunResult};
+use crate::database::{
+    ApiResponse, ApprovalDecision, Database, GoalStatus, PendingWorkModeDispatch, StartRunRequest,
+    StartRunResult,
+};
 use crate::runtime_host::RuntimeEventNotification;
+use crate::work_mode_gate;
 use fox_agent_backend::capability_view::{capability_view, CapabilityView};
 use fox_agent_backend::external::{
     AnswerOutcome, CancelOutcome, ExternalRuntime, ExternalSink, HostPermissionAnswer,
@@ -110,6 +114,17 @@ impl ExternalSink for DesktopSink {
             request["summary"] = json!(summary);
             request["target"] = json!(query);
             request["input"] = json!({"query": query});
+        } else if let Some(call) = native_call.as_ref().filter(|call| {
+            call.input["server"] == fox_agent_backend::fox_mcp::SERVER_NAME
+                && call.input["tool"].as_str().is_some_and(|tool| {
+                    fox_agent_backend::fox_mcp::TOOL_NAMES.contains(&tool)
+                })
+        }) {
+            let tool = call.input["tool"].as_str().unwrap_or_default();
+            summary = format!("Codex 请求调用 Fox 工具 {tool}");
+            request["title"] = json!(summary);
+            request["summary"] = json!(summary);
+            request["input"] = call.input.clone();
         }
         let approval = self
             .database
@@ -484,6 +499,14 @@ fn network_project(database: &Database, conversation_id: &str) -> Result<Option<
 }
 
 impl ExternalBackendHost {
+    pub(crate) fn steering_run(&self, conversation_id: &str) -> Option<String> {
+        self.runtime.steerable_run(conversation_id)
+    }
+
+    pub(crate) async fn steer(&self, conversation_id: &str, run_id: &str, content: String) -> Result<(), String> {
+        self.runtime.steer(conversation_id, run_id, content).await
+    }
+
     pub fn network_status(&self, conversation_id: &str) -> Result<NetworkStatus, String> {
         let project_id = network_project(&self.database, conversation_id)?;
         let previews = self.runtime.previews(conversation_id)?;
@@ -564,6 +587,37 @@ impl ExternalBackendHost {
         &self,
         request: &StartRunRequest,
         backend: AgentBackend,
+    ) -> ApiResponse<StartRunResult> {
+        self.start_run_inner(request, backend, None)
+    }
+
+    pub(crate) fn start_companion_run(&self, started: StartRunResult, backend: AgentBackend) -> ApiResponse<StartRunResult> {
+        self.start_saved_run(started, None, backend)
+    }
+
+    pub(crate) fn resume_work_mode_run(&self, pending: PendingWorkModeDispatch, backend: AgentBackend) -> ApiResponse<StartRunResult> {
+        self.start_saved_run(pending.started, Some(pending.runtime_text), backend)
+    }
+
+    fn start_saved_run(&self, started: StartRunResult, runtime_text: Option<String>, backend: AgentBackend) -> ApiResponse<StartRunResult> {
+        let request = StartRunRequest {
+            conversation_id: started.run.conversation_id.clone(),
+            text: started.user_message.content.clone(),
+            runtime_text,
+            model: None,
+            attachment_ids: Vec::new(),
+            budget: None,
+            agent_backend: None,
+            quote_bubble_id: None,
+        };
+        self.start_run_inner(&request, backend, Some(started))
+    }
+
+    fn start_run_inner(
+        &self,
+        request: &StartRunRequest,
+        backend: AgentBackend,
+        started: Option<StartRunResult>,
     ) -> ApiResponse<StartRunResult> {
         if !request.attachment_ids.is_empty() {
             return failure(
@@ -672,20 +726,66 @@ impl ExternalBackendHost {
                 )
             }
         };
-        let started = match self.database.create_run_checked(
-            &request.conversation_id,
-            &request.text,
-            request.model.as_deref(),
-        ) {
-            Ok(started) => started,
-            Err(error) => return crate::commands::create_run_refusal(&self.data_dir, &error),
+        let user_started = started.is_none();
+        let started = match started {
+            Some(started) => started,
+            None => match self.database.create_run_checked(&request.conversation_id, &request.text, request.model.as_deref()) {
+                Ok(started) => started,
+                Err(error) => return crate::commands::create_run_refusal(&self.data_dir, &error),
+            },
         };
+        let native_goal_command = request.text.split_whitespace().next() == Some("/goal");
+        let prompt = if native_goal_command {
+            request.text.as_str()
+        } else {
+            request.runtime_text.as_deref().unwrap_or(&request.text)
+        };
+        if user_started && work_mode_gate::is_explicit_fox_goal_request(&request.text) {
+            let applied = work_mode_gate::apply_user_request_with_intent(
+                &self.database, &request.conversation_id, &started.run.id,
+                &request.text, &started.user_message.content,
+            );
+            match applied {
+                Ok(applied) => {
+                    if let Some(goal) = applied.goal.filter(|goal| goal.status == GoalStatus::Proposed) {
+                        match self.database.save_pending_work_mode_dispatch(&goal.id, &started, prompt) {
+                            Ok(pending) => {
+                                if let Some(event) = applied.event {
+                                    let _ = self.app.emit("fox://work-event", event);
+                                }
+                                return ApiResponse::success(pending);
+                            }
+                            Err(error) => {
+                                let _ = self.database.mark_run_failed(&started.run.id, "work_mode.confirmation_failed", &error);
+                                return failure("work_mode.confirmation_failed", error, true);
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = self.database.mark_run_failed(&started.run.id, "work_mode.gate_failed", &error);
+                    return failure("work_mode.gate_failed", error, true);
+                }
+            }
+        }
+        let prompt = match self.work_mode_prompt(&request.conversation_id, prompt, native_goal_command) {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                let _ = self.database.mark_run_failed(&started.run.id, "storage.operation_failed", &error);
+                return failure("storage.operation_failed", error, true);
+            }
+        };
+        let coordination = match self.database.companion_coordination_context(&started.run.id) {
+            Ok(context) => context,
+            Err(error) => {
+                let _ = self.database.mark_run_failed(&started.run.id, "storage.operation_failed", &error);
+                return failure("storage.operation_failed", error, true);
+            }
+        };
+        let read_only = coordination.as_ref().is_some_and(|context| context.permission_mode == "read_only");
         let turn = TurnRequest {
             run_id: started.run.id.clone(),
-            prompt: request
-                .runtime_text
-                .clone()
-                .unwrap_or_else(|| request.text.clone()),
+            prompt,
             stored_native_session: stored,
             launch: LaunchRequest {
                 conversation_id: request.conversation_id.clone(),
@@ -702,18 +802,24 @@ impl ExternalBackendHost {
                     "_",
                 ),
                 // Fail-closed: a grant that cannot be read is no grant.
-                full_access_granted: self
+                full_access_granted: !read_only && self
                     .database
                     .conversation_full_access_granted(&request.conversation_id)
                     .unwrap_or(false),
                 unified_login: self.unified_login(backend),
                 // The conversation's choice in its Agent's own permission
                 // list; replaces Fox's 询问 / 自动 / 只读 for external backends.
-                native_permission:
+                native_permission: if read_only {
+                    Some(match backend {
+                        AgentBackend::Pi => "read_only",
+                        _ => "read-only",
+                    }.to_owned())
+                } else {
                     crate::commands::agent_backend_routing::stored_conversation_native_mode(
                         &self.database,
                         &request.conversation_id,
-                    ),
+                    )
+                },
             },
         };
         if let Err(error) = self.runtime.start_turn(turn) {
@@ -723,6 +829,17 @@ impl ExternalBackendHost {
             return failure(error.code(), error.message(), true);
         }
         ApiResponse::success(started)
+    }
+
+    fn work_mode_prompt(&self, conversation_id: &str, prompt: &str, native_goal_command: bool) -> Result<String, String> {
+        if native_goal_command {
+            return Ok(prompt.to_owned());
+        }
+        let goals = self.database.goals().get_by_conversation(conversation_id).map_err(|error| error.to_string())?;
+        let Some(goal) = goals.iter().find(|goal| goal.status == GoalStatus::Active) else {
+            return Ok(prompt.to_owned());
+        };
+        Ok(format!("{prompt}\n\n[Fox workspace]\nFox has an approved goal with ID {}. If this message concerns that goal, call the Fox MCP tool work_snapshot_get first. Use the existing goal and tasks; create ordered tasks only when there are none. Execute the work using your own tools. For each step, use work_snapshot_get after acting to find the recorded tool or file IDs, attach the matching evidence, validate it, and update the task with its latest version. Finish the goal only after Fox confirms every required step. Use your normal planning tools for unrelated work.", goal.id))
     }
 
     /// `run_cancel` for an external run (already routed).
@@ -815,8 +932,9 @@ impl ExternalBackendHost {
             Ok(None) => return ApiResponse::success(false),
             Err(error) => return failure("approval.resolve_failed", error, true),
         };
-        if resolved.tool_name == "web_search" {
-            // Fox executes bridge searches and consumes the recorded decision itself.
+        if matches!(resolved.tool_name.as_str(), "web_search" | "call_mcp_tool" | "list_mcp_tools")
+            || crate::companion_workspace::is_companion_peer_tool(&resolved.tool_name)
+        {
             let _ = crate::runtime_host::emit_approval_event(
                 &self.app,
                 &self.database,

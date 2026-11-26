@@ -2,17 +2,17 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { desktopClient, desktopRuntimeAvailable } from '@/features/conversations/api/desktop-client'
 import type { SkillRecord } from '@/features/conversations/model/types'
 
-export function useSkills(agentId = 'fox-general') {
+export function useSkills(agentId = 'fox-general', enabled = true) {
   const [items, setItems] = useState<SkillRecord[]>([])
-  const [loading, setLoading] = useState(desktopRuntimeAvailable)
+  const [loading, setLoading] = useState(enabled && desktopRuntimeAvailable)
   const [error, setError] = useState<string | null>(null)
   const refresh = useCallback(async () => {
-    if (!desktopRuntimeAvailable) return
+    if (!enabled || !desktopRuntimeAvailable) return
     setLoading(true)
     try { setItems(await desktopClient.listSkills(agentId)); setError(null) }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
     finally { setLoading(false) }
-  }, [agentId])
+  }, [agentId, enabled])
   useEffect(() => { void refresh() }, [refresh])
   const setEnabled = useCallback(async (skillId: string, enabled: boolean) => {
     try { setItems(await desktopClient.setSkillEnabled(agentId, skillId, enabled)); setError(null); return true }

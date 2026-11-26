@@ -5,9 +5,10 @@ import { mergeConversationDetail } from '../model/runtime-event-reducer'
 import { applyKernelModelPreview } from '../model/kernel-model-preview'
 import type { ConversationDetail, DesktopErrorDetails } from '../model/types'
 
-export function useKernelStateStream({ conversationId, active = false, setDetail, setError, setErrorDetails }: {
+export function useKernelStateStream({ conversationId, active = false, previewEnabled = true, setDetail, setError, setErrorDetails }: {
   conversationId: string | null
   active?: boolean
+  previewEnabled?: boolean
   setDetail: Dispatch<SetStateAction<ConversationDetail | null>>
   setError: Dispatch<SetStateAction<string | null>>
   setErrorDetails: Dispatch<SetStateAction<DesktopErrorDetails | null>>
@@ -41,7 +42,7 @@ export function useKernelStateStream({ conversationId, active = false, setDetail
     // Read the persisted state once on open, including terminal runs; while
     // the run is active the interval below keeps it current.
     refresh.invalidate()
-    void desktopClient.listenKernelModelPreviews((notice) => {
+    if (previewEnabled) void desktopClient.listenKernelModelPreviews((notice) => {
       if (!disposed && notice?.conversationId === conversationId) {
         setDetail(current => applyKernelModelPreview(current, notice))
         refresh.invalidate()
@@ -53,5 +54,5 @@ export function useKernelStateStream({ conversationId, active = false, setDetail
     // selected run is active, using the same serialized merge path.
     const timer = active ? window.setInterval(() => refresh.invalidate(), 2_500) : null
     return () => { disposed = true; if (timer !== null) window.clearInterval(timer); refresh.dispose(); stopPreviews?.() }
-  }, [conversationId, active, setDetail, setError, setErrorDetails])
+  }, [conversationId, active, previewEnabled, setDetail, setError, setErrorDetails])
 }

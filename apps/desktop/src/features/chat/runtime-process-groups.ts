@@ -18,6 +18,7 @@ export type RuntimeNoticeGroup = {
   kind: 'notice'
   key: string
   label: string
+  eventType?: string
 }
 
 export type RuntimeDisplayGroup = RuntimeProcessGroup | RuntimeResponseGroup | RuntimeNoticeGroup
@@ -72,7 +73,7 @@ export function projectKernelGroups(runId: string, messages: readonly Conversati
       ;(event.eventType === 'reasoning.delta' ? round.reasoning : round.tools).push(event)
     } else {
       const label = runtimeStatusNotice(event, events) ?? boundaryLabels[event.eventType]
-      if (label) notices.push({ kind: 'notice', key: `${runId}:notice:${event.seq}`, label })
+      if (label) notices.push({ kind: 'notice', key: `${runId}:notice:${event.seq}`, label, eventType: event.eventType })
     }
   }
   const groups: RuntimeDisplayGroup[] = []
@@ -142,7 +143,7 @@ export function projectRuntimeGroups(runId: string, content: string, events: rea
     const noticeLabel = runtimeStatusNotice(event, ordered) ?? boundaryLabels[event.eventType]
     if (noticeLabel) {
       flush()
-      groups.push({ kind: 'notice', key: `${runId}:notice:${event.seq}`, label: noticeLabel })
+      groups.push({ kind: 'notice', key: `${runId}:notice:${event.seq}`, label: noticeLabel, eventType: event.eventType })
       continue
     }
     if (!processEvents.has(event.eventType)) continue

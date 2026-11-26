@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { presentConversationActivity, presentRunActivity, summarizeRunSteps } from '../src/features/chat/run-activity-presentation'
+import { presentConversationActivity, presentConversationPlan, presentRunActivity, summarizeRunSteps } from '../src/features/chat/run-activity-presentation'
 import { applyKernelModelPreview } from '../src/features/conversations/model/kernel-model-preview'
 import type { ConversationDetail, RunEventRecord } from '../src/features/conversations/model/types'
 
@@ -71,6 +71,38 @@ test('approval and questions outrank tools, while terminal state closes both', (
   expect(presentRunActivity(events, { runId: 'r', approvalPending: true }).label).toBe('等待你的确认')
   expect(presentRunActivity(events, { runId: 'r', questionPending: true }).label).toBe('等待你的回答')
   expect(presentRunActivity(events, { runId: 'r', state: 'cancelled', approvalPending: true, questionPending: true }).label).toBe('已取消')
+})
+
+test('live plan follows the latest update for the current run and disappears on completion', () => {
+  const update = (seq: number, status: string, runId = 'r') => event(seq, 'plan.updated', {
+    entries: [{ content: 'Check the index', status }],
+  }, runId)
+  const detail = { conversation: { id: 'c' }, lastRun: { id: 'r', status: 'running' },
+    goals: [], tasks: [], messages: [], approvals: [], toolCalls: [],
+    runtimeEvents: [start, update(2, 'pending'), update(3, 'in_progress'), update(4, 'completed', 'other')],
+  } as unknown as ConversationDetail
+  const plan = (conversationId = 'c') => presentConversationPlan(detail, presentConversationActivity(detail, conversationId))
+  expect(plan()).toEqual([{ id: 'r:0', title: 'Check the index', status: 'in_progress' }])
+  expect(plan('other')).toEqual([])
+  detail.runtimeEvents = [...detail.runtimeEvents, update(5, 'completed')]
+  expect(plan()).toEqual([])
+  detail.runtimeEvents = [...detail.runtimeEvents, update(6, 'pending'), event(7, 'run.cancelled')]
+  expect(plan()).toEqual([])
+})
+
+test('live plan uses the active Fox goal steps in order and keeps them in conversation history', () => {
+  const detail = { conversation: { id: 'c' }, lastRun: { id: 'r', status: 'running' },
+    goals: [{ id: 'g', status: 'active' }],
+    tasks: [{ id: 'later', goalId: 'g', title: 'Verify', ordinal: 2, status: 'queued' },
+      { id: 'now', goalId: 'g', title: 'List files', ordinal: 1, status: 'in_progress' },
+      { id: 'past', goalId: 'other', title: 'Older step', ordinal: 0, status: 'completed' }],
+    messages: [], approvals: [], toolCalls: [], runtimeEvents: [start],
+  } as unknown as ConversationDetail
+  const plan = () => presentConversationPlan(detail, presentConversationActivity(detail, 'c'))
+  expect(plan().map(step => step.id)).toEqual(['now', 'later'])
+  detail.tasks = detail.tasks.map(task => ({ ...task, status: 'completed' }))
+  expect(plan()).toEqual([])
+  expect(detail.tasks).toHaveLength(3)
 })
 
 test('completed and failed compaction do not pretend to be reasoning or terminal run failure', () => {

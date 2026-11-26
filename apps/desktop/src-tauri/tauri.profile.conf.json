@@ -3,7 +3,7 @@
   "build": {
     "beforeDevCommand": "pnpm dev:profile",
     "devUrl": "http://127.0.0.1:1422",
-    "beforeBuildCommand": "pnpm build:profile",
+    "beforeBuildCommand": "node ../../scripts/prepare-connector-auth.mjs && pnpm build:profile",
     "frontendDist": "../dist"
   }
 }

@@ -8,6 +8,8 @@ import { StreamingText as ElementStreamingText } from "@/components/assistant-ui
 import "streamdown/styles.css";
 import { ExternalLink } from "lucide-react";
 import { notify as toast } from "@/features/notifications";
+import { FinalArtifactContext, displayArtifactPath, resolveFinalArtifactReference } from "@/features/chat/final-artifact-references";
+import { artifactTypeBadge } from "@/features/chat/runtime-artifacts";
 import { beautifulMermaidPlugin } from "./beautiful-mermaid-diagram";
 import { MermaidDiagramNotice } from "./mermaid-diagram-notice";
 
@@ -40,8 +42,16 @@ function StreamingLeaf({ children, node: _node, ref: _ref, ...props }: Component
 }
 function MarkdownLink({ children, href, className }: ComponentProps<'a'> & { node?: unknown }) {
   const [open, setOpen] = useState(false);
+  const artifacts = useContext(FinalArtifactContext);
   const style = cn('wrap-anywhere appearance-none text-left font-medium text-primary underline', className);
-  if (href?.startsWith('#fox-artifact=')) return <a href={href} className={style} data-streamdown="link">{children}</a>;
+  if (href?.startsWith('#fox-artifact=')) {
+    const artifact = resolveFinalArtifactReference(href, artifacts);
+    if (artifact) return <a href={href} className="fox-artifact-chip fox-artifact-link" title={displayArtifactPath(artifact.storagePath)}>
+      <span className="fox-artifact-chip-type" aria-hidden="true">{artifactTypeBadge(artifact)}</span>
+      <span className="fox-artifact-chip-name">{artifact.displayName}</span>
+    </a>;
+    return <a href={href} className={style} data-streamdown="link">{children}</a>;
+  }
   if (!href || href === 'streamdown:incomplete-link') return <span className={style}>{children}</span>;
   return <><button type="button" className={style} data-streamdown="link" onClick={() => setOpen(true)}>{children}</button>
     <ExternalLinkDialog isOpen={open} onClose={() => setOpen(false)} onConfirm={() => undefined} url={href} /></>;

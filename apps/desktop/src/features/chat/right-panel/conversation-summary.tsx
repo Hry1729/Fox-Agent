@@ -36,6 +36,16 @@ function legacyContextRows(budget: ContextBudgetDto) {
   }).filter(row => row.tokens > 0)
 }
 
+function runtimeContextRows(runtime: RuntimeContextWindow, budget: ContextBudgetDto | null) {
+  const system = Math.min(runtime.usedTokens, runtime.systemTokens ?? budget?.systemTokens ?? 0)
+  const tools = Math.min(runtime.usedTokens - system, runtime.toolsTokens ?? budget?.toolsTokens ?? 0)
+  return [
+    { key: 'history', label: system || tools ? '消息与其他上下文' : '已用上下文', tokens: runtime.usedTokens - system - tools },
+    { key: 'tools', label: '工具定义', tokens: tools },
+    { key: 'system', label: '系统提示词', tokens: system },
+  ].filter(row => row.tokens > 0)
+}
+
 const contextCellCount = 144
 
 export function SummaryContextBudget({ budget, runtime }: { budget: ContextBudgetDto | null; runtime?: RuntimeContextWindow | null }) {
@@ -46,7 +56,8 @@ export function SummaryContextBudget({ budget, runtime }: { budget: ContextBudge
   const free = Math.max(0, limit - used)
   const fraction = (tokens: number) => limit > 0 ? tokens / limit * 100 : 0
   const percent = fraction(used)
-  const rows = runtime ? [{ key: 'history', label: '已用上下文', tokens: used }] : legacyContextRows(budget!)
+  const rows = runtime ? runtimeContextRows(runtime, budget) : legacyContextRows(budget!)
+  const classified = rows.some(row => row.key === 'tools' || row.key === 'system')
   const legend = [...rows, { key: 'free', label: '剩余可用', tokens: free }]
   let tokensThrough = 0
   const boundaries = rows.map(row => {
@@ -65,7 +76,7 @@ export function SummaryContextBudget({ budget, runtime }: { budget: ContextBudge
       })}
     </div>
     {legend.map(row => <div className={`fox-summary-context-row${row.key === 'free' ? ' is-free' : ''}`} key={row.key} onMouseEnter={() => setHighlight(row.key)} onMouseLeave={() => setHighlight(undefined)}><i className={`is-${row.key}`} /><span>{row.label}</span><b title={row.tokens.toLocaleString()}>{compactTokenCount(row.tokens)}</b><small>{fraction(row.tokens).toFixed(1)}%</small></div>)}
-    {runtime && <p className="fox-summary-context-note">{runtime.source === 'session' ? '按当前会话估算' : '按最近一次主模型请求统计，含缓存'}</p>}
+    {runtime && <p className="fox-summary-context-note">{runtime.source === 'session' ? classified ? '当前会话' : '按当前会话估算' : '按最近一次主模型请求统计，含缓存'}{classified && ' · 分类占用为估算'}</p>}
   </div>
 }
 

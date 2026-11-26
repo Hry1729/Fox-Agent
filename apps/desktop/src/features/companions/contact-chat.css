@@ -71,6 +71,7 @@
   width: 100%;
 }
 .fox-contact-message { position: relative; max-width: var(--fox-bubble-width); min-width: 0; }
+.fox-contact-bubble-list { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .fox-contact-bubble {
   width: fit-content;
   max-width: 100%;
@@ -95,6 +96,8 @@
 .fox-contact-bubble .fox-answer-response > :last-child { margin-bottom: 0; }
 .fox-contact-bubble .fox-answer-response :is(ul, ol) { padding-inline-start: 1.5em; }
 .fox-contact-bubble pre { max-width: 100%; overflow-x: auto; }
+.fox-contact-reply-disclosure { margin-block-start: 8px; color: var(--muted-foreground); font-size: var(--fox-type-caption); text-decoration: underline; text-underline-offset: 3px; }
+.fox-contact-reply-disclosure:hover, .fox-contact-reply-disclosure:focus-visible { color: var(--foreground); }
 /* Portal 菜单打开后焦点离开消息 DOM，仍保留消息操作行。 */
 .fox-contact-message-meta {
   position: absolute;
@@ -205,6 +208,7 @@
 .is-contact-chat .fox-contact-user-row:is(:hover, :focus-within) .fox-user-meta,
 .is-contact-chat .fox-contact-user-row .fox-user-meta[data-menu-open="true"] { opacity: 1; }
 .fox-contact-ended { color: var(--muted-foreground); font-size: var(--fox-type-caption); }
+.fox-contact-ended button { margin-inline-start: 0.5em; color: var(--foreground); text-decoration: underline; }
 
 .fox-contact-message.has-guide { width: var(--fox-bubble-width); }
 .fox-companion-guide { display: grid; gap: 10px; width: 100%; margin-top: 8px; padding: 14px 14px 12px; border-radius: var(--fox-radius-large); background: var(--fox-canvas); box-shadow: inset 0 0 0 1px var(--border), var(--fox-shadow-sm); }

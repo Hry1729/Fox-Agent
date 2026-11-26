@@ -1,0 +1,1553 @@
+[
+  {
+    "id": "feishu",
+    "name": "飞书文档",
+    "description": "搜索、读取、创建和更新飞书云文档。",
+    "category": "文档与网盘",
+    "source": "https://open.feishu.cn/document/mcp_open_tools/supported-tools",
+    "setup": {
+      "url": "https://mcp.feishu.cn/mcp",
+      "oauth": true,
+      "registration": "FEISHU",
+      "secretHeader": "X-Lark-MCP-UAT",
+      "headers": {
+        "X-Lark-MCP-Allowed-Tools": "search-doc,fetch-doc,create-doc,update-doc"
+      },
+      "guide": "使用飞书中国版账号授权。Fox 只能操作该账号有权访问的云文档。"
+    }
+  },
+  {
+    "id": "wecom",
+    "name": "企业微信",
+    "description": "查询企业通讯录、审批和应用收件记录，并发送应用消息。",
+    "category": "即时通讯",
+    "source": "https://github.com/atttx123/wecom-mcp-server/blob/main/README.zh-CN.md",
+    "setup": {
+      "customEndpoint": true,
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "optionalToken": true,
+      "guide": "管理员开通企业应用并部署 wecom-mcp-server 后，填写服务地址。默认本机地址为 http://127.0.0.1:8101/mcp。"
+    }
+  },
+  {
+    "id": "qq",
+    "name": "QQ 机器人",
+    "description": "在 Fox 中读取网关收到的文本消息，回复原会话。",
+    "category": "即时通讯",
+    "source": "https://github.com/TencentCloud/octop-gateway",
+    "setup": {
+      "customEndpoint": true,
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "guide": "需要启动 Fox 消息网关 qq，填写网关的 /mcp 地址和访问令牌。每个平台账号使用独立网关。"
+    }
+  },
+  {
+    "id": "wechat",
+    "name": "微信 / iLink",
+    "description": "在 Fox 中读取网关收到的文本消息，回复原会话。",
+    "category": "即时通讯",
+    "source": "https://github.com/TencentCloud/octop-gateway",
+    "setup": {
+      "customEndpoint": true,
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "guide": "需要启动 Fox 消息网关 weixin，填写网关的 /mcp 地址和访问令牌。每个平台账号使用独立网关。"
+    }
+  },
+  {
+    "id": "dingtalk",
+    "name": "钉钉机器人",
+    "description": "在 Fox 中读取网关收到的文本消息，回复原会话。",
+    "category": "即时通讯",
+    "source": "https://github.com/TencentCloud/octop-gateway",
+    "setup": {
+      "customEndpoint": true,
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "guide": "需要启动 Fox 消息网关 dingtalk，填写网关的 /mcp 地址和访问令牌。每个平台账号使用独立网关。"
+    }
+  },
+  {
+    "id": "slack",
+    "name": "Slack",
+    "description": "搜索消息、读取讨论串和整理频道内容。",
+    "category": "即时通讯",
+    "source": "https://docs.slack.dev/ai/slack-mcp-server/",
+    "setup": {
+      "url": "https://mcp.slack.com/mcp",
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "oauth": true,
+      "registration": "SLACK",
+      "guide": "需要注册 Fox 的 Slack 应用。工作区限制应用安装时，还需管理员批准。"
+    }
+  },
+  {
+    "id": "feishu-bot",
+    "name": "飞书机器人",
+    "description": "在 Fox 中读取网关收到的文本消息，回复原会话。",
+    "category": "即时通讯",
+    "source": "https://github.com/TencentCloud/octop-gateway",
+    "setup": {
+      "customEndpoint": true,
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "guide": "需要启动 Fox 消息网关 feishu，填写网关的 /mcp 地址和访问令牌。每个平台账号使用独立网关。"
+    }
+  },
+  {
+    "id": "wecom-bot",
+    "name": "企业微信机器人",
+    "description": "在 Fox 中读取网关收到的文本消息，回复原会话。",
+    "category": "即时通讯",
+    "source": "https://github.com/TencentCloud/octop-gateway",
+    "setup": {
+      "customEndpoint": true,
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "guide": "需要启动 Fox 消息网关 wecom，填写网关的 /mcp 地址和访问令牌。每个平台账号使用独立网关。"
+    }
+  },
+  {
+    "id": "teams",
+    "name": "Microsoft Teams",
+    "description": "读取获授权的聊天与频道内容。",
+    "category": "即时通讯",
+    "source": "https://learn.microsoft.com/en-us/graph/overview",
+    "setup": {
+      "program": "npx",
+      "args": [
+        "-y",
+        "@softeria/ms-365-mcp-server@0.191.0",
+        "--org-mode",
+        "--preset",
+        "teams"
+      ],
+      "env": [],
+      "guide": "首次使用时，在 Fox 对话中调用该连接器的登录工具，按微软页面提示登录。组织账号可能需要管理员批准。"
+    }
+  },
+  {
+    "id": "telegram",
+    "name": "Telegram",
+    "description": "在 Fox 中读取网关收到的文本消息，回复原会话。",
+    "category": "即时通讯",
+    "source": "https://github.com/TencentCloud/octop-gateway",
+    "setup": {
+      "customEndpoint": true,
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "guide": "需要启动 Fox 消息网关 telegram，填写网关的 /mcp 地址和访问令牌。每个平台账号使用独立网关。"
+    }
+  },
+  {
+    "id": "discord",
+    "name": "Discord",
+    "description": "在 Fox 中读取网关收到的文本消息，回复原会话。",
+    "category": "即时通讯",
+    "source": "https://github.com/TencentCloud/octop-gateway",
+    "setup": {
+      "customEndpoint": true,
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "guide": "需要启动 Fox 消息网关 discord，填写网关的 /mcp 地址和访问令牌。每个平台账号使用独立网关。"
+    }
+  },
+  {
+    "id": "whatsapp",
+    "name": "WhatsApp Business",
+    "description": "接收客户消息并通过企业号码回复。",
+    "category": "即时通讯",
+    "source": "https://www.twilio.com/docs/whatsapp/api",
+    "setup": {
+      "program": "uv",
+      "args": [
+        "run",
+        "--script",
+        "{fox-connector-adapter}",
+        "whatsapp"
+      ],
+      "env": [
+        "FOX_ACCOUNT_SID",
+        "FOX_TOKEN",
+        "FOX_PHONE"
+      ],
+      "guide": "通过 Twilio WhatsApp Business 号码收件和回复。需要已开通的发送号码、Account SID 和 Auth Token。消息费按平台规则结算。"
+    }
+  },
+  {
+    "id": "yuanbao",
+    "name": "腾讯元宝",
+    "description": "在 Fox 中读取网关收到的文本消息，回复原会话。",
+    "category": "即时通讯",
+    "source": "https://github.com/TencentCloud/octop-gateway",
+    "setup": {
+      "customEndpoint": true,
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "guide": "需要启动 Fox 消息网关 yuanbao，填写网关的 /mcp 地址和访问令牌。每个平台账号使用独立网关。"
+    }
+  },
+  {
+    "id": "mqtt",
+    "name": "MQTT",
+    "description": "在 Fox 中读取网关收到的文本消息，回复原会话。",
+    "category": "即时通讯",
+    "source": "https://github.com/TencentCloud/octop-gateway",
+    "setup": {
+      "customEndpoint": true,
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "guide": "需要启动 Fox 消息网关 mqtt，填写网关的 /mcp 地址和访问令牌。每个平台账号使用独立网关。"
+    }
+  },
+  {
+    "id": "drive",
+    "name": "Google Drive",
+    "description": "搜索云端文件并读取获授权的内容。",
+    "category": "文档与网盘",
+    "source": "https://developers.google.com/workspace/guides/configure-mcp-servers",
+    "setup": {
+      "url": "https://drivemcp.googleapis.com/mcp/v1",
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "registration": "GOOGLE",
+      "oauth": true
+    }
+  },
+  {
+    "id": "notion",
+    "name": "Notion",
+    "description": "搜索页面、读取知识库和更新数据库。",
+    "category": "文档与网盘",
+    "source": "https://developers.notion.com/guides/mcp/overview",
+    "setup": {
+      "url": "https://mcp.notion.com/mcp",
+      "oauth": true
+    }
+  },
+  {
+    "id": "docs",
+    "name": "Google Docs",
+    "description": "读取和编辑云端文档。",
+    "category": "文档与网盘",
+    "source": "https://developers.google.com/workspace/guides/configure-mcp-servers",
+    "setup": {
+      "url": "https://docsmcp.googleapis.com/mcp/v1",
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "registration": "GOOGLE",
+      "oauth": true
+    }
+  },
+  {
+    "id": "sheets",
+    "name": "Google Sheets",
+    "description": "读取单元格、更新表格和提取数据。",
+    "category": "文档与网盘",
+    "source": "https://developers.google.com/workspace/guides/configure-mcp-servers",
+    "setup": {
+      "url": "https://sheetsmcp.googleapis.com/mcp/v1",
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "registration": "GOOGLE",
+      "oauth": true
+    }
+  },
+  {
+    "id": "slides",
+    "name": "Google Slides",
+    "description": "检索和更新演示文稿。",
+    "category": "文档与网盘",
+    "source": "https://developers.google.com/workspace/guides/configure-mcp-servers",
+    "setup": {
+      "url": "https://slidesmcp.googleapis.com/mcp/v1",
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "registration": "GOOGLE",
+      "oauth": true
+    }
+  },
+  {
+    "id": "tencent-docs",
+    "name": "腾讯文档",
+    "description": "读取在线文档、智能表格和空间文件。",
+    "category": "文档与网盘",
+    "source": "https://github.com/TencentCloud/Octop/blob/main/src/octop/infra/connectors/catalog.json",
+    "setup": {
+      "url": "https://docs.qq.com/openapi/mcp",
+      "secretHeader": "Authorization"
+    }
+  },
+  {
+    "id": "wps",
+    "name": "WPS / 金山文档",
+    "description": "评估在线文档和企业办公数据接入。",
+    "category": "文档与网盘",
+    "source": "https://open.wps.cn/",
+    "setup": {
+      "url": "https://openapi.wps.cn/mcp/v2/kso-yundoc/message",
+      "secretHeader": "Authorization",
+      "bearer": true
+    }
+  },
+  {
+    "id": "sharepoint",
+    "name": "SharePoint",
+    "description": "搜索站点和共享文档库。",
+    "category": "文档与网盘",
+    "source": "https://learn.microsoft.com/en-us/graph/overview",
+    "setup": {
+      "program": "npx",
+      "args": [
+        "-y",
+        "@softeria/ms-365-mcp-server@0.191.0",
+        "--org-mode",
+        "--preset",
+        "files"
+      ],
+      "env": [],
+      "guide": "首次使用时，在 Fox 对话中调用该连接器的登录工具，按微软页面提示登录。组织账号可能需要管理员批准。"
+    }
+  },
+  {
+    "id": "onedrive",
+    "name": "OneDrive",
+    "description": "浏览和读取微软云盘文件。",
+    "category": "文档与网盘",
+    "source": "https://learn.microsoft.com/en-us/graph/overview",
+    "setup": {
+      "program": "npx",
+      "args": [
+        "-y",
+        "@softeria/ms-365-mcp-server@0.191.0",
+        "--preset",
+        "onedrive"
+      ],
+      "env": [],
+      "guide": "首次使用时，在 Fox 对话中调用该连接器的登录工具，按微软页面提示登录。组织账号可能需要管理员批准。"
+    }
+  },
+  {
+    "id": "dropbox",
+    "name": "Dropbox",
+    "description": "搜索、预览和读取云端文件。",
+    "category": "文档与网盘",
+    "source": "https://www.dropbox.com/developers",
+    "setup": {
+      "url": "https://mcp.dropbox.com/mcp",
+      "oauth": true
+    }
+  },
+  {
+    "id": "box",
+    "name": "Box",
+    "description": "搜索企业文件并读取获授权的内容。",
+    "category": "文档与网盘",
+    "source": "https://developer.box.com/",
+    "setup": {
+      "url": "https://mcp.box.com",
+      "oauth": true,
+      "registration": "BOX"
+    }
+  },
+  {
+    "id": "weiyun",
+    "name": "腾讯微云",
+    "description": "列出网盘文件并管理分享。",
+    "category": "文档与网盘",
+    "source": "https://github.com/TencentCloud/Octop/blob/main/src/octop/infra/connectors/catalog.json",
+    "setup": {
+      "url": "https://www.weiyun.com/api/v3/mcpserver",
+      "secretHeader": "WyHeader",
+      "tokenPrefix": "mcp_token="
+    }
+  },
+  {
+    "id": "youdao",
+    "name": "有道云笔记",
+    "description": "搜索、创建和整理笔记。",
+    "category": "文档与网盘",
+    "source": "https://github.com/TencentCloud/Octop/blob/main/src/octop/infra/connectors/catalog.json",
+    "setup": {
+      "program": "{fox-sse-bridge}",
+      "args": [
+        "--youdao"
+      ],
+      "env": [
+        "YOUDAO_API_KEY"
+      ]
+    }
+  },
+  {
+    "id": "yuque",
+    "name": "语雀",
+    "description": "搜索知识库并读取团队文档。",
+    "category": "文档与网盘",
+    "source": "https://github.com/yuque/yuque-mcp-server/blob/main/docs/clients.md",
+    "setup": {
+      "program": "npx",
+      "args": [
+        "-y",
+        "yuque-mcp@1.1.0"
+      ],
+      "env": [
+        "YUQUE_TOKEN"
+      ]
+    }
+  },
+  {
+    "id": "obsidian",
+    "name": "Obsidian",
+    "description": "检索本地笔记库和双向链接。",
+    "category": "文档与网盘",
+    "source": "https://github.com/TencentCloud/Octop/blob/main/src/octop/infra/connectors/catalog.json",
+    "setup": {
+      "url": "https://127.0.0.1:27124/mcp/",
+      "secretHeader": "Authorization",
+      "bearer": true
+    }
+  },
+  {
+    "id": "lexiang",
+    "name": "腾讯乐享",
+    "description": "检索企业知识库并读取文档。",
+    "category": "文档与网盘",
+    "source": "https://github.com/TencentCloud/Octop/blob/main/src/octop/infra/connectors/catalog.json",
+    "setup": {
+      "url": "https://mcp.lexiang-app.com/mcp?preset=meta",
+      "secretHeader": "Authorization",
+      "bearer": true
+    }
+  },
+  {
+    "id": "ima",
+    "name": "腾讯 ima",
+    "description": "搜索个人知识库并读取笔记。",
+    "category": "文档与网盘",
+    "source": "https://github.com/TencentCloud/Octop/blob/main/src/octop/infra/connectors/catalog.json",
+    "setup": {
+      "program": "uv",
+      "args": [
+        "run",
+        "--script",
+        "{fox-connector-adapter}",
+        "ima"
+      ],
+      "env": [
+        "FOX_CLIENT_ID",
+        "FOX_API_KEY"
+      ]
+    }
+  },
+  {
+    "id": "weknora",
+    "name": "WeKnora",
+    "description": "检索自建知识库并读取文档。",
+    "category": "文档与网盘",
+    "source": "https://github.com/Tencent/WeKnora",
+    "setup": {
+      "program": "uv",
+      "args": [
+        "run",
+        "--script",
+        "{fox-connector-adapter}",
+        "weknora"
+      ],
+      "env": [
+        "FOX_BASE_URL",
+        "FOX_API_KEY"
+      ]
+    }
+  },
+  {
+    "id": "dify",
+    "name": "Dify",
+    "description": "将已发布的工作流作为工具调用。",
+    "category": "文档与网盘",
+    "source": "https://github.com/langgenius/dify",
+    "setup": {
+      "customEndpoint": true,
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "optionalToken": true
+    }
+  },
+  {
+    "id": "filesystem",
+    "name": "本地文件系统",
+    "description": "在允许的目录中查找和读写文件。",
+    "category": "文档与网盘",
+    "source": "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
+    "setup": {
+      "program": "mcp-server-filesystem",
+      "args": [
+        "{directory}"
+      ],
+      "env": [],
+      "guide": "请安装官方 @modelcontextprotocol/server-filesystem 并选择允许访问的文件夹。Windows 需要将 npm 全局工具目录加入 PATH。"
+    }
+  },
+  {
+    "id": "github",
+    "name": "GitHub",
+    "description": "查询仓库、Issue、PR 和 Actions。",
+    "category": "项目与研发",
+    "source": "https://github.com/github/github-mcp-server",
+    "setup": {
+      "url": "https://api.githubcopilot.com/mcp/",
+      "oauth": true,
+      "registration": "GITHUB",
+      "secretHeader": "Authorization",
+      "bearer": true
+    }
+  },
+  {
+    "id": "linear",
+    "name": "Linear",
+    "description": "查找问题、项目和迭代进度。",
+    "category": "项目与研发",
+    "source": "https://linear.app/docs/mcp",
+    "setup": {
+      "url": "https://mcp.linear.app/mcp",
+      "oauth": true,
+      "secretHeader": "Authorization",
+      "bearer": true
+    }
+  },
+  {
+    "id": "jira",
+    "name": "Jira",
+    "description": "搜索问题、查看迭代和更新工单。",
+    "category": "项目与研发",
+    "source": "https://support.atlassian.com/atlassian-rovo-mcp-server/docs/getting-started-with-the-atlassian-remote-mcp-server/",
+    "setup": {
+      "url": "https://mcp.atlassian.com/v2/mcp",
+      "oauth": true
+    }
+  },
+  {
+    "id": "asana",
+    "name": "Asana",
+    "description": "查询项目、任务和负责人。",
+    "category": "项目与研发",
+    "source": "https://developers.asana.com/docs/mcp-server",
+    "setup": {
+      "url": "https://mcp.asana.com/v2/mcp",
+      "oauth": true,
+      "registration": "ASANA"
+    }
+  },
+  {
+    "id": "trello",
+    "name": "Trello",
+    "description": "读取看板、列表和卡片。",
+    "category": "项目与研发",
+    "source": "https://developer.atlassian.com/cloud/trello/rest/",
+    "setup": {
+      "url": "https://mcp.trello.com/v1",
+      "oauth": true
+    }
+  },
+  {
+    "id": "todoist",
+    "name": "Todoist",
+    "description": "查询待办事项、项目和标签。",
+    "category": "项目与研发",
+    "source": "https://developer.todoist.com/api/v1/",
+    "setup": {
+      "url": "https://ai.todoist.net/mcp",
+      "oauth": true
+    }
+  },
+  {
+    "id": "confluence",
+    "name": "Confluence",
+    "description": "搜索知识库和读取项目页面。",
+    "category": "项目与研发",
+    "source": "https://support.atlassian.com/atlassian-rovo-mcp-server/docs/getting-started-with-the-atlassian-remote-mcp-server/",
+    "setup": {
+      "url": "https://mcp.atlassian.com/v2/mcp",
+      "oauth": true
+    }
+  },
+  {
+    "id": "gitlab",
+    "name": "GitLab",
+    "description": "查询合并请求、Issue 和流水线。",
+    "category": "项目与研发",
+    "source": "https://docs.gitlab.com/user/model_context_protocol/mcp_server/",
+    "setup": {
+      "customEndpoint": true,
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "optionalToken": true
+    }
+  },
+  {
+    "id": "gitee",
+    "name": "Gitee",
+    "description": "读取仓库、Issue 和合并请求。",
+    "category": "项目与研发",
+    "source": "https://gitee.com/oschina/mcp-gitee",
+    "setup": {
+      "url": "https://api.gitee.com/mcp",
+      "secretHeader": "Authorization",
+      "bearer": true
+    }
+  },
+  {
+    "id": "tapd",
+    "name": "TAPD",
+    "description": "查看项目、需求和缺陷。",
+    "category": "项目与研发",
+    "source": "https://github.com/TencentCloudCommunity/mcp-server",
+    "setup": {
+      "program": "uvx",
+      "args": [
+        "--from",
+        "mcp-server-tapd==8.0.84",
+        "mcp-server-tapd"
+      ],
+      "env": [
+        "TAPD_API_USER",
+        "TAPD_API_PASSWORD"
+      ]
+    }
+  },
+  {
+    "id": "azuredevops",
+    "name": "Azure DevOps",
+    "description": "查询工作项、仓库和构建流水线。",
+    "category": "项目与研发",
+    "source": "https://github.com/microsoft/azure-devops-mcp",
+    "setup": {
+      "program": "npx",
+      "args": [
+        "-y",
+        "@azure-devops/mcp@2.11.0",
+        "{organization}"
+      ],
+      "env": []
+    }
+  },
+  {
+    "id": "postman",
+    "name": "Postman",
+    "description": "查找工作区、集合和 API 定义。",
+    "category": "项目与研发",
+    "source": "https://github.com/postmanlabs/postman-mcp-server",
+    "setup": {
+      "url": "https://mcp.postman.com/minimal",
+      "oauth": true
+    }
+  },
+  {
+    "id": "context7",
+    "name": "Context7",
+    "description": "获取库和框架的当前文档。",
+    "category": "项目与研发",
+    "source": "https://github.com/upstash/context7",
+    "setup": {
+      "url": "https://mcp.context7.com/mcp/oauth",
+      "oauth": true
+    }
+  },
+  {
+    "id": "deepwiki",
+    "name": "DeepWiki",
+    "description": "查询公开仓库的代码说明。",
+    "category": "项目与研发",
+    "source": "https://docs.devin.ai/work-with-devin/deepwiki-mcp",
+    "setup": {
+      "url": "https://mcp.deepwiki.com/mcp"
+    }
+  },
+  {
+    "id": "playwright",
+    "name": "Playwright",
+    "description": "使用可访问性结构操作浏览器并检查页面。",
+    "category": "项目与研发",
+    "source": "https://github.com/microsoft/playwright-mcp",
+    "setup": {
+      "program": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@0.0.86"
+      ],
+      "env": []
+    }
+  },
+  {
+    "id": "chrome",
+    "name": "Chrome DevTools",
+    "description": "检查 DOM、网络和性能。",
+    "category": "项目与研发",
+    "source": "https://github.com/ChromeDevTools/chrome-devtools-mcp",
+    "setup": {
+      "program": "npx",
+      "args": [
+        "-y",
+        "chrome-devtools-mcp@1.14.0"
+      ],
+      "env": []
+    }
+  },
+  {
+    "id": "sentry",
+    "name": "Sentry",
+    "description": "查询错误、堆栈和受影响的发布。",
+    "category": "项目与研发",
+    "source": "https://github.com/getsentry/toolkit",
+    "setup": {
+      "url": "https://mcp.sentry.dev/mcp",
+      "oauth": true
+    }
+  },
+  {
+    "id": "cloudflare",
+    "name": "Cloudflare",
+    "description": "查询 Workers、部署和文档。",
+    "category": "项目与研发",
+    "source": "https://github.com/cloudflare/mcp-server-cloudflare",
+    "setup": {
+      "url": "https://bindings.mcp.cloudflare.com/mcp",
+      "oauth": true
+    }
+  },
+  {
+    "id": "vercel",
+    "name": "Vercel",
+    "description": "查看项目、部署状态和日志。",
+    "category": "项目与研发",
+    "source": "https://vercel.com/docs/agent-resources/vercel-mcp",
+    "setup": {
+      "url": "https://mcp.vercel.com",
+      "oauth": true,
+      "registration": "VERCEL",
+      "guide": "Vercel 要求先审核客户端。Fox 获批并配置应用后，用户可以打开授权窗口。"
+    }
+  },
+  {
+    "id": "netlify",
+    "name": "Netlify",
+    "description": "查询站点和部署状态。",
+    "category": "项目与研发",
+    "source": "https://docs.netlify.com/build/build-with-ai/agent-setup-guides/agent-setup-overview/",
+    "setup": {
+      "url": "https://mcp.netlify.com/mcp",
+      "oauth": true
+    }
+  },
+  {
+    "id": "aws",
+    "name": "AWS",
+    "description": "查询云资源和服务文档。",
+    "category": "项目与研发",
+    "source": "https://github.com/awslabs/mcp",
+    "setup": {
+      "program": "uvx",
+      "args": [
+        "--from",
+        "awslabs.aws-api-mcp-server==1.6.1",
+        "awslabs.aws-api-mcp-server"
+      ],
+      "env": [
+        "AWS_PROFILE",
+        "AWS_REGION"
+      ]
+    }
+  },
+  {
+    "id": "azure",
+    "name": "Azure",
+    "description": "查询 Azure 资源和监控数据。",
+    "category": "项目与研发",
+    "source": "https://github.com/microsoft/mcp/tree/main/servers/Azure.Mcp.Server",
+    "setup": {
+      "program": "npx",
+      "args": [
+        "-y",
+        "@azure/mcp",
+        "server",
+        "start"
+      ],
+      "env": []
+    }
+  },
+  {
+    "id": "huggingface",
+    "name": "Hugging Face",
+    "description": "搜索模型、数据集、论文和 Spaces。",
+    "category": "项目与研发",
+    "source": "https://github.com/huggingface/hf-mcp-server",
+    "setup": {
+      "url": "https://huggingface.co/mcp",
+      "oauth": true
+    }
+  },
+  {
+    "id": "dida",
+    "name": "滴答清单",
+    "description": "查询或更新待办、项目和清单。",
+    "category": "项目与研发",
+    "source": "https://github.com/TencentCloud/Octop/blob/main/src/octop/infra/connectors/catalog.json",
+    "setup": {
+      "url": "https://mcp.dida365.com",
+      "oauth": true,
+      "guide": "此端点使用中国版滴答清单账号。"
+    }
+  },
+  {
+    "id": "gmail",
+    "name": "Gmail",
+    "description": "搜索邮件、提取线索和整理讨论串。",
+    "category": "邮件与日程",
+    "source": "https://developers.google.com/workspace/guides/configure-mcp-servers",
+    "setup": {
+      "url": "https://gmailmcp.googleapis.com/mcp/v1",
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "registration": "GOOGLE",
+      "oauth": true
+    }
+  },
+  {
+    "id": "google-calendar",
+    "name": "Google Calendar",
+    "description": "查询会议、时间段和空闲情况。",
+    "category": "邮件与日程",
+    "source": "https://developers.google.com/workspace/guides/configure-mcp-servers",
+    "setup": {
+      "url": "https://calendarmcp.googleapis.com/mcp/v1",
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "registration": "GOOGLE",
+      "oauth": true
+    }
+  },
+  {
+    "id": "outlook",
+    "name": "Outlook 邮箱",
+    "description": "搜索邮件和读取对话。",
+    "category": "邮件与日程",
+    "source": "https://learn.microsoft.com/en-us/graph/overview",
+    "setup": {
+      "program": "npx",
+      "args": [
+        "-y",
+        "@softeria/ms-365-mcp-server@0.191.0",
+        "--preset",
+        "mail"
+      ],
+      "env": [],
+      "guide": "首次使用时，在 Fox 对话中调用该连接器的登录工具，按微软页面提示登录。组织账号可能需要管理员批准。"
+    }
+  },
+  {
+    "id": "outlook-calendar",
+    "name": "Outlook 日历",
+    "description": "读取会议和查看可用时段。",
+    "category": "邮件与日程",
+    "source": "https://learn.microsoft.com/en-us/graph/overview",
+    "setup": {
+      "program": "npx",
+      "args": [
+        "-y",
+        "@softeria/ms-365-mcp-server@0.191.0",
+        "--preset",
+        "calendar"
+      ],
+      "env": [],
+      "guide": "首次使用时，在 Fox 对话中调用该连接器的登录工具，按微软页面提示登录。组织账号可能需要管理员批准。"
+    }
+  },
+  {
+    "id": "qq-mail",
+    "name": "QQ 邮箱",
+    "description": "读取授权邮箱，支持发信场景。",
+    "category": "邮件与日程",
+    "source": "https://github.com/TencentCloud/Octop/blob/main/src/octop/infra/connectors/catalog.json",
+    "setup": {
+      "program": "uv",
+      "args": [
+        "run",
+        "--script",
+        "{fox-connector-adapter}",
+        "qq-mail"
+      ],
+      "env": [
+        "FOX_EMAIL",
+        "FOX_PASSWORD"
+      ]
+    }
+  },
+  {
+    "id": "netease-mail",
+    "name": "网易邮箱",
+    "description": "查询 163、126 邮箱内的邮件。",
+    "category": "邮件与日程",
+    "source": "https://github.com/TencentCloud/Octop/blob/main/src/octop/infra/connectors/catalog.json",
+    "setup": {
+      "program": "uv",
+      "args": [
+        "run",
+        "--script",
+        "{fox-connector-adapter}",
+        "netease-mail"
+      ],
+      "env": [
+        "FOX_EMAIL",
+        "FOX_PASSWORD"
+      ]
+    }
+  },
+  {
+    "id": "tencent-meeting",
+    "name": "腾讯会议",
+    "description": "查找会议、录制和会议纪要。",
+    "category": "邮件与日程",
+    "source": "https://meeting.tencent.com/support/articles/14/index.html",
+    "setup": {
+      "url": "https://mcp.meeting.tencent.com/mcp/wemeet-open/v1",
+      "secretHeader": "X-Tencent-Meeting-Token",
+      "headers": {
+        "X-Skill-Version": "v1.0.1"
+      }
+    }
+  },
+  {
+    "id": "zoom",
+    "name": "Zoom Workplace",
+    "description": "读取会议和日历相关内容。",
+    "category": "邮件与日程",
+    "source": "https://developers.zoom.us/docs/mcp/zoom-mcp-server/",
+    "setup": {
+      "url": "https://mcp.zoom.us/mcp/zoom/streamable",
+      "oauth": true,
+      "registration": "ZOOM"
+    }
+  },
+  {
+    "id": "calendly",
+    "name": "Calendly",
+    "description": "查询预约、事件类型和可用时段。",
+    "category": "邮件与日程",
+    "source": "https://developer.calendly.com/docs/getting-started/overview",
+    "setup": {
+      "url": "https://mcp.calendly.com",
+      "oauth": true
+    }
+  },
+  {
+    "id": "figma",
+    "name": "Figma",
+    "description": "读取组件、设计变量和画布内容。",
+    "category": "设计与经营",
+    "source": "https://developers.figma.com/docs/figma-mcp-server/",
+    "setup": {
+      "url": "https://mcp.figma.com/mcp",
+      "oauth": true
+    }
+  },
+  {
+    "id": "canva",
+    "name": "Canva",
+    "description": "搜索和管理设计内容。",
+    "category": "设计与经营",
+    "source": "https://www.canva.dev/docs/connect/",
+    "setup": {
+      "url": "https://api.canva.com/connect/v1/mcp",
+      "oauth": true,
+      "registration": "CANVA"
+    }
+  },
+  {
+    "id": "stripe",
+    "name": "Stripe",
+    "description": "查看客户、账单和支付记录。",
+    "category": "设计与经营",
+    "source": "https://docs.stripe.com/mcp",
+    "setup": {
+      "url": "https://mcp.stripe.com",
+      "oauth": true
+    }
+  },
+  {
+    "id": "hubspot",
+    "name": "HubSpot",
+    "description": "查看联系人、公司和交易记录。",
+    "category": "设计与经营",
+    "source": "https://developers.hubspot.com/docs/",
+    "setup": {
+      "url": "https://mcp.hubspot.com/",
+      "oauth": true,
+      "registration": "HUBSPOT"
+    }
+  },
+  {
+    "id": "salesforce",
+    "name": "Salesforce",
+    "description": "查询客户、联系人和商机。",
+    "category": "设计与经营",
+    "source": "https://developer.salesforce.com/docs/apis",
+    "setup": {
+      "customEndpoint": true,
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "optionalToken": true
+    }
+  },
+  {
+    "id": "zendesk",
+    "name": "Zendesk",
+    "description": "使用账号权限搜索 Zendesk 工单。",
+    "category": "设计与经营",
+    "source": "https://developer.zendesk.com/api-reference/ticketing/ticket-management/search/",
+    "setup": {
+      "program": "uv",
+      "args": [
+        "run",
+        "--script",
+        "{fox-connector-adapter}",
+        "zendesk"
+      ],
+      "env": [
+        "FOX_SUBDOMAIN",
+        "FOX_TOKEN"
+      ],
+      "guide": "填写 Zendesk 子域名和有工单读取权限的 OAuth 令牌。"
+    }
+  },
+  {
+    "id": "intercom",
+    "name": "Intercom",
+    "description": "读取客户对话和联系人。",
+    "category": "设计与经营",
+    "source": "https://developers.intercom.com/docs/references/rest-api/api.intercom.io/",
+    "setup": {
+      "url": "https://mcp.intercom.com/mcp",
+      "oauth": true
+    }
+  },
+  {
+    "id": "typeform",
+    "name": "Typeform",
+    "description": "读取问卷、表单和已授权的回复。",
+    "category": "设计与经营",
+    "source": "https://www.typeform.com/developers/",
+    "setup": {
+      "url": "https://api.typeform.com/mcp",
+      "oauth": true
+    }
+  },
+  {
+    "id": "minimax-media",
+    "name": "MiniMax 媒体工具",
+    "description": "调用语音合成和图像、视频生成服务。",
+    "category": "设计与经营",
+    "source": "https://github.com/MiniMax-AI/MiniMax-MCP",
+    "setup": {
+      "program": "uvx",
+      "args": [
+        "--from",
+        "minimax-mcp==0.0.20",
+        "minimax-mcp"
+      ],
+      "env": [
+        "MINIMAX_API_KEY",
+        "MINIMAX_API_HOST"
+      ]
+    }
+  },
+  {
+    "id": "supabase",
+    "name": "Supabase",
+    "description": "查询项目和数据库结构。",
+    "category": "数据与检索",
+    "source": "https://supabase.com/docs/guides/ai-tools/mcp",
+    "setup": {
+      "url": "https://mcp.supabase.com/mcp",
+      "oauth": true
+    }
+  },
+  {
+    "id": "airtable",
+    "name": "Airtable",
+    "description": "检索数据表和记录，按权限更新内容。",
+    "category": "数据与检索",
+    "source": "https://support.airtable.com/articles/9897799762-using-the-airtable-mcp-server",
+    "setup": {
+      "url": "https://mcp.airtable.com/mcp",
+      "oauth": true
+    }
+  },
+  {
+    "id": "postgres",
+    "name": "PostgreSQL",
+    "description": "检查数据库结构，执行获授权的查询。",
+    "category": "数据与检索",
+    "source": "https://github.com/crystaldba/postgres-mcp",
+    "setup": {
+      "program": "uvx",
+      "args": [
+        "--from",
+        "postgres-mcp==0.3.0",
+        "postgres-mcp",
+        "--access-mode=restricted"
+      ],
+      "env": [
+        "DATABASE_URI"
+      ]
+    }
+  },
+  {
+    "id": "redis",
+    "name": "Redis",
+    "description": "检查键并读取 Redis 数据。",
+    "category": "数据与检索",
+    "source": "https://github.com/redis/mcp-redis",
+    "setup": {
+      "program": "uvx",
+      "args": [
+        "--from",
+        "redis-mcp-server==0.5.1",
+        "redis-mcp-server"
+      ],
+      "env": [
+        "REDIS_URL"
+      ]
+    }
+  },
+  {
+    "id": "mongodb",
+    "name": "MongoDB",
+    "description": "检查集合、索引和文档。",
+    "category": "数据与检索",
+    "source": "https://github.com/mongodb-js/mongodb-mcp-server",
+    "setup": {
+      "program": "npx",
+      "args": [
+        "-y",
+        "mongodb-mcp-server@3.4.0",
+        "--readOnly"
+      ],
+      "env": [
+        "MDB_MCP_CONNECTION_STRING"
+      ]
+    }
+  },
+  {
+    "id": "clickhouse",
+    "name": "ClickHouse",
+    "description": "检查表并执行分析查询。",
+    "category": "数据与检索",
+    "source": "https://github.com/ClickHouse/mcp-clickhouse",
+    "setup": {
+      "program": "uvx",
+      "args": [
+        "--from",
+        "mcp-clickhouse==0.7.0",
+        "mcp-clickhouse"
+      ],
+      "env": [
+        "CLICKHOUSE_HOST",
+        "CLICKHOUSE_USER",
+        "CLICKHOUSE_PASSWORD"
+      ]
+    }
+  },
+  {
+    "id": "elastic",
+    "name": "Elasticsearch",
+    "description": "查询索引和文档数据。",
+    "category": "数据与检索",
+    "source": "https://github.com/elastic/mcp-server-elasticsearch",
+    "setup": {
+      "customEndpoint": true,
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "optionalToken": true
+    }
+  },
+  {
+    "id": "grafana",
+    "name": "Grafana",
+    "description": "查找看板、告警和监控数据。",
+    "category": "数据与检索",
+    "source": "https://github.com/grafana/mcp-grafana",
+    "setup": {
+      "program": "mcp-grafana",
+      "args": [],
+      "env": [
+        "GRAFANA_URL",
+        "GRAFANA_SERVICE_ACCOUNT_TOKEN"
+      ]
+    }
+  },
+  {
+    "id": "bigquery",
+    "name": "BigQuery",
+    "description": "检查数据集与表，运行分析查询。",
+    "category": "数据与检索",
+    "source": "https://docs.cloud.google.com/mcp/supported-products",
+    "setup": {
+      "url": "https://bigquery.googleapis.com/mcp",
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "oauth": true,
+      "registration": "GOOGLE"
+    }
+  },
+  {
+    "id": "snowflake",
+    "name": "Snowflake",
+    "description": "通过 Cortex 工具查询企业数据。",
+    "category": "数据与检索",
+    "source": "https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-agents-mcp",
+    "setup": {
+      "customEndpoint": true,
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "optionalToken": true
+    }
+  },
+  {
+    "id": "databricks",
+    "name": "Databricks",
+    "description": "查询工作区表、向量索引与 Genie。",
+    "category": "数据与检索",
+    "source": "https://docs.databricks.com/aws/en/agents/mcp-tools/built-in-mcp-services",
+    "setup": {
+      "customEndpoint": true,
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "optionalToken": true
+    }
+  },
+  {
+    "id": "openalex",
+    "name": "OpenAlex",
+    "description": "查询论文、作者和研究机构。",
+    "category": "数据与检索",
+    "source": "https://github.com/TencentCloud/Octop/blob/main/src/octop/infra/connectors/catalog.json",
+    "setup": {
+      "url": "https://mcp.openalex.org/mcp",
+      "oauth": true
+    }
+  },
+  {
+    "id": "tavily",
+    "name": "Tavily",
+    "description": "搜索网页并提取正文。",
+    "category": "数据与检索",
+    "source": "https://github.com/tavily-ai/tavily-mcp",
+    "setup": {
+      "url": "https://mcp.tavily.com/mcp/",
+      "oauth": true
+    }
+  },
+  {
+    "id": "brave",
+    "name": "Brave Search",
+    "description": "搜索网页、新闻与本地信息。",
+    "category": "数据与检索",
+    "source": "https://github.com/brave/brave-search-mcp-server",
+    "setup": {
+      "program": "npx",
+      "args": [
+        "-y",
+        "@brave/brave-search-mcp-server@2.2.0"
+      ],
+      "env": [
+        "BRAVE_API_KEY"
+      ]
+    }
+  },
+  {
+    "id": "firecrawl",
+    "name": "Firecrawl",
+    "description": "提取网页正文和结构化数据。",
+    "category": "数据与检索",
+    "source": "https://github.com/firecrawl/firecrawl-mcp-server",
+    "setup": {
+      "url": "https://mcp.firecrawl.dev/v2/mcp-oauth",
+      "oauth": true
+    }
+  },
+  {
+    "id": "zai-search",
+    "name": "智谱网页搜索",
+    "description": "通过 Web Search Prime 搜索网页。",
+    "category": "数据与检索",
+    "source": "https://zcode.z.ai/cn/docs/mcp-services",
+    "setup": {
+      "url": "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp",
+      "secretHeader": "Authorization",
+      "bearer": true
+    }
+  },
+  {
+    "id": "zai-reader",
+    "name": "智谱网页读取",
+    "description": "提取网页正文和结构。",
+    "category": "数据与检索",
+    "source": "https://zcode.z.ai/cn/docs/mcp-services",
+    "setup": {
+      "url": "https://open.bigmodel.cn/api/mcp/web_reader/mcp",
+      "secretHeader": "Authorization",
+      "bearer": true
+    }
+  },
+  {
+    "id": "minimax-plan",
+    "name": "MiniMax Coding Plan MCP",
+    "description": "提供网页搜索和图片理解工具。",
+    "category": "数据与检索",
+    "source": "https://github.com/MiniMax-AI/MiniMax-Coding-Plan-MCP",
+    "setup": {
+      "program": "uvx",
+      "args": [
+        "--from",
+        "minimax-coding-plan-mcp==0.0.5",
+        "minimax-coding-plan-mcp"
+      ],
+      "env": [
+        "MINIMAX_API_KEY",
+        "MINIMAX_API_HOST"
+      ]
+    }
+  },
+  {
+    "id": "fetch",
+    "name": "Fetch",
+    "description": "将网页正文转为可读内容。",
+    "category": "数据与检索",
+    "source": "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch",
+    "setup": {
+      "program": "uvx",
+      "args": [
+        "--from",
+        "mcp-server-fetch==2026.11.18",
+        "mcp-server-fetch"
+      ],
+      "env": []
+    }
+  },
+  {
+    "id": "amap",
+    "name": "高德地图",
+    "description": "查询地点、天气和出行路线。",
+    "category": "数据与检索",
+    "source": "https://lbs.amap.com/api/mcp-server/",
+    "setup": {
+      "program": "npx",
+      "args": [
+        "-y",
+        "@amap/amap-maps-mcp-server@0.0.8"
+      ],
+      "env": [
+        "AMAP_MAPS_API_KEY"
+      ]
+    }
+  },
+  {
+    "id": "baidu-maps",
+    "name": "百度地图",
+    "description": "查询地点、地理编码和出行路线。",
+    "category": "数据与检索",
+    "source": "https://github.com/baidu-maps/mcp/blob/main/README_zh.md",
+    "setup": {
+      "program": "uv",
+      "args": [
+        "run",
+        "--script",
+        "{fox-connector-adapter}",
+        "baidu-maps"
+      ],
+      "env": [
+        "FOX_API_KEY"
+      ]
+    }
+  },
+  {
+    "id": "didi",
+    "name": "滴滴出行",
+    "description": "查询平台开放的出行工具。",
+    "category": "数据与检索",
+    "source": "https://github.com/TencentCloud/Octop/blob/main/src/octop/infra/connectors/catalog.json",
+    "setup": {
+      "url": "https://mcp.didichuxing.com/mcp-servers",
+      "queryKey": "key"
+    }
+  },
+  {
+    "id": "fliggy",
+    "name": "飞猪",
+    "description": "查询机票、酒店和景点。",
+    "category": "数据与检索",
+    "source": "https://flyai.open.fliggy.com/docs/quickstart",
+    "setup": {
+      "program": "uv",
+      "args": [
+        "run",
+        "--script",
+        "{fox-connector-adapter}",
+        "fliggy"
+      ],
+      "env": [
+        "FOX_FLYAI_ENTRY"
+      ],
+      "guide": "需安装飞猪官方 flyai CLI 并在 CLI 中配置 API Key。填写 CLI 程序或 JavaScript 入口的绝对路径。"
+    }
+  },
+  {
+    "id": "ctrip",
+    "name": "携程问道",
+    "description": "查询酒店、机票和行程信息。",
+    "category": "数据与检索",
+    "source": "https://github.com/TencentCloud/Octop/blob/main/src/octop/infra/connectors/catalog.json",
+    "setup": {
+      "program": "uv",
+      "args": [
+        "run",
+        "--script",
+        "{fox-connector-adapter}",
+        "ctrip"
+      ],
+      "env": [
+        "FOX_API_KEY"
+      ]
+    }
+  },
+  {
+    "id": "meituan",
+    "name": "美团旅行",
+    "description": "查询酒店、交通和景点信息。",
+    "category": "数据与检索",
+    "source": "https://github.com/TencentCloud/Octop/blob/main/src/octop/infra/connectors/catalog.json",
+    "setup": {
+      "program": "uv",
+      "args": [
+        "run",
+        "--script",
+        "{fox-connector-adapter}",
+        "meituan"
+      ],
+      "env": [
+        "FOX_API_KEY"
+      ]
+    }
+  },
+  {
+    "id": "tencent-news",
+    "name": "腾讯新闻",
+    "description": "搜索新闻和跟踪主题。",
+    "category": "数据与检索",
+    "source": "https://github.com/TencentCloud/Octop/blob/main/src/octop/infra/connectors/catalog.json",
+    "setup": {
+      "program": "uv",
+      "args": [
+        "run",
+        "--script",
+        "{fox-connector-adapter}",
+        "tencent-news"
+      ],
+      "env": [
+        "FOX_API_KEY"
+      ]
+    }
+  },
+  {
+    "id": "weread",
+    "name": "微信读书",
+    "description": "同步书架和阅读笔记。",
+    "category": "数据与检索",
+    "source": "https://github.com/TencentCloud/Octop/blob/main/src/octop/infra/connectors/catalog.json",
+    "setup": {
+      "program": "uv",
+      "args": [
+        "run",
+        "--script",
+        "{fox-connector-adapter}",
+        "weread"
+      ],
+      "env": [
+        "FOX_API_KEY"
+      ]
+    }
+  },
+  {
+    "id": "qqmusic",
+    "name": "QQ 音乐",
+    "description": "查询歌曲、榜单和歌单。",
+    "category": "数据与检索",
+    "source": "https://github.com/TencentCloud/Octop/blob/main/src/octop/infra/connectors/catalog.json",
+    "setup": {
+      "program": "uv",
+      "args": [
+        "run",
+        "--script",
+        "{fox-connector-adapter}",
+        "qqmusic"
+      ],
+      "env": [
+        "FOX_API_KEY"
+      ]
+    }
+  },
+  {
+    "id": "qcc",
+    "name": "企查查",
+    "description": "查询企业信息、经营数据与知识产权。",
+    "category": "数据与检索",
+    "source": "https://github.com/TencentCloud/Octop/blob/main/src/octop/infra/connectors/catalog.json",
+    "setup": {
+      "url": "https://agent.qcc.com/mcp/company/stream",
+      "oauth": true,
+      "secretHeader": "Authorization",
+      "bearer": true
+    }
+  },
+  {
+    "id": "composio",
+    "name": "Composio",
+    "description": "通过工具包接入多个应用和其授权流程。",
+    "category": "集成平台",
+    "source": "https://github.com/ComposioHQ/composio",
+    "setup": {
+      "customEndpoint": true,
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "optionalToken": true
+    }
+  },
+  {
+    "id": "nango",
+    "name": "Nango",
+    "description": "管理外部 API 的授权与同步。",
+    "category": "集成平台",
+    "source": "https://github.com/NangoHQ/nango",
+    "setup": {
+      "customEndpoint": true,
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "optionalToken": true
+    }
+  },
+  {
+    "id": "pipedream",
+    "name": "Pipedream",
+    "description": "参考应用组件和现成动作。",
+    "category": "集成平台",
+    "source": "https://github.com/PipedreamHQ/pipedream",
+    "setup": {
+      "customEndpoint": true,
+      "secretHeader": "Authorization",
+      "bearer": true,
+      "optionalToken": true
+    }
+  }
+]

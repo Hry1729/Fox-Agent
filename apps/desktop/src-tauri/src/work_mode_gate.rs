@@ -102,10 +102,16 @@ const EXPLICIT_GOAL_PREFIXES: &[&str] = &[
 
 static EXPLICIT_NAMED_GOAL_REQUEST: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r#"^(?:请(?:帮我)?|帮我)?\s*(?:在\s*fox\s*的目标功能中\s*)?创建并跟踪\s*(?:“[^”\r\n]+”|「[^」\r\n]+」|"[^"\r\n]+")\s*(?:这个|这一|这项)目标(?:$|[\s，。、：；！？,.!:;?])"#,
+        r#"(?i)^(?:请(?:帮我)?|帮我)?\s*(?P<fox>在\s*fox\s*的目标功能中\s*)?创建并跟踪\s*(?P<title>“[^”\r\n]+”|「[^」\r\n]+」|"[^"\r\n]+")\s*(?:这个|这一|这项)目标(?:$|[\s，。、：；！？,.!:;?])"#,
     )
     .expect("valid explicit named goal request pattern")
 });
+
+pub fn is_explicit_fox_goal_request(request: &str) -> bool {
+    let request = request.trim();
+    request.split_whitespace().next() == Some("/目标")
+        || EXPLICIT_NAMED_GOAL_REQUEST.captures(request).is_some_and(|captures| captures.name("fox").is_some())
+}
 
 pub fn evaluate(input: WorkModeGateInput<'_>) -> GateEvaluation {
     let normalized = input.request.trim().to_lowercase();
@@ -398,6 +404,9 @@ fn contains_any(value: &str, phrases: &[&str]) -> bool {
 
 fn goal_title(request: &str) -> String {
     let clean = request.trim();
+    if let Some(name) = EXPLICIT_NAMED_GOAL_REQUEST.captures(clean).and_then(|captures| captures.name("title")) {
+        return name.as_str().trim_matches(['“', '”', '「', '」', '"']).to_owned();
+    }
     let mut title = clean.chars().take(80).collect::<String>();
     if clean.chars().count() > 80 {
         title.push('…');
@@ -413,6 +422,15 @@ fn goal_title(request: &str) -> String {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn external_goal_tracking_requires_fox_intent() {
+        assert!(is_explicit_fox_goal_request("/目标 整理资料包"));
+        assert!(is_explicit_fox_goal_request("请在 Fox 的目标功能中创建并跟踪“整理资料包”这个目标。"));
+        assert!(!is_explicit_fox_goal_request("创建并跟踪“整理资料包”这个目标。"));
+        assert!(!is_explicit_fox_goal_request("/goal 整理资料包"));
+        assert!(!is_explicit_fox_goal_request("先拟一个计划再执行"));
+    }
 
     fn setup() -> (Database, std::path::PathBuf, String) {
         let path = std::env::temp_dir().join(format!("fox-work-mode-gate-{}.db", Uuid::new_v4()));

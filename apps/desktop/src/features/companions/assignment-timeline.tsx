@@ -28,11 +28,11 @@ export function CompanionCommunicationProvider({ conversationId, oldestMessageAt
       if (message.role === 'user' || !fox.contactChat) return [{ id: message.id, createdAt: message.createdAt.getTime(), runId: source?.runId }]
       if (!source) return []
       const run = source.runId ?? source.id
-      return visibleContactReplies(source, fox.eventsByRun.get(run) ?? [], fox.contactBubblesByRun?.get(run), fox.contactKernelPreviewsByRun?.get(run))
+      return visibleContactReplies(source, fox.eventsByRun.get(run) ?? [], fox.contactBubblesByRun?.get(run))
         .map(reply => ({ ...reply, runId: source.runId }))
     })
     return groupCompanionCommunications(state.records, anchors, conversationId ?? '', contacts?.current?.id, oldestMessageAt)
-  }, [messages, state.records, conversationId, contacts?.current?.id, oldestMessageAt, fox.contactChat, fox.eventsByRun, fox.contactBubblesByRun, fox.contactKernelPreviewsByRun])
+  }, [messages, state.records, conversationId, contacts?.current?.id, oldestMessageAt, fox.contactChat, fox.eventsByRun, fox.contactBubblesByRun])
   return <CommunicationContext.Provider value={{ groups, state, conversationId, user: { displayName: profile.name, avatarRef: profile.avatar } }}>{children}</CommunicationContext.Provider>
 }
 

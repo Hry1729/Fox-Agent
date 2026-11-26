@@ -1,5 +1,6 @@
 import { normalizeAssistantMarkdown } from '../../conversations/model/assistant-presentation'
 import { conversationRunIsActive } from '../../conversations/model/kernel-snapshot'
+import { runtimeQuestionHistory } from '../../conversations/model/pending-interactions'
 import { deriveRunTerminalStates, type RunFailure } from '../../conversations/model/run-failure'
 import type { ArtifactRecord, AttachmentRecord, ConversationDetail, ConversationMessage, RunEventRecord, RunRecord } from '../../conversations/model/types'
 import { splitAssistantContent } from '../timeline/fox-assistant-content'
@@ -56,6 +57,8 @@ export interface FoxThreadMessage {
   isActiveRun: boolean
   /** Cached conversion key: changes exactly when visible data changes. */
   revision: string
+  /** Run events observed in the same snapshot as this reply's text. */
+  lastEventSeq?: number
   content: FoxThreadPart[]
   attachments: FoxAttachment[]
   /** Failure facts for the message's run, when it ended abnormally. */
@@ -71,6 +74,7 @@ export interface FoxThreadInput {
   pendingMessage?: ConversationMessage | null
   streamingText?: string
   enabled?: boolean
+  contactChat?: boolean
 }
 
 /** Cache entry: reuses object identity for messages whose key has not changed. */
@@ -124,7 +128,11 @@ export function deriveFoxThreadMessages(input: FoxThreadInput, cache: FoxThreadC
   const attachmentsByMessage = groupAttachments(detail.attachments)
   const artifactsByRun = groupArtifacts(detail.artifacts)
   const messages: FoxThreadMessage[] = []
-  const projectedMessages = groupAssistantContinuations(detail.messages.filter(message => message.role === 'user' || message.role === 'assistant'), latestRunAssistantId(detail.messages, activeRunId ?? undefined), streamingText)
+  const questionAnswers = input.contactChat ? new Set(runtimeQuestionHistory(detail)
+    .filter(question => question.status === 'answered').map(question => question.answerMessageId)) : null
+  const projectedMessages = groupAssistantContinuations(detail.messages.filter(message => (message.role === 'assistant'
+    && (!input.contactChat || (message.status !== 'streaming' && !message.kernelPreview)))
+    || (message.role === 'user' && !questionAnswers?.has(message.id))), latestRunAssistantId(detail.messages, activeRunId ?? undefined), streamingText)
   for (const message of projectedMessages) {
     if (message.role !== 'user' && message.role !== 'assistant') continue
     messages.push(toFoxThreadMessage({ message, detail, runTerminalStates, attachmentsByMessage, artifactsByRun, activeRunId, cache }))
@@ -264,6 +272,7 @@ function toFoxThreadMessage(args: {
     status: message.status,
     isActiveRun,
     revision: key,
+    lastEventSeq: version,
     content: parts,
     attachments,
     failure,
@@ -343,6 +352,7 @@ function syntheticAssistantMessage(
     status,
     isActiveRun,
     revision: key,
+    lastEventSeq: version,
     content: parts,
     attachments: [],
     failure,

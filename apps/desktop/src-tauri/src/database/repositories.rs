@@ -327,6 +327,14 @@ const AGENT_RECORD_COLUMNS: &str =
      system_prompt, icon, category, opening_suggestions_json, is_builtin, package_version, \
      package_manifest_json, package_source, package_id, package_hash";
 
+fn workspace_tool_names() -> Vec<&'static str> {
+    fox_engine_protocol::TOOL_CONTRACTS
+        .iter()
+        .map(|(name, ..)| *name)
+        .filter(|name| !name.starts_with("companion_") && !name.starts_with("note_") && *name != "memory_write")
+        .collect()
+}
+
 fn builtin_agent_manifest(system_prompt: &str) -> Value {
     json!({
         "version": "1.0.0",
@@ -334,7 +342,7 @@ fn builtin_agent_manifest(system_prompt: &str) -> Value {
         "skills": [],
         "knowledge": [],
         "mcpServers": [],
-        "allowedTools": ["read", "ls", "find", "grep", "read_attachment", "attachment_compute", "compute_job_start", "compute_job_status", "compute_job_cancel", "compute_job_result", "read_tool_result", "skill_load", "present_files", "write_file", "edit_file", "run_command", "web_search", "web_read", "http_request", "system_info", "sqlite_read", "structured_data", "git_read", "test_run", "code_check", "format_code", "tabular_data", "child_agent_list", "child_run_start", "child_run_collect", "child_run_cancel", "memory_search", "memory_propose", "list_knowledge_bases", "search_knowledge", "read_knowledge_document", "query_knowledge_graph", "list_mcp_tools", "call_mcp_tool", "work_snapshot_get", "goal_propose", "goal_complete", "task_create_many", "task_update", "task_attempt_start", "task_attempt_finish", "task_repair_start", "task_repair_escalate_start", "task_evidence_add", "task_evidence_validate", "plan_revision_create", "review_finding_add", "review_finding_resolve", "acceptance_submit", "workflow_snapshot_get", "workflow_start", "workflow_stage_start", "workflow_stage_complete", "workflow_stage_fail", "workflow_cancel"]
+        "allowedTools": workspace_tool_names()
     })
 }
 
@@ -1781,64 +1789,9 @@ impl Database {
         object
             .entry("mcpServers".to_owned())
             .or_insert_with(|| json!([]));
-        object.entry("allowedTools".to_owned()).or_insert_with(|| {
-            json!([
-                "read",
-                "ls",
-                "find",
-                "grep",
-                "read_attachment",
-                "read_tool_result",
-                "skill_load",
-                "write_file",
-                "edit_file",
-                "run_command",
-                "web_search",
-                "web_read",
-                "http_request",
-                "system_info",
-                "sqlite_read",
-                "structured_data",
-                "git_read",
-                "test_run",
-                "code_check",
-                "format_code",
-                "tabular_data",
-                "child_agent_list",
-                "child_run_start",
-                "child_run_collect",
-                "child_run_cancel",
-                "memory_search",
-                "memory_propose",
-                "list_knowledge_bases",
-                "search_knowledge",
-                "read_knowledge_document",
-                "query_knowledge_graph",
-                "list_mcp_tools",
-                "call_mcp_tool",
-                "work_snapshot_get",
-                "goal_propose",
-                "goal_complete",
-                "task_create_many",
-                "task_update",
-                "task_attempt_start",
-                "task_attempt_finish",
-                "task_repair_start",
-                "task_repair_escalate_start",
-                "task_evidence_add",
-                "task_evidence_validate",
-                "plan_revision_create",
-                "review_finding_add",
-                "review_finding_resolve",
-                "acceptance_submit",
-                "workflow_snapshot_get",
-                "workflow_start",
-                "workflow_stage_start",
-                "workflow_stage_complete",
-                "workflow_stage_fail",
-                "workflow_cancel"
-            ])
-        });
+        object
+            .entry("allowedTools".to_owned())
+            .or_insert_with(|| json!(workspace_tool_names()));
         let enabled_skills = object
             .get("skills")
             .and_then(Value::as_array)
@@ -5759,14 +5712,18 @@ impl Database {
                        SELECT 1
                        FROM tool_calls t JOIN runs r ON r.id = t.run_id
                        WHERE t.id = approvals.tool_call_id
-                         AND t.status = 'pending'
-                         AND r.status = 'running'
+                         AND (
+                             (t.status = 'pending' AND r.status = 'running')
+                             OR (?5 AND t.status = 'interrupted' AND r.status = 'interrupted'
+                                 AND json_extract(approvals.request_json, '$.interruptedByRestart') = 1)
+                         )
                    )",
                 params![
                     approval_id,
                     if approved { "approved" } else { "denied" },
                     decision_json,
-                    now
+                    now,
+                    !approved,
                 ],
             )?;
             if updated == 0 {
@@ -8824,6 +8781,27 @@ fn end_pending_approvals_for_interrupted_run(
     now: i64,
 ) -> rusqlite::Result<usize> {
     match approval_cancel_reason_for_interruption(code) {
+        Some("app_restarted") => {
+            // The stopped backend cannot receive the tool result. Retain only
+            // ungranted Host MCP requests for review, with denial as the sole decision.
+            transaction.execute(
+                "UPDATE approvals
+                 SET request_json = json_set(request_json,
+                     '$.interruptedByRestart', json('true'),
+                     '$.availableDecisions', json('[\"deny\"]'))
+                 WHERE status = 'pending' AND decision_json IS NULL
+                   AND json_extract(request_json, '$.tool') = 'call_mcp_tool'
+                   AND tool_call_id IN (
+                       SELECT t.id FROM tool_calls t
+                       JOIN runs r ON r.id = t.run_id
+                       JOIN conversations c ON c.id = r.conversation_id
+                       WHERE t.run_id = ?1 AND t.tool_name = 'call_mcp_tool'
+                         AND t.status = 'interrupted' AND c.agent_backend <> 'fox'
+                   )",
+                [run_id],
+            )?;
+            cancel_pending_approvals_for_run(transaction, run_id, "app_restarted", now)
+        }
         Some(reason) => cancel_pending_approvals_for_run(transaction, run_id, reason, now),
         None => expire_pending_approvals_for_run(transaction, run_id, "run_interrupted", now),
     }
@@ -8840,8 +8818,9 @@ fn cancel_pending_approvals_for_run(
         "UPDATE approvals
          SET status = 'cancelled', decision_json = ?2, resolved_at = ?3
          WHERE status = 'pending'
+           AND NOT (?4 AND COALESCE(json_extract(request_json, '$.interruptedByRestart'), 0) = 1)
            AND tool_call_id IN (SELECT id FROM tool_calls WHERE run_id = ?1)",
-        params![run_id, decision_json, now],
+        params![run_id, decision_json, now, reason == "app_restarted"],
     )
 }
 
@@ -9441,6 +9420,7 @@ fn query_runtime_events_window(
                'run.retrying', 'run.retry.completed',
                'context.compaction.started', 'context.compaction.dispatched', 'context.compaction.completed', 'context.compaction.failed',
                'planner.started', 'planner.completed', 'planner.failed',
+               'plan.updated', 'agent_goal.updated',
                'message.started', 'message.delta', 'reasoning.delta',
                'tool.started', 'tool.updated', 'tool.completed',
                'user.question.requested', 'user.question.responded',

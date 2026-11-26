@@ -1,0 +1,330 @@
+{
+  "collections": {
+    "logos": {
+      "name": "SVG Logos",
+      "author": {
+        "name": "Gil Barbara",
+        "url": "https://github.com/gilbarbara/logos"
+      },
+      "license": {
+        "title": "CC0",
+        "spdx": "CC0-1.0",
+        "url": "https://raw.githubusercontent.com/gilbarbara/logos/master/LICENSE.txt"
+      }
+    },
+    "simple-icons": {
+      "name": "Simple Icons",
+      "author": {
+        "name": "Simple Icons Collaborators",
+        "url": "https://github.com/simple-icons/simple-icons"
+      },
+      "license": {
+        "title": "CC0 1.0",
+        "spdx": "CC0-1.0",
+        "url": "https://github.com/simple-icons/simple-icons/blob/develop/LICENSE.md"
+      }
+    },
+    "vscode-icons": {
+      "name": "VSCode Icons",
+      "author": {
+        "name": "Roberto Huertas",
+        "url": "https://github.com/vscode-icons/vscode-icons"
+      },
+      "license": {
+        "title": "MIT",
+        "spdx": "MIT",
+        "url": "https://github.com/vscode-icons/vscode-icons/blob/master/LICENSE"
+      }
+    }
+  },
+  "marks": {
+    "airtable": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/airtable.svg",
+      "collection": "logos"
+    },
+    "amap": {
+      "file": "amap.jpg",
+      "source": "https://apps.apple.com/us/app/amap-global/id461703208?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/47/36/74/4736744e-e536-3313-1981-d3879684d2a9/AppIcon-0-0-1x_U007epad-0-1-0-85-220.png/100x100bb.jpg"
+    },
+    "asana": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/asana-icon.svg",
+      "collection": "logos"
+    },
+    "aws": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/aws.svg",
+      "collection": "logos"
+    },
+    "azure": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/azure-icon.svg",
+      "collection": "logos"
+    },
+    "azuredevops": {
+      "source": "https://github.com/simple-icons/simple-icons/blob/develop/icons/azuredevops.svg",
+      "collection": "simple-icons"
+    },
+    "baidu-maps": {
+      "file": "baidu-maps.jpg",
+      "source": "https://apps.apple.com/us/app/%E7%99%BE%E5%BA%A6%E5%9C%B0%E5%9B%BE-%E8%B7%AF%E7%BA%BF%E8%A7%84%E5%88%92-%E5%87%BA%E8%A1%8C%E5%BF%85%E5%A4%87/id452186370?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/50/72/63/50726368-4e0c-8d0e-5e01-99fe5e189736/appIconLiquid-0-0-1x_U007epad-0-1-0-0-sRGB-85-220.png/100x100bb.jpg"
+    },
+    "bigquery": {
+      "source": "https://github.com/simple-icons/simple-icons/blob/develop/icons/googlebigquery.svg",
+      "collection": "simple-icons"
+    },
+    "calendly": {
+      "source": "https://github.com/simple-icons/simple-icons/blob/develop/icons/calendly.svg",
+      "collection": "simple-icons"
+    },
+    "composio": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/composio-icon.svg",
+      "collection": "logos"
+    },
+    "context7": {
+      "source": "https://github.com/vscode-icons/vscode-icons/blob/master/icons/file_type_context7.svg",
+      "collection": "vscode-icons"
+    },
+    "ctrip": {
+      "file": "ctrip.jpg",
+      "source": "https://apps.apple.com/us/app/%E6%90%BA%E7%A8%8B%E6%97%85%E8%A1%8C-%E8%AE%A2%E9%85%92%E5%BA%97%E6%9C%BA%E7%A5%A8%E7%81%AB%E8%BD%A6%E7%A5%A8/id379395415?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/d0/b0/51/d0b05172-fe05-4868-3e9b-616519565eca/AppIcon-0-0-1x_U007emarketing-0-5-0-85-220.png/100x100bb.jpg"
+    },
+    "databricks": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/databricks-icon.svg",
+      "collection": "logos"
+    },
+    "dida": {
+      "file": "dida.jpg",
+      "source": "https://apps.apple.com/us/app/ticktick-to-do-list-calendar/id626144601?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/7e/b3/8b/7eb38b09-24c2-c4df-99cc-5f9f0b3c28e0/AppIcon-0-0-1x_U007epad-0-0-0-1-0-0-85-220.png/100x100bb.jpg"
+    },
+    "didi": {
+      "file": "didi.jpg",
+      "source": "https://apps.apple.com/us/app/didi-china-ride-hailing/id554499054?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/ca/3d/42/ca3d42f0-df90-3b4d-831e-3d4ee671cfc8/AppIcon_default-0-0-1x_U007emarketing-0-6-0-0-85-220.png/100x100bb.jpg"
+    },
+    "dify": {
+      "source": "https://github.com/simple-icons/simple-icons/blob/develop/icons/dify.svg",
+      "collection": "simple-icons"
+    },
+    "dingtalk": {
+      "file": "dingtalk.jpg",
+      "source": "https://apps.apple.com/us/app/dingding-redefine-work-in-ai/id930368978?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/bd/d6/bd/bdd6bd7a-9fde-3a71-61c4-284892779a7c/AppIcon-0-0-1x_U007epad-0-1-0-sRGB-85-220.png/100x100bb.jpg"
+    },
+    "docs": {
+      "file": "docs.png",
+      "source": "https://developers.google.com/workspace/extend",
+      "artwork": "https://www.gstatic.com/images/branding/product/2x/docs_2020q4_48dp.png"
+    },
+    "feishu": {
+      "file": "feishu.jpg",
+      "source": "https://apps.apple.com/cn/app/%E9%A3%9E%E4%B9%A6-%E5%AD%97%E8%8A%82%E8%B7%B3%E5%8A%A8%E6%97%97%E4%B8%8B-ai-%E5%B7%A5%E4%BD%9C%E5%B9%B3%E5%8F%B0/id1401729613?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/e2/1c/de/e21cdec1-825c-6a99-9e81-5c04f1095adc/AppIcon-0-0-1x_U007epad-0-0-0-1-0-0-85-220.png/100x100bb.jpg"
+    },
+    "firecrawl": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/firecrawl-icon.svg",
+      "collection": "logos"
+    },
+    "fliggy": {
+      "file": "fliggy.jpg",
+      "source": "https://www.fliggy.hk/",
+      "artwork": "https://img.alicdn.com/imgextra/i4/O1CN01D8c1Dr1kxYEfeVpFv_!!6000000004750-0-tps-60-55.jpg"
+    },
+    "gitee": {
+      "source": "https://github.com/simple-icons/simple-icons/blob/develop/icons/gitee.svg",
+      "collection": "simple-icons"
+    },
+    "gitlab": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/gitlab-icon.svg",
+      "collection": "logos"
+    },
+    "ima": {
+      "file": "ima.jpg",
+      "source": "https://apps.apple.com/cn/app/ima-%E8%85%BE%E8%AE%AFai%E7%9F%A5%E8%AF%86%E7%AE%A1%E5%AE%B6/id6737188438?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/12/57/45/12574530-ac01-cd34-a0ee-6a1894944ac5/AppIcon-0-0-1x_U007epad-0-1-0-sRGB-85-220.png/100x100bb.jpg"
+    },
+    "intercom": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/intercom-icon.svg",
+      "collection": "logos"
+    },
+    "lexiang": {
+      "file": "lexiang.png",
+      "source": "https://lexiangla.com/version/",
+      "artwork": "https://lexiangla.com/favicon.ico"
+    },
+    "meituan": {
+      "file": "meituan.jpg",
+      "source": "https://apps.apple.com/us/app/meituan-eat-better-live-better/id423084029?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/ae/18/27/ae18274b-f6c4-c32b-aa6a-ba28dd480aff/AppIcon-0-0-1x_U007emarketing-0-0-0-7-0-0-sRGB-85-220.png/100x100bb.jpg"
+    },
+    "minimax-media": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/minimax-icon.svg",
+      "collection": "logos"
+    },
+    "nango": {
+      "file": "nango.png",
+      "source": "https://nango.dev/",
+      "artwork": "https://nango.dev/apple-touch-icon.png"
+    },
+    "netease-mail": {
+      "file": "netease-mail.jpg",
+      "source": "https://apps.apple.com/us/app/mail-master-by-netease/id897003024?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/0d/df/e1/0ddfe14a-61f9-46a5-c847-32667b019ca5/AppIconStore-0-0-1x_U007emarketing-0-8-0-85-220.png/100x100bb.jpg"
+    },
+    "openalex": {
+      "file": "openalex.png",
+      "source": "https://openalex.org/",
+      "artwork": "https://openalex.org/tricon-outlined.png"
+    },
+    "outlook": {
+      "source": "https://github.com/vscode-icons/vscode-icons/blob/master/icons/file_type_outlook.svg",
+      "collection": "vscode-icons"
+    },
+    "pipedream": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/pipedream.svg",
+      "collection": "logos"
+    },
+    "playwright": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/playwright.svg",
+      "collection": "logos"
+    },
+    "postgres": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/postgresql.svg",
+      "collection": "logos"
+    },
+    "qcc": {
+      "file": "qcc.jpg",
+      "source": "https://apps.apple.com/cn/app/%E4%BC%81%E6%9F%A5%E6%9F%A5-%E5%85%A8%E5%9B%BD%E4%BC%81%E4%B8%9A%E4%BF%A1%E7%94%A8%E4%BF%A1%E6%81%AF%E5%B7%A5%E5%95%86%E5%BE%81%E4%BF%A1%E5%95%86%E6%A0%87%E4%B8%93%E5%88%A9%E6%9F%A5%E8%AF%A2/id878075397?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/eb/84/f2/eb84f224-a49d-4df3-0352-86f2cece1492/AppIcon-0-0-1x_U007epad-0-1-0-85-220.png/100x100bb.jpg"
+    },
+    "qq": {
+      "file": "qq.jpg",
+      "source": "https://apps.apple.com/us/app/qq/id444934666?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/e6/7f/b6/e67fb608-d48b-4366-e99f-ade6b3745728/AppIcon-1-0-0-1x_U007epad-0-1-0-sRGB-85-220.png/100x100bb.jpg"
+    },
+    "qq-mail": {
+      "file": "qq-mail.jpg",
+      "source": "https://apps.apple.com/us/app/qq%E9%82%AE%E7%AE%B1/id473225145?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/75/d0/17/75d01722-c88d-bef6-3365-507ceca9ddae/AppIcon-0-0-1x_U007emarketing-0-8-0-sRGB-85-220.png/100x100bb.jpg"
+    },
+    "qqmusic": {
+      "file": "qqmusic.jpg",
+      "source": "https://apps.apple.com/cn/app/qq%E9%9F%B3%E4%B9%90-%E5%90%AC%E6%88%91%E6%83%B3%E5%90%AC/id414603431?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/57/3a/60/573a605b-d554-1738-7fe0-23081e4f8c51/AppIcon-0-0-1x_U007epad-0-1-0-sRGB-85-220.png/100x100bb.jpg"
+    },
+    "redis": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/redis.svg",
+      "collection": "logos"
+    },
+    "sharepoint": {
+      "source": "https://github.com/simple-icons/simple-icons/blob/develop/icons/microsoftsharepoint.svg",
+      "collection": "simple-icons"
+    },
+    "sheets": {
+      "file": "sheets.png",
+      "source": "https://developers.google.com/workspace/extend",
+      "artwork": "https://www.gstatic.com/images/branding/product/2x/sheets_2020q4_48dp.png"
+    },
+    "slides": {
+      "file": "slides.png",
+      "source": "https://developers.google.com/workspace/extend",
+      "artwork": "https://www.gstatic.com/images/branding/product/2x/slides_2020q4_48dp.png"
+    },
+    "snowflake": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/snowflake-icon.svg",
+      "collection": "logos"
+    },
+    "tapd": {
+      "file": "tapd.png",
+      "source": "https://www.tapd.cn/official/program",
+      "artwork": "https://www.tapd.cn/favicon_new.png"
+    },
+    "tavily": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/tavily.svg",
+      "collection": "logos"
+    },
+    "tencent-docs": {
+      "file": "tencent-docs.jpg",
+      "source": "https://apps.apple.com/cn/app/%E8%85%BE%E8%AE%AF%E6%96%87%E6%A1%A3/id1370780836?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/2e/56/ee/2e56eefc-4ab1-9af0-8a41-96456f5a9f22/AppIcon-0-0-1x_U007epad-0-11-0-0-sRGB-GLES2_U002c0-85-220.png/100x100bb.jpg"
+    },
+    "tencent-meeting": {
+      "file": "tencent-meeting.jpg",
+      "source": "https://apps.apple.com/cn/app/%E8%85%BE%E8%AE%AF%E4%BC%9A%E8%AE%AE-%E5%A4%9A%E4%BA%BA%E5%AE%9E%E6%97%B6%E8%A7%86%E9%A2%91%E4%BC%9A%E8%AE%AE%E8%BD%AF%E4%BB%B6/id1484048379?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/b0/e4/df/b0e4df4e-e732-9e1c-7adf-69249498e8e8/AppIcon-Release-0-0-1x_U007epad-0-9-0-85-220.png/100x100bb.jpg"
+    },
+    "tencent-news": {
+      "file": "tencent-news.jpg",
+      "source": "https://apps.apple.com/cn/app/%E8%85%BE%E8%AE%AF%E6%96%B0%E9%97%BB/id399363156?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/c5/67/d9/c567d9f3-365e-e46b-e293-4056d13a6b94/AppIconNew-0-0-1x_U007epad-0-9-0-85-220.png/100x100bb.jpg"
+    },
+    "todoist": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/todoist-icon.svg",
+      "collection": "logos"
+    },
+    "trello": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/trello.svg",
+      "collection": "logos"
+    },
+    "typeform": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/typeform-icon.svg",
+      "collection": "logos"
+    },
+    "wecom": {
+      "file": "wecom.jpg",
+      "source": "https://apps.apple.com/us/app/wecom-work-communication-tools/id1087897068?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/6d/b3/92/6db39257-641a-95f3-bf53-c6bce6361d77/AppIcon-0-0-1x_U007epad-0-1-0-sRGB-85-220.png/100x100bb.jpg"
+    },
+    "weiyun": {
+      "file": "weiyun.png",
+      "source": "https://www.weiyun.com/download.html",
+      "artwork": "https://img.weiyun.com/vipstyle/nr/box/img/favicon.ico?max_age=31536000"
+    },
+    "weknora": {
+      "file": "weknora.png",
+      "source": "https://weknora.weixin.qq.com/",
+      "artwork": "https://weknora.weixin.qq.com/docs/favicon.ico"
+    },
+    "weread": {
+      "file": "weread.jpg",
+      "source": "https://apps.apple.com/us/app/%E5%BE%AE%E4%BF%A1%E8%AF%BB%E4%B9%A6/id952059546?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/03/8e/f6/038ef6ec-c9cc-47db-a0f3-f29e4394cf8f/AppIcon-0-0-1x_U007epad-0-11-0-85-220.png/100x100bb.jpg"
+    },
+    "whatsapp": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/whatsapp-icon.svg",
+      "collection": "logos"
+    },
+    "wps": {
+      "file": "wps.jpg",
+      "source": "https://apps.apple.com/cn/app/wps-office-%E6%99%BA%E8%83%BDai%E5%8A%9E%E5%85%AC%E5%8A%A9%E6%89%8B/id599852710?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/27/02/53/270253ee-3ad5-4c97-0eda-375f7aedd5ef/AppIcon-0-0-1x_U007epad-0-1-0-sRGB-0-0-85-220.png/100x100bb.jpg"
+    },
+    "youdao": {
+      "file": "youdao.jpg",
+      "source": "https://apps.apple.com/cn/app/%E6%9C%89%E9%81%93%E4%BA%91%E7%AC%94%E8%AE%B0-%E7%AC%94%E8%AE%B0%E6%89%AB%E6%8F%8F%E6%95%88%E7%8E%87%E5%8A%9E%E5%85%AC/id450748070?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/4f/2a/67/4f2a67bf-8985-74ca-ecbb-15f160d0be9d/AppIcon-0-1x_U007emarketing-0-11-0-85-220-0.png/100x100bb.jpg"
+    },
+    "yuanbao": {
+      "file": "yuanbao.jpg",
+      "source": "https://apps.apple.com/cn/app/%E5%85%83%E5%AE%9D-%E8%85%BE%E8%AE%AF%E5%85%A8%E8%83%BDai%E5%8A%A9%E6%89%8B/id6480446430?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/1b/66/b5/1b66b5c4-914b-b711-6df5-7d7d61f472bb/AppIcon-0-0-1x_U007epad-0-1-0-sRGB-85-220.png/100x100bb.jpg"
+    },
+    "yuque": {
+      "file": "yuque.jpg",
+      "source": "https://apps.apple.com/cn/app/%E8%AF%AD%E9%9B%80-%E6%96%87%E6%A1%A3%E7%AC%94%E8%AE%B0%E5%92%8C%E7%9F%A5%E8%AF%86%E5%BA%93%E5%B7%A5%E5%85%B7/id1601937668?uo=4",
+      "artwork": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/ad/37/98/ad3798bf-ca68-42af-fe7d-0aa5ddc58d72/AppIcon-0-0-1x_U007emarketing-0-8-0-0-85-220.png/100x100bb.jpg"
+    },
+    "zai-search": {
+      "source": "https://github.com/lobehub/lobe-icons/blob/master/packages/static-svg/icons/zai.svg"
+    },
+    "zendesk": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/zendesk-icon.svg",
+      "collection": "logos"
+    },
+    "zoom": {
+      "source": "https://github.com/gilbarbara/logos/blob/main/logos/zoom-icon.svg",
+      "collection": "logos"
+    }
+  }
+}

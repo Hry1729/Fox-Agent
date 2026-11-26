@@ -1,8 +1,59 @@
-.fox-run-status-bar {
+.fox-run-activity-stack {
   width: var(--fox-chat-column-width);
-  max-width: none;
   margin: 0 auto;
   flex-shrink: 0;
+  min-width: 0;
+  display: grid;
+  gap: var(--fox-space-s);
+}
+
+.fox-live-plan {
+  box-sizing: border-box;
+  display: grid;
+  gap: var(--fox-space-xs);
+  margin: 0;
+  padding: var(--fox-space-s) var(--fox-space-m);
+  max-block-size: min(18rem, 36vh);
+  overflow: auto;
+  list-style: none;
+  border: 1px solid var(--fox-border);
+  border-radius: var(--fox-radius-card);
+  background: var(--fox-card);
+  color: var(--fox-muted);
+  font-size: var(--fox-type-control);
+  line-height: 1.5;
+}
+
+.fox-live-plan-step {
+  display: grid;
+  grid-template-columns: 1.25em minmax(0, 1fr);
+  align-items: start;
+  gap: var(--fox-space-s);
+  padding-block: var(--fox-space-micro);
+  overflow-wrap: anywhere;
+}
+
+.fox-live-plan-marker {
+  display: grid;
+  place-items: center;
+  width: 1.25em;
+  height: 1.25em;
+  margin-block-start: .125em;
+  border-radius: var(--fox-radius-pill);
+}
+
+.fox-live-plan-marker > svg { width: .9em; height: .9em; }
+.fox-live-plan-step[data-status='in_progress'] { color: var(--fox-text); font-weight: 500; }
+.fox-live-plan-step[data-status='completed'] .fox-live-plan-marker { background: var(--fox-send-surface); color: var(--fox-send-ink); }
+.fox-live-plan-step:is([data-status='blocked'], [data-status='interrupted']) .fox-live-plan-marker { color: var(--fox-warning-text); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .fox-live-plan-step[data-status='in_progress'] svg { animation: fox-live-plan-spin 1.2s linear infinite; }
+}
+
+@keyframes fox-live-plan-spin { to { transform: rotate(1turn); } }
+
+.fox-run-status-bar {
   min-height: 40px;
   display: flex;
   align-items: center;

@@ -117,13 +117,15 @@ fn ensure_granted_inner(
         return Err("咨询仅允许读取信息，不能修改文件、派活或执行其他操作。".into());
     }
     if crate::companion_workspace::is_companion_peer_tool(tool) {
-        if tool == "companion_coordinate" && scope.is_none() {
+        let (child, backend): (bool, String) = connection.query_row(
+            "SELECT r.run_kind='child' OR r.parent_run_id IS NOT NULL, c.agent_backend
+             FROM runs r JOIN conversations c ON c.id=r.conversation_id WHERE r.id=?1",
+            [run_id], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|error| error.to_string())?;
+        let external = matches!(backend.as_str(), "pi" | "codex" | "deepseek");
+        if tool == "companion_coordinate" && scope.is_none() && !external {
             return Err("伙伴转派仅在伙伴会话中可用。当前任务可使用子 Agent 或专家。".into());
         }
-        let child: bool = connection.query_row(
-            "SELECT run_kind='child' OR parent_run_id IS NOT NULL FROM runs WHERE id=?1",
-            [run_id], |row| row.get(0),
-        ).map_err(|error| error.to_string())?;
         if child || scope.as_ref().is_some_and(|scope| scope.is_child) {
             return Err("临时子 Agent 不能发起伙伴协作。".into());
         }
@@ -875,6 +877,25 @@ mod tests {
             .ensure_companion_tool_granted(&companion, "companion_coordinate", None)
             .unwrap();
         assert!(f.db.companion_assignments_list(&ordinary.id).unwrap().is_empty());
+        drop(f.db);
+        std::fs::remove_dir_all(f.root).unwrap();
+    }
+
+    #[test]
+    fn external_companion_dispatch_can_claim_an_approved_call() {
+        let f = Fixture::new();
+        let conversation = f.db
+            .create_conversation_with_backend(f.db.default_agent_id(), None, None, Some("ask"), "pi")
+            .unwrap();
+        let run = f.db.create_run(&conversation.id, "请伙伴核对项目资料", None).unwrap().run.id;
+        f.db.apply_runtime_event(&run, 1, &json!({"type":"run.started"})).unwrap();
+        let input = json!({"targets": [f.companion], "instructions": "核对项目资料"});
+        let call = f.db
+            .create_host_tool_call(&run, "coordinate", "companion_coordinate", &input, "pending", true)
+            .unwrap();
+        let approval = f.db.create_approval(&call.id, "派活", &input).unwrap();
+        f.db.resolve_approval(&approval.id, ApprovalDecision::AllowOnce).unwrap();
+        assert!(f.db.claim_approved_tool_call(&run, "coordinate").unwrap());
         drop(f.db);
         std::fs::remove_dir_all(f.root).unwrap();
     }

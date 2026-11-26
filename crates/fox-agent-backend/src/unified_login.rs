@@ -256,7 +256,7 @@ pub fn codex_unsupported_reason(login: &UnifiedLogin) -> Option<String> {
 
 /// The files to generate for `backend` from `login` (content includes the
 /// key where the backend reads it from a file), or why not.
-fn generated_files(backend: AgentBackend, login: &UnifiedLogin) -> Result<(Vec<(&'static str, String)>, Vec<(String, Secret)>), String> {
+fn generated_files(backend: AgentBackend, home: &Path, login: &UnifiedLogin) -> Result<(Vec<(&'static str, String)>, Vec<(String, Secret)>), String> {
     if !valid_secret(login.api_key.expose()) {
         return Err("模型服务默认 provider 的 key 含有空白或引号等字符，Fox 不自动写入".to_owned());
     }
@@ -278,7 +278,9 @@ fn generated_files(backend: AgentBackend, login: &UnifiedLogin) -> Result<(Vec<(
                     }
                 }
             });
-            let settings = serde_json::json!({ "defaultProvider": FOX_PROVIDER_ID, "defaultModel": login.model });
+            let mut settings = pi_settings(home).as_ref().map(crate::onboarding::pi_preferences).unwrap_or_default();
+            settings.insert("defaultProvider".into(), serde_json::json!(FOX_PROVIDER_ID));
+            settings.insert("defaultModel".into(), serde_json::json!(login.model));
             Ok((
                 vec![
                     (PI_MODELS, serde_json::to_string_pretty(&models).expect("json") + "\n"),
@@ -313,6 +315,10 @@ fn generated_files(backend: AgentBackend, login: &UnifiedLogin) -> Result<(Vec<(
     }
 }
 
+fn pi_settings(home: &Path) -> Option<serde_json::Value> {
+    read_small(&rel(home, PI_SETTINGS)).and_then(|text| serde_json::from_str(&text).ok())
+}
+
 fn report(backend: AgentBackend, login: &UnifiedLogin, outcome: Outcome) -> UnifiedReport {
     UnifiedReport { backend: backend.as_str().to_owned(), outcome, provider: login.provider_name.clone(), files: Vec::new(), user_files: Vec::new(), reason: None, env: Vec::new() }
 }
@@ -343,7 +349,7 @@ fn run(backend: AgentBackend, home: &Path, login: &UnifiedLogin, host_login: boo
         out.files = candidates.iter().filter(|relative| is_managed(home, &ledger, relative)).map(|relative| (*relative).to_owned()).collect();
         return Ok(out);
     }
-    let (files, env) = match generated_files(backend, login) {
+    let (files, env) = match generated_files(backend, home, login) {
         Ok(generated) => generated,
         Err(reason) => {
             let mut out = report(backend, login, Outcome::Unsupported);
@@ -375,7 +381,10 @@ fn run(backend: AgentBackend, home: &Path, login: &UnifiedLogin, host_login: boo
     let mut written = false;
     let mut managed = Vec::new();
     for (relative, content) in &files {
-        if user_files.iter().any(|file| file == relative) {
+        let preferences_only = *relative == PI_SETTINGS && pi_settings(home).is_some_and(|settings| {
+            settings.is_object() && crate::onboarding::PI_MODEL_SETTINGS.iter().all(|key| settings.get(*key).is_none())
+        });
+        if user_files.iter().any(|file| file == relative) && !preferences_only {
             continue;
         }
         managed.push((*relative).to_owned());
@@ -416,7 +425,15 @@ pub fn remove_managed(backend: AgentBackend, home: &Path) -> Result<Vec<String>,
     let mut removed = Vec::new();
     for relative in managed_candidates(backend) {
         if is_managed(home, &ledger, relative) {
-            std::fs::remove_file(rel(home, relative)).map_err(|error| format!("cannot remove {relative}: {error}"))?;
+            let path = rel(home, relative);
+            let preferences = (*relative == PI_SETTINGS).then(|| pi_settings(home)).flatten()
+                .as_ref().map(crate::onboarding::pi_preferences).unwrap_or_default();
+            if preferences.is_empty() {
+                std::fs::remove_file(&path).map_err(|error| format!("cannot remove {relative}: {error}"))?;
+            } else {
+                write_private(&path, &serde_json::to_vec_pretty(&preferences).expect("JSON"))
+                    .map_err(|error| format!("cannot preserve {relative}: {error}"))?;
+            }
             ledger.remove(*relative);
             removed.push((*relative).to_owned());
         } else if ledger.contains_key(*relative) && std::fs::symlink_metadata(rel(home, relative)).is_err() {

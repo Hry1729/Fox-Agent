@@ -1,4 +1,7 @@
+import { createContext } from 'react'
 import type { ArtifactRecord } from '../conversations/model/types'
+
+export const FinalArtifactContext = createContext<ArtifactRecord[]>([])
 
 export function displayArtifactPath(path: string) {
   return path.replace(/^[\\/]{2}\?[\\/]UNC[\\/]/iu, '\\\\').replace(/^[\\/]{2}\?[\\/]/u, '')
@@ -28,14 +31,41 @@ export function resolveFinalArtifactReference(href: string, artifacts: ArtifactR
     const path = normalizedArtifactPath(id)
     if (!path || path.split('/').some(part => part === '..')) return undefined
     const matches = artifacts.filter(artifact => {
-      if (!path.includes('/')) return artifact.displayName === path
       const storagePath = normalizedArtifactPath(artifact.storagePath)
-      return storagePath === path || (!/^(?:\/|[a-z]:)/iu.test(path) && storagePath.endsWith(`/${path}`))
+      const windows = /^(?:[a-z]:\/|\/\/)/iu.test(storagePath)
+      const target = windows ? path.toLowerCase() : path
+      const stored = windows ? storagePath.toLowerCase() : storagePath
+      if (!path.includes('/')) return (windows ? artifact.displayName.toLowerCase() : artifact.displayName) === target
+      return stored === target || (!/^(?:\/|[a-z]:)/iu.test(path) && stored.endsWith(`/${target}`))
     })
     if (matches.length === 1) return matches[0]
+    // Older replies guessed the output directory. Recover only an unambiguous
+    // file from the records supplied by this reply.
+    if (!matches.length && /^(?:output|fox)\//iu.test(path)) {
+      const name = path.split('/').at(-1)
+      const candidates = artifacts.filter(artifact => artifact.status === 'ready' && artifact.displayName === name)
+      if (candidates.length === 1) return candidates[0]
+    }
   } catch {
     return undefined
   }
+}
+
+export function normalizeFinalArtifactLinks(text: string, artifacts: ArtifactRecord[]) {
+  if (!artifacts.length || !text.includes('](')) return text
+  return text.replace(/^```[^\n]*\n[\s\S]*?^```[^\n]*$|`[^`\n]+`|\[([^\]\n]+)\]\((<[^>\n]+>|[^\s)]+)\)/gm, (match, label?: string, target?: string) => {
+    if (!label || !target) return match
+    const href = target.replace(/^<|>$/gu, '')
+    if (/^[a-z][a-z\d+.-]*:/iu.test(href) && !/^(?:file:\/\/|[a-z]:[\\/])/iu.test(href)) return match
+    try {
+      const path = decodeURIComponent(href).replace(/^file:\/\/\/+(?=[a-z]:)/iu, '').replace(/^file:\/\/(?=\/)/iu, '')
+      const artifact = resolveFinalArtifactReference(href.startsWith('#fox-artifact=')
+        ? href : `#fox-artifact=${encodeURIComponent(path)}`, artifacts)
+      return artifact ? `[${label}](#fox-artifact=${encodeURIComponent(artifact.id)})` : match
+    } catch {
+      return match
+    }
+  })
 }
 
 /** Selection affects presentation only; Host classification and delivery facts stay intact. */

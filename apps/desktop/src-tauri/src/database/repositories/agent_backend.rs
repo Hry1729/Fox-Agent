@@ -6,7 +6,8 @@
 //! mapping, misroute refusal, the `FOX_EXTERNAL_BACKENDS` switch) is
 //! `fox_agent_backend::host_routing`'s job, so this file holds no policy.
 use super::Database;
-use rusqlite::OptionalExtension;
+use rusqlite::{params, OptionalExtension};
+use serde_json::Value;
 
 /// The frozen backend of the conversation a run or approval belongs to, plus
 /// the Kernel `engine_id` for the audit line (`None` when the run has no
@@ -254,6 +255,41 @@ impl Database {
         })
     }
 
+    pub(crate) fn external_work_evidence(&self, conversation_id: &str, run_id: &str) -> Result<Vec<Value>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id, tool_name, runtime_tool_call_id, input_json
+                 FROM tool_calls WHERE conversation_id = ?1 AND run_id = ?2 AND status = 'completed'
+                 ORDER BY started_at DESC, rowid DESC LIMIT 80",
+            )?;
+            let calls = statement.query_map(params![conversation_id, run_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?, row.get::<_, String>(3)?))
+            })?;
+            let mut sources = Vec::new();
+            for call in calls {
+                let (id, name, native_id, input) = call?;
+                let input: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
+                let reported_name = input["tool"].as_str().or_else(|| input["title"].as_str()).unwrap_or(&name);
+                let work_tools = &fox_agent_backend::fox_mcp::WORK_TOOL_NAMES;
+                if name == "agent_permission" || work_tools.contains(&name.as_str()) || work_tools.contains(&reported_name) {
+                    continue;
+                }
+                let subject = ["path", "command", "title"].iter()
+                    .find_map(|key| input[*key].as_str())
+                    .map(|text| text.chars().take(160).collect::<String>());
+                sources.push(serde_json::json!({
+                    "refKind": "tool_call", "evidenceType": "tool_call", "refId": id,
+                    "toolName": name, "nativeToolCallId": native_id, "subject": subject
+                }));
+                if sources.len() == 20 {
+                    break;
+                }
+            }
+            Ok(sources)
+        })
+    }
+
     /// Runs of external-backend conversations that a previous Fox process
     /// left non-terminal. Their backend process died with that Fox.
     pub(crate) fn external_runs_left_active(&self) -> Result<Vec<String>, String> {
@@ -271,8 +307,8 @@ impl Database {
     /// Startup step owned by the external Host: every run of an external
     /// conversation that a previous Fox process left non-terminal is
     /// interrupted with `agent_backend_host_restarted` (its backend died with
-    /// that process). `mark_run_interrupted` ends the run's pending approvals
-    /// as `cancelled` / `app_restarted`. The generic
+    /// that process). Pending Host MCP approvals remain reviewable after the
+    /// interruption. Session-bound native approvals are cancelled. The generic
     /// `repair_interrupted_runs` skips these runs so this code is what they get.
     /// Returns the interrupted run ids; a run that fails to transition is
     /// logged and skipped, never aborting startup.
@@ -744,6 +780,23 @@ mod tests {
                 &serde_json::json!({ "availableDecisions": ["allow_once", "deny"] }),
             )
             .expect("approval");
+        let (connector, _) = database
+            .create_host_tool_call_once(
+                &pi_run,
+                "connector-restart-gen",
+                "call_mcp_tool",
+                &serde_json::json!({"serverId": "test", "tool": "publish"}),
+                "pending",
+                true,
+            )
+            .expect("connector tool call");
+        let connector_request = serde_json::json!({
+            "tool": "call_mcp_tool", "serverId": "test", "mcpTool": "publish",
+            "arguments": {"message": "hello"}, "availableDecisions": ["allow_once", "deny"]
+        });
+        let connector_approval = database
+            .create_approval(&connector.id, "publish", &connector_request)
+            .expect("connector approval");
         let fox = database
             .create_conversation(database.default_agent_id(), Some("fox"), None, None)
             .expect("fox conversation");
@@ -802,6 +855,19 @@ mod tests {
             .resolve_approval(&approval.id, crate::database::ApprovalDecision::AllowOnce)
             .unwrap()
             .is_none());
+        assert_eq!(approval_status(&database, &connector_approval.id), "pending");
+        assert!(database
+            .resolve_approval(&connector_approval.id, crate::database::ApprovalDecision::AllowOnce)
+            .unwrap()
+            .is_none());
+        let denied = database
+            .resolve_approval(&connector_approval.id, crate::database::ApprovalDecision::Deny)
+            .expect("deny the interrupted connector request")
+            .expect("connector approval");
+        assert_eq!(denied.status, "denied");
+        assert_eq!(denied.request["availableDecisions"], serde_json::json!(["deny"]));
+        assert_eq!(denied.request["interruptedByRestart"], true);
+        assert_eq!(denied.request["arguments"], connector_request["arguments"]);
         // Idempotent on a second startup.
         assert!(database
             .interrupt_external_runs_left_active("Fox 已重启")

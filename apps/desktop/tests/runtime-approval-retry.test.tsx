@@ -25,6 +25,46 @@ test('a rejected resolver re-enables the exact ticket buttons for retry', async 
   } finally {await act(async()=>root.unmount())}
 })
 
+test('long command details stay collapsed until opened without hiding the approval buttons', async () => {
+  const cwd = 'D:/project'
+  const command = Array.from({ length: 60 }, (_, index) => `Write-Output 'line ${index + 1}'`).join('\n')
+  const approval = {
+    id: 'long-command:v1', status: 'pending', toolName: 'run_command',
+    request: { input: { cwd, command }, availableDecisions: ['deny', 'allow_once'] },
+  } as ApprovalRecord
+  const calls: unknown[] = []
+  const host = document.createElement('div')
+  const root = createRoot(host)
+  try {
+    await act(async () => root.render(<RuntimeApprovalPrompt approval={approval} onResolve={async (id, decision) => { calls.push([id, decision]); return true }} />))
+    const preview = host.querySelector('.aui-approval-operation')!
+    const trigger = [...host.querySelectorAll('button')].find(button => button.textContent === '查看详情')!
+    const commandRegion = host.querySelector('[aria-label="完整命令"]')!
+    const panel = commandRegion.closest<HTMLElement>('.fox-approval-command-panel')!
+    const allowButton = host.querySelector<HTMLButtonElement>('[data-slot="approval-card-allow-once"]')!
+    const denyButton = host.querySelector<HTMLButtonElement>('[data-slot="approval-card-deny"]')!
+
+    expect(preview.firstChild?.textContent).toBe(`${cwd}\nWrite-Output 'line 1'…`)
+    expect(preview.contains(panel)).toBe(true)
+    expect([...allowButton.parentElement!.children]).toEqual([trigger, denyButton, allowButton])
+    expect(trigger.getAttribute('aria-controls')).toBe(panel.id)
+    expect(trigger.getAttribute('aria-expanded')).toBe('false')
+    expect(panel.hidden).toBe(true)
+    expect(panel.contains(allowButton)).toBe(false)
+
+    await act(async () => trigger.click())
+    expect(trigger.getAttribute('aria-expanded')).toBe('true')
+    expect(trigger.textContent).toBe('收起详情')
+    expect(panel.hidden).toBe(false)
+    expect(commandRegion.textContent).toBe(`${cwd}\n${command}`)
+
+    await act(async () => trigger.click())
+    expect(panel.hidden).toBe(true)
+    await act(async () => allowButton.click())
+    expect(calls).toEqual([['long-command:v1', 'allow_once']])
+  } finally { await act(async () => root.unmount()) }
+})
+
 test('a path-only permission uses the declared decision intersection and submits the original ticket', async () => {
   const calls: unknown[]=[]
   const approval={id:'kernel-approval:read:v9',status:'pending',toolName:'read_file',requestedAction:'读取文件',request:{authority:'kernel',category:'tool_execution',input:{path:'D:/project/数据.csv'},availableDecisions:['deny','allow_conversation']}} as ApprovalRecord

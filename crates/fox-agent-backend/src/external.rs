@@ -659,6 +659,7 @@ struct Turn {
     prompt_error: Option<String>,
     /// JSON-RPC `data` of the failed prompt (unredacted until the diagnostic).
     prompt_error_data: Option<String>,
+    codex_system_error: bool,
     /// L-1: [`SessionState::revoke_epoch`] when this turn was reserved. A
     /// later revocation moves the session's epoch; a turn frozen with full
     /// access then never starts a full-access process.
@@ -677,13 +678,13 @@ struct Turn {
 }
 
 impl Turn {
-    fn new(run_id: &str, native_mode: &str, revoke_epoch: u64) -> Self {
+    fn new(run_id: &str, native_mode: &str, revoke_epoch: u64, backend: AgentBackend) -> Self {
         Self {
             last_activity: std::time::Instant::now(),
             active_tools: std::collections::HashSet::new(),
             run_id: run_id.to_owned(),
             native_mode: native_mode.to_owned(),
-            projector: AcpProjector::new(),
+            projector: AcpProjector::for_backend(backend),
             arbiter: TerminalArbiter::default(),
             approvals: HashMap::new(),
             cancel_requested: false,
@@ -691,6 +692,7 @@ impl Turn {
             prompt_fence_seen: false,
             prompt_error: None,
             prompt_error_data: None,
+            codex_system_error: false,
             revoke_epoch,
             awaiting_user: false,
             process_baseline: None,
@@ -789,6 +791,11 @@ struct Inner<S: ExternalSink, L: ExternalLauncher> {
 /// The Host's external backend runtime. Cheap to clone.
 pub struct ExternalRuntime<S: ExternalSink, L: ExternalLauncher> {
     inner: Arc<Inner<S, L>>,
+}
+
+fn supports_steering(backend: AgentBackend, response: &Value) -> bool {
+    (backend == AgentBackend::Codex || backend == AgentBackend::Pi && crate::backends::pi::native_rpc(response))
+        && crate::backends::codex::steer_supported(response)
 }
 
 impl<S: ExternalSink, L: ExternalLauncher> Clone for ExternalRuntime<S, L> {
@@ -892,7 +899,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 return Err(StartError::TurnBusy);
             }
             let epoch = state.revoke_epoch;
-            state.turn = Some(Turn::new(&request.run_id, native_mode, epoch));
+            state.turn = Some(Turn::new(&request.run_id, native_mode, epoch, backend));
         }
         let started = json!({ "type": "run.started", "agentBackend": backend.as_str() });
         if let Err(error) = self.inner.sink.emit(&request.run_id, &session.conversation_id, started) {
@@ -1203,13 +1210,14 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         };
         let capabilities = crate::capability_view::backend_declaration(session.backend, &initialize_response, pi_launch);
         let can_load = capabilities.session.load;
+        let should_resume = !can_load && capabilities.session.resume;
         // Reopen: the id this connection already had (crash / restart within
         // this Fox), else the recorded one.
         let previous = lock(&session.state).native_session_id.clone().or_else(|| request.stored_native_session.clone());
         let cwd = request.launch.project_root.clone();
         let session_open_timeout = self.inner.session_open_timeout;
         let opened = tokio::time::timeout(session_open_timeout, async { match previous {
-            Some(id) if can_load => {
+            Some(id) if can_load || should_resume => {
                 // Everything from sending session/load until its reply (the
                 // replayed history, as session/update) is dropped here and
                 // never projected. The reply is followed in the event stream
@@ -1218,7 +1226,13 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 // two channels interleave. A permission request in that
                 // window is refused (no turn can own it).
                 let load_id = id.clone();
-                let load = connection.load_session(&load_id, cwd.clone());
+                let load = async {
+                    if should_resume {
+                        connection.resume_session(&load_id, cwd.clone()).await
+                    } else {
+                        connection.load_session(&load_id, cwd.clone()).await
+                    }
+                };
                 tokio::pin!(load);
                 let mut dropped = 0usize;
                 let mut fenced = false;
@@ -1254,7 +1268,8 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                     );
                 }
                 match loaded {
-                    Ok(()) => (Ok(id), "load", None),
+                    Ok(()) => (Ok(id), if should_resume { "resume" } else { "load" }, None),
+                    Err(error) if error.starts_with(crate::acp::FOX_TOOLS_SKIPPED) => (Err(error), "fox_tools_skipped", None),
                     Err(error) => (connection.new_session(cwd.clone()).await, "new_after_load_failed", Some(error)),
                 }
             }
@@ -1591,6 +1606,13 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                     return;
                 };
                 let run_id = turn.run_id.clone();
+                if session.backend == AgentBackend::Codex {
+                    match update.pointer("/_meta/codex/threadStatus/type").and_then(Value::as_str) {
+                        Some("systemError") => turn.codex_system_error = true,
+                        Some("active") => turn.codex_system_error = false,
+                        _ => {}
+                    }
+                }
                 let events = turn.projector.project(&update);
                 turn.last_activity = std::time::Instant::now();
                 for event in &events {
@@ -1673,10 +1695,18 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                 }
             }
             BackendEvent::TurnEnded { stop_reason, .. } => {
-                let Some(run_id) = state.turn.as_ref().filter(|turn| turn.prompt_sent).map(|turn| turn.run_id.clone()) else {
+                let Some(turn) = state.turn.as_ref().filter(|turn| turn.prompt_sent) else {
                     return;
                 };
-                let terminal = crate::projection::terminal_for_stop_reason(&stop_reason);
+                let run_id = turn.run_id.clone();
+                let terminal = if turn.codex_system_error && !turn.cancel_requested && stop_reason == "end_turn" {
+                    TurnTerminal::Failed {
+                        code: "agent_backend_codex_system_error".into(),
+                        message: "Codex 未能完成本轮请求。请查看本轮回复中的错误信息。".into(),
+                    }
+                } else {
+                    crate::projection::terminal_for_stop_reason(&stop_reason)
+                };
                 self.finish_turn(session, &mut state, &run_id, terminal, json!({ "stopReason": stop_reason }));
             }
             BackendEvent::TurnFailed { error, data, .. } => {
@@ -2160,6 +2190,12 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
     /// running turn ends `interrupted`, the process tree is stopped and
     /// confirmed. `None` when the conversation had no session.
     pub async fn close_conversation(&self, conversation_id: &str, reason: &str) -> Option<TerminateReport> {
+        self.close_session(conversation_id, reason, "agent_backend_session_closed").await
+    }
+
+    async fn close_session(
+        &self, conversation_id: &str, reason: &str, error_code: &str,
+    ) -> Option<TerminateReport> {
         let session = lock(&self.inner.sessions).remove(conversation_id)?;
         {
             let mut state = lock(&session.state);
@@ -2169,7 +2205,7 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
                     &session,
                     &mut state,
                     &run_id,
-                    TurnTerminal::Interrupted { code: "agent_backend_session_closed".into(), message: format!("外部后端会话已关闭：{reason}") },
+                    TurnTerminal::Interrupted { code: error_code.into(), message: format!("外部后端会话已关闭：{reason}") },
                     json!({ "outcome": "unknown" }),
                 );
             }
@@ -2183,7 +2219,10 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         let ids: Vec<String> = lock(&self.inner.sessions).keys().cloned().collect();
         let closes = ids.into_iter().map(|id| {
             let runtime = self.clone();
-            async move { runtime.close_conversation(&id, "Fox 退出").await.map(|report| (id, report)) }
+            async move {
+                runtime.close_session(&id, "Fox 退出", "runtime.application_exit").await
+                    .map(|report| (id, report))
+            }
         });
         futures::future::join_all(closes).await.into_iter().flatten().collect()
     }
@@ -2211,6 +2250,44 @@ impl<S: ExternalSink, L: ExternalLauncher> ExternalRuntime<S, L> {
         let session = lock(&self.inner.sessions).get(conversation_id).cloned()?;
         let state = lock(&session.state);
         state.turn.as_ref().map(|turn| turn.run_id.clone())
+    }
+
+    pub fn steerable_run(&self, conversation_id: &str) -> Option<String> {
+        let session = lock(&self.inner.sessions).get(conversation_id).cloned()?;
+        let state = lock(&session.state);
+        let turn = state.turn.as_ref()?;
+        (state.initialize_response.as_ref().is_some_and(|response| supports_steering(session.backend, response))
+            && turn.prompt_fence_seen
+            && !turn.cancel_requested)
+            .then(|| turn.run_id.clone())
+    }
+
+    pub async fn steer(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        text: String,
+    ) -> Result<(), String> {
+        let session = lock(&self.inner.sessions)
+            .get(conversation_id)
+            .cloned()
+            .ok_or("外部 Agent 会话已结束。")?;
+        let (connection, native_id) = {
+            let state = lock(&session.state);
+            state.turn.as_ref().filter(|turn| {
+                turn.run_id == run_id && turn.prompt_fence_seen && !turn.cancel_requested
+            })
+                .ok_or("外部 Agent 的原回合已结束。")?;
+            if !state.initialize_response.as_ref().is_some_and(|response| supports_steering(session.backend, response))
+            {
+                return Err("该外部 Agent 不支持执行中追加指令。".into());
+            }
+            (
+                state.connection.clone().ok_or("ACP 连接已关闭。")?,
+                state.native_session_id.clone().ok_or("ACP 会话尚未建立。")?,
+            )
+        };
+        connection.steer(native_id, text, session.backend == AgentBackend::Pi).await
     }
 
     /// What is known about a conversation's backend session.

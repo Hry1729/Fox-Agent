@@ -52,13 +52,15 @@ describe('同级侧栏卡片（缺口 A）', () => {
 
   test('右侧栏并进 content-card，联系人卡仍是兄弟卡片', () => {
     const cardOpen = flatWorkbench.indexOf('<div className="fox-content-card">')
-    const surfaceClosed = flatWorkbench.indexOf('</section> </div>')
-    const panelRender = flatWorkbench.indexOf('{showConversationRightSidebar && !rightSidebarCollapsed && <>')
+    const notificationHost = flatWorkbench.indexOf('ref={setNotificationHost}', cardOpen)
+    const surfaceClosed = flatWorkbench.indexOf('/>} </div>', notificationHost)
+    const panelRender = flatWorkbench.indexOf('{showConversationRightSidebar && (!rightSidebarCollapsed || openRightTabs.includes', surfaceClosed)
     const sideCardRender = flatWorkbench.indexOf('{contactCardOpen && contact && <ContactSideCard')
     expect(cardOpen).toBeGreaterThan(-1)
-    expect(surfaceClosed).toBeGreaterThan(cardOpen)
+    expect(notificationHost).toBeGreaterThan(cardOpen)
+    expect(surfaceClosed).toBeGreaterThan(notificationHost)
     expect(panelRender).toBeGreaterThan(surfaceClosed)
-    expect(flatWorkbench.slice(surfaceClosed, panelRender).trim()).toBe('</section> </div>')
+    expect(flatWorkbench.slice(surfaceClosed, panelRender).trim()).toBe('/>} </div>')
     expect(sideCardRender).toBeGreaterThan(panelRender)
     expect(flatWorkbench.slice(panelRender, sideCardRender).trim().endsWith('</>} </div>')).toBe(true)
     expect(flatWorkbench.slice(panelRender, panelRender + 220)).toContain('<ResizeDivider')
@@ -131,8 +133,7 @@ describe('同级侧栏卡片（缺口 A）', () => {
       'core:window:allow-is-maximized',
       'core:window:allow-is-fullscreen',
     ]) expect(capabilities.permissions).toContain(permission)
-    expect(tauriConfig.app.windows[0]!.width).toBe(1190)
-    expect(tauriConfig.app.windows[0]!.minWidth).toBe(600)
+    expect(tauriConfig.app.windows[0]).toMatchObject({ width: 1152, height: 768, preventOverflow: true, minWidth: 600 })
     expect(controller).toContain('export const BASE_MIN_WIDTH = 600')
     expect(controller).toContain('export const SIDEBAR_CARD_GAP = 5')
     expect(sideCardSource).toContain('export const CONTACT_SIDE_CARD_WIDTH = 320')

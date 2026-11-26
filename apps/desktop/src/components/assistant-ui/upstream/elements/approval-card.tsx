@@ -1,7 +1,7 @@
 "use client";
 
-import { useId, type ComponentProps, type ReactNode } from "react";
-import { CheckIcon, InfoIcon, Loader2Icon, TerminalIcon, XIcon } from "lucide-react";
+import { useId, useState, type ComponentProps, type ReactNode } from "react";
+import { CheckIcon, ChevronUpIcon, InfoIcon, Loader2Icon, TerminalIcon, XIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { field, ghostButton, inkButton, mono, paper } from "./surfaces";
 import { useReceiptFocus } from "./receipt-focus";
@@ -17,6 +17,7 @@ const receiptText: Record<Exclude<ApprovalState, "request">, string> = {
 export function ApprovalCard({
   state,
   command,
+  commandDetails,
   title,
   subtitle,
   description,
@@ -58,6 +59,7 @@ export function ApprovalCard({
 > & {
   state: ApprovalState;
   command?: string | undefined;
+  commandDetails?: ReactNode;
   title: string;
   subtitle: string;
   description?: string | undefined;
@@ -78,6 +80,8 @@ export function ApprovalCard({
 }) {
   const titleId = useId();
   const descriptionId = useId();
+  const commandDetailsId = useId();
+  const [commandExpanded, setCommandExpanded] = useState(false);
   const { receiptRef, focusHandlers } = useReceiptFocus<HTMLDivElement>(props);
 
   return (
@@ -128,7 +132,12 @@ export function ApprovalCard({
             "aui-approval-operation text-foreground/70 rounded-xl px-3.5 py-2.5 font-mono text-xs",
           )}
         >
-          {command}
+          {!commandExpanded && command}
+          {commandDetails && (
+            <div id={commandDetailsId} hidden={!commandExpanded} className="fox-approval-command-panel font-sans">
+              {commandDetails}
+            </div>
+          )}
         </div>
       ) : null}
 
@@ -152,6 +161,18 @@ export function ApprovalCard({
       {detailsContent}
 
       <div className="fox-confirmation-actions flex min-h-8 flex-wrap items-center justify-end gap-2">
+        {commandDetails && (
+          <button
+            type="button"
+            aria-expanded={commandExpanded}
+            aria-controls={commandDetailsId}
+            onClick={() => setCommandExpanded((expanded) => !expanded)}
+            className={cn(ghostButton, "fox-approval-command-toggle flex h-8 items-center gap-1 px-3.5 text-xs font-medium whitespace-nowrap")}
+          >
+            <ChevronUpIcon aria-hidden="true" />
+            {commandExpanded ? "收起详情" : "查看详情"}
+          </button>
+        )}
         {state === "request" ? (
           <>
             {onDeny && (

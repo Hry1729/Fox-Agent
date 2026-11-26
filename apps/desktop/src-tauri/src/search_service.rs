@@ -18,7 +18,13 @@ pub(crate) enum SearchProvider {
 }
 
 impl SearchProvider {
-    pub(crate) const PLUGINS: [(Self, &'static str, &'static str, &'static str); 4] = [
+    pub(crate) const PLUGINS: [(Self, &'static str, &'static str, &'static str); 5] = [
+        (
+            Self::Auto,
+            "search:auto",
+            "免 Key 搜索",
+            "优先使用 DuckDuckGo，必要时尝试 Yahoo。",
+        ),
         (
             Self::Tavily,
             "search:tavily",

@@ -77,6 +77,18 @@ function highlightBubble(element: HTMLElement, query: string) {
   clearContactSearchHighlight()
   highlightedElement = element
   element.classList.add('is-search-hit')
+  const disclosure = query && element.querySelector<HTMLButtonElement>('.fox-contact-reply-disclosure[aria-expanded="false"]')
+  if (disclosure) {
+    disclosure.click()
+    requestAnimationFrame(() => {
+      if (highlightedElement === element && element.isConnected) scrollAndHighlightText(element, query)
+    })
+    return
+  }
+  scrollAndHighlightText(element, query)
+}
+
+function scrollAndHighlightText(element: HTMLElement, query: string) {
   // Turn anchors use display: contents, so scroll their rendered message instead.
   const scrollTarget = element.classList.contains('fox-turn-anchor') ? element.firstElementChild ?? element : element
   scrollTarget.scrollIntoView({ behavior: 'smooth', block: 'center' })

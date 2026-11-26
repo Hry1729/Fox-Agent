@@ -200,7 +200,9 @@ async fn the_bridge_is_injected_used_and_revoked_for_codex_and_dsh() {
         // 2. tools/list through the relay.
         runtime.start_turn(turn(&conversation, &run("tools"), "tools", backend)).unwrap();
         assert_eq!(sink.terminal(&run("tools")).await["type"], "run.completed");
-        let tools: Vec<String> = serde_json::from_str(&sink.text(&run("tools"))).unwrap();
+        let listed = sink.text(&run("tools"));
+        let tools: Vec<String> = serde_json::from_str(&listed)
+            .unwrap_or_else(|error| panic!("{backend:?} MCP tools/list returned {listed:?}: {error}"));
         assert_eq!(tools, fox_mcp::TOOL_NAMES);
 
         // 3. A tool call reaches the Host bound to this conversation and turn;

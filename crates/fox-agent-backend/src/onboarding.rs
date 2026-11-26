@@ -685,6 +685,15 @@ impl Backup<'_> {
     }
 }
 
+pub(crate) const PI_MODEL_SETTINGS: &[&str] = &["defaultProvider", "defaultModel", "httpProxy"];
+
+pub(crate) fn pi_preferences(settings: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    settings.as_object().into_iter().flatten()
+        .filter(|(key, _)| !PI_MODEL_SETTINGS.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
 pub(crate) fn archive_source(backend: AgentBackend, home: &Path) -> Result<(), String> {
     let stamp = backup_stamp(std::time::SystemTime::now());
     let mut backup = Backup { home, stamp: &stamp, directory: None, items: Vec::new() };
@@ -705,7 +714,19 @@ pub(crate) fn archive_source(backend: AgentBackend, home: &Path) -> Result<(), S
     }
     // 所有副本备份成功后才腾出原路径，真实 HOME 中的配置始终保留。
     for relative in &backup.items {
-        std::fs::remove_file(rel(home, relative)).map_err(|error| format!("无法切换 Agent 配置 {relative}：{error}"))?;
+        let source = rel(home, relative);
+        if backend == AgentBackend::Pi && relative == PI_SETTINGS {
+            let bytes = std::fs::read(&source).map_err(|error| format!("无法读取 Pi 设置：{error}"))?;
+            if let Ok(settings) = serde_json::from_slice(&bytes) {
+                let preferences = pi_preferences(&settings);
+                if !preferences.is_empty() {
+                    let content = serde_json::to_vec_pretty(&preferences).expect("JSON");
+                    write_private(&source, &content).map_err(|error| format!("无法保留 Pi 工具偏好：{error}"))?;
+                    continue;
+                }
+            }
+        }
+        std::fs::remove_file(source).map_err(|error| format!("无法切换 Agent 配置 {relative}：{error}"))?;
     }
     Ok(())
 }

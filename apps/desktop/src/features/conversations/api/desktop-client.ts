@@ -536,6 +536,8 @@ export const desktopClient = {
   setSkillEnabled: (agentId: string, skillId: string, enabled: boolean) =>
     command<SkillRecord[]>('skill_set_enabled', { agentId, skillId, enabled }),
   listMcpServers: () => command<McpServerRecord[]>('mcp_servers_list'),
+  authorizeCatalogConnector: (id: string) => command<McpServerRecord>('connector_authorize', { id }, true),
+  catalogAuthorizationReady: (id: string) => command<boolean>('connector_authorization_ready', { id }, true),
   saveMcpServer: (request: { id?: string; name: string; command: string; args: string[]; transport: McpServerRecord['transport']; endpointUrl?: string; definition?: string; environment?: Record<string, string>; clearEnvironment?: boolean }) =>
     command<McpServerRecord>('mcp_server_save', request),
   testMcpServer: (serverId: string) => command<McpConnectionTest>('mcp_server_test', { serverId }),

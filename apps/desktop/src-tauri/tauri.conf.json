@@ -6,18 +6,20 @@
   "build": {
     "beforeDevCommand": "node ../../scripts/prepare-officecli.mjs && node ../../scripts/start-desktop-dev.mjs",
     "devUrl": "http://127.0.0.1:1421",
-    "beforeBuildCommand": "node ../../scripts/prepare-officecli.mjs && node ../../scripts/prepare-windows-runtime.mjs && pnpm build",
+    "beforeBuildCommand": "node ../../scripts/prepare-connector-auth.mjs && node ../../scripts/prepare-officecli.mjs && node ../../scripts/prepare-windows-runtime.mjs && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
     "windows": [
       {
         "title": "Fox",
-        "width": 1190,
-        "height": 780,
+        "width": 1152,
+        "height": 768,
+        "preventOverflow": true,
         "minWidth": 600,
         "minHeight": 560,
         "decorations": false,
+        "dragDropEnabled": false,
         "resizable": true,
         "center": true,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --enable-features=msEdgeFluentOverlayScrollbar"
@@ -33,6 +35,10 @@
     "targets": "all",
     "resources": {
       "resources/officecli/*": "officecli/",
+      "resources/connectors/stdio.py": "connectors/stdio.py",
+      "../../../services/connector-channels/gateway.py": "connectors/gateway.py",
+      "../../../services/connector-channels/README.md": "connectors/README.md",
+      "resources/connectors/adapters/*": "connectors/adapters/",
       "resources/pdf-renderer/*": "pdf-renderer/",
       "../../../services/agent-runtime/src/fake-runtime.mjs": "agent-runtime/fake-runtime.mjs",
       "../../../services/agent-runtime/src/pi-runtime.mjs": "agent-runtime/pi-runtime.mjs",

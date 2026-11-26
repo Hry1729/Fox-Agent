@@ -217,7 +217,7 @@ function FrozenConversationAgent({ backend }: { backend: AgentBackendId }) {
   )
 }
 
-function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLockedReason = null, initialAttachments, onInitialAttachmentsConsumed, resetKey, draft, setDraft, chatState, centered = false, newConversation, entryFrozen = false, boundAgentBackend = null, dark = false, runtimeControlled = false, runtimeInitializing = false, projectRoot, projectPermissionMode, activeAgent, activeExpert, expertReadOnly = false, expertToolAvailability, agents = [], modelService, runtimeCapabilities, yuxiModels = [], knowledgeBindings = [], questionRequest, goalProgressData, runtimeApprovals = [], approvalsInThread = false, steeringConversationId, steeringActive = false, onProject, onPermissionModeChange, onKnowledge, onAgentChange, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onApprove, onDeny, onAnswer, onResolveApproval, onResolveWorkModeConfirmation, onResolvePlanRevision, onResolveWorkflowGate, onEvidenceClick, onStatusChange, onCancel, sendFailureReason, noticeBackend = null }: { /** Row rendered inside the composer container, directly above the input box (Agent backend bar). */ topSlot?: ReactNode; /** The approval mode selector of an external Agent's conversation (replaces Fox's own). */ approvalControl?: ReactNode; /** Fox / PiNative modes from the Host (`agent_backend_approval_modes`). */ foxApprovalCatalog?: NativePermissionCatalog | null; /** When set, the conversation is read-only: input and send are disabled with this reason. */ inputLockedReason?: string | null; initialAttachments?: ComposerInitialAttachments | null; onInitialAttachmentsConsumed?: (requestId: number) => void; resetKey: number; draft: string; setDraft: Dispatch<SetStateAction<string>>; chatState: ChatState; centered?: boolean; newConversation?: boolean; /** 模型已经回复过的会话：托盘上的项目和 Agent 只展示这个会话自己的值，不能再换。 */ entryFrozen?: boolean; /** 已选中会话自己的 Agent；未选中时仍用草稿里的 Agent。 */ boundAgentBackend?: AgentBackendId | null; dark?: boolean; runtimeControlled?: boolean; runtimeInitializing?: boolean; projectRoot?: string | null; projectPermissionMode?: ComposerAccessMode | null; activeAgent?: AgentRecord | null; activeExpert?: AgentRecord | null; expertReadOnly?: boolean; expertToolAvailability?: ExpertToolAvailability; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; goalProgressData?: GoalProgressData | null; runtimeApprovals?: ApprovalRecord[]; approvalsInThread?: boolean; steeringConversationId?: string; steeringActive?: boolean; onProject?: () => void; onPermissionModeChange?: (permissionMode: ComposerAccessMode, options?: { confirmedFullAccess?: boolean }) => void | Promise<void>; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onViewExpert?: () => void; onChangeExpert?: () => void; onRemoveExpert?: () => void | Promise<void>; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onApprove?: () => void; onDeny?: () => void; onAnswer?: (answer: string) => void; onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>; onResolveWorkModeConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>; onResolvePlanRevision?: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onResolveWorkflowGate?: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => boolean | void | Promise<boolean | void>; /** Why the last send did not start (Host error), read right after onSubmitPrompt returns 'error'. */ sendFailureReason?: () => string | null | undefined; /** 当前草稿或已打开会话的 Agent，用来写「dsh 还没有登录」这种通知标题。 */ noticeBackend?: AgentBackendId | null }) {
+function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLockedReason = null, initialAttachments, onInitialAttachmentsConsumed, onAttachmentFilesChange, resetKey, draft, setDraft, chatState, centered = false, newConversation, entryFrozen = false, boundAgentBackend = null, dark = false, runtimeControlled = false, runtimeInitializing = false, projectRoot, projectPermissionMode, activeAgent, activeExpert, expertReadOnly = false, expertToolAvailability, agents = [], modelService, runtimeCapabilities, yuxiModels = [], knowledgeBindings = [], questionRequest, goalProgressData, runtimeApprovals = [], approvalsInThread = false, steeringConversationId, steeringActive = false, onProject, onPermissionModeChange, onKnowledge, onAgentChange, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onApprove, onDeny, onAnswer, onResolveApproval, onResolveWorkModeConfirmation, onResolvePlanRevision, onResolveWorkflowGate, onEvidenceClick, onStatusChange, onCancel, sendFailureReason, noticeBackend = null }: { /** Row rendered inside the composer container, directly above the input box (Agent backend bar). */ topSlot?: ReactNode; /** The approval mode selector of an external Agent's conversation (replaces Fox's own). */ approvalControl?: ReactNode; /** Fox / PiNative modes from the Host (`agent_backend_approval_modes`). */ foxApprovalCatalog?: NativePermissionCatalog | null; /** When set, the conversation is read-only: input and send are disabled with this reason. */ inputLockedReason?: string | null; initialAttachments?: ComposerInitialAttachments | null; onInitialAttachmentsConsumed?: (requestId: number) => void; onAttachmentFilesChange?: (files: File[]) => void; resetKey: number; draft: string; setDraft: Dispatch<SetStateAction<string>>; chatState: ChatState; centered?: boolean; newConversation?: boolean; /** 模型已经回复过的会话：托盘上的项目和 Agent 只展示这个会话自己的值，不能再换。 */ entryFrozen?: boolean; /** 已选中会话自己的 Agent；未选中时仍用草稿里的 Agent。 */ boundAgentBackend?: AgentBackendId | null; dark?: boolean; runtimeControlled?: boolean; runtimeInitializing?: boolean; projectRoot?: string | null; projectPermissionMode?: ComposerAccessMode | null; activeAgent?: AgentRecord | null; activeExpert?: AgentRecord | null; expertReadOnly?: boolean; expertToolAvailability?: ExpertToolAvailability; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; goalProgressData?: GoalProgressData | null; runtimeApprovals?: ApprovalRecord[]; approvalsInThread?: boolean; steeringConversationId?: string; steeringActive?: boolean; onProject?: () => void; onPermissionModeChange?: (permissionMode: ComposerAccessMode, options?: { confirmedFullAccess?: boolean }) => void | Promise<void>; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onViewExpert?: () => void; onChangeExpert?: () => void; onRemoveExpert?: () => void | Promise<void>; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string, conversationId?: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string, conversationId?: string) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onApprove?: () => void; onDeny?: () => void; onAnswer?: (answer: string) => void; onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>; onResolveWorkModeConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>; onResolvePlanRevision?: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onResolveWorkflowGate?: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => boolean | void | Promise<boolean | void>; /** Why the last send did not start (Host error), read right after onSubmitPrompt returns 'error'. */ sendFailureReason?: () => string | null | undefined; /** 当前草稿或已打开会话的 Agent，用来写「dsh 还没有登录」这种通知标题。 */ noticeBackend?: AgentBackendId | null }) {
   const runtimeContext = useContext(ComposerRuntimeContext)
   const companion = useContacts()
   const entry = useContext(ComposerEntryContext)
@@ -554,6 +554,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
     decisionPending,
     hasActiveQuestion: Boolean(activeQuestionRequest),
   })
+  const externalSteering = boundAgentBackend === 'pi' || boundAgentBackend === 'codex'
 
   const submitDraftToSteering = async (lane: RunSteeringLane) => {
     const content = draft.trim()
@@ -566,7 +567,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
     // Never claim the model acted on it: the Host has only durably accepted it.
     toast.success(
       lane === 'current'
-        ? '已接收：将在当前任务的下一个安全边界交给模型'
+        ? externalSteering ? '已转交给当前任务' : '已接收：将在当前任务的下一个安全边界交给模型'
         : '已排队：保留到下一轮，当前任务不会处理它',
     )
     return true
@@ -614,7 +615,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
       {steering.busy ? <LoaderCircle className="animate-spin" size={13} /> : <CornerDownLeft size={13} />}
       {steeringView.primaryLabel}
     </Button>
-    <Button
+    {!externalSteering && <Button
       type="button"
       size="sm"
       variant="outline"
@@ -626,7 +627,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
     >
       <Clock3 size={13} />
       {steeringView.secondaryLabel}
-    </Button>
+    </Button>}
     <Button
       type="button"
       size="sm"
@@ -730,6 +731,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
           </p>
         )}
         <PromptInput
+          key={resetKey}
           accept={supportsImageInput ? 'image/*,.pdf,.txt,.md,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.tsv' : '.pdf,.txt,.md,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.tsv'}
           multiple
           maxFiles={8}
@@ -756,7 +758,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
             if (steeringMode) return
             const prompt = text.trim() || (files.length ? '请分析这些附件' : '')
             if (!prompt && !activeQuestionRequest) return
-            if (!activeQuestionRequest) flushSync(() => onPromptCommit?.(prompt))
+            if (!activeQuestionRequest) flushSync(() => onPromptCommit?.(prompt, steeringConversationId))
           }}
           onSubmit={async ({ text, files: submittedFiles }) => {
           if (runtimeInitializing) return
@@ -820,7 +822,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
           const runtimeText = selectedSlashCommand ? slashCommandRuntimeText(selectedSlashCommand, prompt) : undefined
           let outcome: Awaited<ReturnType<NonNullable<typeof onSubmitPrompt>>> | undefined
           try {
-            outcome = await onSubmitPrompt?.(prompt, selectedModel, submittedFiles, runtimeText)
+            outcome = await onSubmitPrompt?.(prompt, selectedModel, submittedFiles, runtimeText, steeringConversationId)
           } catch (cause) {
             restoreDraft()
             setStatus('ready')
@@ -857,7 +859,7 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
           className={`fox-prompt-input ${focused ? 'is-focused' : ''}`}
         >
         <ComposerAttachmentCommandBridge openRef={attachmentDialogRef} />
-        <ComposerInitialAttachmentBridge request={initialAttachments} onConsumed={onInitialAttachmentsConsumed} />
+        <ComposerInitialAttachmentBridge request={initialAttachments} onConsumed={onInitialAttachmentsConsumed} onFilesChange={onAttachmentFilesChange} />
         <ComposerAttachmentPreview knowledgeChips={runtimeControlled ? knowledgeChips : []} onKnowledge={openKnowledge} />
         {companion?.privateChat && <ContactQuoteDraft />}
         <PromptInputBody>
@@ -873,11 +875,12 @@ function Composer({ topSlot, approvalControl, foxApprovalCatalog = null, inputLo
                 {!newConversation && !companion?.privateChat && <div className="fox-history-menu-settings">{expertControl}{modelControl}</div>}
               </PromptInputActionMenuContent>
             </PromptInputActionMenu>
-            {approvalControl ?? <FoxApprovalControl catalog={foxApprovalCatalog} value={projectPermissionMode} disabled={!runtimeControlled} onChange={onPermissionModeChange} />}
+            {!companion?.privateChat && (approvalControl ?? <FoxApprovalControl catalog={foxApprovalCatalog} value={projectPermissionMode} disabled={!runtimeControlled} onChange={onPermissionModeChange} />)}
             {selectedSlashCommand && <button type="button" className="fox-command-mode-chip" title={`退出${selectedSlashCommand.modeLabel}模式`} onClick={() => setSelectedSlashCommand(null)}><span className="fox-command-mode-icon">{selectedSlashCommand.icon}</span><span>{selectedSlashCommand.modeLabel}</span><span className="fox-command-mode-close"><X size={10} /></span></button>}
             {newConversation && expertControl}
           </PromptInputTools>
           <div className="fox-composer-submit">
+            {companion?.privateChat && (approvalControl ?? <FoxApprovalControl catalog={foxApprovalCatalog} value={projectPermissionMode} disabled={!runtimeControlled} onChange={onPermissionModeChange} />)}
             {newConversation && modelControl}
             {steeringMode ? steeringControls : sendControls}
           </div>

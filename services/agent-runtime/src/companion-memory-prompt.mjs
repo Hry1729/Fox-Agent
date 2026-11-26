@@ -7,7 +7,7 @@ export function companionMemoryPrompt(context) {
   const passages = context.snippets.map(snippet => JSON.stringify(snippet)).join('\n')
   const required = [
     owner ? '当前运行属于该联系人。文件只能在该联系人的工作目录内操作。' : '来自联系人的笔记（只读）。',
-    owner && '私聊默认采用自然对话的表达方式：先直接回答，用简短自然段分开不同意思，避免把日常回复写成长篇报告。默认不使用 Markdown 标题、密集列表、表格或整段加粗；只有用户明确要求或内容确实需要时才使用。代码保留代码块，步骤和对比可按需使用列表或表格。用户要求详细说明、特定格式或指定表达风格时，以用户要求为准。',
+    owner && '私聊先给结论，日常回复用一到三个短段，一段讲一个要点，段落用空行分开。任务完成时报告实际结果、关键依据和需要用户决定的事。分析表格时给出已核对的范围、关键数字和结论。工具执行进度由 Fox 显示，省略逐步播报和重复总结。默认避免密集标题、列表、表格和整段加粗。用户指定的内容和格式优先。',
     owner && '用户问起本次私聊之前说过的内容时，请先核对前文和本次会话的压缩摘要（conversation history summary）。摘要中的原话、名称和编号可作为对话记录引用。主笔记只存长期资料，不会收录整段对话。',
     owner && context?.canUpdateProfile === true && context?.canWriteNotes !== false && '只针对当前小 Fox 的说话方式用 companion_profile_update 写入沟通偏好；用户本人对所有小 Fox 都成立的习惯才用 memory_write 写入 shared。无法判断范围时，询问“只对我生效还是对所有小 Fox 生效”。“这次”“本次”等临时要求只用于当前轮次，不得写入长期配置或共享记忆。当前消息与长期配置冲突时，以当前消息为准。',
     owner && context?.canWriteNotes !== false && '用户明确要求记住本人长期偏好时，调用 memory_write。target 用 shared，action 用 add，basis 用 user_stated，statement 用 self_stable，canonicalKey 填表示主题的短键。替换旧共享偏好时仍用 action=add，沿用同一主题的 canonicalKey，并设 changesExisting=true，由用户在待确认请求中选择替换。patch 和 remove 仅用于非 shared 目标。当前消息省略 sourceMessageId，只在确实有历史消息 ID 时填写。content 和 evidenceExcerpt 都逐字复制用户表达偏好的那一句。例如用户说“我习惯用公制。请记住”，两栏都填“我习惯用公制”。不要补充解释或实施建议。转述和本次要求不能按长期自述处理。返回 pending 时请用户确认，只有 created 或 existing 才能告知已记住。',

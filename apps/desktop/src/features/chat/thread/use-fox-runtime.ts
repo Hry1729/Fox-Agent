@@ -117,13 +117,15 @@ export function useFoxRuntime(
   const convert = options.stableAssistantTurns ? convertContactThreadMessage : convertFoxThreadMessage
 
   const isRunning = conversation.enabled && runIsActive(detail)
+  const streamingText = isRunning && !options.stableAssistantTurns ? conversation.streamingText : ''
   const messages = useMemo(
     () => deriveFoxThreadMessages({
       detail: conversation.enabled ? detail : null,
       pendingMessage: options.pendingMessage,
-      streamingText: isRunning ? conversation.streamingText : '',
+      streamingText,
+      contactChat: options.stableAssistantTurns,
     }, cacheRef.current),
-    [conversation.enabled, conversation.streamingText, detail, isRunning, options.pendingMessage],
+    [conversation.enabled, streamingText, detail, options.pendingMessage, options.stableAssistantTurns],
   )
 
   const onNew = useStableCallback(async (message: AppendMessage) => {

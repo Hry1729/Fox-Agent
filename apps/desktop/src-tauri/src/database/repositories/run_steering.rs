@@ -155,6 +155,19 @@ impl Database {
         lane: &str,
         now: i64,
     ) -> Result<i64, String> {
+        self.accept_run_steering(run_id, message_id, content, lane, now, false)
+            .map(|(seq, _)| seq)
+    }
+
+    pub(crate) fn enqueue_external_steering(
+        &self, run_id: &str, message_id: &str, content: &str,
+    ) -> Result<(i64, bool), String> {
+        self.accept_run_steering(run_id, message_id, content, STEERING_LANE_CURRENT, now_ms(), true)
+    }
+
+    fn accept_run_steering(
+        &self, run_id: &str, message_id: &str, content: &str, lane: &str, now: i64, external: bool,
+    ) -> Result<(i64, bool), String> {
         let content = content.trim();
         if message_id.trim().is_empty() {
             return Err("steering message id is empty".into());
@@ -186,8 +199,9 @@ impl Database {
                   WHERE run_id=?1 AND state IN ('created','running','retry_scheduled'))
                   OR EXISTS(SELECT 1 FROM runs r JOIN run_control_bindings b ON b.run_id=r.id
                   WHERE r.id=?1 AND r.status IN ('queued','running','awaiting_confirmation')
-                    AND b.authority='authoritative' AND json_extract(b.binding_json,'$.executorRoute')='pi_native')",
-                params![run_id],
+                    AND b.authority='authoritative' AND json_extract(b.binding_json,'$.executorRoute')='pi_native')
+                  OR (?2 AND EXISTS(SELECT 1 FROM runs WHERE id=?1 AND status IN ('running','awaiting_confirmation')))",
+                params![run_id, external],
                 |row| row.get(0),
             )?;
             if !active {
@@ -237,19 +251,39 @@ impl Database {
                 params![run_id],
                 |row| row.get::<_, i64>(0),
             )?;
-            conn.execute(
+            let inserted = conn.execute(
                 "INSERT OR IGNORE INTO run_steering_messages(
                     run_id, seq, message_id, content, status, lane, received_at)
                 VALUES (?1, ?2, ?3, ?4, 'received', ?5, ?6)",
                 params![run_id, seq, message_id, content, lane, now],
             )?;
             let effective = conn.query_row(
-                "SELECT seq FROM run_steering_messages WHERE message_id=?1",
-                params![message_id],
+                "SELECT seq FROM run_steering_messages WHERE message_id=?1 AND run_id=?2",
+                params![message_id, run_id],
                 |row| row.get::<_, i64>(0),
             )?;
-            Ok(effective)
+            Ok((effective, inserted != 0))
         })
+    }
+
+    pub(crate) fn settle_external_steering(&self, run_id: &str, seq: i64, delivered: bool) -> Result<(), String> {
+        self.with_connection(|conn| {
+            conn.execute(
+                "UPDATE run_steering_messages SET status=?3
+                 WHERE run_id=?1 AND seq=?2 AND status='received'",
+                params![run_id, seq, if delivered { "delivered" } else { "cancelled" }],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn latest_external_steering_run(&self, conversation_id: &str) -> Result<Option<String>, String> {
+        self.with_connection(|conn| conn.query_row(
+            "SELECT r.id FROM runs r WHERE r.conversation_id=?1
+             AND EXISTS (SELECT 1 FROM run_steering_messages s WHERE s.run_id=r.id)
+             ORDER BY r.created_at DESC, r.id DESC LIMIT 1",
+            [conversation_id], |row| row.get(0),
+        ).optional())
     }
 
     /// Every still-undelivered queued row of a conversation, whichever

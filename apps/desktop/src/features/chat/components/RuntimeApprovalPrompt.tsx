@@ -180,6 +180,12 @@ export function RuntimeApprovalPrompt({
           : allowedDecisions.includes('allow_conversation') ? '对话授权仅限此工具和此目标，可撤销。' : '仅授权本次操作。'
   const target = displayPath(replacement?.targetIdentity ?? presentation.officeReuse?.target ?? presentation.target)
   const operation = presentation.command && presentation.command !== target ? `${target}\n${presentation.command}` : target
+  const longCommand = Boolean(presentation.command) && (operation.length > 120 || operation.split('\n', 3).length > 2)
+  const operationPreview = longCommand ? `${operation.split('\n', 2).join('\n').slice(0, 120).trimEnd()}…` : operation
+  const inlineCommandDetails = longCommand && !contactMode
+  const description = approval.status === 'pending' && request.interruptedByRestart === true
+    ? 'Fox 已重启，原操作已中断。请拒绝这次申请。如需继续，请在会话中重新发起操作。'
+    : repairOverride || replacement || presentation.officeReuse ? briefScope : undefined
   const Card = contactMode ? ContactApprovalCard : ApprovalCard
   const decision = approval.decision as { scope?: string; decision?: string } | null
   const scopeHistory = decision?.scope === 'conversation' || decision?.decision === 'allow_conversation' ? '本次对话内允许' : decision?.scope === 'once' || decision?.decision === 'allow_once' ? '仅允许这一次' : null
@@ -188,16 +194,9 @@ export function RuntimeApprovalPrompt({
     : approval.status === 'approved'
       ? scopeHistory ? `已选择：${scopeHistory}` : '已选择：仅允许这一次'
       : approval.status === 'pending' ? '此确认已结束' : approvalStatusLabel(approval.status)
-  return withNavigation(
-    <Card state={active ? 'request' : approval.status === 'denied' && !invalidated ? 'denied' : 'done'} invalidated={invalidated} statusLabel={receipt} title={title} icon={approvalCardIcon(title, approval.toolName)} subtitle={presentation.command ? '需要确认这条命令' : operationSummary} command={operation} description={repairOverride || replacement || presentation.officeReuse ? briefScope : undefined} busy={submitting} className="aui-approval-card fox-confirmation fox-runtime-confirmation is-compact"
-      onDeny={() => void resolve('deny')}
-      onAllowOnce={allowedDecisions.includes('allow_once') ? () => void resolve('allow_once') : undefined}
-      onAllowConversation={allowedDecisions.includes('allow_conversation') ? () => void resolve('allow_conversation') : undefined}
-      detailsContent={<>
-        {invalidated && scopeHistory && <p className="fox-approval-scope-note">原选择（历史）：{scopeHistory}</p>}
-        {/* UI 1104-07：卡片主体只留目录、命令和「拒绝 / 只允许这一次」；Host 说明和「本项目总是允许」收进详情。 */}
-        <FoxDisclosure className="fox-approval-details-scroll fox-approval-disclosure" summary={presentation.content !== undefined ? <>查看内容 <span>{presentation.content.split('\n').length} 行</span></> : '查看操作详情'}>
-        <div role="region" aria-label="审批详情">
+  const detailsBody = (
+    <div role="region" aria-label="审批详情" className={longCommand ? 'fox-approval-command-details' : undefined} tabIndex={longCommand ? 0 : undefined}>
+        {longCommand && <pre className="fox-approval-diff" aria-label="完整命令"><code>{operation}</code></pre>}
         {policyNote && <p className="fox-approval-scope-note fox-approval-host-note">{policyNote}</p>}
         {ruleOffer && active && <div className="fox-approval-project-rule">
           <label>
@@ -235,8 +234,18 @@ export function RuntimeApprovalPrompt({
           </FoxDisclosure>
         </div>}
         {allowedDecisions.includes('allow_conversation') && !presentation.officeReuse && <div className="fox-approval-scope"><p className="fox-approval-scope-note">{conversationScopeNote}</p></div>}
-        </div>
-        </FoxDisclosure>
+    </div>
+  )
+  return withNavigation(
+    <Card state={active ? 'request' : approval.status === 'denied' && !invalidated ? 'denied' : 'done'} invalidated={invalidated} statusLabel={receipt} title={title} icon={approvalCardIcon(title, approval.toolName)} subtitle={presentation.command ? '需要确认这条命令' : operationSummary} command={operationPreview} commandDetails={inlineCommandDetails ? detailsBody : undefined} description={description} busy={submitting} className="aui-approval-card fox-confirmation fox-runtime-confirmation is-compact"
+      onDeny={() => void resolve('deny')}
+      onAllowOnce={allowedDecisions.includes('allow_once') ? () => void resolve('allow_once') : undefined}
+      onAllowConversation={allowedDecisions.includes('allow_conversation') ? () => void resolve('allow_conversation') : undefined}
+      detailsContent={<>
+        {invalidated && scopeHistory && <p className="fox-approval-scope-note">原选择（历史）：{scopeHistory}</p>}
+        {!inlineCommandDetails && <FoxDisclosure className={longCommand ? 'fox-approval-disclosure' : 'fox-approval-disclosure fox-approval-details-scroll'} summary={longCommand ? '查看详情' : presentation.content !== undefined ? <>查看内容 <span>{presentation.content.split('\n').length} 行</span></> : '查看操作详情'}>
+          {detailsBody}
+        </FoxDisclosure>}
         {error && <p role="alert" className="fox-approval-error">{error}</p>}
       </>}
     />

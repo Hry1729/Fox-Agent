@@ -29,8 +29,7 @@ export function AgentImportPreview({ backend, developer, onDone, onCancel }: { b
     } catch (cause) { setError(configErrorText(cause)) }
     finally { setBusy(false) }
   }
-  return <section className="fox-agent-inline" aria-label={`导入 ${AGENT_NAMES[backend]} 配置`}>
-    <h3>从这台电脑导入 {AGENT_NAMES[backend]} 配置</h3>
+  return <section className="fox-agent-import" aria-label={`导入 ${AGENT_NAMES[backend]} 配置`}>
     {!preview && !error && <p role="status">正在读取可导入内容…</p>}
     {preview && <>
       <fieldset><legend>要导入的内容</legend>{preview.items.map(item => <label className="fox-model-choice" key={item.id}><input type="checkbox" checked={selected.includes(item.id)} onChange={e => setSelected(e.target.checked ? [...selected, item.id] : selected.filter(id => id !== item.id))} />{item.label}{developer && item.devPath && <code>{item.devPath}</code>}</label>)}</fieldset>

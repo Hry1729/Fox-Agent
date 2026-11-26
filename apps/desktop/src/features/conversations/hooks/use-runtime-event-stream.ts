@@ -3,12 +3,13 @@ import { flushSync } from 'react-dom'
 import { desktopClient, desktopRuntimeAvailable } from '../api/desktop-client'
 import { loadConversationWithRetry } from '../model/conversation-reload'
 import { enqueueRuntimeEvent, takeRuntimeEventFrame } from '../model/runtime-event-queue'
-import { mergeConversationDetail, reduceRuntimeNotifications } from '../model/runtime-event-reducer'
+import { isAssistantPreviewEvent, mergeConversationDetail, reduceRuntimeNotifications } from '../model/runtime-event-reducer'
 import type { ConversationDetail, DesktopErrorDetails, RuntimeEventNotification } from '../model/types'
 
 interface RuntimeEventStreamOptions {
   authoritativeRunIdRef: MutableRefObject<string | null>
   activeConversationIdRef: MutableRefObject<string | null>
+  companionConversationIdRef: MutableRefObject<string | null>
   runtimeListenerReadyRef: MutableRefObject<Promise<void> | null>
   runtimeEventQueueRef: MutableRefObject<RuntimeEventNotification[]>
   runtimeEventFrameRef: MutableRefObject<number | null>
@@ -37,6 +38,7 @@ export function useRuntimeEventStream(options: RuntimeEventStreamOptions) {
   const {
     authoritativeRunIdRef,
     activeConversationIdRef,
+    companionConversationIdRef,
     runtimeListenerReadyRef,
     runtimeEventQueueRef,
     runtimeEventFrameRef,
@@ -54,6 +56,20 @@ export function useRuntimeEventStream(options: RuntimeEventStreamOptions) {
     if (!desktopRuntimeAvailable) return
     let disposed = false
     let unlisten: (() => void) | undefined
+    const reloadConversation = (conversationId: string, terminal: boolean) => {
+      void loadConversationWithRetry(id => desktopClient.loadConversation(id), conversationId).then(persisted => {
+        if (disposed || activeConversationIdRef.current !== conversationId) return
+        const apply = () => setDetail(current => current?.conversation.id === conversationId ? mergeConversationDetail(persisted, current) : current)
+        if (terminal) flushSync(apply)
+        else apply()
+      }).catch(cause => {
+        if (disposed || activeConversationIdRef.current !== conversationId || !terminal) return
+        const reason = cause instanceof Error ? cause.message : String(cause)
+        const message = `对话已结束，但重新加载持久化结果失败：${reason}`
+        setError(message)
+        setErrorDetails({ code: 'conversation.reload_failed', message, retryable: true })
+      })
+    }
     const flushRuntimeEvents = () => {
       runtimeEventFrameRef.current = null
       if (disposed || runtimeEventQueueRef.current.length === 0) return
@@ -64,7 +80,12 @@ export function useRuntimeEventStream(options: RuntimeEventStreamOptions) {
       })
       const terminal = [...notifications].reverse().find(({ event }) => terminalEventTypes.has(event.type))
       if (runtimeEventQueueRef.current.length > 0) scheduleRuntimeFlush()
-      if (!terminal) return
+      if (!terminal) {
+        const reply = notifications.findLast(({ event, conversationId }) => event.type === 'message.completed'
+          && conversationId === companionConversationIdRef.current && conversationId === activeConversationIdRef.current)
+        if (reply) reloadConversation(reply.conversationId, false)
+        return
+      }
 
       const event = terminal.event
       const metricKey = `${terminal.runId}:${terminal.seq}`
@@ -94,19 +115,7 @@ export function useRuntimeEventStream(options: RuntimeEventStreamOptions) {
         return
       }
 
-      void loadConversationWithRetry(
-        (conversationId) => desktopClient.loadConversation(conversationId),
-        terminal.conversationId,
-      ).then((persisted) => {
-        if (disposed || activeConversationIdRef.current !== terminal.conversationId) return
-        flushSync(() => setDetail((current) => current?.conversation.id === terminal.conversationId
-          ? mergeConversationDetail(persisted, current) : current))
-      }).catch((cause) => {
-        if (disposed || activeConversationIdRef.current !== terminal.conversationId) return
-        const message = cause instanceof Error ? cause.message : String(cause)
-        setError(`对话已结束，但重新加载持久化结果失败：${message}`)
-        setErrorDetails({ code: 'conversation.reload_failed', message, retryable: true })
-      })
+      reloadConversation(terminal.conversationId, true)
       void refreshList()
     }
     const scheduleRuntimeFlush = () => {
@@ -115,9 +124,13 @@ export function useRuntimeEventStream(options: RuntimeEventStreamOptions) {
     }
     const subscription = desktopClient.listenRuntimeEvents((notification) => {
       if (disposed) return
+      const event = notification.event
+      if (notification.conversationId === companionConversationIdRef.current && isAssistantPreviewEvent(event.type)) {
+        lastRuntimeEventAtRef.current = Date.now()
+        return
+      }
       onRunActivity?.(notification)
       if (notification.runId === authoritativeRunIdRef.current) return
-      const event = notification.event
       if (event.type === 'run.started' && notification.conversationId === activeConversationIdRef.current) {
         setError(null)
         setErrorDetails(null)
@@ -163,6 +176,7 @@ export function useRuntimeEventStream(options: RuntimeEventStreamOptions) {
   }, [
     authoritativeRunIdRef,
     activeConversationIdRef,
+    companionConversationIdRef,
     lastRuntimeEventAtRef,
     refreshList,
     runtimeEventFrameRef,

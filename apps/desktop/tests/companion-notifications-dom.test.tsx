@@ -48,7 +48,7 @@ describe('伙伴通知', () => {
       ...notice, id: 'coordination-approval', kind: 'approval', status: 'pending',
       title: '需要确认协作操作', action: { coordinationConversationId: 'coordination-1' },
     }
-    notices = [approval]
+    notices = [approval, notice]
     const bridge: NotificationBridge = {
       initial: Promise.resolve([approval]),
       connect: () => () => {},
@@ -58,10 +58,31 @@ describe('伙伴通知', () => {
       <NotificationCenter bridge={bridge} open showTrigger={false} activeView="chat"
         onNavigate={(...args) => navigations.push(args)} onOpenChange={() => {}} />
     </ContactsContext.Provider>)
-    expect(await view.findByText(approval.title)).toBeDefined()
-    fireEvent.click(view.container.querySelector('.fox-notification-item-main')!)
+    expect(await view.findByText(/需要确认协作操作/)).toBeDefined()
+    fireEvent.click(view.getByRole('button', { name: '需处理 1' }))
+    expect(view.queryByText(notice.body)).toBeNull()
     fireEvent.click(await view.findByRole('button', { name: '打开协作对话' }))
     await waitFor(() => expect(navigations).toEqual([['companions', undefined, { conversationId: 'coordination-1' }]]))
+  })
+
+  test('消息正文在主内容容器展开，关闭按钮触发返回', async () => {
+    const long = { ...notice, body: '这是任务的完整说明。'.repeat(8) }
+    notices = [long]
+    const host = document.createElement('main')
+    document.body.append(host)
+    const openChanges: boolean[] = []
+    try {
+      const view = render(<NotificationCenter open showTrigger={false} activeView="chat" panelHost={host}
+        bridge={{ initial: Promise.resolve([long]), connect: () => () => {} }}
+        onNavigate={() => {}} onOpenChange={value => openChanges.push(value)} />)
+      const page = within(host)
+      const expand = await page.findByRole('button', { name: '展开' })
+      expect(view.container.querySelector('.fox-notification-page')).toBeNull()
+      fireEvent.click(expand)
+      expect(page.getByRole('button', { name: '收起' }).getAttribute('aria-expanded')).toBe('true')
+      fireEvent.keyDown(page.getByRole('button', { name: '关闭消息中心' }), { key: 'Escape' })
+      expect(openChanges).toEqual([false])
+    } finally { host.remove() }
   })
 
   test('通知中心与 Toast 使用伙伴头像，打开通知进入指定私聊', async () => {
@@ -80,12 +101,12 @@ describe('伙伴通知', () => {
     </ContactsContext.Provider>)
 
     await waitFor(() => expect(view.getByText('资料伙伴')).toBeDefined())
-    expect(view.getByText('文件已经整理好。')).toBeDefined()
-    expect(view.container.querySelector('.fox-notification-source-icon.is-companion .fox-contact-avatar')?.textContent).toBe('📚')
-    fireEvent.click(view.container.querySelector('.fox-notification-item-main')!)
+    expect(view.getByText('伙伴完成了整理 · 文件已经整理好。')).toBeDefined()
+    expect(view.container.querySelector('.fox-notification-avatar.is-companion .fox-contact-avatar')?.textContent).toBe('📚')
     fireEvent.click(await view.findByRole('button', { name: '打开私聊' }))
     await waitFor(() => expect(navigations).toEqual([['companions', 'c1']]))
-    expect(openChanges).toContain(false)
+    fireEvent.click(view.getByRole('button', { name: '关闭消息中心' }))
+    expect(openChanges).toEqual([false])
 
     act(() => {
       handlers?.preview({ notification: { ...notice, id: 'notice-toast', readAt: null }, soundId: 'soft' })

@@ -12,9 +12,15 @@ if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register()
 const now = 1_700_000_000_000
 const manifest = { version: '1.0.0', manifestSchemaVersion: 2, skills: [], knowledgeReferences: [], mcpServers: [], allowedTools: [] }
 const agent = (o: Record<string, unknown>) => ({ description: '', runtimeType: 'pi', defaultModel: 'configured-model', icon: null, category: 'general', openingSuggestions: [], systemPrompt: '你是一名助手。', isBuiltin: false, packageVersion: '1.0.0', packageSource: 'local', packageId: null, packageHash: null, packageManifest: manifest, capabilities: null, resources: { tools: [], knowledges: [], mcps: [], skills: [] }, configurableItems: null, isDefault: false, available: true, agentKind: 'expert', invocationMode: 'inline', visibility: 'expert_center', ...o })
+const filesystemPlugin = {
+  id: 'mcp:filesystem', name: 'Filesystem', kind: 'mcp' as const, category: '连接器', origin: 'local' as const,
+  description: '从本机读取文件', compatible: true, installStatus: 'installed' as const,
+  activation: { mode: 'global' as const, enabled: true }, permissions: [],
+}
 const agents = [
   agent({ id: 'fox-general', name: 'Fox 通用助手', agentKind: 'assistant', invocationMode: 'primary', visibility: 'chat_selector', isBuiltin: true, packageSource: 'builtin' }),
-  agent({ id: 'local-writer', name: '周报撰写助手', description: '整理周报' }),
+  agent({ id: 'local-writer', name: '周报撰写助手', description: '整理周报', openingSuggestions: ['整理本周完成的事项'],
+    packageManifest: { ...manifest, allowedTools: ['read'] } }),
 ]
 const servers = [
   { id: 'filesystem', name: 'Filesystem', command: 'npx.cmd', args: ['-y', 'server-filesystem'], transport: 'stdio', endpointUrl: null, definition: null, enabled: true, status: 'unknown', credentialConfigured: false, lastError: null, lastCheckedAt: null, lastLatencyMs: null, toolCount: null, consecutiveFailures: 0, createdAt: now, updatedAt: now },
@@ -34,6 +40,7 @@ mock.module('../src/features/conversations/api/desktop-client', () => ({
     listAgents: async () => agents.map((item) => ({ ...item })),
     syncYuxiAgents: async () => null,
     listSkills: async () => skills.map((item) => ({ ...item })),
+    pluginInstallationsList: async () => ({ items: [filesystemPlugin], total: 1 }),
     listMcpServers: async () => servers.map((item) => ({ ...item })),
     deleteMcpServer: async (id: string) => { calls.push(`delete:${id}`); return true },
     listLifecycleHooks: async () => [],
@@ -54,6 +61,9 @@ mock.module('../src/features/conversations/api/desktop-client', () => ({
 const React = await import('react')
 const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react')
 const pages = await import('../src/features/settings/settings-pages')
+const { WorkspaceShell } = await import('../src/features/workspace/workspace-shell')
+const { createTauriPluginGateway } = await import('../src/features/plugins/tauri-gateway')
+const { AgentListPage, AgentDetailPage } = await import('../src/features/agents/agent-pages')
 const { TooltipProvider } = await import('../src/components/ui/tooltip')
 const { ConfirmDialogProvider } = await import('../src/components/ui/confirm-dialog')
 const { PLUGIN_RETURN_KEY, rememberPluginReturn } = await import('../src/features/settings/settings-shared')
@@ -140,14 +150,54 @@ describe('权限与安全 page', () => {
   })
 })
 
+test('专家目录打开详情，开场提问进入带草稿的召唤路由', async () => {
+  const navigated: unknown[][] = []
+  const navigate = (...args: unknown[]) => navigated.push(args)
+  await mount(React.createElement(AgentListPage, { ...base, navigate }))
+  const card = await waitFor(() => {
+    const result = byLabel('查看周报撰写助手详情')
+    if (!result) throw new Error('expert card not loaded')
+    return result
+  })
+  fireEvent.click(card)
+  expect(navigated.at(-1)).toEqual(['agent-detail', 'local-writer', { documentId: 'home' }])
+  cleanup()
+  await mount(React.createElement(AgentDetailPage, { ...base, agentId: 'local-writer', navigate }))
+  const prompt = await waitFor(() => {
+    const result = byLabel('整理本周完成的事项')
+    if (!result) throw new Error('opening prompt not loaded')
+    return result
+  })
+  fireEvent.click(prompt)
+  expect(navigated.at(-1)).toEqual(['chat', 'local-writer', { draftPrompt: '整理本周完成的事项' }])
+  const equipped = document.querySelector('[aria-label="筛选已装配能力"]')!
+  expect(equipped.textContent).toBe('全部 1内置工具 1')
+  expect(document.querySelector('.fox-expert-equipped-list strong')?.textContent).toBe('read')
+})
+
 describe('插件 page', () => {
-  test('connector row opens the edit Sheet; 删除 asks the in-app confirm before deleting', async () => {
-    await mount(React.createElement(pages.ExtensionsSettingsPage, { ...base, navigate: () => {} }))
-    await waitFor(() => { if (!byLabel('编辑 Filesystem')) throw new Error('connector row missing') })
-    expect(text()).toContain('周报模板')
-    await act(async () => { fireEvent.click(byLabel('编辑 Filesystem')!) })
-    await waitFor(() => { if (!sheet()) throw new Error('sheet not open') })
-    await act(async () => { fireEvent.click(buttonNamed(sheet()!, '删除连接器')!) })
+  test('连接器详情保留设置来源，移除配置会先要求确认', async () => {
+    const gateway = createTauriPluginGateway()
+    function RoutedPluginSettings() {
+      const [route, setRoute] = React.useState<{ view: import('../src/features/workspace/types').WorkspaceView; id?: string; documentId?: string }>({ view: 'settings-extensions' })
+      return React.createElement(WorkspaceShell, {
+        ...base, activeView: route.view, activeEntityId: route.id, activeDocumentId: route.documentId, pluginGateway: gateway,
+        navigate: (view, id, context) => setRoute({ view, id, documentId: context?.documentId }),
+        dark: false, onDark: () => {}, onAskKnowledge: () => {}, onAskLocalKnowledgeDocument: () => {},
+      })
+    }
+    await mount(React.createElement(RoutedPluginSettings))
+    await waitFor(() => { if (!byLabel('查看 Filesystem 详情')) throw new Error('connector row missing') })
+    await act(async () => { fireEvent.click(byLabel('查看 Filesystem 详情')!) })
+    await waitFor(() => { if (!byLabel('更多插件操作')) throw new Error('detail not open') })
+    expect(byLabel('插件路径')?.textContent).toContain('设置 · 插件')
+    await act(async () => { fireEvent.keyDown(byLabel('更多插件操作')!, { key: 'Enter' }) })
+    const item = await waitFor(() => {
+      const result = [...document.querySelectorAll('[role=menuitem]')].find(element => element.textContent === '移除配置')
+      if (!result) throw new Error('no remove action')
+      return result
+    })
+    await act(async () => { fireEvent.click(item) })
     const confirm = await waitFor(() => { const box = document.querySelector('[data-testid="fox-confirm-dialog"]'); if (!box) throw new Error('no confirm'); return box as HTMLElement })
     expect(confirm.textContent).toContain('删除连接器')
     expect(calls).toEqual([])

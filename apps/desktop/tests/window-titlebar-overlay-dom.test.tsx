@@ -21,13 +21,22 @@ const { isWindowChromeTarget } = await import('../src/components/ui/window-chrom
 afterEach(() => cleanup())
 
 const noop = () => {}
-const titlebar = () => React.createElement(MemoizedWindowTitlebar, { leftSidebarCollapsed: false, onNewChat: noop, onOpenProject: noop, onSettings: noop, onAbout: noop, onToggleSidebar: noop, onZoom: noop })
+const titlebar = (onResetSidebarWidth?: () => void) => React.createElement(MemoizedWindowTitlebar, { leftSidebarCollapsed: false, onNewChat: noop, onOpenProject: noop, onSettings: noop, onAbout: noop, onToggleSidebar: noop, onResetSidebarWidth, onZoom: noop })
 const windowButtons = () => ['最小化', '最大化', '关闭'].map((label) => {
   const button = document.querySelector(`.fox-window-controls [aria-label="${label}"]`) as HTMLElement | null
   if (!button) throw new Error(`no window button ${label}`)
   return button
 })
 const TOP = 'top-[var(--fox-titlebar-height,0px)]'
+
+test('the view menu lets users reset the left sidebar width', async () => {
+  let resets = 0
+  const view = render(React.createElement(TooltipProvider, null, titlebar(() => { resets++ })))
+  fireEvent.keyDown(view.getByRole('button', { name: '应用菜单' }), { key: 'Enter' })
+  fireEvent.keyDown(await view.findByRole('menuitem', { name: '视图' }), { key: 'ArrowRight' })
+  fireEvent.click(await view.findByRole('menuitem', { name: '恢复左栏默认宽度' }))
+  expect(resets).toBe(1)
+})
 
 function mountWith(layer: 'sheet' | 'dialog' | 'alert') {
   const content = layer === 'sheet'

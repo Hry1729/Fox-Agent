@@ -1,16 +1,19 @@
 import { SidebarStatusDot } from '@/features/chat/sidebar-status-dot'
 import { useEffect, useState, type KeyboardEvent } from 'react'
 import { DndContext, PointerSensor, closestCenter, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
-import { ArrowLeft, BellOff, Archive, Check, GripVertical, Mail, MailOpen, MoreHorizontal, Pencil, Pin, PinOff, Plus, RotateCcw, Search, Star, StarOff, Trash2, UserRound, UserRoundPlus, Users } from 'lucide-react'
+import { BellOff, Archive, Check, ChevronDown, GripVertical, Mail, MailOpen, MoreHorizontal, Pencil, Pin, PinOff, Plus, RotateCcw, Search, Star, StarOff, Trash2, UserRound, Users } from 'lucide-react'
+import { AnimatedIconTrigger, Archive as AnimatedArchive, ArrowLeft, CalendarClock, Inbox, UserRoundPlus, Users as AnimatedUsers } from '@/components/fox-ui/animated-icons'
 import { ContextMenu as RadixContextMenu } from 'radix-ui'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger, runAfterMenuClose } from '@/components/ui/dropdown-menu'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '@/components/ui/context-menu'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { AgentCard } from '@/features/workspace/entity-card'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
+import type { NavigateWorkspace, WorkspaceView } from '@/features/workspace/types'
 import { asAgentCard } from '@/features/agents/agent-card-data'
 import { defaultProfileAvatars } from '@/features/profile/user-profile'
 import { CatPaw } from '@/components/animate-ui/icons/cat-paw'
@@ -41,7 +44,12 @@ function CreateCompanionDialog({ open, onOpenChange, creating, onCreate }: {
   const [experts, setExperts] = useState<AgentRecord[]>([])
   const [selected, setSelected] = useState('')
   const [query, setQuery] = useState('')
-  const choices = experts.filter(agent => `${agent.name} ${agent.description ?? ''}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
+  const [category, setCategory] = useState('all')
+  const categories = [...new Set(experts.map(agent => agent.category).filter(Boolean))]
+  const choices = experts.filter(agent => (category === 'all' || agent.category === category)
+    && `${agent.name} ${agent.description ?? ''}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
+  const selectedExpert = experts.find(agent => agent.id === selected)
+
   const [loading, setLoading] = useState(false)
   const load = async () => {
     setLoading(true)
@@ -51,18 +59,35 @@ function CreateCompanionDialog({ open, onOpenChange, creating, onCreate }: {
     } catch (error) { showContactError(error) } finally { setLoading(false) }
   }
   return <Dialog open={open} onOpenChange={next => { if (!creating) onOpenChange(next) }}>
-    <DialogContent className="fox-expert-picker-dialog fox-companion-expert-dialog" onOpenAutoFocus={() => { setQuery(''); if (!experts.length && !loading) void load() }}>
-      <DialogHeader><DialogTitle>从专家创建</DialogTitle><DialogDescription>选择一个可用的本机专家，创建拥有独立职责和私聊的伙伴。</DialogDescription></DialogHeader>
-      <label className="fox-expert-picker-search"><Search size={16} aria-hidden /><Input aria-label="搜索专家" placeholder="搜索专家名称或职责" value={query} onChange={event => setQuery(event.target.value)} /></label>
-      <div className="fox-expert-picker-grid" aria-label="可用专家" aria-busy={loading}>
-        {loading ? <p className="fox-expert-picker-empty">正在加载专家…</p> : choices.map(agent => <div className={`fox-expert-picker-choice ${selected === agent.id ? 'is-selected' : ''}`} key={agent.id}>
-          <AgentCard agent={asAgentCard(agent)} disabled={creating} showAction={false} selected={selected === agent.id}
-            actionLabel={`选择${agent.name}`} onUse={() => setSelected(agent.id)} />
-          {selected === agent.id && <span className="fox-expert-picker-selected">已选择</span>}
-        </div>)}
-        {!loading && !choices.length && <p className="fox-expert-picker-empty">{query ? '没有找到匹配的专家' : '暂无可用专家'}</p>}
+    <DialogContent className="fox-companion-modal fox-companion-expert-picker" aria-describedby={undefined}
+      onOpenAutoFocus={() => { setQuery(''); setCategory('all'); setSelected(''); void load() }}>
+      <DialogHeader><DialogTitle>从专家创建</DialogTitle></DialogHeader>
+      <div className="fox-companion-picker-tools">
+        <label className="fox-expert-picker-search"><Search size={16} aria-hidden /><Input type="search" aria-label="搜索专家" placeholder="搜索专家名称或用处" value={query} onChange={event => setQuery(event.target.value)} /></label>
+        <Select value={category} onValueChange={setCategory}><SelectTrigger aria-label="专家分类"><SelectValue /></SelectTrigger><SelectContent>
+          <SelectItem value="all">全部分类</SelectItem>{categories.map(value => <SelectItem key={value} value={value}>{value}</SelectItem>)}
+        </SelectContent></Select>
       </div>
-      <DialogFooter><Button variant="outline" disabled={creating} onClick={() => onOpenChange(false)}>取消</Button><Button disabled={creating || !selected} onClick={() => void onCreate(selected)}>{creating ? '正在创建…' : '确认创建'}</Button></DialogFooter>
+      <div className="fox-companion-expert-choices" aria-label="可用专家" aria-busy={loading}>
+        {loading ? <p>正在加载专家…</p> : choices.map(agent => <button type="button" className="fox-companion-expert-choice" key={agent.id}
+          aria-label={`选择${agent.name}`} aria-pressed={selected === agent.id} disabled={creating} onClick={() => setSelected(agent.id)}>
+          <img src={asAgentCard(agent).image} alt="" />
+          <span className="fox-companion-expert-copy">
+            <span className="fox-companion-expert-name"><strong>{agent.name}</strong>
+              {selected === agent.id && <span className="fox-companion-picker-check"><Check size={11} aria-hidden /></span>}
+            </span>
+            <small>{agent.description}</small>
+          </span>
+        </button>)}
+        {!loading && !choices.length && <p>{query || category !== 'all' ? '没有找到匹配的专家' : '暂无可用专家'}</p>}
+      </div>
+      <DialogFooter>
+        <span className="fox-companion-picked-expert">{selectedExpert
+          ? <><img src={asAgentCard(selectedExpert).image} alt="" /><span>已选 <strong>{selectedExpert.name}</strong></span></>
+          : '请选择一位专家'}</span>
+        <Button variant="outline" disabled={creating} onClick={() => onOpenChange(false)}>取消</Button>
+        <Button disabled={creating || !selected} onClick={() => void onCreate(selected)}>{creating ? '正在创建…' : '创建'}</Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 }
@@ -86,13 +111,18 @@ function useCompanionActions(openCompanionPage?: (contact: Companion) => void) {
       else ctx.open(opened)
     } catch (error) { showContactError(error) }
   }
-  const create = async (expertId?: string, profile?: { displayName: string; avatarRef: string }) => {
+  const create = async (expertId?: string, profile?: { displayName: string; avatarRef: string; duty?: string }) => {
     if (creating) return
     setCreating(true)
     try {
-      const created = expertId ? await contacts.add(expertId) : await contacts.createBlank(profile)
+      const created = expertId ? await contacts.add(expertId) : await contacts.createBlank(profile && { displayName: profile.displayName, avatarRef: profile.avatarRef })
       const initialized = await applyCompanionDefaults(created)
-      ctx.open(initialized.contact)
+      let contact = initialized.contact
+      if (profile?.duty) {
+        try { contact = await contacts.profile(created.id, { duty: profile.duty }) }
+        catch (error) { toast.error('伙伴已创建，职责保存失败', { description: desktopErrorDetails(error).message }) }
+      }
+      ctx.open(contact)
       if (initialized.errors.length) toast.error('伙伴已创建，部分默认值未应用', { description: initialized.errors.join('；') })
       setExpertOpen(false)
       setBlankOpen(false)
@@ -106,7 +136,7 @@ function useCompanionActions(openCompanionPage?: (contact: Companion) => void) {
     try { await contacts.restore(contact.id); await ctx.refresh() } catch (error) { showContactError(error) }
   }
   const toggleWork = async (contact: Companion) => {
-    const selected = ctx.list.companions.filter(item => item.workShortcutOrder && !item.archivedAt && !item.deletingAt).sort((a, b) => (a.workShortcutOrder ?? 0) - (b.workShortcutOrder ?? 0))
+    const selected = ctx.list.companions.filter(item => item.workShortcutOrder != null && !item.archivedAt && !item.deletingAt).sort((a, b) => (a.workShortcutOrder ?? 0) - (b.workShortcutOrder ?? 0))
     const ids = selected.some(item => item.id === contact.id) ? selected.filter(item => item.id !== contact.id).map(item => item.id) : [...selected.map(item => item.id), contact.id]
     try { await contacts.setWorkShortcuts(ids); await ctx.refresh() } catch (error) { showContactError(error) }
   }
@@ -131,8 +161,16 @@ function useCompanionActions(openCompanionPage?: (contact: Companion) => void) {
 
 type Actions = NonNullable<ReturnType<typeof useCompanionActions>>
 
+const companionTemplates = [
+  { label: '日常助理', name: '小狐助理', duty: '梳理待办、跟进日程并起草常用消息。' },
+  { label: '写作搭档', name: '文字搭档', duty: '协助编写和修改周报、产品文案与汇报材料。' },
+  { label: '调研助手', name: '情报小狐', duty: '查找并核验一手资料，记录调研结果。' },
+  { label: '技术顾问', name: '代码搭档', duty: '审查代码改动、排查问题并维护技术决策记录。' },
+]
+
 function BlankCompanionDialog({ actions }: { actions: Actions }) {
   const [name, setName] = useState('')
+  const [template, setTemplate] = useState<(typeof companionTemplates)[number]>()
   const [avatarRef, setAvatarRef] = useState(defaultProfileAvatars[0] ?? '/mascot/fox_magic.png')
   const [error, setError] = useState('')
   useEffect(() => {
@@ -142,51 +180,71 @@ function BlankCompanionDialog({ actions }: { actions: Actions }) {
     return () => { active = false }
   }, [])
   return <Dialog open onOpenChange={open => { if (!open && !actions.creating) actions.setBlankOpen(false) }}>
-    <DialogContent className="fox-blank-companion-dialog">
-      <DialogHeader><DialogTitle>新建伙伴</DialogTitle><DialogDescription>给伙伴起个名字，选一个头像。</DialogDescription></DialogHeader>
+    <DialogContent className="fox-companion-modal fox-blank-companion-dialog" aria-describedby={undefined}>
+      <DialogHeader><DialogTitle>新建伙伴</DialogTitle></DialogHeader>
       <form className="fox-blank-companion-form" onSubmit={event => {
         event.preventDefault()
         if (!name.trim() || actions.creating) return
         setError('')
-        void actions.create(undefined, { displayName: name.trim(), avatarRef }).catch(cause => setError(desktopErrorDetails(cause).message))
+        void actions.create(undefined, { displayName: name.trim(), avatarRef, duty: template?.duty }).catch(cause => setError(desktopErrorDetails(cause).message))
       }}>
-        <label>伙伴名称<input className="fox-companion-rename" value={name} maxLength={40}
-          autoFocus disabled={actions.creating} onChange={event => setName(event.currentTarget.value)} /></label>
-        <fieldset><legend>选择头像</legend><div className="fox-avatar-picker">
+        <div className="fox-companion-avatar-preview"><img src={avatarRef} alt="伙伴头像预览" /></div>
+        <Input className="fox-companion-name-input" aria-label="伙伴名称" placeholder="给你的伙伴起个名字" value={name} maxLength={40}
+          autoFocus disabled={actions.creating} onChange={event => setName(event.currentTarget.value)} />
+        <fieldset><legend className="sr-only">选择头像</legend><div className="fox-avatar-picker">
           {defaultProfileAvatars.map((src, index) => <label key={src} className={avatarRef === src ? 'is-selected' : undefined}>
             <input type="radio" name="companion-avatar" aria-label={`头像 ${index + 1}`} checked={avatarRef === src}
               disabled={actions.creating} onChange={() => setAvatarRef(src)} />
             <img src={src} alt="" />{avatarRef === src && <Check size={14} aria-hidden />}
           </label>)}
         </div></fieldset>
+        <fieldset><legend className="sr-only">快捷角色</legend><div className="fox-companion-modal-pills">
+          {companionTemplates.map(item => <Button key={item.label} type="button" variant={template === item ? 'secondary' : 'outline'} size="sm"
+            aria-pressed={template === item} disabled={actions.creating} onClick={() => { setTemplate(item); setName(item.name) }}>{item.label}</Button>)}
+        </div><p className="fox-companion-preset-hint">{template?.duty ?? '点选快捷角色可快速起名'}</p></fieldset>
         {error && <p className="fox-contact-decision-error" role="alert">{error}</p>}
         <DialogFooter>
           <Button type="button" variant="outline" disabled={actions.creating} onClick={() => actions.setBlankOpen(false)}>取消</Button>
-          <Button type="submit" disabled={actions.creating || !name.trim()}>{actions.creating ? '正在创建…' : '创建伙伴'}</Button>
+          <Button type="submit" disabled={actions.creating || !name.trim()}>{actions.creating ? '正在创建…' : '创建'}</Button>
         </DialogFooter>
       </form>
     </DialogContent>
   </Dialog>
 }
 
+export function NewCompanionButton() {
+  const actions = useCompanionActions()
+  if (!actions) return null
+  return <>
+    <Button onClick={() => actions.setBlankOpen(true)}><Plus />新建伙伴</Button>
+    {actions.blankOpen && <BlankCompanionDialog actions={actions} />}
+  </>
+}
+
 function CompanionCreateMenu({ actions, collapsed = false }: { actions: Actions; collapsed?: boolean }) {
   const label = actions.creating ? '正在创建…' : '新建伙伴'
   return <>
-    <DropdownMenu><DropdownMenuTrigger asChild>
-      <button type="button" className={collapsed ? 'fox-companion-create-collapsed' : 'fox-companion-create'}
+    <DropdownMenu><AnimatedIconTrigger><DropdownMenuTrigger asChild>
+      <button type="button" className={`fox-sidebar-command fox-companion-create${collapsed ? '' : ' is-emphasis'}`}
         aria-label={label} title={collapsed ? label : undefined} disabled={actions.creating}>
         <UserRoundPlus size={18} aria-hidden />
-        {!collapsed && <span>{label}</span>}
+        {!collapsed && <><span>{label}</span><ChevronDown size={14} aria-hidden /></>}
       </button>
-    </DropdownMenuTrigger><DropdownMenuContent align="start" side={collapsed ? 'right' : 'bottom'} className="fox-conversation-menu fox-companion-create-menu">
-      <DropdownMenuItem aria-label="新建伙伴" disabled={actions.creating} onSelect={() => runAfterMenuClose(() => actions.setBlankOpen(true))}>
+    </DropdownMenuTrigger></AnimatedIconTrigger><DropdownMenuContent align="start" side={collapsed ? 'right' : 'bottom'} className="fox-conversation-menu fox-companion-create-menu">
+      <AnimatedIconTrigger><DropdownMenuItem aria-label="新建伙伴" disabled={actions.creating} onSelect={() => runAfterMenuClose(() => actions.setBlankOpen(true))}>
         <UserRoundPlus /><span>新建伙伴</span>
-      </DropdownMenuItem>
-      <DropdownMenuItem aria-label="从专家创建" disabled={actions.creating} onSelect={() => runAfterMenuClose(() => actions.setExpertOpen(true))}>
-        <Users /><span>从专家创建</span>
-      </DropdownMenuItem>
+      </DropdownMenuItem></AnimatedIconTrigger>
+      <AnimatedIconTrigger><DropdownMenuItem aria-label="从专家创建" disabled={actions.creating} onSelect={() => runAfterMenuClose(() => actions.setExpertOpen(true))}>
+        <AnimatedUsers /><span>从专家创建</span>
+      </DropdownMenuItem></AnimatedIconTrigger>
     </DropdownMenuContent></DropdownMenu>
-    <CreateCompanionDialog open={actions.expertOpen} onOpenChange={actions.setExpertOpen} creating={actions.creating} onCreate={actions.create} />
+    <CompanionCreateDialogs actions={actions} />
+  </>
+}
+
+function CompanionCreateDialogs({ actions }: { actions: Actions }) {
+  return <>
+    {actions.expertOpen && <CreateCompanionDialog open={actions.expertOpen} onOpenChange={actions.setExpertOpen} creating={actions.creating} onCreate={actions.create} />}
     {actions.blankOpen && <BlankCompanionDialog actions={actions} />}
   </>
 }
@@ -345,7 +403,10 @@ export function WorkCompanionSidebar({ activeId, collapsed = false, onOpenCompan
   </section>
 }
 
-export function CompanionSidebar({ activeId, collapsed = false, scroll = false }: { activeId?: string; collapsed?: boolean; scroll?: boolean }) {
+export function CompanionSidebar({ activeId, collapsed = false, scroll = false, view, navigate, enabledTaskCount }: {
+  activeId?: string; collapsed?: boolean; scroll?: boolean
+  view?: WorkspaceView; navigate?: NavigateWorkspace; enabledTaskCount?: number
+}) {
   const actions = useCompanionActions()
   const [archivedOpen, setArchivedOpen] = useState(false)
   const [draftPinned, setDraftPinned] = useState<string[] | null>(null)
@@ -374,16 +435,30 @@ export function CompanionSidebar({ activeId, collapsed = false, scroll = false }
   const dragEnd = ({ active: dragged, over }: DragEndEvent) => {
     if (over) void saveOrder(String(dragged.id), String(over.id))
   }
+  const destinations = [
+    { id: 'companion-inbox', label: '待我处理', Icon: Inbox, count: active.reduce((total, item) => total + item.pendingActionCount, 0) },
+    { id: 'companion-schedules', label: '定时任务', Icon: CalendarClock, count: enabledTaskCount },
+    { id: 'companion-overview', label: '全部伙伴', Icon: AnimatedUsers, count: undefined },
+  ] as const
+  const globalNav = navigate && <nav className="fox-companion-global-nav" aria-label="伙伴工作区">
+    {destinations.map(({ id, label, Icon, count }) => <AnimatedIconTrigger key={id}><button type="button" className={`fox-sidebar-command ${view === id ? 'is-active' : ''}`}
+      aria-current={view === id ? 'page' : undefined} aria-label={count ? `${label}，${count} 项` : label} title={label}
+      onClick={() => { setArchivedOpen(false); navigate(id) }}><Icon size={16} aria-hidden />{!collapsed && <span>{label}</span>}{Boolean(count) && <small>{count}</small>}</button></AnimatedIconTrigger>)}
+  </nav>
+  const primary = <div className="fox-sidebar-primary fox-companion-primary">
+    <CompanionCreateMenu actions={actions} collapsed={collapsed} />
+    {globalNav}
+  </div>
   const archiveRows = archived.map(item => <CompanionRow key={item.id} contact={item} actions={actions} activeId={activeId} archived />)
   if (collapsed) return <div className="fox-collapsed-companion-page">
-    <CompanionCreateMenu actions={actions} collapsed />
+    {primary}
     <div className="fox-collapsed-companions" aria-label="伙伴">{[...pinned, ...ordinary].map(item => <button type="button" key={item.id}
       aria-label={item.displayName} title={item.displayName} aria-current={activeId === item.conversationId ? 'page' : undefined}
       onClick={() => void actions.open(item)}><ContactAvatar contact={item} /><CompanionStatus contact={item} /></button>)}</div>
   </div>
   if (archivedOpen && archived.length > 0) return <section className={`fox-contact-sidebar fox-companion-page ${scroll ? 'fox-companion-sidebar-frame' : ''}`} aria-label="已归档伙伴">
     <header className="fox-companion-archive-head">
-      <Button type="button" variant="ghost" size="icon-sm" aria-label="返回伙伴列表" onClick={() => setArchivedOpen(false)}><ArrowLeft size={15} /></Button>
+      <AnimatedIconTrigger><Button type="button" variant="ghost" size="icon-sm" aria-label="返回伙伴列表" onClick={() => setArchivedOpen(false)}><ArrowLeft size={15} aria-hidden /></Button></AnimatedIconTrigger>
       <strong>已归档</strong><span>{archived.length}</span>
     </header>
     {scroll ? <ScrollArea className="fox-sidebar-scroll fox-sidebar-group-scroll">{archiveRows}</ScrollArea> : archiveRows}
@@ -391,15 +466,55 @@ export function CompanionSidebar({ activeId, collapsed = false, scroll = false }
   </section>
   const listing = <>
     <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={dragEnd}>
-      <div className="fox-companion-tile-grid">{pinned.map(item => <CompanionTile key={item.id} contact={item} actions={actions} activeId={activeId} onMove={movePinned} sorting={draftPinned != null} />)}</div>
+      <div className="fox-companion-tile-grid" aria-label="置顶伙伴">{pinned.map(item => <CompanionTile key={item.id} contact={item} actions={actions} activeId={activeId} onMove={movePinned} sorting={draftPinned != null} />)}</div>
     </DndContext>
-    <div className="fox-companionordinary-list">{ordinary.map(item => <CompanionRow key={item.id} contact={item} actions={actions} activeId={activeId} />)}</div>
+    {ordinary.length > 0 && <section className="fox-companionordinary-list" aria-label="伙伴私聊">
+      <header><span>全部私聊</span><span>{ordinary.length}</span></header>
+      {ordinary.map(item => <CompanionRow key={item.id} contact={item} actions={actions} activeId={activeId} />)}
+    </section>}
   </>
   return <section className={`fox-contact-sidebar fox-companion-page ${scroll ? 'fox-companion-sidebar-frame' : ''}`} aria-label="伙伴">
-    <CompanionCreateMenu actions={actions} />
+    {primary}
     {ctx.error && <button type="button" title={ctx.error} onClick={() => void ctx.refresh()}>重新加载伙伴</button>}
     {scroll ? <ScrollArea className="fox-sidebar-scroll fox-sidebar-group-scroll">{listing}</ScrollArea> : listing}
-    {archived.length > 0 && <div className="fox-companion-archive"><button type="button" className="fox-companion-archive-toggle" onClick={() => setArchivedOpen(true)}><Archive size={15} /><span>已归档</span><span>{archived.length}</span></button></div>}
+    {archived.length > 0 && <div className="fox-companion-archive"><AnimatedIconTrigger><button type="button" className="fox-companion-archive-toggle" onClick={() => setArchivedOpen(true)}><AnimatedArchive size={15} aria-hidden /><span>已归档</span><span>{archived.length}</span></button></AnimatedIconTrigger></div>}
     {actions.deleting && <ContactDelete contact={actions.deleting} close={() => actions.setDeleting(null)} />}
   </section>
+}
+
+export function CompanionOverview({ navigate, permissions }: { navigate: NavigateWorkspace; permissions: ReadonlyMap<string, string> }) {
+  const actions = useCompanionActions()
+  const [saving, setSaving] = useState(false)
+  const active = actions?.ctx.list.companions.filter(item => !item.archivedAt && !item.deletingAt) ?? []
+  return <div className="fox-companion-workspace-inner">
+    <header className="fox-companion-workspace-head">
+      <div><h1>全部伙伴</h1><p>查看职责、模型和权限，管理工作页快捷入口。</p></div>
+      {actions && <div><Button variant="outline" onClick={() => actions.setExpertOpen(true)}><Users />从专家创建</Button><Button onClick={() => actions.setBlankOpen(true)}><Plus />新建伙伴</Button></div>}
+    </header>
+    {!active.length && <p className="fox-companion-workspace-empty">{actions?.ctx.error || '暂无常驻伙伴'}</p>}
+    <div className="fox-companion-workspace-list">
+      {active.map(item => <article key={item.id} className="fox-companion-workspace-row">
+        <button type="button" className="fox-companion-workspace-person" onClick={() => void actions?.open(item)}>
+          <ContactAvatar contact={item} /><span>
+            <span className="fox-companion-workspace-row-title">
+              <strong>{item.displayName}</strong>
+              {item.isDefault && <small className="fox-companion-schedule-tag">默认伙伴</small>}
+              {!item.isDefault && item.pinnedAt != null && <small className="fox-companion-schedule-tag">已置顶</small>}
+            </span>
+            <small>{item.duty}</small>
+            <small>{[permissions.get(item.conversationId), item.modelRef || actions?.ctx.model].filter(Boolean).join(' · ')}</small>
+          </span>
+        </button>
+        <label className="fox-companion-workspace-switch"><Switch checked={item.isDefault || item.workShortcutOrder != null}
+          aria-label={`在工作页显示${item.displayName}`} disabled={item.isDefault || saving}
+          onCheckedChange={() => {
+            setSaving(true)
+            void actions?.toggleWork(item).finally(() => setSaving(false))
+          }} />工作页快捷栏</label>
+        <Button size="sm" variant="ghost" onClick={() => void actions?.open(item)}>进入私聊</Button>
+      </article>)}
+    </div>
+    <Button variant="ghost" onClick={() => navigate('settings-companions')}>设置 · 伙伴默认设置</Button>
+    {actions && <CompanionCreateDialogs actions={actions} />}
+  </div>
 }

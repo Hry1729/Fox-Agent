@@ -91,7 +91,7 @@ impl Database {
                 // being skipped forever (which left conversations, bindings and
                 // the expert library pointing at a missing row).
                 let missing=current.is_none();
-                if installed && !missing { refresh_compute_bindings(&tx,&r.expert_id,&r.version,now)?; continue; }
+                if installed && !missing { refresh_bundled_bindings(&tx,&r.expert_id,&r.version,now)?; continue; }
                 tx.execute(
                     "INSERT INTO agents(id,name,description,runtime_type,system_prompt,default_model,created_at,updated_at,
                        icon,category,opening_suggestions_json,is_builtin,package_version,package_manifest_json,
@@ -126,14 +126,14 @@ impl Database {
                      ON CONFLICT(agent_id,scope_type,scope_id,config_key) DO NOTHING",
                     params![r.expert_id,json!(r.enabled_skills).canonical_string(),now],
                 )?;
-                refresh_compute_bindings(&tx,&r.expert_id,&r.version,now)?;
+                refresh_bundled_bindings(&tx,&r.expert_id,&r.version,now)?;
             }
             tx.commit()
         })
     }
 }
 
-fn refresh_compute_bindings(
+fn refresh_bundled_bindings(
     tx: &rusqlite::Transaction<'_>,
     expert_id: &str,
     version: &str,
@@ -153,7 +153,7 @@ fn refresh_compute_bindings(
     // Upgrade idle conversations to the newly installed bundled version.
     // Keep historical binding snapshots and all in-flight runs immutable.
     let mut query=tx.prepare("SELECT b.id FROM conversation_expert_bindings b WHERE b.expert_id=?1 AND b.state='active'
-                    AND b.expert_version IN ('1.0.0','1.1.0','1.2.0','1.3.0') AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.conversation_id=b.conversation_id
+                    AND b.expert_version IN ('1.0.0','1.1.0','1.2.0','1.3.0','1.3.1') AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.conversation_id=b.conversation_id
                     AND r.status IN ('queued','running','waiting_approval'))")?;
     let bindings = query
         .query_map([expert_id], |row| row.get::<_, String>(0))?
@@ -212,10 +212,11 @@ mod tests {
                 .as_deref(),
             Some("/custom-reviewer.png")
         );
-        assert!(!reviewer.package_manifest["allowedTools"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("write_file")));
+        let tool_names = json!(workspace_tool_names());
+        for expert in experts.iter().filter(|expert| expert.package_manifest["bundledLibrary"] == "agency-zh-fox-v1") {
+            assert_eq!(expert.package_manifest["allowedTools"], tool_names, "{}", expert.id);
+        }
+        assert_eq!(reviewer.package_manifest["requestedPermissions"]["project"], "read_only");
         let conversation = db
             .create_conversation(DEFAULT_AGENT_ID, None, None, None)
             .unwrap();
@@ -263,7 +264,7 @@ mod compute_upgrade_tests {
 
     #[test]
     fn prompt_upgrade_refreshes_idle_binding_preserves_active_run_and_user_choices() {
-        assert_bundled_binding_upgrade("1.3.0");
+        assert_bundled_binding_upgrade("1.3.1");
     }
 
     fn assert_bundled_binding_upgrade(previous_version: &str) {
@@ -280,6 +281,7 @@ mod compute_upgrade_tests {
                 .unwrap()
                 .retain(|tool| tool != "attachment_compute");
         }
+        old["allowedTools"].as_array_mut().unwrap().retain(|tool| tool != "run_command");
         db.with_connection(|c| {
             c.execute("UPDATE agents SET package_version=?1,package_manifest_json=?2,system_prompt=?3,icon='custom-avatar.png' WHERE id='fox-data-analyst'",params![previous_version,old.canonical_string(),previous_prompt])?;
             c.execute("UPDATE expert_package_versions SET version=?1 WHERE expert_id='fox-data-analyst' AND version=?2",params![previous_version,installed_version])?;
@@ -330,6 +332,10 @@ mod compute_upgrade_tests {
                 .contains(&json!("office_import_data"))
         );
         assert_ne!(idle_after.id, idle_before.id);
+        assert_eq!(
+            idle_after.package_snapshot["packageManifest"]["allowedTools"],
+            json!(workspace_tool_names())
+        );
         assert!(
             idle_after.package_snapshot["packageManifest"]["allowedTools"]
                 .as_array()

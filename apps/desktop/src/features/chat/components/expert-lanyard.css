@@ -4,7 +4,7 @@
   position: absolute;
   z-index: 17;
   top: 0;
-  right: clamp(28px, 18%, 180px);
+  left: var(--fox-space-l);
   --fox-expert-card-fill: #ffffff;
   --fox-expert-card-ink: #292c33;
   --fox-expert-card-muted: #7b8491;

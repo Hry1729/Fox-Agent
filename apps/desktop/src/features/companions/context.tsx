@@ -8,6 +8,7 @@ import { companionBubbleOrders, readWalkBase, reportableReadOrder, shouldReportR
 export const showContactError = (error: unknown) => toast.error(desktopErrorDetails(error).message)
 export const shouldRefreshContacts = (notice: { event: { type?: string; tool?: string; isError?: boolean } }) =>
   /^(run\.(started|completed|failed|cancelled|interrupted)|message\.completed)$/.test(notice.event.type ?? '')
+  || notice.event.type === 'user.question.requested' || notice.event.type === 'user.question.responded'
   || (notice.event.type === 'tool.completed' && notice.event.tool === 'companion_profile_update' && notice.event.isError !== true)
 
 export function useContactList(enabled: boolean) {
@@ -27,10 +28,15 @@ export function useContactList(enabled: boolean) {
   useEffect(() => {
     if (!enabled) return
     void refresh()
-    const listener = desktopClient.listenRuntimeEvents(event => {
-      if (shouldRefreshContacts(event)) void refresh()
-    })
-    return () => { ++version.current; void listener.then(stop => stop()).catch(() => { }) }
+    const listeners = [
+      desktopClient.listenRuntimeEvents(event => { if (shouldRefreshContacts(event)) void refresh() }),
+      desktopClient.listenApprovalRequests(refresh),
+      desktopClient.listenApprovalResolved(refresh),
+    ].map(listener => listener.catch(() => undefined))
+    return () => {
+      ++version.current
+      listeners.forEach(listener => { void listener.then(stop => stop?.()) })
+    }
   }, [enabled, refresh])
   return { list, refresh, error }
 }
@@ -68,6 +74,8 @@ export interface ContactsContextValue extends ReturnType<typeof useContactList> 
   clearQuote?: () => void
   /** The same Host-backed send path used by the composer, including optimistic UI. */
   sendPrompt?: (text: string) => Promise<unknown>
+  onReplyReaction?: (conversationId: string, bubbleId: string, reaction: string | null) => void
+  retryRun?: { id: string; resume: () => void }
   /** C07: the latest Host-confirmed mark per bubble, shared by every view of
    * this chat so a cancel on the favorites page reaches the bubble menu too. */
   bubbleMarkUpdates?: ReadonlyMap<string, ContactBubbleMarkRecord>

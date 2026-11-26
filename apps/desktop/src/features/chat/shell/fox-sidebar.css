@@ -128,12 +128,6 @@
   padding-left:var(--fox-sidebar-inset);
   padding-right:calc(var(--fox-sidebar-action-size) + var(--fox-sidebar-action-inset) + var(--fox-space-xs));
 }
-.fox-sidebar .fox-sidebar-row-actions {
-  position:absolute;
-  inset-inline-end:var(--fox-sidebar-action-inset);
-  top:50%;
-  transform:translateY(-50%);
-}
 .fox-sidebar .fox-sidebar-list-pane.is-companions {
   margin-top: 0;
   padding-top: 0;

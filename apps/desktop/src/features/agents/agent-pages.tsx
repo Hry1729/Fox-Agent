@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Brain, CalendarDays, CheckCircle2, Code2, Copy, Database, Download, FileUp, Folder, Globe2, History, Images, Info, LoaderCircle, MessageSquareText, Pencil, Plus, Puzzle, RefreshCw, RotateCcw, Search, Settings2, Sparkles, Trash2, Wrench } from 'lucide-react'
+import { Brain, CalendarDays, CheckCircle2, ChevronRight, Code2, Copy, Database, Download, FileUp, Folder, Globe2, History, Images, Info, LoaderCircle, MessageSquareText, MoreHorizontal, Pencil, Plus, Puzzle, RotateCcw, Search, Settings2, Sparkles, Trash2, UserRoundPlus, Wrench } from 'lucide-react'
 import { notify as toast } from '@/features/notifications'
 import { readDeveloperUi } from '@/features/chat/developer-ui'
 import { Badge } from '@/components/ui/badge'
@@ -9,6 +9,12 @@ import { SkeletonContent } from '@/components/ui/skeleton'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger, runAfterMenuClose } from '@/components/ui/dropdown-menu'
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
+import { contacts } from '@/features/companions/api'
+import { applyCompanionDefaults } from '@/features/companions/defaults'
+import { showContactError, useContacts } from '@/features/companions/context'
+import './expert-center.css'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -18,6 +24,7 @@ import { desktopClient, desktopRuntimeAvailable } from '@/features/conversations
 import type { AgentRecord, ConversationSummary, ExpertPackagePreview, ExpertPackageVersionRecord, KnowledgeReference, MemoryEntityRecord, MemoryKind, MemoryRecallRecord, MemoryRevisionRecord, MemoryScope, ProjectRecord, SaveAgentInput } from '@/features/conversations/model/types'
 import { AgentCard, type AgentCardData } from '@/features/workspace/entity-card'
 import { WorkspacePage } from '@/features/workspace/page-shell'
+import { DetailPromptCards } from '@/features/workspace/detail-prompt-cards'
 import type { NavigateWorkspace, WorkspaceView } from '@/features/workspace/types'
 import { useAgents } from './use-agents'
 import { asAgentCard as asCard } from './agent-card-data'
@@ -30,14 +37,9 @@ import { knowledgeReferencesFromDeclaration, remoteKnowledgeReference, resolveEx
 import { confirmDialog } from '@/components/ui/confirm-dialog'
 import { rememberPluginReturn } from '@/features/settings/settings-shared'
 import { formatDateTime, formatShortDateTime } from '@/lib/time-format'
+import { toolContracts } from '../../../../../packages/fox-engine-protocol/schema.json'
 
 const fallbackAgent: AgentRecord = { id: 'fox-general', name: 'Fox 通用助手', description: 'Fox 默认通用专家', runtimeType: 'pi', defaultModel: 'configured-model', icon: null, category: 'general', openingSuggestions: [], systemPrompt: '', isBuiltin: true, packageVersion: '1.0.0', packageSource: 'builtin', packageId: null, packageHash: null, packageManifest: {}, capabilities: ['files', 'tools', 'reasoning'], resources: { tools: [{ id: 'files', name: '文件读写', description: '读取和处理已授权项目文件' }, { id: 'tools', name: '本机工具', description: '调用 Fox Runtime 提供的本机工具' }, { id: 'reasoning', name: '任务推理', description: '规划并执行多步骤任务' }], knowledges: [], mcps: [], skills: [] }, configurableItems: {}, isDefault: true, available: true }
-
-const emptyAgentDraft: SaveAgentInput = {
-  name: '', description: '', icon: '/mascot/fox_magic.png', category: 'general', systemPrompt: '',
-  defaultModel: 'configured-model', openingSuggestions: [],
-  packageManifest: { version: '1.0.0', manifestSchemaVersion: 2, skills: [], knowledgeReferences: [], mcpServers: [], allowedTools: [] },
-}
 
 interface MemoryDraft {
   scope: MemoryScope
@@ -337,11 +339,10 @@ function manifestAfterToggle(manifest: SaveAgentInput['packageManifest'], key: E
     else selected.delete(id)
     packageManifest = { ...packageManifest, [key]: [...selected] }
   }
-  if (key === 'knowledge' || key === 'mcpServers') {
-    const tools = new Set(Array.isArray(packageManifest.allowedTools) ? packageManifest.allowedTools : [])
+  if ((key === 'knowledge' || key === 'mcpServers') && selected.size && Array.isArray(packageManifest.allowedTools)) {
+    const tools = new Set(packageManifest.allowedTools)
     const dependentTools = key === 'knowledge' ? knowledgeToolIds : mcpToolIds
-    if (selected.size) dependentTools.forEach((tool) => tools.add(tool))
-    else dependentTools.forEach((tool) => tools.delete(tool))
+    dependentTools.forEach((tool) => tools.add(tool))
     packageManifest.allowedTools = [...tools]
   }
   return packageManifest
@@ -351,13 +352,14 @@ function localDayKey(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 }
 
-function AgentWorkRecord({ agentId, conversationsOnly = false }: { agentId: string; conversationsOnly?: boolean }) {
+function AgentWorkRecord({ agentId, conversationsOnly = false, summaryOnly = false }: { agentId: string; conversationsOnly?: boolean; summaryOnly?: boolean }) {
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
+  const [countAvailable, setCountAvailable] = useState(false)
 
   useEffect(() => {
     let active = true
     void desktopClient.listConversations()
-      .then((items) => { if (active) setConversations(items.filter((item) => item.agentId === agentId)) })
+      .then((items) => { if (active) { setConversations(items.filter(item => item.agentId === agentId)); setCountAvailable(true) } })
       .catch(() => { if (active) setConversations([]) })
     return () => { active = false }
   }, [agentId])
@@ -395,6 +397,12 @@ function AgentWorkRecord({ agentId, conversationsOnly = false }: { agentId: stri
   }, [conversations])
 
   const conversationList = record.recent.length ? record.recent.map((conversation) => <div key={conversation.id} className="fox-agent-task-row"><span className="fox-agent-task-icon"><MessageSquareText /></span><span className="fox-agent-task-copy"><b>{conversation.title}</b><small><Folder />{conversation.projectRoot?.split(/[\\/]/).filter(Boolean).at(-1) ?? '未关联项目'}</small></span><Badge variant="secondary"><CheckCircle2 />已完成</Badge><time>{formatShortDateTime(conversation.lastMessageAt ?? conversation.updatedAt)}</time></div>) : <p>还没有对话任务。</p>
+
+  if (summaryOnly) {
+    return countAvailable ? <div className="fox-expert-collaboration-summary">
+      <span>{conversations.length} 条工作记录</span><span>{record.projects} 个关联项目</span><span>{record.activeDays} 天有活动</span>
+    </div> : null
+  }
 
   if (conversationsOnly) {
     return <Card className="fox-agent-work-card fox-agent-section-card"><div className="fox-agent-work-head"><h2>工作记录</h2></div><div className="fox-agent-work-list is-section-list">{conversationList}</div></Card>
@@ -436,7 +444,7 @@ function AgentWorkRecord({ agentId, conversationsOnly = false }: { agentId: stri
   )
 }
 
-const foxRuntimeTools = [
+const documentedRuntimeTools = [
   { id: 'read', name: 'read', description: '读取已授权项目中的 UTF-8 文本文件', kind: 'Runtime' },
   { id: 'ls', name: 'ls', description: '列出指定目录下的文件和文件夹', kind: 'Runtime' },
   { id: 'find', name: 'find', description: '按名称在项目目录中查找文件和文件夹', kind: 'Runtime' },
@@ -479,6 +487,24 @@ const foxRuntimeTools = [
   { id: 'workflow_cancel', name: 'workflow_cancel', description: '取消活动工作流并收口任务状态', kind: 'Workflow' },
 ]
 
+const documentedToolsById = new Map(documentedRuntimeTools.map(tool => [tool.id, tool]))
+const runtimeToolCategories: Record<string, string> = {
+  'project-read': 'Runtime', 'project-write': 'Runtime', attachment: 'Data', process: 'CLI',
+  knowledge: 'Knowledge', skill: 'Runtime', mcp: 'MCP', work: 'Work', memory: 'Memory', delegation: 'Delegation',
+}
+const foxRuntimeTools = toolContracts
+  .filter(({ name }) => !name.startsWith('companion_') && !name.startsWith('note_') && name !== 'memory_write')
+  .map(({ name, category }) => documentedToolsById.get(name) ?? {
+    id: name, name, description: '', kind: runtimeToolCategories[category],
+  })
+const emptyAgentDraft: SaveAgentInput = {
+  name: '', description: '', icon: '/mascot/fox_magic.png', category: 'general', systemPrompt: '',
+  defaultModel: 'configured-model', openingSuggestions: [],
+  packageManifest: {
+    version: '1.0.0', manifestSchemaVersion: 2, skills: [], knowledgeReferences: [], mcpServers: [],
+    allowedTools: foxRuntimeTools.map(tool => tool.id),
+  },
+}
 
 function AgentSectionLayout({ title, description, children }: { title: string; description: string; children: React.ReactNode }) {
   return <section className="fox-agent-section-layout"><header><h1>{title}</h1><p>{description}</p></header>{children}</section>
@@ -560,7 +586,7 @@ export function useAgentEditor(enabled = true) {
         setEditing(saved)
       }
       const syncResults: boolean[] = []
-      if (key === 'skills' && mode !== 'manifest') {
+      if (key === 'skills' && mode !== 'manifest' && (editing.isBuiltin || checked)) {
         syncResults.push(await skillResource.setEnabled(id, checked))
       } else if (key === 'mcpServers' && mode !== 'manifest' && (editing.isBuiltin || checked)) {
         syncResults.push(await mcpResource.setEnabled(id, checked))
@@ -994,7 +1020,7 @@ function AgentCapabilitySection({ kind, editor, navigate, onCopy }: { kind: Expe
         badges: [item.enabled ? (item.status || '已启用') : '未启用', item.toolCount != null ? `${item.toolCount} 工具` : ''].filter(Boolean),
         icon: <Globe2 />, checked: agent.isBuiltin ? item.enabled : selected.has(item.id),
         // 内置专家切换全局启停；本地专家勾选时会自动全局启用，取消仅移除声明。
-        disabled: agent.runtimeType !== 'pi' || (!agent.isBuiltin && !item.enabled),
+        disabled: agent.runtimeType !== 'pi' || (!agent.isBuiltin && editor.readOnly),
         error: Boolean(item.lastError),
         toggleMode: agent.isBuiltin ? 'global' : 'manifest-global',
       }))
@@ -1055,74 +1081,74 @@ function AgentCapabilitySection({ kind, editor, navigate, onCopy }: { kind: Expe
   )
 }
 
-function AgentCapabilityOverview({ editor }: { editor: AgentEditor }) {
+function AgentCapabilityOverview({ editor, onManage }: { editor: AgentEditor; onManage?: () => void }) {
+  const [filter, setFilter] = useState('all')
   const agent = editor.editing
   if (!agent) return null
-  const groups: { key: string; label: string; names: string[] }[] = []
+  const groups: { key: string; label: string; Icon: typeof Puzzle; items: { id: string; name: string; description?: string | null }[] }[] = []
   if (agent.runtimeType === 'pi') {
     const allowedTools = Array.isArray(agent.packageManifest.allowedTools) ? new Set(agent.packageManifest.allowedTools) : null
     groups.push({
-      key: 'tools', label: '工具',
-      names: foxRuntimeTools.filter((tool) => !allowedTools || allowedTools.has(tool.id)).map((tool) => tool.name),
+      key: 'tools', label: '内置工具', Icon: Wrench,
+      items: foxRuntimeTools.filter(tool => !allowedTools || allowedTools.has(tool.id)),
     })
     const defaultSkillIds = new Set(agent.resources.skills.map((item) => item.id))
     const userSkills = editor.skillItems
-      .filter((item) => !defaultSkillIds.has(item.id) && (agent.isBuiltin ? item.enabled : editor.selectedResources('skills').has(item.id)))
-      .map((item) => item.name || item.id)
+      .filter((item) => !defaultSkillIds.has(item.id) && item.valid && item.enabled && (agent.isBuiltin || editor.selectedResources('skills').has(item.id)))
     groups.push({
-      key: 'skills', label: '技能',
-      names: [...agent.resources.skills.map((item) => item.name || item.id), ...userSkills],
+      key: 'skills', label: '技能', Icon: Puzzle,
+      items: [...agent.resources.skills, ...userSkills],
     })
     const selectedMcps = new Set(Array.isArray(agent.packageManifest.mcpServers) ? agent.packageManifest.mcpServers : [])
     groups.push({
-      key: 'mcp', label: '连接器',
-      names: editor.mcpItems
-        .filter((item) => agent.isBuiltin ? item.enabled : selectedMcps.has(item.id))
-        .map((item) => item.name),
+      key: 'mcp', label: '连接器', Icon: Globe2,
+      items: editor.mcpItems
+        .filter((item) => item.enabled && (agent.isBuiltin || selectedMcps.has(item.id)))
+        .map(item => ({ id: item.id, name: item.name, description: item.toolCount != null ? `已发现 ${item.toolCount} 个工具` : undefined })),
     })
-    let knowledgeNames: string[] = []
-    try {
-      const selectedKnowledge = new Set(knowledgeReferencesFromDeclaration(resolveExpertKnowledgeDeclaration(agent.packageManifest)).map((reference) => reference.id))
-      knowledgeNames = editor.knowledgeItems.filter((item) => selectedKnowledge.has(item.id)).map((item) => item.name)
-    } catch {
-      knowledgeNames = []
-    }
-    groups.push({ key: 'knowledge', label: '资料库', names: knowledgeNames })
+    const selectedKnowledge = editor.selectedResources('knowledge')
+    groups.push({ key: 'knowledge', label: '资料库', Icon: Database, items: editor.knowledgeItems.filter(item => selectedKnowledge.has(item.id)) })
   } else {
-    groups.push({ key: 'tools', label: '工具', names: agent.resources.tools.map((item) => item.name || item.id) })
-    groups.push({ key: 'skills', label: '技能', names: agent.resources.skills.map((item) => item.name || item.id) })
-    groups.push({ key: 'mcp', label: '连接器', names: agent.resources.mcps.map((item) => item.name || item.id) })
-    groups.push({ key: 'knowledge', label: '资料库', names: agent.resources.knowledges.map((item) => item.name || item.id) })
+    groups.push({ key: 'tools', label: '工具', Icon: Wrench, items: agent.resources.tools })
+    groups.push({ key: 'skills', label: '技能', Icon: Puzzle, items: agent.resources.skills })
+    groups.push({ key: 'mcp', label: '连接器', Icon: Globe2, items: agent.resources.mcps })
+    groups.push({ key: 'knowledge', label: '资料库', Icon: Database, items: agent.resources.knowledges })
   }
-  return (
-    <Card className="fox-agent-cap-overview">
-      <header><h2><Wrench size={15} />可用能力</h2></header>
-      {groups.map((group) => (
-        <div className="fox-agent-cap-row" key={group.key}>
-          <span className="fox-agent-cap-row-label">{group.label}</span>
-          <div className="fox-agent-cap-chips">
-            {group.names.length
-              ? group.names.map((name) => <span className="fox-agent-cap-chip" key={name} title={name}>{name}</span>)
-              : <span className="fox-agent-cap-empty">暂无</span>}
-          </div>
-        </div>
-      ))}
-    </Card>
-  )
+  const equipped = groups
+    .filter(group => group.items.length > 0)
+  const count = equipped.reduce((total, group) => total + group.items.length, 0)
+  const activeFilter = equipped.some(group => group.key === filter) ? filter : 'all'
+  return <section className="fox-expert-detail-section">
+    <header><h2>已装配能力{count > 0 && <small>{count} 项已启用</small>}</h2>{onManage && <Button variant="outline" size="sm" onClick={onManage}><Settings2 />管理装配</Button>}</header>
+    {equipped.length ? <>
+      <div className="fox-expert-capability-filters" role="group" aria-label="筛选已装配能力">
+        <Button size="sm" variant={activeFilter === 'all' ? 'secondary' : 'ghost'} aria-pressed={activeFilter === 'all'} onClick={() => setFilter('all')}>全部 {count}</Button>
+        {equipped.map(group => <Button key={group.key} size="sm" variant={activeFilter === group.key ? 'secondary' : 'ghost'}
+          aria-pressed={activeFilter === group.key} onClick={() => setFilter(group.key)}>{group.label} {group.items.length}</Button>)}
+      </div>
+      <ul className="fox-expert-equipped-list">
+        {equipped.filter(group => activeFilter === 'all' || group.key === activeFilter).flatMap(({ key, label, Icon, items }) => items.map(item =>
+          <li key={`${key}:${item.id}`}>
+            <span className="fox-expert-equipped-icon"><Icon size={16} aria-hidden /></span>
+            <span className="fox-expert-equipped-copy"><strong>{item.name || item.id}</strong>{item.description && <small>{item.description}</small>}</span>
+            <Badge variant="secondary">{label}</Badge>
+          </li>))}
+      </ul>
+    </> : <p className="fox-agent-cap-empty">暂无已装配能力。</p>}
+  </section>
 }
 
-export function AgentListPage({ sidebarCollapsed, onSidebar, navigate }: { sidebarCollapsed: boolean; onSidebar: () => void; navigate: NavigateWorkspace }) {
+export function AgentListPage({ sidebarCollapsed, onSidebar, navigate, initialCategory }: { sidebarCollapsed: boolean; onSidebar: () => void; navigate: NavigateWorkspace; initialCategory?: string }) {
   const resource = useAgents()
   const cards = expertCatalogAgents(resource.agents).map(asCard)
   const [query, setQuery] = useState('')
   const [availability, setAvailability] = useState<'all' | 'available' | 'unavailable'>('all')
   const [environment, setEnvironment] = useState<'all' | 'local' | 'knowledge'>('all')
-  const [category, setCategory] = useState('all')
+  const [category, setCategory] = useState(initialCategory || 'all')
+  useEffect(() => setCategory(initialCategory || 'all'), [initialCategory])
   const [createOpen, setCreateOpen] = useState(false)
   const [createTab, setCreateTab] = useState<'profile' | 'resources'>('profile')
   const editor = useAgentEditor(createOpen)
-  const [detailOpen, setDetailOpen] = useState(false)
-  const [detailAgent, setDetailAgent] = useState<AgentCardData | null>(null)
   const packageInputRef = useRef<HTMLInputElement>(null)
   const [packagePreviewOpen, setPackagePreviewOpen] = useState(false)
   const [packagePreview, setPackagePreview] = useState<ExpertPackagePreview | null>(null)
@@ -1134,22 +1160,24 @@ export function AgentListPage({ sidebarCollapsed, onSidebar, navigate }: { sideb
     if (availability === 'unavailable' && agent.available) return false
     if (environment === 'local' && agent.runtimeType !== 'pi') return false
     if (environment === 'knowledge' && agent.runtimeType === 'pi') return false
-    if (category !== 'all' && agent.category !== category) return false
-    return !normalizedQuery || [agent.name, agent.description, agent.defaultModel].some((value) => value.toLocaleLowerCase().includes(normalizedQuery))
+    if (category !== 'all' && (agent.category || 'general') !== category) return false
+    const searchText = [agent.name, agent.description, agent.defaultModel, agentCategoryLabels[agent.category] ?? agent.category].join(' ').toLocaleLowerCase()
+    return normalizedQuery.split(/\s+/).every(term => searchText.includes(term))
   })
   const openCreate = () => {
     editor.reset(null)
     setCreateTab('profile')
     setCreateOpen(true)
   }
-  const openView = (agent: AgentCardData) => {
-    setDetailAgent(agent)
-    setDetailOpen(true)
-  }
-  const enterManage = (agent: AgentCardData) => {
-    setDetailOpen(false)
-    navigate('agent-detail', agent.id, { documentId: 'home' })
-  }
+  const categories = [...new Set(cards.map(agent => agent.category || 'general'))]
+  const featured = category === 'all' && availability === 'all' && environment === 'all' && !normalizedQuery
+    ? filteredCards.filter(agent => agent.isBuiltin && agent.available).slice(0, 4) : []
+  const featuredIds = new Set(featured.map(agent => agent.id))
+  const groups = categories.map(id => ({
+    id, title: agentCategoryLabels[id] ?? id,
+    items: filteredCards.filter(agent => (agent.category || 'general') === id && !featuredIds.has(agent.id)),
+  })).filter(group => group.items.length > 0)
+  if (featured.length) groups.unshift({ id: 'featured', title: '常用精选', items: featured })
   const inspectPackageFile = async (file: File | undefined) => {
     if (!file) return
     if (file.size > 2 * 1024 * 1024) {
@@ -1198,27 +1226,34 @@ export function AgentListPage({ sidebarCollapsed, onSidebar, navigate }: { sideb
   }
 
   return (
-    <WorkspacePage className="fox-agent-list-page" title="专家" subtitle="查看并与本机或资料库服务中的专家开始对话" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
+    <WorkspacePage className="fox-agent-list-page" title="专家" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
       <section className="fox-page-content fox-agent-list-page">
-        <div className="fox-page-intro fox-list-page-intro"><h1>选择一个专家</h1><label className="fox-list-page-search"><Search size={14} /><Input value={query} onChange={(event) => setQuery(event.target.value)} aria-label="搜索专家" placeholder="搜索专家" /></label></div>
-        <div className="fox-page-toolbar fox-agent-toolbar">
-          <div className="fox-agent-toolbar-filters">
-            <Select value={availability} onValueChange={(value) => setAvailability(value as typeof availability)}><SelectTrigger className="fox-agent-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部状态</SelectItem><SelectItem value="available">可使用</SelectItem><SelectItem value="unavailable">不可用</SelectItem></SelectContent></Select>
-            <Select value={environment} onValueChange={(value) => setEnvironment(value as typeof environment)}><SelectTrigger className="fox-agent-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部环境</SelectItem><SelectItem value="local">本机</SelectItem><SelectItem value="knowledge">资料库</SelectItem></SelectContent></Select>
-            <Select value={category} onValueChange={setCategory}><SelectTrigger className="fox-agent-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部分类</SelectItem>{agentCategoryOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select>
-            <span className="fox-agent-result-count">{filteredCards.length} 个结果</span>
-          </div>
+        <div className="fox-page-intro fox-list-page-intro fox-expert-center-heading">
+          <h1>专家</h1>
           <div className="fox-agent-toolbar-actions">
-            <Button variant="outline" size="icon" className="fox-agent-refresh" disabled={resource.syncing} title="刷新" aria-label="刷新" onClick={() => void resource.refresh()}>{resource.syncing ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}</Button>
-            <input ref={packageInputRef} hidden type="file" accept=".foxexpert,.json,application/json" onChange={(event) => void inspectPackageFile(event.target.files?.[0])} />
+            <input ref={packageInputRef} hidden type="file" accept=".foxexpert,.json,application/json" onChange={event => void inspectPackageFile(event.target.files?.[0])} />
             <Button variant="outline" disabled={packageBusy || !desktopRuntimeAvailable} onClick={() => packageInputRef.current?.click()}>{packageBusy ? <LoaderCircle className="animate-spin" /> : <FileUp />}导入能力包</Button>
             <Button onClick={openCreate}><Plus />新建专家</Button>
           </div>
         </div>
+        <div className="fox-page-toolbar fox-agent-toolbar">
+          <div className="fox-agent-toolbar-filters">
+            <Select value={availability} onValueChange={value => setAvailability(value as typeof availability)}><SelectTrigger className="fox-agent-filter" aria-label="状态"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部状态</SelectItem><SelectItem value="available">可使用</SelectItem><SelectItem value="unavailable">不可用</SelectItem></SelectContent></Select>
+            <Select value={environment} onValueChange={value => setEnvironment(value as typeof environment)}><SelectTrigger className="fox-agent-filter" aria-label="环境"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部环境</SelectItem><SelectItem value="local">本机</SelectItem><SelectItem value="knowledge">资料库</SelectItem></SelectContent></Select>
+            <Select value={category} onValueChange={setCategory}><SelectTrigger className="fox-agent-filter" aria-label="分类"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部分类</SelectItem>{categories.map(value => <SelectItem key={value} value={value}>{agentCategoryLabels[value] ?? value}</SelectItem>)}</SelectContent></Select>
+            <span className="fox-agent-result-count">{filteredCards.length} 位</span>
+          </div>
+          <label className="fox-list-page-search"><Search size={14} aria-hidden /><Input type="search" value={query} onChange={event => setQuery(event.target.value)} aria-label="搜索专家" placeholder="搜索专家" /></label>
+        </div>
         {resource.error && <FoxEmptyState variant="error" title="专家加载失败" description={resource.error} action={<Button variant="outline" size="sm" onClick={() => void resource.refresh()}>重试</Button>} />}
-        {resource.loading && cards.length === 0 ? <SkeletonContent label="正在加载专家…" lines={4} avatar /> : filteredCards.length ? <div className="fox-entity-grid fox-shadcn-entity-grid">{filteredCards.map((agent) => <AgentCard key={agent.id} agent={agent} onUse={() => navigate('chat', agent.id)} onViewDetail={() => openView(agent)} />)}</div> : !resource.error && <FoxEmptyState className="fox-page-empty" variant={cards.length ? 'search' : 'empty'} title={cards.length ? '没有符合当前筛选条件的专家' : '暂无可用专家'} description={cards.length ? '调整关键词、状态、环境或分类后再试。' : '新建专家，或导入专家能力包后开始使用。'} action={<Button onClick={openCreate}><Plus />新建专家</Button>} />}
+        {resource.loading && cards.length === 0 ? <SkeletonContent label="正在加载专家…" lines={4} avatar /> : groups.length ? groups.map(group => <section className="fox-expert-center-group" key={group.id}>
+          <h2>{group.title} <small>{group.items.length} 位</small></h2>
+          <div className="fox-entity-grid fox-shadcn-entity-grid">{group.items.map(agent => <AgentCard key={agent.id} agent={agent}
+            subtitle={`${agent.recent} · ${agentCategoryLabels[agent.category] ?? (agent.category || '通用')}`}
+            onUse={() => navigate('chat', agent.id)} onOpen={() => navigate('agent-detail', agent.id, { documentId: 'home' })} />)}</div>
+        </section>) : !resource.error && <FoxEmptyState className="fox-page-empty" variant={cards.length ? 'search' : 'empty'} title={cards.length ? '没有符合当前筛选条件的专家' : '暂无可用专家'}
+          action={cards.length ? <Button variant="outline" onClick={() => { setQuery(''); setAvailability('all'); setEnvironment('all'); setCategory('all') }}>清除筛选</Button> : <Button onClick={openCreate}><Plus />新建专家</Button>} />}
       </section>
-      <AgentDetailDialog agent={detailAgent} open={detailOpen} onOpenChange={setDetailOpen} onManage={enterManage} onUse={(agent) => { setDetailOpen(false); navigate('chat', agent.id) }} />
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent className="fox-agent-editor-dialog">
           <DialogHeader><DialogTitle>新建专家</DialogTitle><DialogDescription>创建本机可编辑专家；保存后可在专家管理页设置头像、技能、资料库、连接器与工具权限。</DialogDescription></DialogHeader>
@@ -1263,12 +1298,17 @@ export function AgentListPage({ sidebarCollapsed, onSidebar, navigate }: { sideb
 
 export function AgentDetailPage({ sidebarCollapsed, onSidebar, navigate, agentId, section = 'home' }: { sidebarCollapsed: boolean; onSidebar: () => void; navigate: NavigateWorkspace; agentId?: string | null; section?: string }) {
   const resource = useAgents()
-  const loaded = resource.agents.length > 0
-  const record = resource.agents.find((item) => item.id === agentId) ?? resource.agents[0] ?? fallbackAgent
+  const match = agentId ? resource.agents.find(item => item.id === agentId) : expertCatalogAgents(resource.agents)[0]
+  const loaded = Boolean(match)
+  const record = match ?? fallbackAgent
   const agent = asCard(record)
   const editor = useAgentEditor()
   const [profileOpen, setProfileOpen] = useState(false)
   const [promptOpen, setPromptOpen] = useState(false)
+  const [assemblyOpen, setAssemblyOpen] = useState(false)
+  const [assemblyKind, setAssemblyKind] = useState<ExpertResourceKey>('skills')
+  const [creatingCompanion, setCreatingCompanion] = useState(false)
+  const companionContext = useContacts()
   useEffect(() => {
     if (!loaded) return
     editor.reset(record)
@@ -1286,7 +1326,9 @@ export function AgentDetailPage({ sidebarCollapsed, onSidebar, navigate, agentId
 
   const capabilitySectionMap: Record<string, ExpertResourceKey> = { knowledge: 'knowledge', skills: 'skills', mcp: 'mcpServers', tools: 'allowedTools' }
   const sectionKind: ExpertResourceKey | null = capabilitySectionMap[section] ?? null
-  const view = asCard(editor.editing ?? record)
+  const view = asCard(editor.editing?.id === record.id ? editor.editing : record)
+  const category = view.category || 'general'
+  const readOnly = view.packageSource !== 'local' || view.runtimeType !== 'pi'
   const refreshAfterSave = () => { void resource.refresh(false) }
 
   const copyManage = async () => {
@@ -1303,6 +1345,17 @@ export function AgentDetailPage({ sidebarCollapsed, onSidebar, navigate, agentId
     navigate('agents')
   }
 
+  const createCompanion = async () => {
+    setCreatingCompanion(true)
+    try {
+      const initialized = await applyCompanionDefaults(await contacts.add(view.id))
+      await companionContext?.refresh()
+      navigate('companions', undefined, { conversationId: initialized.contact.conversationId })
+      if (initialized.errors.length) toast.error('伙伴已创建，部分默认值未应用', { description: initialized.errors.join('；') })
+    } catch (error) { showContactError(error) }
+    finally { setCreatingCompanion(false) }
+  }
+
   const rollbackManage = async (version: string) => {
     await editor.rollback(version)
     await resource.refresh(false)
@@ -1312,46 +1365,73 @@ export function AgentDetailPage({ sidebarCollapsed, onSidebar, navigate, agentId
     <WorkspacePage className="fox-agent-detail-page fox-agent-manage-page" title={view.name} subtitle={isHome ? '专家介绍' : `专家详情 · ${sectionTitle}`} sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} onBack={() => navigate('agents')}>
       <div className="fox-detail-layout fox-agent-detail-layout">
         <main className="fox-detail-main">
-          {!loaded && (resource.loading ? <SkeletonContent label="正在载入专家…" lines={4} avatar /> : <FoxEmptyState variant={resource.error ? 'error' : 'empty'} title={resource.error ? '专家加载失败' : '暂无专家'} description={resource.error ?? '返回专家列表新建或导入专家。'} action={<Button variant="outline" size="sm" onClick={() => resource.error ? void resource.refresh() : navigate('agents')}>{resource.error ? '重试' : '返回专家列表'}</Button>} />)}
-          {loaded && section === 'home' && <>
-            <section className="fox-agent-manage-section fox-agent-manage-home">
-              <header className="fox-agent-hero fox-agent-manage-hero">
-                <span><img src={view.image} alt="" /></span>
-                <div>
+          {!loaded && (resource.loading ? <SkeletonContent label="正在载入专家…" lines={4} avatar /> : <FoxEmptyState variant={resource.error ? 'error' : 'empty'} title={resource.error ? '专家加载失败' : '找不到该专家'} description={resource.error ?? undefined} action={<Button variant="outline" size="sm" onClick={() => resource.error ? void resource.refresh() : navigate('agents')}>{resource.error ? '重试' : '返回专家列表'}</Button>} />)}
+          {loaded && isHome && <>
+            <section className="fox-agent-manage-section fox-agent-manage-home fox-expert-detail-home">
+              <nav className="fox-expert-breadcrumb" aria-label="专家路径">
+                <button type="button" onClick={() => navigate('agents')}>专家</button><ChevronRight />
+                <button type="button" onClick={() => navigate('agents', category)}>{agentCategoryLabels[category] ?? category}</button><ChevronRight />
+                <span aria-current="page">{view.name}</span>
+              </nav>
+              <header className="fox-expert-detail-hero">
+                <img src={view.image} alt="" />
+                <div className="fox-expert-hero-copy">
                   <div className="fox-agent-manage-name-row">
                     <h1>{view.name}</h1>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button variant="ghost" size="icon" className="fox-agent-name-edit" aria-label="编辑信息" onClick={() => setProfileOpen(true)}><Pencil size={15} /></Button>
-                      </TooltipTrigger>
-                      <TooltipContent side="top">编辑信息</TooltipContent>
-                    </Tooltip>
-                    {view.isDefault && <Badge variant="secondary"><i />默认专家</Badge>}
+                    <Badge variant="secondary">{view.available ? view.runtimeType === 'pi' ? '本机可用' : '资料库服务' : '不可用'}</Badge>
+                    {view.packageSource === 'local' && <Badge variant="outline">自定义</Badge>}
                   </div>
-                  <small>{packageSourceText(view)}</small>
+                  {view.description && <p>{view.description}</p>}
+                  <AgentWorkRecord key={view.id} agentId={view.id} summaryOnly />
+                </div>
+                <div className="fox-expert-hero-actions">
+                  <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label="更多专家操作"><MoreHorizontal /></Button></DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem disabled={!editor.editing || editor.saving} onSelect={() => void copyManage()}><Copy />复制为新专家</DropdownMenuItem>
+                      {agent.runtimeType === 'pi' && <DropdownMenuItem disabled={!editor.editing || editor.packageBusy} onSelect={() => void editor.exportPackage()}><Download />导出能力包</DropdownMenuItem>}
+                      {agent.runtimeType === 'pi' && <DropdownMenuItem disabled={!view.available || creatingCompanion} onSelect={() => void createCompanion()}><UserRoundPlus />创建为常驻伙伴</DropdownMenuItem>}
+                      {!agent.isBuiltin && agent.runtimeType === 'pi' && <><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" disabled={editor.saving} onSelect={() => runAfterMenuClose(() => void deleteManage())}><Trash2 />删除专家</DropdownMenuItem></>}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                  {!readOnly && <Button variant="outline" onClick={() => setProfileOpen(true)}><Pencil />编辑</Button>}
+                  <Button disabled={!view.available} onClick={() => navigate('chat', view.id)}><Sparkles />召唤对话</Button>
                 </div>
               </header>
 
-              <AgentWorkRecord agentId={view.id} />
-
-              <AgentCapabilityOverview editor={editor} />
-
-              <Card className="fox-agent-prompt-card">
-                <header><h2><Sparkles size={15} />工作要求</h2>{!editor.readOnly && <Button variant="outline" size="sm" onClick={() => setPromptOpen(true)}><Pencil size={13} />编辑</Button>}</header>
-                <p>{view.systemPrompt || '未提供工作要求。'}</p>
-                {view.openingSuggestions.length > 0 && <div className="fox-agent-prompt-openings"><span>提问示例</span><ul>{view.openingSuggestions.map((suggestion, index) => <li key={index}>{suggestion}</li>)}</ul></div>}
-              </Card>
-
-              <Card className="fox-agent-manage-zone-card">
-                <header><h2><Settings2 size={15} />专家操作</h2></header>
-                <div className="fox-agent-manage-zone-actions">
-                  <Button variant="outline" size="sm" disabled={editor.saving} onClick={() => void copyManage()}><Copy size={13} />复制专家</Button>
-                  {agent.runtimeType === 'pi' && <Button variant="outline" size="sm" disabled={editor.packageBusy} onClick={() => void editor.exportPackage()}><Download size={13} />导出专家</Button>}
-                  {!agent.isBuiltin && <Button variant="outline" size="sm" className="fox-agent-manage-zone-danger" disabled={editor.saving} onClick={() => void deleteManage()}><Trash2 size={13} />删除专家</Button>}
-                </div>
-                {editor.editing?.packageSource === 'imported' && <div className="fox-agent-manage-versions"><h3><History size={14} />不可变版本记录</h3><div className="fox-agent-resource-list">{editor.packageVersions.map((item) => <div key={item.id}><span><History /></span><p><b>v{item.version}<em>{item.status === 'active' ? '当前' : '历史'}</em></b><small>SHA-256 {item.packageHash.slice(0, 16)}… · {formatDateTime(item.activatedAt)}</small></p>{item.status !== 'active' && <Button variant="outline" size="sm" disabled={editor.packageBusy} onClick={() => void rollbackManage(item.version)}><RotateCcw size={13} />恢复版本</Button>}</div>)}{!editor.packageVersions.length && <p className="fox-agent-resource-empty">正在读取版本历史…</p>}</div></div>}
-              </Card>
+              {view.openingSuggestions.length > 0 && <DetailPromptCards label="推荐开场提问" name={view.name} mark={<img src={view.image} alt="" />}
+                prompts={view.openingSuggestions} disabled={!view.available} onSelect={draftPrompt => navigate('chat', view.id, { draftPrompt })} />}
+              <section className="fox-expert-detail-section">
+                <header><h2>工作要求 <small>系统提示词</small></h2>{!readOnly && <Button variant="ghost" size="sm" onClick={() => setPromptOpen(true)}><Pencil />修改</Button>}</header>
+                {readOnly ? <p className="fox-expert-prompt-block">{view.systemPrompt || '未提供工作要求。'}</p>
+                  : <button type="button" className="fox-expert-prompt-block" onClick={() => setPromptOpen(true)}>{view.systemPrompt || '添加工作要求'}</button>}
+              </section>
+              <AgentCapabilityOverview key={view.id} editor={editor} onManage={view.runtimeType === 'pi' ? () => setAssemblyOpen(true) : undefined} />
+              <section className="fox-expert-detail-section">
+                <header><h2>基础信息</h2></header>
+                <dl className="fox-expert-facts">
+                  <div><dt>所属领域</dt><dd>{agentCategoryLabels[category] ?? category}</dd></div>
+                  <div><dt>来源</dt><dd>{packageSourceText(view)}</dd></div>
+                  <div><dt>运行环境</dt><dd>{view.recent}</dd></div>
+                  <div><dt>默认模型</dt><dd>{view.defaultModel === 'configured-model' ? '使用配置的模型' : view.defaultModel}</dd></div>
+                  <div><dt>版本</dt><dd>{view.packageVersion}</dd></div>
+                  <div><dt>工作记录</dt><dd><button type="button" onClick={() => navigate('agent-detail', view.id, { documentId: 'conversations' })}>查看记录<ChevronRight /></button></dd></div>
+                  <div><dt>长期记忆</dt><dd><button type="button" onClick={() => navigate('agent-detail', view.id, { documentId: 'memory' })}>管理记忆<ChevronRight /></button></dd></div>
+                </dl>
+                {editor.editing?.packageSource === 'imported' && <details className="fox-agent-manage-versions"><summary>能力包版本记录</summary><div className="fox-agent-resource-list">{editor.packageVersions.map(item => <div key={item.id}><span><History /></span><p><b>v{item.version}<em>{item.status === 'active' ? '当前' : '历史'}</em></b><small>SHA-256 {item.packageHash.slice(0, 16)}… · {formatDateTime(item.activatedAt)}</small></p>{item.status !== 'active' && <Button variant="outline" size="sm" disabled={editor.packageBusy} onClick={() => void rollbackManage(item.version)}><RotateCcw size={13} />恢复版本</Button>}</div>)}</div></details>}
+              </section>
             </section>
+            <Sheet open={assemblyOpen} onOpenChange={setAssemblyOpen}>
+              <SheetContent className="fox-expert-assembly-sheet" side="right">
+                <SheetHeader><SheetTitle>管理装配</SheetTitle><SheetDescription>{view.name}</SheetDescription></SheetHeader>
+                <div className="fox-expert-assembly-body">
+                  <div className="fox-expert-capability-filters" role="group" aria-label="能力分类">
+                    {(Object.keys(capabilityKindMeta) as ExpertResourceKey[]).map(kind => <Button key={kind} size="sm" variant={assemblyKind === kind ? 'secondary' : 'ghost'}
+                      aria-pressed={assemblyKind === kind} onClick={() => setAssemblyKind(kind)}>{capabilityKindMeta[kind].title}</Button>)}
+                  </div>
+                  <AgentCapabilitySection key={assemblyKind} kind={assemblyKind} editor={editor} navigate={navigate} onCopy={() => void copyManage()} />
+                </div>
+              </SheetContent>
+            </Sheet>
             <AgentProfileEditDialog editor={editor} open={profileOpen} onOpenChange={setProfileOpen} onSaved={refreshAfterSave} />
             <AgentPromptEditDialog editor={editor} open={promptOpen} onOpenChange={setPromptOpen} onSaved={refreshAfterSave} />
           </>}

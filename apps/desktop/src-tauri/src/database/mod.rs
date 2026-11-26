@@ -34,6 +34,7 @@ pub(crate) use repositories::companion_files::{CompanionFile, CompanionFileEntry
 pub(crate) use repositories::companion_coordination;
 pub(crate) use repositories::companion_ownership::OWNERSHIP_MISSING;
 pub(crate) use repositories::companions;
+pub(crate) use repositories::contact_bubbles::visible_answer as contact_visible_answer;
 pub(crate) use repositories::contact_marks::prompt_block as contact_quote_prompt_block;
 #[cfg(test)]
 pub(crate) use repositories::finalize_fault;

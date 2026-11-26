@@ -22,7 +22,7 @@
 use crate::launch::LaunchSpec;
 use crate::port::{CapabilityDeclaration, SessionCapabilities};
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ContentBlock, InitializeRequest, LoadSessionRequest, NewSessionRequest, PromptRequest,
+    CancelNotification, ContentBlock, InitializeRequest, LoadSessionRequest, NewSessionRequest, PromptRequest, ResumeSessionRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionNotification, SetSessionModeRequest, SetSessionConfigOptionRequest, TextContent,
 };
@@ -102,6 +102,7 @@ enum Command {
         session_id: String,
         cwd: PathBuf,
         mcp_servers: Vec<agent_client_protocol::schema::v1::McpServer>,
+        resume: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
     Prompt {
@@ -110,6 +111,11 @@ enum Command {
     },
     Cancel {
         session_id: String,
+    },
+    Steer {
+        session_id: String,
+        text: String,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     /// `session/set_mode` (Codex permission modes, mid-session).
     SetMode {
@@ -123,6 +129,11 @@ enum Command {
         reply: oneshot::Sender<Result<(), String>>,
     },
 }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, agent_client_protocol::JsonRpcRequest)]
+#[serde(transparent)]
+#[request(method = "_session/steering", response = Value)]
+struct SteeringRequest(Value);
 
 /// Pending permission requests plus the stopping flag, under ONE lock: the
 /// request handler checks the flag and registers the request atomically, and
@@ -1221,6 +1232,15 @@ impl AcpConnection {
         let rpc_error_data: Arc<Mutex<Option<String>>> = Arc::default();
         let session_error_data = Arc::clone(&rpc_error_data);
 
+        let mut initialize_request = InitializeRequest::new(ProtocolVersion::V1);
+        if spec.backend == crate::port::AgentBackend::Codex {
+            let mut capabilities = agent_client_protocol::schema::v1::ClientCapabilities::new();
+            capabilities.meta = Some(serde_json::Map::from_iter([(
+                "jetbrains".to_owned(),
+                serde_json::json!({"air": {"version": 1, "capabilities": ["goal"]}}),
+            )]));
+            initialize_request.client_capabilities = capabilities;
+        }
         tokio::spawn(async move {
             let result = Client
                 .builder()
@@ -1274,7 +1294,7 @@ impl AcpConnection {
                 )
                 .connect_with(transport, async move |connection: ConnectionTo<Agent>| {
                     let init = connection
-                        .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        .send_request(initialize_request)
                         .block_task()
                         .await;
                     let init = match init {
@@ -1314,17 +1334,27 @@ impl AcpConnection {
                                     });
                                 let _ = reply.send(created);
                             }
-                            Command::LoadSession { session_id, cwd, mcp_servers, reply } => {
+                            Command::LoadSession { session_id, cwd, mcp_servers, resume, reply } => {
                                 let cwd = crate::launch::backend_visible_path(&cwd);
                                 let fence_session = session_id.clone();
-                                let loaded = connection
-                                    .send_request(LoadSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers))
-                                    .block_task()
-                                    .await
-                                    .map(|_| ())
+                                let offered_fox_tools = !mcp_servers.is_empty();
+                                let response = if resume {
+                                    connection.send_request(ResumeSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers))
+                                        .block_task().await.map(|response| serde_json::to_value(response).unwrap_or(Value::Null))
+                                } else {
+                                    connection.send_request(LoadSessionRequest::new(session_id, cwd).mcp_servers(mcp_servers))
+                                        .block_task().await.map(|response| serde_json::to_value(response).unwrap_or(Value::Null))
+                                };
+                                let loaded = response
                                     .map_err(|error| {
                                         *lock_data(&session_error_data) = rpc_error_data_text(&error);
                                         rpc_error_summary(&error)
+                                    })
+                                    .and_then(|raw| {
+                                        if offered_fox_tools && crate::fox_mcp::skipped_by_agent(&raw) {
+                                            return Err(format!("{FOX_TOOLS_SKIPPED}: the Agent skipped the Fox tool MCP server"));
+                                        }
+                                        Ok(())
                                     });
                                 let _ = main_tx.send(BackendEvent::LoadSettled { session_id: fence_session });
                                 let _ = reply.send(loaded);
@@ -1361,6 +1391,23 @@ impl AcpConnection {
                             }
                             Command::Cancel { session_id } => {
                                 let _ = connection.send_notification(CancelNotification::new(session_id));
+                            }
+                            Command::Steer { session_id, text, reply } => {
+                                let connection = connection.clone();
+                                tokio::spawn(async move {
+                                    let request = SteeringRequest(crate::backends::codex::steering_params(&session_id, &text));
+                                    let result = connection.send_request(request).block_task().await
+                                        .map_err(|error| rpc_error_summary(&error))
+                                        .and_then(|value| match value["outcome"].as_str() {
+                                            Some("injected") => Ok(()),
+                                            Some("startedNewTurn") => {
+                                                let _ = connection.send_notification(CancelNotification::new(session_id));
+                                                Err("原回合已结束，Fox 已请求停止 Codex 新启动的回合。".into())
+                                            }
+                                            _ => Err("外部 Agent 未确认收到当前回合的补充指令。".into()),
+                                        });
+                                    let _ = reply.send(result);
+                                });
                             }
                             Command::SetMode { session_id, mode_id, reply } => {
                                 // Its own task: a mode switch during a turn
@@ -1531,12 +1578,20 @@ impl AcpConnection {
     /// ([`crate::port::SessionCapabilities::load`]); the replayed
     /// `session/update`s arrive on [`Self::events`] before this returns.
     pub async fn load_session(&self, session_id: &str, cwd: PathBuf) -> Result<(), String> {
+        self.reopen_session(session_id, cwd, false).await
+    }
+
+    pub async fn resume_session(&self, session_id: &str, cwd: PathBuf) -> Result<(), String> {
+        self.reopen_session(session_id, cwd, true).await
+    }
+
+    async fn reopen_session(&self, session_id: &str, cwd: PathBuf, resume: bool) -> Result<(), String> {
         if self.is_stopping() {
             return Err(STOPPING_REFUSAL.to_owned());
         }
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(Command::LoadSession { session_id: session_id.to_owned(), cwd, mcp_servers: self.mcp_servers.iter().map(acp_mcp_server).collect(), reply })
+            .send(Command::LoadSession { session_id: session_id.to_owned(), cwd, mcp_servers: self.mcp_servers.iter().map(acp_mcp_server).collect(), resume, reply })
             .map_err(|_| "backend connection closed".to_string())?;
         response.await.map_err(|_| "backend connection closed".to_string())?
     }
@@ -1574,6 +1629,19 @@ impl AcpConnection {
     }
 
     /// Start a turn. Its end is reported as `TurnEnded` or `TurnFailed`.
+    pub async fn steer(&self, session_id: String, text: String, wait_for_delivery: bool) -> Result<(), String> {
+        let (reply, result) = oneshot::channel();
+        self.commands.send(Command::Steer { session_id, text, reply })
+            .map_err(|_| "ACP 连接已关闭。".to_owned())?;
+        let outcome = if wait_for_delivery {
+            result.await
+        } else {
+            tokio::time::timeout(std::time::Duration::from_secs(15), result).await
+                .map_err(|_| "等待外部 Agent 确认补充指令超时。".to_owned())?
+        };
+        outcome.map_err(|_| "外部 Agent 连接已关闭。".to_owned())?
+    }
+
     pub fn prompt(&self, session_id: &str, text: &str) -> Result<(), String> {
         if self.is_stopping() {
             return Err(STOPPING_REFUSAL.to_owned());

@@ -44,7 +44,7 @@ export function LocalKnowledgeSidebarNavigation({ collapsed, activeView, activeE
   }, [activeView, gateway])
   const libraryActive = activeView === 'knowledge' || activeView === 'knowledge-detail' || activeView === 'knowledge-graph' || activeView === 'local-files' || (activeView.startsWith('local-knowledge') && !['local-knowledge-home', 'local-knowledge-models', 'local-knowledge-jobs'].includes(activeView))
   return <>
-    <div className="fox-sidebar-primary fox-local-knowledge-sidebar-primary">
+    <div className="fox-sidebar-primary">
       {[
         { view: 'local-knowledge-home' as const, label: '最近', icon: Home, active: activeView === 'local-knowledge-home' },
         { view: 'local-knowledge' as const, label: '资料库', icon: Library, active: libraryActive },

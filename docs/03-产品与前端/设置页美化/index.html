@@ -76,7 +76,7 @@ code, .mono { font-family: "Cascadia Mono", Consolas, monospace; font-size: 12px
 .doc { width: 100%; max-width: 1360px; margin: 0 auto; padding: 32px 40px 120px; }
 .doc-hero h1 { margin: 0 0 8px; font-size: 32px; font-weight: 600; letter-spacing: -.02em; }
 .doc-hero p { margin: 0; max-width: 940px; color: var(--muted-foreground); font-size: 14px; line-height: 1.75; }
-.toc { margin-top: 16px; }
+.toc { margin-top: 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .toc .sel { max-width: 100%; }
 .frame { margin-top: 64px; scroll-margin-top: 40px; }
 .frame:first-of-type { margin-top: 26px; }
@@ -147,7 +147,7 @@ body.single .win { height: 100%; }
 
 /* Item row: mark + name + status + controls; hover bleeds 8px past the text edge. */
 .irow { position: relative; margin: 0 -8px; padding: 0 8px; border-radius: var(--fox-radius-card); }
-.irow + .irow::before, [data-agent] + [data-agent] > .irow::before { content: ''; position: absolute; top: 0; left: 8px; right: 8px; height: 1px; background: var(--hairline); }
+.irow + .irow::before, .irow + [data-agent] > .irow::before, [data-agent] + [data-agent] > .irow::before { content: ''; position: absolute; top: 0; left: 8px; right: 8px; height: 1px; background: var(--hairline); }
 .irow.hover, .irow.open { background: var(--fox-hover); }
 .irow.hover::before, .irow.hover + .irow::before, .irow.open::before, .irow.open + .irow::before { opacity: 0; }
 .ir { min-height: var(--sp-row-min); display: flex; align-items: center; gap: 12px; padding: 12px 0; }
@@ -378,12 +378,12 @@ button, .btn, .sw, .seg > span, .x, .mi, .disc { cursor: pointer; }
 select.sel { max-width: min(100%, 290px); min-width: 0; background: var(--fox-card); }
 .fld select.sel { width: 100% !important; max-width: none; }
 input.inp { background: var(--fox-card); min-width: 0; width: 100%; }
-.sheet textarea.ta { display: block; width: 100%; resize: vertical; color: inherit; font: inherit; }
+.sheet textarea.ta { display: block; width: 100%; resize: vertical; color: inherit; }
 .sheet .fld > span { font-size: 12px; font-weight: 500; }
 .sheet .fld input, .sheet .fld select { min-height: var(--fox-action-height); }
-.provider-toolbar { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: var(--fox-space-m); padding-block: var(--fox-space-l); background: var(--popover); }
-.provider-toolbar .inp { flex: 1; min-width: 0; }
-.provider-toolbar :is(.inp, .btn) { height: var(--fox-action-height, var(--fox-control-md)); }
+.catalog-toolbar { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: var(--fox-space-m); padding-block: var(--fox-space-l); background: var(--popover); }
+.catalog-toolbar .inp { flex: 1; min-width: 0; }
+.catalog-toolbar :is(.inp, .sel, .btn) { height: var(--fox-action-height); }
 .provider-directory h3 { margin: 10px 0 8px; font-size: 13px; font-weight: 600; }
 .provider-directory section { padding: 0 0 16px; }
 .provider-directory section + section { border-top: 1px solid var(--hairline); padding-top: 6px; }
@@ -401,6 +401,26 @@ input.inp { background: var(--fox-card); min-width: 0; width: 100%; }
 .provider-empty { padding-block: 22px; color: var(--fox-muted); }
 .model-options summary { cursor: pointer; width: fit-content; color: var(--foreground); font-weight: 500; }
 .model-options[open] summary { margin-bottom: 12px; }
+.agent-external .grp-body > .srow { border-top: 1px solid var(--hairline); }
+.agent-external .grp-body > .srow .st { flex-basis: auto; }
+.agent-external .grp-body > .hint { margin: 0; padding-block: var(--fox-space-l); border-top: 1px solid var(--hairline); }
+.agent-catalog-filters { display: flex; flex-wrap: wrap; gap: var(--fox-space-m); align-items: center; }
+.agent-directory { border-top: 1px solid var(--hairline); }
+.agent-directory > .hint { margin-block: var(--fox-space-xl) 0; }
+.agent-directory:not(:has(.agent-doc-link)) + .hint { display: none; }
+.agent-catalog-scenario { margin-block: var(--fox-space-xl); padding-top: var(--fox-space-l); border-top: 1px solid var(--hairline); }
+.agent-catalog-scenario summary { color: var(--muted-foreground); }
+.agent-catalog-scenario[open] summary { margin-bottom: var(--fox-space-m); }
+.agent-doc-link { display: inline-flex; align-items: center; gap: var(--fox-space-xs); min-height: var(--fox-action-height); color: var(--primary); text-underline-offset: 3px; }
+.agent-doc-link .i { width: var(--fox-space-l); height: var(--fox-space-l); }
+.agent-connection-facts > div { grid-template-columns: 5em minmax(0, 1fr); }
+.agent-connection-facts + .agent-doc-link { margin-top: var(--fox-space-m); }
+[data-agent-settings] .sh-sec:has(> .srow:only-child) { padding-block: 0; }
+[data-agent-settings] .sh-sec > select.sel { width: 100%; max-width: none; }
+[data-agent-settings] .source-service, [data-custom-acp] .fld + .srow { margin-top: var(--fox-space-l); }
+[data-custom-acp] .fld + .srow { min-height: var(--fox-action-height); padding-block: 0; }
+.agent-env-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)) auto; gap: var(--fox-space-m); align-items: center; margin-bottom: var(--fox-space-m); }
+[data-custom-acp] :is(.agent-env-row .btn, [data-action="add-acp-env"]) { height: var(--fox-action-height); }
 .model-baseline { display: grid; gap: 3px; margin-top: 14px; }
 .model-baseline small { font-size: 12px; color: var(--muted-foreground); }
 .model-baseline code { overflow-wrap: anywhere; }
@@ -408,11 +428,12 @@ input.inp { background: var(--fox-card); min-width: 0; width: 100%; }
 .model-key-row input { flex: 1; }
 .model-key-row .btn { height: var(--fox-action-height); }
 [data-sheet="model"] label.fld:focus-within { outline: none; }
-.sh-foot .model-return { margin-right: auto; padding-inline: 6px; }
+.sh-foot .drawer-return { margin-inline-end: auto; padding-inline: var(--fox-space-s); }
 .drawer-feedback { flex: 0 0 100%; min-width: 0; margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted-foreground); overflow-wrap: anywhere; }
 .drawer-feedback:empty { display: none; }
 .drawer-feedback.error { color: var(--destructive); }
 .drawer-feedback.success { color: color-mix(in oklch, var(--success) 75%, var(--foreground)); }
+[data-sheet="agent"] .drawer-feedback.error { padding: var(--fox-space-m) var(--fox-space-l); border: 1px solid color-mix(in oklch, var(--destructive) 35%, var(--border)); border-radius: var(--fox-radius-control); background: color-mix(in oklch, var(--destructive) 5%, var(--card)); }
 .sheet .tools b { overflow-wrap: anywhere; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 .source-service { margin-top: 18px; }
@@ -472,6 +493,9 @@ label:focus-within { outline: 2px solid var(--fox-accent); }
   .sh-head > .mk { width: 32px; height: 32px; }
   .sh-body .ir { display: grid; grid-template-columns: var(--sp-mark) minmax(0, 1fr); gap: 6px 12px; }
   .sh-body .ir-meta { grid-column: 2; }
+  .agent-catalog-tools { flex-wrap: wrap; }
+  .agent-catalog-tools .inp { flex-basis: 100%; }
+  .agent-directory .ir > .mk { align-self: start; }
   .search-option { gap: 8px; min-height: 50px; padding: 6px 8px; }
 }
 @media (max-width: 1050px) {
@@ -491,10 +515,12 @@ label:focus-within { outline: 2px solid var(--fox-accent); }
 }
 @container drawer (max-width: 310px) {
   .sh-body .fld-row { grid-template-columns: minmax(0, 1fr); }
-  .provider-toolbar { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: start; }
+  .catalog-toolbar { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: start; }
   .provider-option { grid-template-columns: var(--fox-control-xs) minmax(0, 1fr); padding-inline: var(--fox-space-s); gap: var(--fox-space-s); }
   .provider-option .i:last-child { display: none; }
-  .sh-foot .model-return { flex-basis: 100%; justify-content: flex-start; }
+  .sh-foot .drawer-return { flex-basis: 100%; justify-content: flex-start; }
+  .agent-env-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .agent-env-row input:first-child { grid-column: 1 / -1; }
 }
 </style>
 </head>
@@ -581,9 +607,9 @@ function saveDemo() {
 
 const AG = {
   fox: { name: 'Fox', m: { img: FOX, av: true } },
-  pi: { name: 'Pi', m: { letter: 'π' } },
-  codex: { name: 'Codex', m: { img: P('openai') } },
-  deepseek: { name: 'DeepSeek（dsh）', m: { img: P('deepseek') } },
+  pi: { name: 'Pi', m: { letter: 'π' }, command: 'pi', route: '本机 RPC', version: '1.6.0', signedIn: false, guide: 'https://docs.pi.dev/latest/quickstart' },
+  codex: { name: 'Codex', m: { img: P('openai') }, command: 'codex', route: '本机 App Server', version: '0.171.0', signedIn: true, guide: 'https://learn.chatgpt.com/docs/codex/cli' },
+  deepseek: { name: 'DeepSeek（dsh）', m: { img: P('deepseek') }, command: 'dsh', route: '本机 ACP', version: '0.2.1', signedIn: false, guide: 'https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/desktop/README.zh.md#终端命令' },
 }
 const SEED_SERVICES = [
   { id: 'deepseek', def: true, hasKey: true, status: stat('ok', '已连接') },
@@ -661,7 +687,7 @@ function providerDirectory(filter) {
 }
 const addSheet = (filter = '') => sheet({
   kind: 'provider-catalog', m: { icon: 'plus' }, title: '添加模型', desc: '选择供应商，或连接自己的 API 地址。',
-  body: `<div class="provider-toolbar">
+  body: `<div class="catalog-toolbar">
     <input class="inp" type="search" name="provider-filter" aria-label="搜索供应商" placeholder="搜索名称或域名" value="${escapeHtml(filter)}" />
     ${btn('自定义供应商', { icon: 'plus', action: 'custom-provider' })}
   </div><div class="provider-directory" aria-live="polite">${providerDirectory(filter)}</div>`,
@@ -691,27 +717,98 @@ function providerForm(id, filter = '', service) {
       </details>` : `<details class="model-options"><summary>高级</summary>${urlField('model-endpoint', '覆盖默认端点（选填）', preset[2])}</details>`)}
       <div class="sh-sec" data-model-results hidden><div class="sh-sec-h"><h3>示例模型</h3></div><div class="tools"></div></div>
     </div>`,
-    foot: `${feedback('')}${service ? btn('取消') : btn('返回列表', { kind: 'ghost', cls: 'model-return', action: 'back-to-providers' })}${btn('检查连接', { icon: 'zap', action: 'check-model' })}${btn(service ? '保存' : '添加', { kind: 'primary', action: 'save-model', disabled: !service })}`,
+    foot: `${feedback('')}${service ? btn('取消') : btn('返回列表', { kind: 'ghost', cls: 'drawer-return', action: 'back-to-providers' })}${btn('检查连接', { icon: 'zap', action: 'check-model' })}${btn(service ? '保存' : '添加', { kind: 'primary', action: 'save-model', disabled: !service })}`,
   })
 }
 const connectSheet = (key = 'codex', failed = false) => {
-  const config = (!failed && demo.agents[key]) || { enabled: key !== 'deepseek', checked: key === 'pi', values: {} }
+  const config = agentConfig(key)
+  const profile = AG[key]
+  const detected = agentDetected(key)
   const enabled = failed || config.enabled
-  const checked = !failed && config.checked
-  const local = config.values['agent-source'] === '使用这台电脑上的登录'
+  const checked = !failed && detected && config.checked
+  const local = !failed && config.values?.['agent-source'] === localAgentSource
   const options = modelOptions()
-  const permissions = ['只读', '操作前询问', '目录内自动']
   return sheet({
-    kind: 'agent', m: AG[key].m, title: `配置 ${AG[key].name}`, desc: '启用前请完成连接检查。',
+    kind: 'agent', m: profile.m, title: `配置 ${profile.name}`, desc: '启用与验证决定它能否用于新对话。',
     body: `<div data-agent-settings="${key}" data-checked="${checked}" data-failed="${failed}">
-      ${sec('', srow('启用 Agent', '启用后可用于新对话。', sw(enabled)))}
-      ${sec('模型来源', `${choose('agent-source', ['使用我的模型服务', '使用这台电脑上的登录'], Number(local))}
-        <div class="source-service" ${local ? 'hidden' : ''}>${fld('使用的模型', choose('agent-model', options, Math.max(0, options.indexOf(config.values['agent-model']))))}</div>
-        <p class="source-local hint" ${local ? '' : 'hidden'}>使用本机登录与 Agent 的模型配置。</p>`)}
-      ${sec('默认权限', `${choose('agent-permission', permissions, Math.max(0, permissions.indexOf(config.values['agent-permission'] || '操作前询问')))}<p class="hint">仅影响新对话。目录内自动仍遵守全局禁止规则。</p>`)}
+      ${sec('本机运行环境', `<dl class="facts agent-connection-facts">
+        <div><dt>接入方式</dt><dd>${profile.route}</dd></div>
+        <div><dt>检测命令</dt><dd><code>${profile.command}</code></dd></div>
+        <div><dt>版本</dt><dd>${detected ? profile.version : '未检测到'}</dd></div>
+        <div><dt>本机登录</dt><dd>${!detected ? '未检查' : profile.signedIn ? '已登录' : '未登录'}</dd></div>
+      </dl>${detected ? '' : agentInstallGuide(profile)}`)}
+      ${sec('', srow('启用 Agent', '连接检查通过后可用于新对话。', sw(enabled)))}
+      ${sec('模型来源', `${choose('agent-source', [foxAgentSource, localAgentSource], Number(local), '模型来源')}
+        <div class="source-service" ${local ? 'hidden' : ''}>${fld('使用的模型', choose('agent-model', options, failed ? 0 : Math.max(0, options.indexOf(config.values?.['agent-model'])), '使用的模型'))}</div>
+        <p class="source-local hint" ${local ? '' : 'hidden'}>${profile.signedIn ? '沿用该 Agent 的本机账号和模型配置。' : '请先到该 Agent 自行登录，或切换到 Fox 中的模型服务。'}</p>`)}
+      ${sec('默认权限', `${choose('agent-permission', agentPermissions, Math.max(0, agentPermissions.indexOf(agentPerm(key))), '默认权限')}<p class="hint">仅影响新对话。目录内自动仍遵守全局禁止规则。</p>`)}
     </div>`,
-    foot: `${feedback(failed ? '示例 401：模型服务的 Key 无效。请更新 Key，或切换模型来源后重试。' : checked ? '示例检查通过 · 连接和试跑正常。' : enabled ? '尚未检查。检查通过后可保存。' : '停用状态可以直接保存。', failed ? 'error' : checked ? 'success' : '')}
-      <span class="grow"></span>${btn('取消')}${btn(failed ? '重试检查' : '检查连接', { icon: 'zap', action: 'check-agent' })}${btn('保存 Agent', { kind: 'primary', action: 'save-agent', disabled: enabled && !checked })}`,
+    foot: `${feedback(failed ? '示例 401：模型服务的 Key 无效。请更新 Key，或切换模型来源后重试。' : !detected ? '安装后回到 Agent 设置重新检测。' : checked ? '示例检查通过 · 连接和试跑正常。' : enabled ? '检查通过后可保存启用状态。' : '停用状态可以直接保存。', failed ? 'error' : checked ? 'success' : '')}
+      ${btn('取消')}${btn(failed ? '重试检查' : '检查连接', { icon: 'zap', action: 'check-agent' })}${btn('保存 Agent', { kind: 'primary', action: 'save-agent', disabled: enabled && !checked })}`,
+  })
+}
+
+function agentInstallGuide(profile) {
+  return `<a class="agent-doc-link" href="${profile.guide}" target="_blank" rel="noopener noreferrer" aria-label="${profile.name} 官方安装指引">官方安装指引${I('external-link')}</a>`
+}
+function agentDirectory(query = '', filter = 'all') {
+  const term = query.trim().toLowerCase()
+  const results = agentKeys.filter(key => {
+    const profile = AG[key]
+    return `${profile.name} ${profile.command}`.toLowerCase().includes(term)
+      && (filter === 'all' || agentDetected(key) === (filter === 'detected'))
+  })
+  return results.map(key => {
+    const profile = AG[key]
+    const detected = agentDetected(key)
+    return `<div data-agent="${key}">${irow({
+      m: profile.m, name: profile.name, desc: `${profile.route} · ${profile.command}${detected ? ' · ' + profile.version : ''}`,
+      status: detected ? agentStatus(key) : stat('empty', '未检测到'),
+      tail: detected ? btn('配置', { action: 'configure-agent' }) : agentInstallGuide(profile),
+    })}</div>`
+  }).join('') || '<p class="hint">没有符合条件的 Agent。</p>'
+}
+function agentCatalogSheet(filter = 'all') {
+  return sheet({
+    kind: 'agent-catalog', m: { icon: 'bot' }, title: '添加 Agent', desc: '选择本机工具，或查看支持自装的 Agent。',
+    body: `<div class="catalog-toolbar agent-catalog-tools">
+      <input class="inp" type="search" name="agent-filter" aria-label="搜索 Agent" placeholder="搜索名称或命令">
+      <div class="agent-catalog-filters">
+        <select class="sel" name="agent-detected-filter" aria-label="按检测状态筛选">
+          ${[['all', '全部'], ['detected', '已检测'], ['missing', '未检测']].map(([value, label]) => `<option value="${value}" ${value === filter ? 'selected' : ''}>${label}</option>`).join('')}
+        </select>
+        ${btn('重新检测', { kind: 'ghost', icon: 'refresh-cw', action: 'detect-agents' })}
+      </div>
+    </div><div class="agent-directory" aria-live="polite">${agentDirectory('', filter)}</div>
+    <p class="hint">${I('info')}自行安装后回到 Fox，点击「重新检测」。</p>
+    <details class="model-options agent-catalog-scenario"><summary>演示检测场景</summary><select class="sel" name="agent-computer" aria-label="演示检测场景">
+      ${[['current', '发现 Pi 和 Codex'], ['all', '也发现 DeepSeek（dsh）'], ['none', '未发现外部 Agent']].map(([value, label]) => `<option value="${value}" ${value === (demo.agentComputer || 'current') ? 'selected' : ''}>${label}</option>`).join('')}
+    </select></details>`,
+    foot: btn('关闭') + btn('添加自定义 ACP', { icon: 'plus', kind: 'primary', action: 'custom-acp' }),
+  })
+}
+const acpEnvRow = (name = '') => `<div class="agent-env-row">
+  <input class="inp mono" name="acp-env-name" aria-label="变量名" placeholder="变量名" value="${escapeHtml(name)}">
+  <input class="inp mono" name="acp-env-value" aria-label="示例变量值" placeholder="示例值" type="password" autocomplete="off">
+  ${btn('移除', { kind: 'ghost', action: 'remove-acp-env' })}
+</div>`
+function customAcpSheet(key = '') {
+  const config = key ? agentConfig(key) : { enabled: true, checked: false }
+  const profile = config.custom
+  return sheet({
+    kind: 'agent', m: { icon: 'square-terminal' }, title: key ? '编辑自定义 ACP' : '添加自定义 ACP',
+    desc: '连接本机支持 stdio ACP 的可执行文件。',
+    body: `<div data-agent-settings="${key}" data-custom-acp data-checked="${config.checked}">
+      ${sec('基本信息', fld('名称', edit('acp-name', profile?.name || '', '名称')) + srow('启用 Agent', '', sw(config.enabled)))}
+      ${sec('运行', fld('可执行文件', edit('acp-command', profile?.command || '', '可执行文件'), '输入本机命令名或可执行文件的完整路径。') +
+        fld('启动参数', `<textarea class="ta mono" name="acp-args" aria-label="启动参数" rows="3" placeholder="每行一个参数">${escapeHtml(profile?.args?.join('\n') || '')}</textarea>`))}
+      ${sec('环境变量', `<div data-acp-env>${(profile?.envNames || []).map(acpEnvRow).join('')}</div>
+        ${btn('添加变量', { icon: 'plus', action: 'add-acp-env' })}
+        <p class="hint">原型只保存变量名。请使用示例值。</p>`)}
+    </div>`,
+    foot: feedback(config.checked ? '示例 ACP 验证通过。' : '原型只检查表单，展示 ACP 握手流程。') +
+      `${key ? btn('取消') : btn('返回目录', { kind: 'ghost', cls: 'drawer-return', action: 'back-agent-catalog' })}${btn('检查连接', { icon: 'zap', action: 'check-agent' })}
+      ${btn(key ? '保存' : '保存并添加', { kind: 'primary', action: 'save-agent', disabled: config.enabled && !config.checked })}`,
   })
 }
 
@@ -733,25 +830,76 @@ const PROJECTS = [
 const PROJECT_MODES = ['只读', '询问', '自动']
 const projectMode = project => demo.projects[project.id] || project.mode
 
-const agentStatus = key => {
-  const config = demo.agents[key]
-  const enabled = config?.enabled ?? key === 'pi'
-  return enabled ? stat('ok', '已就绪') : stat('empty', config ? '已停用' : key === 'codex' ? '待连接' : '未启用')
-}
-const agentSummary = key => {
-  const values = demo.agents[key]?.values
-  if (!values) return `${{ pi: 'DeepSeek 官方 · deepseek-chat', codex: '选择模型服务或本机登录', deepseek: '本机登录' }[key]} · 默认权限：询问`
-  const source = values['agent-source'] === '使用我的模型服务' ? escapeHtml(values['agent-model']) : '本机登录'
-  return `${source} · 默认权限：${values['agent-permission']}`
-}
 const agentKeys = ['pi', 'codex', 'deepseek']
-const newAgentOptions = () => ['Fox', ...agentKeys.filter(key => demo.agents[key]?.enabled ?? key === 'pi').map(key => AG[key].name)]
+const localAgentSource = '使用这台电脑上的登录'
+const foxAgentSource = '使用我的模型服务'
+const agentPermissions = ['只读', '操作前询问', '目录内自动']
+const agentProfile = key => AG[key] || demo.agents[key]?.custom
+const agentConfig = key => demo.agents[key] || {
+  enabled: key !== 'deepseek', checked: key !== 'deepseek', values: {
+    'agent-source': key === 'pi' ? foxAgentSource : localAgentSource,
+    'agent-model': modelOptions()[0],
+    'agent-permission': agentPermissions[1],
+  },
+}
+const agentDetected = key => agentKeys.includes(key)
+  ? demo.agentComputer !== 'none' && (key !== 'deepseek' || demo.agentComputer === 'all')
+  : agentConfig(key).checked
+const agentPerm = key => agentConfig(key).values?.['agent-permission'] || agentPermissions[1]
+const agentNeedsLogin = (key, source) => agentKeys.includes(key) && source === localAgentSource && !AG[key].signedIn
+const agentReady = key => agentDetected(key) && agentConfig(key).enabled && agentConfig(key).checked
+  && !agentNeedsLogin(key, agentConfig(key).values?.['agent-source'])
+const configuredAgentKeys = () => [
+  ...agentKeys.filter(key => agentDetected(key) || Object.hasOwn(demo.agents, key)),
+  ...Object.keys(demo.agents).filter(key => demo.agents[key].custom),
+]
+function agentStatus(key) {
+  const config = agentConfig(key)
+  if (!agentDetected(key)) return stat('empty', config.custom ? '待验证' : '未检测到')
+  if (!config.enabled) return stat('empty', demo.agents[key] ? '已停用' : '待配置')
+  if (agentNeedsLogin(key, config.values?.['agent-source'])) return stat('warn', '需要登录')
+  return agentReady(key) ? stat('ok', '可用') : stat('warn', '待验证')
+}
+function agentSummary(key) {
+  const profile = agentProfile(key)
+  const config = agentConfig(key)
+  if (!agentDetected(key)) return `${profile.route} · 检测命令 ${escapeHtml(profile.command)}`
+  const model = config.custom ? '沿用 Agent 的模型' : config.values?.['agent-source'] === foxAgentSource
+    ? escapeHtml(config.values['agent-model'] || '尚未选择模型') : '本机账号'
+  return [profile.route, profile.version, model].filter(Boolean).join(' · ')
+}
+function agentDefaultsGroup() {
+  const options = ['fox', ...configuredAgentKeys().filter(agentReady)]
+  const preferred = demo.defaultAgent || 'fox'
+  const active = options.includes(preferred) ? preferred : 'fox'
+  const description = active !== preferred
+    ? `${escapeHtml(agentProfile(preferred)?.name || '原默认 Agent')} 暂不可用，新对话使用 Fox。`
+    : '已启用且验证通过的 Agent 可以用于新对话。'
+  const select = `<select class="sel" name="new-agent" aria-label="新对话默认 Agent">${options.map(key =>
+    `<option value="${key}" ${key === active ? 'selected' : ''}>${escapeHtml(agentProfile(key).name)}</option>`).join('')}</select>`
+  return group('新对话', srow('默认 Agent', description, select), { cls: 'agent-defaults' })
+}
+function externalAgentsGroup() {
+  const count = agentKeys.filter(agentDetected).length
+  const hasMissing = agentKeys.some(key => !agentDetected(key))
+  const keys = configuredAgentKeys()
+  return group('外部 Agent',
+    irow({ m: { icon: 'square-terminal' }, name: '这台电脑', desc: count ? `已检测到 ${count} 个预设 Agent` : '未检测到预设 Agent',
+      tail: btn('重新检测', { icon: 'refresh-cw', action: 'detect-agents' }) }) +
+    (keys.length ? keys.map(key => `<div data-agent="${key}">${irow({
+      m: agentProfile(key).m, name: escapeHtml(agentProfile(key).name), desc: agentSummary(key), status: agentStatus(key),
+      tail: btn('配置', { action: 'configure-agent' }),
+    })}</div>`).join('') : '<p class="hint">新对话可继续使用 Fox 通用助手。</p>') +
+    (hasMissing ? srow('支持自装接入', '',
+      btn('查看安装指引', { kind: 'ghost', trail: 'chevron-right', action: 'unsupported-agents' })) : ''),
+    { aside: btn('添加 Agent', { icon: 'plus', action: 'add-agent' }), cls: 'agent-external' },
+  )
+}
 const agentPage = () => `
   ${phead('Agent', '选择新对话使用的运行引擎，配置各自的工作方式。')}
-  ${group('新对话', srow('新会话使用的 Agent', '只列出已启用且可使用的 Agent；现有对话保持原设置。', choose('new-agent', newAgentOptions())))}
+  ${agentDefaultsGroup()}
   ${group('Fox 通用助手', irow({ m: { img: FOX, av: true }, name: 'Fox 通用助手', desc: '名称、介绍、工作要求和开场建议', tail: btn('编辑助手') }))}
-  ${group('外部 Agent', agentKeys.map(k => `<div data-agent="${k}">${irow({ m: AG[k].m, name: AG[k].name, desc: agentSummary(k), status: agentStatus(k), tail: btn('配置') })}</div>`).join(''))}
-  <p class="hint">专家的内容、技能和资料库在专家中心管理。</p>`
+  ${externalAgentsGroup()}`
 
 const securityPage = () => `
   ${phead('权限与安全', '管理项目权限和跨 Agent 的工具规则。')}
@@ -816,11 +964,11 @@ const connectorsGroup = () => {
   }).join(''), { aside: `${list.length} 个，${list.filter(connector => connector.on).length} 个已启用`, cls: 'connector-services' })
 }
 const pluginsPage = () => `
-  ${phead('插件', '配置内置工具，管理技能、连接器和已安装的工具插件。', btn('添加连接器', { kind: 'primary lg', icon: 'plus', action: 'add-connector' }))}
+  ${phead('插件', '配置内置工具，管理技能、连接器和已安装的工具插件。', '<a class="btn lg" href="plugin-center/连接器目录.html">连接器目录</a>' + btn('添加连接器', { kind: 'primary lg', icon: 'plus', action: 'add-connector' }))}
   ${group('内置工具', irow({ m: { icon: 'globe' }, name: '网页搜索', desc: '用于 Fox 通用助手和专家；外部 Agent 使用各自的搜索能力。', status: stat('ok', SEARCH.find(provider => provider.k === demo.search.provider).name), tail: btn('配置搜索', { cls: 'configure-search' }) }))}
   ${group('技能', SKILLS.map(s => irow({ m: { icon: 'puzzle' }, name: s.name, pills: s.bad ? pill('校验失败', 'err') : pill(s.v), desc: s.desc, descCls: s.bad ? 'err' : '', tail: sw(s.on, s.bad) })).join(''), { aside: `<span>5 个，3 个已启用</span>${btn('重新扫描', { kind: 'ghost', icon: 'refresh-cw' })}` })}
   ${connectorsGroup()}
-  ${group('已安装的工具插件', srow('工具插件', '查看已安装工具插件的状态与兼容性', btn('插件中心', { kind: 'ghost', icon: 'wrench', trail: 'chevron-right' })))}`
+  ${group('已安装的工具插件', srow('工具插件', '查看已安装工具插件的状态与兼容性', `<a class="btn ghost" href="plugin-center/index.html?frame=directory">${I('wrench')}插件中心${I('chevron-right')}</a>`))}`
 
 const connectorSheet = (connector = {}) => {
   const { id = '', type = 'stdio', command = '', args = '', endpoint = '', on = true } = connector
@@ -885,8 +1033,8 @@ const libraryPage = ({ broken = false } = {}) => `
     ? srow('资料库账户', '登录后同步你有权访问的远程专家与资料库；Fox 与浏览器的登录态相互独立', btn('登录账户', { icon: 'log-in' }))
     : irow({ m: { img: ME, av: true }, name: 'Hury', pills: pill('已登录', 'ok'), desc: 'u-10024 · 产品部 · 管理员' }))}`
 
-const choose = (name, values, selected = 0) => `<select class="sel" name="${name}" aria-label="${name}">${values.map((v, i) => `<option ${i === selected ? 'selected' : ''}>${escapeHtml(v)}</option>`).join('')}</select>`
-const edit = (name, value) => `<input class="inp" aria-label="${name}" name="${name}" value="${escapeHtml(value)}" />`
+const choose = (name, values, selected = 0, label = name) => `<select class="sel" name="${name}" aria-label="${label}">${values.map((v, i) => `<option ${i === selected ? 'selected' : ''}>${escapeHtml(v)}</option>`).join('')}</select>`
+const edit = (name, value, label = name) => `<input class="inp" aria-label="${label}" name="${name}" value="${escapeHtml(value)}" />`
 const companionsPage = () => `
   ${phead('伙伴', '设置新伙伴的工作默认值。已有伙伴的权限和文件位置保持不变。')}
   ${group('工作目录', `<div class="directory-preview">
@@ -938,6 +1086,8 @@ const screens = [
   { id: 'models-add', title: '模型 · 添加模型', render: () => win('models', modelsPage(), { overlay: addSheet() }) },
   { id: 'models-edit', title: '模型 · 编辑服务', render: () => { const service = modelServices()[0]; return win('models', modelsPage(), { overlay: providerForm(service.id, '', service) }) } },
   { id: 'agent', title: 'Agent', desc: '运行引擎与默认工作方式，专家由专家中心管理。', render: () => win('agent', agentPage()) },
+  { id: 'agent-catalog', title: 'Agent · 添加 Agent', render: () => win('agent', agentPage(), { overlay: agentCatalogSheet() }) },
+  { id: 'agent-acp', title: 'Agent · 自定义 ACP', render: () => win('agent', agentPage(), { overlay: customAcpSheet() }) },
   { id: 'agent-connect', title: 'Agent · 统一配置', desc: '启用、模型来源、默认权限与检查集中到一个抽屉。', render: () => win('agent', agentPage(), { overlay: connectSheet() }) },
   { id: 'agent-check', title: 'Agent · 检查失败', desc: '失败原因与重试操作留在同一个抽屉。', render: () => win('agent', agentPage(), { overlay: connectSheet('pi', true) }) },
   { id: 'plugins', title: '插件', desc: '网页搜索收进内置工具。', render: () => win('plugins', pluginsPage(), { h: 1120 }) },
@@ -996,6 +1146,7 @@ function render() {
   <header class="doc-hero"><h1>Fox 设置原型</h1>
     <p>这里使用示例数据。检查连接、保存与切换只在预览中演示。</p></header>
   <nav class="toc" aria-label="原型导航">
+    <a class="btn lg" href="plugin-center/连接器目录.html">连接器目录</a>
     <select class="sel" name="jump-frame" aria-label="跳转到页面"><option value="">跳转到页面</option>
       ${screens.map(s => `<option value="${s.id}">${s.title}</option>`).join('')}
     </select>
@@ -1125,8 +1276,57 @@ function setAgentCheck(dialog, checked, message, tone = '') {
   dialog.querySelector('[data-action="save-agent"]').disabled = dialog.querySelector('.sw.on') !== null && !checked
   showFeedback(dialog, message, tone)
 }
+function refreshAgentGroups() {
+  refreshGroup('.agent-external', externalAgentsGroup())
+  refreshGroup('.agent-defaults', agentDefaultsGroup())
+}
+function refreshAgentDirectory(dialog) {
+  const query = dialog.querySelector('[name="agent-filter"]').value
+  const filter = dialog.querySelector('[name="agent-detected-filter"]').value
+  dialog.querySelector('.agent-directory').innerHTML = agentDirectory(query, filter)
+}
+function customAgentProfile(form) {
+  const field = name => form.querySelector(`[name="${name}"]`).value.trim()
+  const name = field('acp-name')
+  const command = field('acp-command')
+  if (!name || !command) throw new Error('请输入名称和可执行文件。')
+  if (['fox', ...agentKeys, ...configuredAgentKeys().filter(key => demo.agents[key]?.custom)].some(key => key !== form.dataset.agentSettings
+    && agentProfile(key).name.toLowerCase() === name.toLowerCase())) throw new Error('这个 Agent 名称已使用。')
+  const envNames = [...form.querySelectorAll('[name="acp-env-name"]')].map(input => input.value.trim())
+  if (envNames.some(name => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) || new Set(envNames).size !== envNames.length) {
+    throw new Error('请填写有效且不重复的环境变量名，或移除空行。')
+  }
+  return { name, command, args: field('acp-args').split(/\r?\n/).filter(arg => arg.trim()), envNames, route: '本机 ACP', m: { icon: 'square-terminal' } }
+}
 function drawerAction(card, target) {
   const action = target.dataset.action
+  if (action === 'add-agent' || action === 'unsupported-agents') {
+    openSheet(card, agentCatalogSheet(action === 'unsupported-agents' ? 'missing' : 'all'), '[name="agent-filter"]')
+    return
+  }
+  if (action === 'detect-agents') {
+    const catalog = target.closest('[data-sheet="agent-catalog"]')
+    refreshAgentGroups()
+    if (catalog) refreshAgentDirectory(catalog)
+    else card.querySelector('[data-action="detect-agents"]')?.focus({ preventScroll: true })
+    notice(`示例检测完成，发现 ${agentKeys.filter(agentDetected).length} 个预设 Agent。`)
+    return
+  }
+  if (action === 'configure-agent') {
+    const key = target.closest('[data-agent]').dataset.agent
+    const content = demo.agents[key]?.custom ? customAcpSheet(key) : connectSheet(key)
+    if (target.closest('.sheet')) replaceSheet(card, content)
+    else openSheet(card, content)
+    return
+  }
+  if (action === 'custom-acp') {
+    replaceSheet(card, customAcpSheet(), '[name="acp-name"]')
+    return
+  }
+  if (action === 'back-agent-catalog') {
+    replaceSheet(card, agentCatalogSheet(), '[name="agent-filter"]')
+    return
+  }
   if (action === 'add-connector') { openSheet(card, connectorSheet()); return }
   if (action === 'add-provider') { openSheet(card, addSheet(), '[name="provider-filter"]'); return }
   if (action === 'edit-model') {
@@ -1135,6 +1335,18 @@ function drawerAction(card, target) {
     return
   }
   const dialog = target.closest('.sheet')
+  if (action === 'add-acp-env' || action === 'remove-acp-env') {
+    if (action === 'add-acp-env') {
+      const rows = dialog.querySelector('[data-acp-env]')
+      rows.insertAdjacentHTML('beforeend', acpEnvRow())
+      rows.lastElementChild.querySelector('input').focus()
+    } else {
+      target.closest('.agent-env-row').remove()
+      dialog.querySelector('[data-action="add-acp-env"]').focus()
+    }
+    setAgentCheck(dialog, false, '环境变量已更改，请重新检查。')
+    return
+  }
   if (action === 'pick-provider' || action === 'custom-provider') {
     const id = target.dataset.provider || 'custom'
     replaceSheet(card, providerForm(id, dialog.querySelector('[name="provider-filter"]').value), id === 'custom' ? '[name="model-name"]' : '[name="model-key"]')
@@ -1226,26 +1438,33 @@ function drawerAction(card, target) {
   }
   if (action === 'check-agent' || action === 'save-agent') {
     const form = dialog.querySelector('[data-agent-settings]')
-    const key = form.dataset.agentSettings
+    let key = form.dataset.agentSettings
+    let custom
+    if (form.hasAttribute('data-custom-acp')) {
+      try {
+        custom = customAgentProfile(form)
+      } catch (error) {
+        setAgentCheck(dialog, false, error.message, 'error')
+        return
+      }
+    }
     const values = Object.fromEntries([...form.querySelectorAll('select[name]')].map(select => [select.name, select.value]))
     const enabled = form.querySelector('.sw.on') !== null
     if (action === 'check-agent') {
-      const failed = form.dataset.failed === 'true' && values['agent-source'] === '使用我的模型服务' && values['agent-model'] === modelOptions()[0]
-      setAgentCheck(dialog, !failed, failed ? '示例 401：请选择其他模型或使用本机登录。' : '示例检查通过 · 连接和试跑正常。', failed ? 'error' : 'success')
+      const issue = custom ? '' : !agentDetected(key) ? '本机未检测到该命令，请自行安装后重新检测。'
+        : agentNeedsLogin(key, values['agent-source']) ? '本机尚未登录。请先在该 Agent 完成登录，或使用 Fox 中的模型服务。'
+        : form.dataset.failed === 'true' && values['agent-source'] === foxAgentSource && values['agent-model'] === modelOptions()[0]
+          ? '示例 401：请选择其他模型或使用本机登录。' : ''
+      setAgentCheck(dialog, !issue, issue || (custom ? '表单检查通过，已演示 ACP 握手成功。' : '示例检查通过 · 连接和试跑正常。'), issue ? 'error' : 'success')
       return
     }
-    demo.agents[key] = { enabled, values, checked: form.dataset.checked === 'true' }
+    if (custom && !key) key = `acp-${crypto.randomUUID()}`
+    demo.agents[key] = { enabled, values, checked: form.dataset.checked === 'true', ...(custom ? { custom } : {}) }
     saveDemo()
-    document.querySelectorAll(`[data-agent="${key}"]`).forEach(row => {
-      row.querySelector('.it small').innerHTML = agentSummary(key)
-      row.querySelector('.stat').outerHTML = agentStatus(key)
-    })
-    document.querySelectorAll('[name="new-agent"]').forEach(select => {
-      const active = select.value
-      select.replaceChildren(...newAgentOptions().map(name => new Option(name, name, false, name === active)))
-    })
     closeSheet(card)
-    notice(`已保存 ${AG[key].name} 示例配置。`)
+    refreshAgentGroups()
+    card.querySelector(`[data-agent="${key}"] [data-action="configure-agent"]`)?.focus({ preventScroll: true })
+    notice(`已保存 ${agentProfile(key).name} 示例配置。`)
     return
   }
   const project = PROJECTS.find(entry => entry.id === dialog.querySelector('[data-project-settings]').dataset.projectSettings)
@@ -1257,6 +1476,11 @@ function drawerAction(card, target) {
 
 document.addEventListener('input', event => {
   const input = event.target
+  if (input.name === 'agent-filter') { refreshAgentDirectory(input.closest('.sheet')); return }
+  if (input.closest('[data-custom-acp]')) {
+    setAgentCheck(input.closest('.sheet'), false, '运行配置已更改，请重新检查。')
+    return
+  }
   if (input.name === 'provider-filter') {
     input.closest('.sheet').querySelector('.provider-directory').innerHTML = providerDirectory(input.value)
     return
@@ -1287,6 +1511,20 @@ document.addEventListener('keydown', event => {
 })
 document.addEventListener('change', event => {
   const el = event.target
+  if (el.name === 'agent-detected-filter') refreshAgentDirectory(el.closest('.sheet'))
+  if (el.name === 'agent-computer') {
+    demo.agentComputer = el.value
+    saveDemo()
+    refreshAgentDirectory(el.closest('.sheet'))
+    refreshAgentGroups()
+  }
+  if (el.name === 'new-agent') {
+    const card = el.closest('.card')
+    demo.defaultAgent = el.value
+    saveDemo()
+    refreshGroup('.agent-defaults', agentDefaultsGroup())
+    card.querySelector('[name="new-agent"]')?.focus()
+  }
   if (el.name === 'settings-page') location.search = `?frame=${el.value}`
   if (el.name === 'jump-frame' && el.value) location.hash = el.value
   if (el.dataset.projectMode) setProjectMode(el.dataset.projectMode, el.value)
@@ -1347,7 +1585,6 @@ document.addEventListener('click', event => {
     return
   }
   if (target.matches('.seg > span')) { [...target.parentElement.children].forEach(el => el.classList.remove('on')); target.classList.add('on'); return }
-  if (text === '配置' && target.closest('[data-agent]')) { openSheet(card, connectSheet(target.closest('[data-agent]').dataset.agent)); return }
   if (target.matches('.configure-search')) { openSheet(card, searchSheet()); return }
   if (text === '管理 Hook') { openSheet(card, hookSheet()); return }
   if (text === '编辑助手') {

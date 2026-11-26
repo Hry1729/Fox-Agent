@@ -1,5 +1,7 @@
 .fox-shell {
   --fox-shell-chrome: color-mix(in oklch, var(--background) 34%, transparent);
+  --fox-chrome-control-surface: color-mix(in oklch, var(--foreground) 5%, var(--sidebar));
+  --fox-sidebar-surface: color-mix(in oklch, var(--background) 34%, var(--shell));
   /* Compact conversation spacing; project headings retain their own height. */
   --fox-sidebar-row-gap: var(--fox-space-micro);
   --fox-sidebar-group-gap: var(--fox-space-xs);
@@ -14,6 +16,7 @@
 }
 
 .fox-window-titlebar {
+  --fox-titlebar-control-width: 44px;
   position: relative;
   z-index: 80;
   height: 30px;
@@ -67,7 +70,7 @@
 .fox-titlebar-sidebar-controls {
   display: flex;
   align-items: center;
-  gap: 1px;
+  gap: calc(var(--fox-titlebar-control-width) - var(--fox-inline-action-height));
   height: var(--fox-inline-action-height);
   align-self: center;
   /* The title bar keeps a single icon menu, so it starts right after the product
@@ -86,11 +89,6 @@
   background: transparent;
   color: var(--fox-muted);
   cursor: pointer;
-}
-
-.fox-titlebar-sidebar-controls button:hover {
-  background: var(--fox-hover);
-  color: var(--fox-text);
 }
 
 .fox-titlebar-sidebar-controls button[aria-pressed="true"] {
@@ -207,594 +205,8 @@
   box-shadow: 0 0 0 var(--fox-space-micro) var(--fox-card);
 }
 
-.fox-notification-popover {
-  width: min(560px, calc(100vw - var(--fox-space-3xl)));
-  max-height: min(620px, calc(100vh - var(--fox-space-5xl)));
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 0;
-  padding: 0;
-  overflow: hidden;
-  border-radius: var(--fox-radius-overlay);
-}
-
-.fox-notification-sidebar {
-  position: relative;
-  min-width: 0;
-  min-height: 0;
-  flex: 1 1 auto;
-  display: flex;
-  flex-direction: column;
-  margin: 2px -6px 0;
-  overflow: hidden;
-  background: transparent;
-}
-
-.fox-notification-sidebar > header {
-  flex: 0 0 auto;
-}
-
-.fox-notification-clear-read,
-.fox-notification-more {
-  width: 28px !important;
-  height: 28px !important;
-  min-height: 28px !important;
-  flex: 0 0 28px;
-}
-
-.fox-notification-clear-read svg,
-.fox-notification-more svg {
-  width: 14px;
-  height: 14px;
-}
-
-.fox-notification-clear-read:disabled {
-  opacity: .35;
-}
-
-.fox-notification-menu {
-  min-width: 156px;
-}
-
-.fox-notification-popover > header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--fox-space-m);
-  padding: var(--fox-space-m) var(--fox-space-l);
-  border-bottom: 1px solid var(--fox-border);
-}
-
-.fox-notification-heading {
-  min-width: 64px;
-  flex: 0 0 auto;
-}
-
-.fox-notification-popover > header h2,
-.fox-notification-popover > header p { margin: 0; }
-.fox-notification-popover > header h2 { font-size: var(--fox-type-title); }
-.fox-notification-popover > header p { color: var(--fox-muted); font-size: var(--fox-type-caption); }
-
-.fox-notification-toolbar {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: var(--fox-space-micro);
-}
-
-.fox-notification-toolbar > button:not([data-slot='button']) {
-  height: 24px;
-  padding-inline: var(--fox-space-s);
-  border: 1px solid transparent;
-  border-radius: var(--fox-radius-small);
-  background: transparent;
-  color: var(--fox-muted);
-  font-size: var(--fox-type-caption);
-  cursor: pointer;
-}
-
-.fox-notification-toolbar > button.is-active {
-  border-color: var(--fox-border);
-  background: var(--fox-panel);
-  color: var(--fox-text);
-}
-
-.fox-notification-toolbar [data-slot='button'] {
-  height: 24px;
-  padding-inline: var(--fox-space-s);
-  font-size: var(--fox-type-caption);
-}
-
-.fox-notification-toolbar .fox-notification-refresh {
-  width: 24px;
-  padding: 0;
-}
-
-.fox-notification-refresh svg {
-  width: var(--fox-icon-size-compact);
-  height: var(--fox-icon-size-compact);
-}
-
-.fox-notification-list {
-  min-height: 110px;
-  max-height: 460px;
-  overflow: auto;
-}
-
-.fox-notification-sidebar .fox-notification-list {
-  min-height: 0;
-  max-height: none;
-  flex: 1 1 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
-  padding: 0 6px var(--fox-space-m);
-  scrollbar-gutter: stable;
-}
-
-.fox-notification-day {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.fox-notification-day + .fox-notification-day {
-  margin-top: 18px;
-}
-
-.fox-notification-day-title {
-  min-height: 26px;
-  display: flex;
-  align-items: flex-end;
-  justify-content: flex-start;
-  padding: 0 7px 6px;
-  color: var(--fox-faint);
-  font-size: 12px;
-  line-height: 1.2;
-  text-align: left;
-}
-
-.fox-notification-day-items {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding-left: 8px;
-}
-
-.fox-notification-priority-empty {
-  margin: 0;
-  padding: 5px 8px 6px;
-  color: var(--fox-faint);
-  font-size: var(--fox-type-caption);
-  line-height: 1.3;
-  text-align: left;
-}
-
-.fox-notification-sidebar .fox-notification-entry {
-  margin-bottom: 0;
-  overflow: visible;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-}
-
-.fox-notification-sidebar .fox-notification-item {
-  min-height: 42px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  justify-content: flex-start;
-  padding: 4px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--fox-muted);
-  box-shadow: none;
-  text-align: left;
-}
-
-.fox-notification-sidebar .fox-notification-item:hover {
-  background: var(--fox-panel);
-  color: var(--fox-text);
-}
-
-.fox-notification-sidebar .fox-notification-item:focus-within {
-  outline: 2px solid var(--ring);
-  outline-offset: -2px;
-}
-
-.fox-notification-sidebar .fox-notification-item.is-active {
-  background: var(--fox-card) !important;
-  color: var(--fox-text);
-  box-shadow: inset 0 0 0 1px var(--fox-border) !important;
-}
-
-.fox-notification-sidebar .fox-notification-item.is-unread {
-  background: transparent;
-}
-
-.fox-notification-sidebar .fox-notification-item.is-unread:hover {
-  background: var(--fox-panel);
-}
-
-.fox-notification-sidebar .fox-notification-dot {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 6px;
-  margin: 0;
-}
-
-.fox-notification-item-main {
-  min-width: 0;
-  min-height: 34px;
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 8px;
-  border: 0;
-  background: transparent;
-  padding: 0 4px;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.fox-notification-pin {
-  width: 26px;
-  height: 26px;
-  flex: 0 0 26px;
-  display: grid;
-  place-items: center;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--fox-faint);
-  opacity: 0;
-  cursor: pointer;
-  transition: background-color 130ms ease, color 130ms ease, opacity 120ms ease;
-}
-
-.fox-notification-pin svg {
-  width: 13px;
-  height: 13px;
-}
-
-.fox-notification-item:hover .fox-notification-pin,
-.fox-notification-item:focus-within .fox-notification-pin,
-.fox-notification-item.is-manually-pinned .fox-notification-pin {
-  opacity: 1;
-}
-
-.fox-notification-pin:hover,
-.fox-notification-pin:focus-visible,
-.fox-notification-item.is-manually-pinned .fox-notification-pin {
-  background: var(--fox-hover);
-  color: var(--fox-text);
-  outline: none;
-}
-
-.fox-notification-sidebar .fox-notification-copy {
-  min-width: 0;
-  flex: 1;
-  display: grid;
-  gap: 0;
-  text-align: left;
-}
-
-.fox-notification-sidebar .fox-notification-line {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.fox-notification-sidebar .fox-notification-line strong {
-  min-width: 0;
-  flex: 1;
-  overflow: hidden;
-  color: inherit;
-  font-size: var(--fox-type-control);
-  font-weight: var(--fox-weight-medium);
-  line-height: 18px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fox-notification-sidebar .fox-notification-line time {
-  max-width: 0;
-  overflow: hidden;
-  color: var(--fox-faint);
-  font-size: var(--fox-type-caption);
-  white-space: nowrap;
-  opacity: 0;
-  visibility: hidden;
-  transition: max-width 140ms ease, opacity 120ms ease, visibility 120ms ease;
-}
-
-.fox-notification-sidebar .fox-notification-item:hover time,
-.fox-notification-sidebar .fox-notification-item:focus-within time {
-  max-width: 78px;
-  opacity: 1;
-  visibility: visible;
-}
-
-.fox-notification-sidebar .fox-notification-copy small {
-  display: block;
-  overflow: hidden;
-  color: var(--fox-faint);
-  font-size: var(--fox-type-caption);
-  line-height: 16px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fox-notification-sidebar .fox-notification-details {
-  padding: 4px 8px var(--fox-space-l) 22px;
-}
-
-.fox-notification-sidebar .fox-notification-details footer {
-  align-items: flex-start;
-  flex-direction: column;
-}
-
-.fox-notification-sidebar .fox-notification-details footer > div {
-  max-width: 100%;
-  flex-wrap: wrap;
-}
-
-.fox-notification-entry {
-  border-bottom: 1px solid var(--fox-border);
-  background: var(--fox-card);
-}
-
-.fox-notification-entry.is-expanded {
-  background: var(--fox-panel);
-}
-
-.fox-notification-item {
-  width: 100%;
-  display: grid;
-  grid-template-columns: var(--fox-space-s) minmax(0, 1fr);
-  gap: var(--fox-space-xs);
-  padding: var(--fox-space-s) 10px;
-  border: 0;
-  border-bottom: 0;
-  background: var(--fox-card);
-  color: var(--fox-text);
-  text-align: left;
-  cursor: pointer;
-}
-
-.fox-notification-item:hover { background: var(--fox-hover); }
-.fox-notification-item:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
-.fox-notification-item.is-unread { background: var(--fox-unread-surface); }
-
-.fox-notification-dot {
-  width: var(--fox-space-xs);
-  height: var(--fox-space-xs);
-  margin-top: var(--fox-space-s);
-  border-radius: var(--fox-radius-pill);
-  background: transparent;
-}
-
-.fox-notification-item.is-unread .fox-notification-dot { background: var(--fox-accent); }
-.fox-notification-item.is-failed .fox-notification-dot,
-.fox-notification-item.is-approval .fox-notification-dot { background: var(--destructive); }
-
-.fox-notification-copy { min-width: 0; display: grid; gap: 0; }
-.fox-notification-line { min-width: 0; display: flex; align-items: center; gap: var(--fox-space-s); }
-.fox-notification-line strong { min-width: 0; flex: 1; }
-.fox-notification-line .badge { flex: none; height: var(--fox-badge-height); font-size: var(--fox-type-caption); }
-.fox-notification-copy time { flex: none; color: var(--fox-muted); font-size: var(--fox-type-caption); line-height: 16px; }
-.fox-notification-copy strong { overflow: hidden; font-size: var(--fox-type-meta); line-height: 16px; text-overflow: ellipsis; white-space: nowrap; }
-.fox-notification-copy small { overflow: hidden; color: var(--fox-muted); font-size: var(--fox-type-caption); line-height: 16px; text-overflow: ellipsis; white-space: nowrap; }
-.fox-notification-copy i { height: var(--fox-space-xs); overflow: hidden; border-radius: var(--fox-radius-pill); background: var(--fox-panel); }
-.fox-notification-copy i b { height: 100%; display: block; border-radius: inherit; background: var(--fox-accent); }
-
-.fox-notification-details {
-  display: grid;
-  gap: var(--fox-space-m);
-  padding: 0 10px var(--fox-space-l) 26px;
-}
-
-.fox-notification-details pre {
-  max-height: 260px;
-  margin: 0;
-  padding: var(--fox-space-m);
-  overflow: auto;
-  border: 1px solid var(--fox-border);
-  border-radius: var(--fox-radius-small);
-  color: var(--fox-text);
-  background: var(--fox-card);
-  font: inherit;
-  font-size: var(--fox-type-caption);
-  line-height: 1.55;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-}
-
-.fox-notification-details footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--fox-space-m);
-}
-
-.fox-notification-details footer > span {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--fox-muted);
-  font-size: var(--fox-type-caption);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fox-notification-details footer > div {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: var(--fox-space-s);
-}
-
-.fox-notification-details footer svg {
-  width: var(--fox-icon-size-compact);
-  height: var(--fox-icon-size-compact);
-}
-
-.fox-notification-state,
-.fox-notification-error {
-  min-height: 120px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--fox-space-m);
-  color: var(--fox-muted);
-  font-size: var(--fox-type-body);
-}
-
-.fox-notification-error { min-height: 0; justify-content: flex-start; padding: var(--fox-space-l) var(--fox-space-xl); color: var(--destructive); }
-.fox-notification-state svg,
-.fox-notification-error svg { width: var(--fox-icon-size); height: var(--fox-icon-size); }
-
-.fox-notification-toast-host {
-  position: fixed;
-  z-index: 120;
-  top: calc(var(--fox-action-height) + var(--fox-space-l));
-  right: var(--fox-space-l);
-  width: min(328px, calc(100vw - var(--fox-space-3xl)));
-  display: flex;
-  flex-direction: column;
-  gap: var(--fox-space-m);
-  pointer-events: none;
-}
-
-.fox-notification-toast {
-  position: relative;
-  min-height: 76px;
-  display: grid;
-  grid-template-columns: var(--fox-action-height) minmax(0, 1fr) 24px;
-  align-items: center;
-  gap: var(--fox-space-m);
-  padding: var(--fox-space-l) var(--fox-space-l) 14px;
-  overflow: hidden;
-  border: 1px solid var(--fox-border-strong);
-  border-radius: var(--fox-radius-overlay);
-  color: var(--fox-text);
-  background: color-mix(in oklch, var(--fox-card) 96%, transparent);
-  box-shadow: var(--fox-shadow);
-  backdrop-filter: blur(18px);
-  pointer-events: auto;
-  animation: fox-notification-toast-enter 180ms ease-out both;
-}
-
-.fox-notification-toast.is-leaving {
-  pointer-events: none;
-  animation: fox-notification-toast-exit 280ms ease-in both;
-}
-
-.fox-notification-toast-icon {
-  width: var(--fox-action-height);
-  height: var(--fox-action-height);
-  display: grid;
-  place-items: center;
-  border-radius: var(--fox-radius-pill);
-  color: var(--fox-accent);
-  background: var(--fox-accent-soft);
-}
-
-.fox-notification-toast.is-failed .fox-notification-toast-icon,
-.fox-notification-toast.is-approval .fox-notification-toast-icon {
-  color: var(--destructive);
-  background: var(--fox-danger-surface);
-}
-
-.fox-notification-toast-icon svg {
-  width: var(--fox-icon-size-small);
-  height: var(--fox-icon-size-small);
-}
-
-.fox-notification-toast-copy {
-  min-width: 0;
-  display: grid;
-  gap: var(--fox-space-xs);
-}
-
-.fox-notification-toast-copy strong,
-.fox-notification-toast-copy small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fox-notification-toast-copy strong {
-  font-size: var(--fox-type-control);
-  font-weight: var(--fox-weight-semibold);
-}
-
-.fox-notification-toast-copy small {
-  color: var(--fox-muted);
-  font-size: var(--fox-type-meta);
-}
-
-.fox-notification-toast > button {
-  width: 24px;
-  height: 24px;
-  display: grid;
-  place-items: center;
-  align-self: start;
-  margin-top: calc(var(--fox-space-xs) * -1);
-  border: 0;
-  border-radius: var(--fox-radius-small);
-  color: var(--fox-muted);
-  background: transparent;
-  cursor: pointer;
-}
-
-.fox-notification-toast > button:hover { color: var(--fox-text); background: var(--fox-hover); }
-.fox-notification-toast > button svg { width: var(--fox-icon-size-compact); height: var(--fox-icon-size-compact); }
-
-.fox-notification-toast-progress {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: var(--fox-space-micro);
-  background: var(--fox-accent);
-  transform-origin: left center;
-  animation: fox-notification-toast-progress 5s linear forwards;
-}
-
-.fox-notification-toast.is-failed .fox-notification-toast-progress,
-.fox-notification-toast.is-approval .fox-notification-toast-progress { background: var(--destructive); }
-.fox-notification-toast.is-leaving .fox-notification-toast-progress { opacity: 0; }
-
-@keyframes fox-notification-toast-progress {
-  from { transform: scaleX(1); }
-  to { transform: scaleX(0); }
-}
-
-@keyframes fox-notification-toast-enter {
-  from { opacity: 0; transform: translate3d(18px, -6px, 0) scale(.98); }
-  to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
-}
-
-@keyframes fox-notification-toast-exit {
-  from { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
-  to { opacity: 0; transform: translate3d(0, -14px, 0) scale(.98); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .fox-notification-toast,
-  .fox-notification-toast.is-leaving { animation-duration: 1ms; }
-}
-
 .fox-window-controls button {
-  width: 44px;
+  width: var(--fox-titlebar-control-width);
   height: 100%;
   display: grid;
   place-items: center;
@@ -803,14 +215,9 @@
   color: color-mix(in oklch, var(--fox-text) 78%, var(--fox-muted));
 }
 
+.fox-titlebar-sidebar-controls button:not(:disabled):hover,
 .fox-window-controls button:hover {
-  background: var(--fox-hover);
-  color: var(--fox-text);
-}
-
-.fox-window-controls button.is-close:hover {
-  background: var(--destructive);
-  color: white;
+  background: var(--fox-chrome-control-surface);
 }
 
 .fox-window-controls svg {
@@ -824,7 +231,7 @@
   min-height: 0;
   display: flex;
   overflow: visible;
-  background: var(--fox-shell-chrome);
+  background: var(--fox-sidebar-surface);
   /* Besides the light frost, the filter makes this element the containing block
      for position: fixed overlays inside it (notification toasts, the local
      fullscreen table), keeping them below the title bar. Do not drop it. */
@@ -1026,8 +433,8 @@
 
 .fox-mode-tabs {
   min-width: 0;
-  width: 148px;
-  flex: 0 0 148px;
+  width: 136px;
+  flex: 0 0 auto;
 }
 
 .fox-mode-tabs [data-slot='tabs-list'] {
@@ -1037,7 +444,7 @@
   display: flex;
   gap: 0;
   border-radius: var(--fox-radius-pill);
-  background: color-mix(in oklch, var(--foreground) 5%, var(--sidebar));
+  background: var(--fox-chrome-control-surface);
   padding: 0;
   box-shadow: inset 0 1px 3px color-mix(in oklch, var(--fox-shadow-color) 7%, transparent), inset 0 0 0 1px color-mix(in oklch, var(--foreground) 6%, transparent);
 }
@@ -1068,6 +475,7 @@
 .fox-mode-tabs [data-slot='tabs-trigger'] { position:relative; }
 .fox-mode-selection { position:absolute; inset:0; z-index:-1; border-radius:inherit; background:var(--fox-mode-surface); box-shadow:inset 0 0 0 1px color-mix(in oklch, var(--fox-shadow-color) 12%, transparent), inset 0 1px 0 color-mix(in oklch, white 45%, transparent); }
 .fox-mode-content { display:inline-flex; align-items:center; justify-content:center; gap:6px; }
+.fox-mode-label { line-height: 1; translate: 0 1px; }
 
 .fox-sidebar-search-trigger {
   width: var(--fox-control-sm);
@@ -6061,8 +5469,13 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-approval-disclosure summary:focus-visible { outline: 2px solid var(--fox-accent); outline-offset: 2px; }
 .fox-approval-disclosure summary span { margin-left: var(--fox-space-m); color: var(--fox-muted); font-size: var(--fox-type-caption); }
 .fox-approval-disclosure .fox-approval-context,
-.fox-approval-disclosure .fox-approval-diff { border: 0; border-radius: 0; background: transparent; margin: var(--fox-space-m) 0 0; padding: 0; }
-.fox-approval-disclosure .fox-approval-diff { max-height: none; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fox-type-caption); }
+.fox-approval-disclosure .fox-approval-diff,
+.fox-approval-command-panel .fox-approval-diff { border: 0; border-radius: 0; background: transparent; margin: var(--fox-space-m) 0 0; padding: 0; }
+.fox-approval-disclosure .fox-approval-diff,
+.fox-approval-command-panel .fox-approval-diff { max-height: none; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fox-type-caption); }
+.fox-approval-command-panel .fox-approval-diff { margin: 0; }
+.fox-approval-command-toggle svg { width: var(--fox-icon-size-small); height: var(--fox-icon-size-small); }
+.fox-approval-command-toggle[aria-expanded='true'] svg { transform: rotate(180deg); }
 .fox-runtime-confirmation .fox-confirmation-actions { margin-top: 0; padding-top: var(--fox-space-l); border-top: 1px solid var(--fox-border); }
 
 .fox-approval-command,
@@ -6126,11 +5539,18 @@ img[src='/avatars/fox-assistant.png'] {
   white-space: pre;
 }
 .fox-approval-disclosure .fox-approval-write-preview { max-height: 240px; overflow: auto; overscroll-behavior: contain; scrollbar-width: var(--fox-native-scrollbar-width, thin); }
+.fox-approval-command-details {
+  max-block-size: min(12rem, 24vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: var(--fox-native-scrollbar-width, thin);
+}
+.fox-approval-command-details:focus-visible { outline: var(--fox-focus-outline); outline-offset: -2px; }
 .fox-approval-write-preview, .fox-approval-write-preview > code { color: var(--fox-muted); }
 .fox-approval-details-scroll:has(.fox-approval-write-preview) { flex: 0 0 auto; max-height: none; max-block-size: none; overflow: visible; }
 .fox-approval-details-scroll:has(.fox-approval-write-preview) .fox-approval-scope-note { color: var(--fox-muted); }
-.fox-runtime-confirmation:has(.fox-approval-write-preview),
-.fox-decision-approval-list:has(.fox-approval-write-preview) { max-height: none; max-block-size: none; overflow: visible; }
+.fox-runtime-confirmation:has(.fox-approval-write-preview, .fox-approval-command-details),
+.fox-decision-approval-list:has(.fox-approval-write-preview, .fox-approval-command-details) { max-height: none; max-block-size: none; overflow: visible; }
 
 .fox-prompt-toolbar {
   position: relative;
@@ -11975,7 +11395,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-execution-control > span, .fox-expert-chip > span:not(.fox-expert-icon), .aui-composer-model-trigger > span { line-height: 1.4; padding-block: 1px; }
 
 .fox-mode-tabs [data-slot='tabs-trigger'] { display: inline-flex; align-items: center; justify-content: center; flex: none; gap: 6px; padding: 0 9px; white-space: nowrap; }
-.fox-mode-tabs [data-slot='tabs-trigger'][data-state='active'] { flex: 1; }
+.fox-mode-tabs [data-slot='tabs-trigger'][data-state='active'] { flex: 1; padding-inline: 7px; }
 .fox-mode-tabs [data-slot='tabs-trigger'][data-state='inactive'] .fox-mode-label { display: none; }
 .fox-mode-tabs [data-slot='tabs-trigger']:focus-visible { outline: 2px solid var(--ring); outline-offset: -4px; }
 .fox-mode-tabs [data-slot='tabs-trigger'][data-pointer-focus='true']:focus-visible { outline: none; }
@@ -11991,7 +11411,6 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-sidebar.is-collapsed .fox-sidebar-collapsed-rail .fox-sidebar-mode-switch { width:28px; height:28px; min-width:28px; min-height:28px; flex:0 0 28px; margin:0; }
 .fox-sidebar.is-collapsed .fox-sidebar-primary { gap:1px; }
 .fox-sidebar.is-collapsed .fox-sidebar-command { width:28px; height:28px; min-height:28px; padding:0; }
-.fox-sidebar.is-collapsed .fox-companion-create-collapsed { width:28px; height:28px; }
 
 .fox-sidebar.is-collapsed .fox-sidebar-collapsed-sections { gap:1px; margin-top:4px; padding-block:4px; }
 .fox-sidebar.is-collapsed .fox-sidebar-collapsed-sections > .fox-sidebar-collapsed-entry > button { width:28px; height:28px; min-width:28px; min-height:28px; }

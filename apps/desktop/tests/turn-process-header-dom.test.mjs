@@ -75,6 +75,7 @@ test('one turn header holds the step summary, fold control, and durable duration
   assert.equal(header.querySelectorAll('.fox-assistant-avatar').length, 0)
   assert.equal(view.container.querySelectorAll('.fox-assistant-content .fox-assistant-avatar').length, 0)
   assert.equal(header.querySelector('[role="timer"]'), null)
+  assert.match(header.textContent, /用时 6秒/)
   assert.equal(stages(view).filter(stage => stage.hidden).length, 2)
   assert.equal(view.container.querySelectorAll('.fox-answer-segment:not([hidden])').length, 1)
   assert.match(view.container.querySelector('.fox-answer-segment:not([hidden])').textContent, /第二段/)
@@ -227,20 +228,20 @@ test('the round header joins its own fields: no leading separator or duplicate t
   assert.equal(toggle(view, '展开').getAttribute('aria-expanded'), 'false')
 })
 
-test('a settled turn preserves its process title and omits the duplicate time', async () => {
+test('a settled turn displays duration once after the process summary', async () => {
   const view = render(timeline())
   await waitFor(() => assert.equal(stages(view).length, 2))
-  const settled = () => view.getByRole('button', { name: /^(展开|收起)过程 · 已读取 1 个文件$/ })
+  const settled = () => view.getByRole('button', { name: /^(展开|收起)过程 · 已读取 1 个文件 · 用时 6秒$/ })
   assert.equal(settled().getAttribute('aria-expanded'), 'false')
-  assert.equal(settled().querySelector('.fox-process-turn-label').textContent, '已读取 1 个文件')
-  assert.equal(settled().getAttribute('aria-label'), '展开过程 · 已读取 1 个文件')
-  assert.equal(header(view).textContent, '已读取 1 个文件')
+  assert.equal(settled().querySelector('.fox-process-turn-label').textContent, '已读取 1 个文件 · 用时 6秒')
+  assert.equal(settled().getAttribute('aria-label'), '展开过程 · 已读取 1 个文件 · 用时 6秒')
+  assert.equal(header(view).textContent, '已读取 1 个文件 · 用时 6秒')
   assert.equal(view.container.querySelectorAll('.fox-process-turn-separator').length, 0)
   assert.equal(view.container.querySelectorAll('[role="timer"]').length, 0)
   // Both fold states read the same: the fields are independent of the disclosure.
   fireEvent.click(settled())
-  assert.equal(settled().querySelector('.fox-process-turn-label').textContent, '已读取 1 个文件')
-  assert.equal(header(view).textContent, '已读取 1 个文件')
+  assert.equal(settled().querySelector('.fox-process-turn-label').textContent, '已读取 1 个文件 · 用时 6秒')
+  assert.equal(header(view).textContent, '已读取 1 个文件 · 用时 6秒')
   assert.equal(view.container.querySelectorAll('.fox-process-turn-separator').length, 0)
 })
 
@@ -309,15 +310,15 @@ test('a planned tool retry keeps its note joined to the state by exactly one sep
   assert.equal((header(view).textContent.match(/·/g) ?? []).length, 0)
 })
 
-test('a header without process content keeps its own word and omits elapsed time', async () => {
+test('a completed response shows elapsed time even without process content', async () => {
   await React.act(async () => persistProcessDisplayMode('verbose'))
   const view = render(React.createElement(TurnProcessHeader, { avatar: null, events: [event(1, 'run.started'), event(7, 'run.completed')], active: false, canToggle: false, collapsed: true, status: '处理过程', onToggle() {} }))
   await waitFor(() => assert.ok(view.container.querySelector('.fox-process-turn-toggle.is-status')))
   const status = view.container.querySelector('.fox-process-turn-toggle.is-status')
-  assert.equal(status.querySelector('.fox-process-turn-label').textContent, '处理过程')
+  assert.equal(status.querySelector('.fox-process-turn-label').textContent, '处理过程 · 用时 6秒')
   assert.equal(status.querySelector('[role="timer"]'), null)
   assert.equal(status.getAttribute('role'), 'status')
-  assert.equal(header(view).textContent, '处理过程')
+  assert.equal(header(view).textContent, '处理过程 · 用时 6秒')
   assert.equal(view.container.querySelectorAll('[role="timer"]').length, 0)
 })
 

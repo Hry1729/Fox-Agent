@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CalendarClock, History, Pencil, Play, Plus, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Switch } from '@/components/ui/switch'
+import type { NavigateWorkspace } from '@/features/workspace/types'
+import { ContactAvatar } from './chat-controls'
+import type { Companion } from './api'
 import { command } from '@/features/conversations/api/desktop-client'
 import type { DigitalColleagueRecord, DigitalColleagueScheduleRecord, DigitalColleagueTriggerRecord } from '@/features/conversations/model/types'
 import { showContactError } from './context'
@@ -79,6 +84,95 @@ export function useCompanionTasks(companionId: string, active: boolean) {
   const pending = tasks.filter(owned => Boolean(activeTrigger(history[owned.task.id]))).length
   const due = tasks.filter(owned => owned.schedule.enabled && owned.schedule.nextDueAt <= Date.now()).length
   return { tasks, history, loaded, error, pending, due, refresh }
+}
+
+export function useWorkspaceSchedules(companions: readonly Companion[], active: boolean) {
+  const ids = JSON.stringify(companions.filter(item => !item.archivedAt && !item.deletingAt).map(item => item.id).sort())
+  const [entries, setEntries] = useState<Array<OwnedCompanionTask & { companionId: string }>>([])
+  const [errors, setErrors] = useState<string[]>([])
+  const [loaded, setLoaded] = useState(false)
+  const generation = useRef(0)
+  const refresh = useCallback(async () => {
+    if (!active) return
+    const current = ++generation.current
+    const companionIds: string[] = JSON.parse(ids)
+    const results = await Promise.allSettled(companionIds.map(async companionId => (await listTasks(companionId)).map(owned => ({ ...owned, companionId }))))
+    if (current !== generation.current) return
+    setEntries(results.flatMap(result => result.status === 'fulfilled' ? result.value : []))
+    setErrors(companionIds.filter((_, index) => results[index].status === 'rejected'))
+    setLoaded(true)
+  }, [ids, active])
+  useEffect(() => {
+    setLoaded(false)
+    void refresh()
+    if (!active) return
+    const timer = window.setInterval(() => void refresh(), 15000)
+    return () => { ++generation.current; window.clearInterval(timer) }
+  }, [active, refresh])
+  return { entries, errors, loaded, refresh, enabledCount: entries.filter(item => item.schedule.enabled).length }
+}
+
+export type WorkspaceSchedules = ReturnType<typeof useWorkspaceSchedules>
+
+export function CompanionSchedules({ companions, schedules, navigate }: {
+  companions: Companion[]; schedules: WorkspaceSchedules; navigate: NavigateWorkspace
+}) {
+  const [creating, setCreating] = useState(false)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [latest, setLatest] = useState<Record<string, DigitalColleagueTriggerRecord | null | undefined>>({})
+  const { entries, errors, loaded, refresh } = schedules
+  useEffect(() => {
+    let active = true
+    void Promise.all(entries.map(async ({ companionId, task }) => [
+      task.id, await taskHistory(companionId, task.id, 1).then(runs => runs[0]).catch(() => null),
+    ] as const)).then(results => { if (active) setLatest(Object.fromEntries(results)) })
+    return () => { active = false }
+  }, [entries])
+  const runAction = async (action: () => Promise<unknown>, id: string) => {
+    setBusy(id)
+    try { await action(); await refresh() }
+    catch (error) { showContactError(error) }
+    finally { setBusy(null) }
+  }
+  return <div className="fox-companion-workspace-inner">
+    <header className="fox-companion-workspace-head"><div><h1>定时任务</h1><p>查看伙伴的定时计划，统一启停或立即执行。</p></div><Button disabled={!companions.length} onClick={() => setCreating(true)}><Plus />新建定时任务</Button></header>
+    {!loaded && <p className="fox-companion-workspace-empty" role="status">正在加载定时任务…</p>}
+    {errors.length > 0 && <div className="fox-companion-workspace-meta" role="alert">有 {errors.length} 位伙伴的任务未能加载。<Button size="sm" variant="ghost" onClick={() => void refresh()}>重试</Button></div>}
+    {loaded && !entries.length && !errors.length && <p className="fox-companion-workspace-empty">还没有定时任务。</p>}
+    <div className="fox-companion-workspace-list">{entries.map(({ companionId, task, schedule }) => {
+      const companion = companions.find(item => item.id === companionId)
+      if (!companion) return null
+      const lastRun = latest[task.id]
+      return <article className="fox-companion-workspace-row" key={task.id}>
+        <button type="button" className="fox-companion-workspace-person" onClick={() => navigate('companions', companion.id)}>
+          <ContactAvatar contact={companion} /><span>
+            <span className="fox-companion-workspace-row-title"><strong>{task.name}</strong><small className="fox-companion-schedule-tag">{scheduleText(schedule)}</small></span>
+            <small>{companion.displayName} · 下次 {schedule.enabled ? formatAt(schedule.nextDueAt, schedule.timezone) : '已暂停'}</small>
+            <small>{task.objective}</small>
+            <small>上次结果 · {!(task.id in latest) ? '正在读取' : lastRun === null ? '读取失败' : latestResult(lastRun)}</small>
+          </span>
+        </button>
+        <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => void runAction(() => taskCommand('companion_task_run_now', companionId, task.id), task.id)}><Play />立即执行</Button>
+        <Switch checked={schedule.enabled} disabled={busy !== null} aria-label={`启用${task.name}`}
+          onCheckedChange={enabled => void runAction(() => taskCommand(enabled ? 'companion_task_resume' : 'companion_task_pause', companionId, task.id), task.id)} />
+      </article>
+    })}</div>
+    {loaded && <div className="fox-companion-workspace-footer">
+      <p className="fox-companion-workspace-meta">共 {entries.length} 项任务，{schedules.enabledCount} 项已启用</p>
+      <Button size="sm" variant="ghost" onClick={() => navigate('companion-inbox')}>查看待我处理</Button>
+    </div>}
+    {creating && <Dialog open onOpenChange={open => { if (!open && !busy) setCreating(false) }}>
+      <DialogContent className="fox-companion-modal fox-companion-task-modal" aria-describedby={undefined}>
+        <DialogHeader><DialogTitle>新建定时任务</DialogTitle></DialogHeader>
+        <TaskEditor companionId={companions[0]?.id ?? ''} companions={companions} owned={null} busy={busy !== null} onCancel={() => setCreating(false)}
+          onSave={async (request, companionId) => {
+            setBusy('create')
+            try { await command('companion_task_create', { companionId, ...request }); await refresh(); setCreating(false) }
+            finally { setBusy(null) }
+          }} />
+      </DialogContent>
+    </Dialog>}
+  </div>
 }
 
 function deviceTimezone() {
@@ -228,17 +322,20 @@ function TaskRuns({ owned, runs }: { owned: OwnedCompanionTask; runs: DigitalCol
   </section>
 }
 
-function TaskEditor({ companionId, owned, busy, onCancel, onSave }: {
+function TaskEditor({ companionId, companions, owned, busy, onCancel, onSave }: {
   companionId: string
+  companions?: Companion[]
   owned: OwnedCompanionTask | null
   busy: boolean
   onCancel: () => void
-  onSave: (request: { name: string; objective: string; schedule: CompanionSchedule; enabled: boolean }) => Promise<void>
+  onSave: (request: { name: string; objective: string; schedule: CompanionSchedule; enabled: boolean }, companionId: string) => Promise<void>
 }) {
   const timezone = useMemo(() => owned?.schedule.timezone ?? deviceTimezone(), [owned])
+  const [selectedCompanion, setSelectedCompanion] = useState(companionId)
+  const [preset, setPreset] = useState(companions ? 'daily' : 'custom')
   const [name, setName] = useState(owned?.task.name ?? '')
   const [objective, setObjective] = useState(owned?.task.objective ?? '')
-  const [kind, setKind] = useState<ScheduleKind>(owned?.schedule.scheduleKind ?? 'interval')
+  const [kind, setKind] = useState<ScheduleKind>(owned?.schedule.scheduleKind ?? (companions ? 'daily' : 'interval'))
   const originalOnceAt = owned?.schedule.onceAt ?? null
   const [onceAt, setOnceAt] = useState(originalOnceAt != null ? localInputValue(originalOnceAt, timezone) : '')
   const initialInterval = intervalParts(owned?.schedule.intervalSeconds)
@@ -249,8 +346,10 @@ function TaskEditor({ companionId, owned, busy, onCancel, onSave }: {
   const [enabled, setEnabled] = useState(owned?.schedule.enabled ?? true)
   const [error, setError] = useState('')
   const submit = async () => {
+    if (busy) return
     setError('')
     try {
+      if (companions && !companions.some(item => item.id === selectedCompanion)) throw new Error('请选择执行伙伴。')
       if (!name.trim() || !objective.trim()) throw new Error('请填写任务名称和执行要求。')
       let schedule: CompanionSchedule
       if (kind === 'once') {
@@ -268,13 +367,29 @@ function TaskEditor({ companionId, owned, busy, onCancel, onSave }: {
         if (kind === 'weekly' && !weekdays.length) throw new Error('每周任务至少选择一个星期。')
         schedule = { kind, weekdays: kind === 'daily' ? ALL_WEEKDAYS : weekdays, localTime, timezone }
       }
-      await onSave({ name: name.trim(), objective: objective.trim(), schedule, enabled })
+      await onSave({ name: name.trim(), objective: objective.trim(), schedule, enabled }, selectedCompanion)
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
   }
   return <form className="fox-contact-task-editor" onSubmit={event => { event.preventDefault(); void submit() }}>
-    <h3>{owned ? '编辑任务' : '添加任务'}</h3>
-    <label>任务名称<input aria-label="任务名称" value={name} onChange={event => setName(event.target.value)} required /></label>
-    <label>执行要求<textarea aria-label="执行要求" value={objective} onChange={event => setObjective(event.target.value)} required /></label>
+    {companions ? <fieldset><legend>执行伙伴</legend><div className="fox-companion-modal-pills">
+      {companions.map(item => <label className="fox-companion-task-choice" key={item.id}>
+        <input type="radio" name="task-companion" checked={selectedCompanion === item.id} onChange={() => setSelectedCompanion(item.id)} />
+        <ContactAvatar contact={item} />{item.displayName}
+      </label>)}
+    </div></fieldset> : <h3>{owned ? '编辑任务' : '添加任务'}</h3>}
+    <label>任务名称<input aria-label="任务名称" placeholder={companions ? '例如：每日晨间简报' : undefined} value={name} onChange={event => setName(event.target.value)} required /></label>
+    {!companions && <label>执行要求<textarea aria-label="执行要求" value={objective} onChange={event => setObjective(event.target.value)} required /></label>}
+    {companions && <fieldset><legend>执行频率</legend><div className="fox-companion-modal-pills">
+      {[
+        { id: 'daily', label: '每天 09:00', apply: () => { setKind('daily'); setLocalTime('09:00') } },
+        { id: 'weekday', label: '工作日 18:00', apply: () => { setKind('weekly'); setWeekdays([1, 2, 3, 4, 5]); setLocalTime('18:00') } },
+        { id: 'weekly', label: '每周五 17:00', apply: () => { setKind('weekly'); setWeekdays([5]); setLocalTime('17:00') } },
+        { id: 'interval', label: '每 4 小时', apply: () => { setKind('interval'); setIntervalValue('4'); setIntervalUnit('3600') } },
+        { id: 'custom', label: '自定义', apply: () => {} },
+      ].map(option => <Button key={option.id} size="sm" type="button" variant={preset === option.id ? 'secondary' : 'outline'}
+        aria-pressed={preset === option.id} onClick={() => { setPreset(option.id); option.apply() }}>{option.label}</Button>)}
+    </div></fieldset>}
+    {preset === 'custom' && <>
     <label>执行频率<select aria-label="执行频率" value={kind} onChange={event => setKind(event.target.value as ScheduleKind)}>
       <option value="once">一次性</option><option value="interval">间隔</option><option value="daily">每天</option><option value="weekly">每周</option>
     </select></label>
@@ -282,9 +397,14 @@ function TaskEditor({ companionId, owned, busy, onCancel, onSave }: {
     {kind === 'interval' && <div className="fox-contact-task-interval"><label>每隔<input aria-label="间隔数值" type="number" min="1" step="1" value={intervalValue} onChange={event => setIntervalValue(event.target.value)} /></label><label>单位<select aria-label="间隔单位" value={intervalUnit} onChange={event => setIntervalUnit(event.target.value as typeof intervalUnit)}><option value="1">秒</option><option value="60">分钟</option><option value="3600">小时</option><option value="86400">天</option></select></label></div>}
     {(kind === 'daily' || kind === 'weekly') && <label>本地时间<input aria-label="本地时间" type="time" value={localTime} onChange={event => setLocalTime(event.target.value)} required /></label>}
     {kind === 'weekly' && <fieldset><legend>星期</legend><div className="fox-contact-task-weekdays">{WEEKDAYS.map(([label, day]) => <label key={day}><input type="checkbox" checked={weekdays.includes(day)} onChange={event => setWeekdays(current => event.target.checked ? [...current, day].sort() : current.filter(value => value !== day))} />{label}</label>)}</div></fieldset>}
-    <p className="fox-contact-task-meta">时区：{timezone}{owned ? '（保持不变）' : '（设备时区）'}</p>
-    <label className="fox-contact-task-enabled"><input type="checkbox" checked={enabled} onChange={event => setEnabled(event.target.checked)} />启用任务</label>
+    </>}
+    {companions && <label>任务目标<textarea aria-label="任务目标" rows={3} placeholder="说明到点后需要伙伴检查、整理或交付什么" value={objective} onChange={event => setObjective(event.target.value)} required /></label>}
+    {preset === 'custom' && <p className="fox-contact-task-meta">时区：{timezone}{owned ? '（保持不变）' : '（设备时区）'}</p>}
+    {!companions && <label className="fox-contact-task-enabled"><input type="checkbox" checked={enabled} onChange={event => setEnabled(event.target.checked)} />启用任务</label>}
     {error && <p role="alert">{error}</p>}
-    <div className="fox-contact-task-actions"><Button type="submit" size="sm" disabled={busy}>保存</Button><Button type="button" size="sm" variant="ghost" disabled={busy} onClick={onCancel}>取消</Button></div>
+    <div className="fox-contact-task-actions">
+      <Button type="button" size="sm" variant={companions ? 'outline' : 'ghost'} disabled={busy} onClick={onCancel}>取消</Button>
+      <Button type="submit" size="sm" disabled={busy || Boolean(companions && !selectedCompanion)}>{companions ? '创建' : '保存'}</Button>
+    </div>
   </form>
 }

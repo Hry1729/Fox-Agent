@@ -143,7 +143,7 @@ test('passes the Phase 0B full manifest with complete Runtime tool coverage', as
   // 2026-10-31: the stable prompt moved with B4b (runtime-instructions.mjs,
   // 1e2db797), so the result identity moved with it (main push CI 41170749997).
   // 2026-11-18: the Runtime prompt update changes this hash without changing the tool catalog.
-  assert.equal(report.resultHash, 'a4f8dd02cdbadb1596cb9d2637d819be19e0e0cb20548e8ed346901dcd389435')
+  assert.equal(report.resultHash, 'b76c69b7325803c0051f4560a22cead8b2e5750d711d21aa87e55dd4fe83e595')
 })
 
 test('locks Graph review and final Acceptance schemas, profile boundary, and truthful completion Prompt', () => {

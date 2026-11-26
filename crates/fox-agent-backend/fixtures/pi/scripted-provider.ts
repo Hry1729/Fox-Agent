@@ -47,12 +47,17 @@ function respond(body: any, res: any) {
 		sse(res, { ...base, choices: [{ index: 0, delta: { role: "assistant", content: value }, finish_reason: null }] });
 		finish("stop");
 	};
+	if (messages.some((message) => message?.role === "system" &&
+		textOf(message.content).startsWith("You are a context summarization assistant."))) {
+		text("Native compaction fixture summary.");
+		return;
+	}
 	if (last?.role === "tool") {
 		text(`tool-result: ${textOf(last.content).slice(0, 200)}`);
 		return;
 	}
 	const lastUser = [...messages].reverse().find((m) => m?.role === "user");
-	const match = /(GATE|GATEWRITE|GATEREAD|GATESLEEP|FOXTOOL):([A-Za-z0-9_-]+)/.exec(textOf(lastUser?.content));
+	const match = /(GATE|GATEWRITE|GATEREAD|GATESLEEP|GATEEXIT|FOXTOOL):([A-Za-z0-9_-]+)/.exec(textOf(lastUser?.content));
 	if (match) {
 		const kind = match[1];
 		const token = match[2];
@@ -76,6 +81,8 @@ function respond(body: any, res: any) {
 			);
 		} else if (kind === "GATESLEEP") {
 			args = JSON.stringify({ command: `sleep 299; echo fox-sleep-${token}` });
+		} else if (kind === "GATEEXIT") {
+			args = JSON.stringify({ command: "exit 2" });
 		}
 		sse(res, {
 			...base,

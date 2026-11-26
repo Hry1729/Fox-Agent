@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { AGENT_DISABLED_CODE, AGENT_DISABLED_NOTICE, enabledOrFox, isAgentEnabled } from '../src/features/conversations/model/external-agent-enablement'
 import { readFileSync } from 'node:fs'
+import { isCompanionWorkspaceView } from '../src/features/workspace/types'
 import { resolveConversationAgentId } from '../src/features/conversations/model/agent-initialization'
 import { knowledgeReferenceKey, knowledgeReferenceFromLegacyBinding } from '../src/features/conversations/api/desktop-client'
 import { conversationRunFingerprint, conversationRunState, snapshotForRun } from '../src/features/conversations/model/kernel-snapshot'
@@ -136,14 +137,13 @@ describe('conversation navigation ownership', () => {
     messages: [], attachments: [], knowledgeBindings: [], expertBindings: [], lastRun: null,
   })
 
-  test('a private chat sends the actual inbox filename returned for a dropped attachment', async () => {
+  test('a private chat passes attachment IDs for the Host to deliver in the send', async () => {
     const h = harness()
     h.setConversationLoader(async id => ({ ...detail(id), companionId: 'cmp_a' }))
     await h.render().openConversation('private')
     await h.render().send('查看报价', undefined, [{ filename: '报价.txt', url: 'data:text/plain;base64,MQ==' }])
     expect(h.runRequest().attachmentIds).toEqual(['attachment-1'])
-    expect(h.runRequest().runtimeText).toContain('收到的文件/报价 (1).txt')
-    expect(h.runRequest().runtimeText).not.toContain('attachment_compute')
+    expect(h.runRequest().runtimeText).toBe('查看报价')
   })
 
   test('late A load cannot replace a later B selection, including an A background update', async () => {
@@ -205,9 +205,9 @@ describe('starting a fresh draft', () => {
     }
     const beginNewDraft = new Function(
       'clearWorkflowTimer', 'setChatState', 'setActivePrompt', 'setPendingUserMessage',
-      'setEmptyConversation', 'setComposerDraft', 'setComposerResetKey', 'setActiveEntityId',
+      'setEmptyConversation', 'setWorkComposerDraft', 'setComposerResetKey', 'setActiveEntityId',
       'setActiveDocumentId', 'setActiveSourceLocator', 'setAssistantMode', 'setActiveView',
-      'cancelDocumentAsk', 'setComposerInitialAttachments', 'setRightPanelMaximized', 'setRightMode', 'setContactCardConversationId',
+      'cancelDocumentAsk', 'setComposerInitialAttachments', 'collapseRightSidebar', 'setContactCardConversationId', 'workDraft', 'setForegroundView',
       `${compiled}; return beginNewDraft`,
     )(
       () => { calls.clearWorkflowTimer = true },
@@ -215,7 +215,8 @@ describe('starting a fresh draft', () => {
       setter('emptyConversation'), setter('composerDraft'), setter('composerResetKey'),
       setter('activeEntityId'), setter('activeDocumentId'), setter('activeSourceLocator'),
       setter('assistantMode'), setter('activeView'),
-      () => { calls.cancelDocumentAsk = true }, setter('composerInitialAttachments'), setter('rightPanelMaximized'), setter('rightMode'), setter('contactCardConversationId'),
+      () => { calls.cancelDocumentAsk = true }, setter('composerInitialAttachments'),
+      () => { calls.collapseRightSidebar = true }, setter('contactCardConversationId'), { current: null }, setter('foregroundView'),
     )
     return { beginNewDraft, calls }
   }
@@ -226,8 +227,8 @@ describe('starting a fresh draft', () => {
     // The previous conversation's run state must not survive: a draft that keeps
     // "running" shows the stop button over an empty composer.
     expect(calls.chatState).toBe('complete')
-    expect(calls.rightMode).toBeNull()
-    expect(calls.rightPanelMaximized).toBe(false)
+    expect(calls.collapseRightSidebar).toBe(true)
+    expect(calls.foregroundView).toBeNull()
     expect(calls.contactCardConversationId).toBeNull()
     expect(calls.pendingUserMessage).toBeNull()
     expect(calls.composerDraft).toBe('')
@@ -293,62 +294,52 @@ describe('composable conversation draft selections', () => {
     expect(oldConversation.knowledgeReferences).toEqual([{ source: 'local', id: 'existing-kb' }])
     expect(h.submitted().savedReferences).toBeUndefined()
   })
-  test('工作标签进入新对话草稿，不恢复之前的伙伴；伙伴标签仍恢复上次位置', async () => {
+  test('工作标签恢复暂存草稿，伙伴标签恢复上次私聊或进入待我处理', () => {
     const workbench = readFileSync(new URL('../src/features/chat/workbench.tsx', import.meta.url), 'utf8')
     const selection = workbench.slice(workbench.indexOf('  const switchAssistantMode ='), workbench.indexOf('  const createProjectDraft ='))
     const compiled = new Bun.Transpiler({ loader: 'ts' }).transformSync(selection)
-    const routes: string[] = []
+    const routes: unknown[][] = []
     const drafts: string[] = []
-    const opened: string[] = []
-    window.localStorage.setItem('fox.workspace.workConversation', 'work-private')
+    const companions = [
+      { id: 'default', conversationId: 'default-chat', isDefault: true, archivedAt: null, deletingAt: null },
+      { id: 'remembered', conversationId: 'companion-chat', isDefault: false, archivedAt: null, deletingAt: null },
+    ]
+    let savedDraft = false
     window.localStorage.setItem('fox.workspace.companionConversation', 'companion-chat')
     const change = new Function(
-      'setAssistantMode', 'navigate', 'agentResource', 'prepareDraft', 'contactList',
-      'desktopConversation', 'showContactError', 'layoutStorage',
+      'setForegroundView', 'setAssistantMode', 'navigate', 'contactList',
+      'layoutStorage', 'restoreWorkDraft', 'activeView', 'privateChat', 'openNewWorkDraft',
       `${compiled}; return switchAssistantMode`,
     )(
-      () => {}, (view: string) => routes.push(view), { agents: [{ id: 'fox-general' }] },
-      (id: string) => drafts.push(id),
-      { list: { companions: [
-        { id: 'default', conversationId: 'default-chat', isDefault: true, archivedAt: null, deletingAt: null },
-        { id: 'work-contact', conversationId: 'work-private', isDefault: false, archivedAt: null, deletingAt: null },
-        { id: 'remembered', conversationId: 'companion-chat', isDefault: false, archivedAt: null, deletingAt: null },
-      ] } },
-      {
-        conversations: [{ id: 'ordinary-work' }],
-        openConversation: async (id: string) => { opened.push(id) },
-        createConversation: async () => { throw new Error('不应新建工作对话') },
-      },
-      (cause: unknown) => { throw cause },
-      { workConversation: 'fox.workspace.workConversation', companionConversation: 'fox.workspace.companionConversation' },
+      () => {}, () => {}, (...args: unknown[]) => routes.push(args), { list: { companions } },
+      { companionConversation: 'fox.workspace.companionConversation' },
+      () => savedDraft, 'companions', true, () => drafts.push('work'),
     ) as (mode: 'work' | 'companions' | 'knowledge') => void
 
     change('work')
-    await new Promise(resolve => setTimeout(resolve, 0))
-    expect(drafts).toEqual(['fox-general'])
-    expect(routes).toEqual([])
-    expect(opened).toEqual([])
-    change('companions')
-    await new Promise(resolve => setTimeout(resolve, 0))
-    expect(routes).toEqual(['companions'])
-    expect(opened).toEqual(['companion-chat'])
-    change('knowledge')
-    expect(routes).toEqual(['companions', 'local-knowledge-home'])
+    expect(drafts).toEqual(['work'])
+    savedDraft = true
     change('work')
-    expect(drafts).toEqual(['fox-general', 'fox-general'])
+    expect(drafts).toEqual(['work'])
+
+    change('companions')
+    expect(routes).toEqual([['companions', undefined, { conversationId: 'companion-chat' }]])
+    companions.length = 0
+    change('companions')
+    expect(routes.at(-1)).toEqual(['companion-inbox'])
   })
   test('打开非默认伙伴保留当前工作区，不把伙伴侧栏切回工作', () => {
     const workbench = readFileSync(new URL('../src/features/chat/workbench.tsx', import.meta.url), 'utf8')
     const selection = workbench.slice(workbench.indexOf('  const openContact ='), workbench.indexOf('  const coordinationOrigin ='))
     const compiled = new Bun.Transpiler({ loader: 'tsx' }).transformSync(selection)
-    for (const activeView of ['companions', 'chat']) {
+    for (const [activeView, targetView] of [['companions', 'companions'], ['companion-overview', 'companions'], ['chat', 'chat']]) {
       const routes: unknown[][] = []
       const profiles: string[] = []
-      const open = new Function('useStableCallback', 'activeView', 'navigate', 'setContactCardConversationId', `${compiled}; return openContact`)(
-        (callback: unknown) => callback, activeView, (...args: unknown[]) => routes.push(args), (id: string) => profiles.push(id),
+      const open = new Function('useStableCallback', 'activeView', 'navigate', 'setContactCardConversationId', 'isCompanionWorkspaceView', `${compiled}; return openContact`)(
+        (callback: unknown) => callback, activeView, (...args: unknown[]) => routes.push(args), (id: string) => profiles.push(id), isCompanionWorkspaceView,
       )
       open({ id: 'specialist', isDefault: false, conversationId: 'specialist-chat' })
-      expect(routes).toEqual([[activeView, undefined, { conversationId: 'specialist-chat' }]])
+      expect(routes).toEqual([[targetView, undefined, { conversationId: 'specialist-chat' }]])
       expect(profiles).toEqual([])
       open({ id: 'specialist', isDefault: false, conversationId: 'specialist-chat' }, true)
       expect(profiles).toEqual(['specialist-chat'])

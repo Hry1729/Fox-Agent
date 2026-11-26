@@ -99,7 +99,7 @@ pub fn pi_subject(
                 None => (tool.to_owned(), ToolSubject::Other),
             }
         }
-        "bash" => match text("command") {
+        "bash" | "powershell" => match text("command") {
             Some(command) => (
                 "run_command".to_owned(),
                 ToolSubject::Command {
@@ -276,7 +276,7 @@ pub fn answer_pi_request(
     // 与 pi_subject 使用同一条命令和同一个 cwd，供卡片上「本项目总是允许」校验前缀。
     let approval = parse_tool_approval(request);
     let command = approval.as_ref().and_then(|approval| {
-        if approval.tool_name != "bash" {
+        if !matches!(approval.tool_name.as_str(), "bash" | "powershell") {
             return None;
         }
         approval.input.get("command").and_then(Value::as_str)
@@ -303,7 +303,7 @@ pub fn answer_pi_request(
 
 /// 从 pi 的审批卡写入「本项目总是允许」规则。错误码和中文文案与
 /// `RuntimeHost::allow_approval_with_project_rules` 相同；规则工具名固定为
-/// `run_command`（pi 的 bash 映射），不用卡片上的 `agent_permission`。
+/// `run_command`（pi 的命令工具映射），不用卡片上的 `agent_permission`。
 pub fn allow_pi_with_project_rule(
     database: &crate::database::Database,
     approval: &crate::database::ApprovalRecord,

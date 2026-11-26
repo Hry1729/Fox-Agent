@@ -46,7 +46,9 @@ test('the real Pi SDK extension serializes Host capability facts into the actual
       .filter((message) => message.role === 'system')
       .map((message) => typeof message.content === 'string' ? message.content : '')
       .join('\n')
-    captured = { system, tools: (body.tools ?? []).map((tool) => tool.function?.name ?? tool.name) }
+    const definitions = (body.tools ?? []).map(tool => tool.function ?? tool)
+    captured = { system, tools: definitions.map(tool => tool.name),
+      computeCode: definitions.find(tool => tool.name === 'attachment_compute')?.parameters?.properties?.code }
     sse(res, 'CAP_HTTP_OK')
   })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -122,6 +124,9 @@ test('the real Pi SDK extension serializes Host capability facts into the actual
     })
     await waitFor((message) => message.runId === runId && message.payload?.type === 'run.completed')
     assert.ok(captured, 'the real SDK must issue an HTTP request')
+    assert.match(captured.system, /verify the overall denominator/)
+    assert.doesNotMatch(captured.system, /daily_sum:<header>|Independent review and acceptance are A1 capabilities/)
+    assert.match(captured.computeCode.description, /daily_sum:<header>/)
     assert.match(captured.system, /Host runtime availability for this frozen manifest\/profile:/)
     assert.match(captured.system, /<fox_context_block kind="runtime"/)
     assert.match(captured.system, /"executionProfileId":"legacy"/)

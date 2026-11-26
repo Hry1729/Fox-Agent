@@ -1,0 +1,6 @@
+Upstream: https://github.com/TencentCloud/Octop
+Commit: 30f4aecd2e14e7eeee639b8c6c33c9f404463df8
+Source: src/octop/infra/connectors/gateway/adapters and mail_servers.py
+License: MIT, see LICENSE. Fox adapts imports and the WeKnora base URL helper for standalone use.
+Fox opens IMAP mailboxes read-only and uses BODY.PEEK for reads. The fliggy_cli,
+whatsapp_twilio and zendesk modules are Fox adapters, separate from the Octop sources.

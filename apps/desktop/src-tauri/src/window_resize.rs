@@ -1,37 +1,84 @@
+use std::cell::Cell;
 use windows::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+    Graphics::{
+        Dwm::{
+            DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE,
+            DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUNDSMALL, DWM_WINDOW_CORNER_PREFERENCE,
+        },
+        Gdi::{CreateRoundRectRgn, DeleteObject, SetWindowRgn},
+    },
     UI::{
         HiDpi::GetDpiForWindow,
         Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::{
-            GetCursorPos, GetWindowRect, SendMessageW, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
-            HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, MINMAXINFO, WMSZ_BOTTOMLEFT,
-            WMSZ_BOTTOMRIGHT, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
-            WM_GETMINMAXINFO, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_SIZING,
+            GetCursorPos, GetWindowRect, IsIconic, IsZoomed, SendMessageW, HTBOTTOM, HTBOTTOMLEFT,
+            HTBOTTOMRIGHT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, MINMAXINFO,
+            WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_DPICHANGED,
+            WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_NCDESTROY, WM_NCHITTEST,
+            WM_NCLBUTTONDOWN, WM_SIZE, WM_SIZING,
         },
     },
 };
 
 const SUBCLASS_ID: usize = 0x464f5852;
+const LEGACY_CORNER_DIAMETER_DIP: u32 = 12;
+
+#[derive(Default)]
+struct LegacyCorners {
+    applied: Cell<Option<(i32, i32, i32)>>,
+}
 
 #[derive(Default)]
 struct ResizeState {
     start: Option<RECT>,
     limits: MINMAXINFO,
+    legacy_corners: Option<LegacyCorners>,
 }
 
 pub fn install(window: &tauri::WebviewWindow) -> Result<(), Box<dyn std::error::Error>> {
     let hwnd = HWND(window.hwnd()?.0 as _);
-    install_on_window(hwnd)
+    let native_corners = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            std::ptr::from_ref(&DWMWCP_ROUNDSMALL).cast(),
+            size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+        )
+        .is_ok()
+    };
+    if native_corners {
+        let _ = unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_BORDER_COLOR,
+                std::ptr::from_ref(&DWMWA_COLOR_NONE).cast(),
+                size_of::<u32>() as u32,
+            )
+        };
+    } else {
+        // On Windows 10 Tao's undecorated shadow reserves a frame on three sides.
+        window.set_shadow(false)?;
+    }
+    install_on_window(hwnd, !native_corners)
 }
 
-fn install_on_window(hwnd: HWND) -> Result<(), Box<dyn std::error::Error>> {
-    let state = Box::into_raw(Box::<ResizeState>::default());
+fn install_on_window(
+    hwnd: HWND,
+    use_legacy_corners: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let state = Box::into_raw(Box::new(ResizeState {
+        legacy_corners: use_legacy_corners.then(LegacyCorners::default),
+        ..ResizeState::default()
+    }));
     // Tauri setup runs on the window thread; subclass state stays on that thread.
     if !unsafe { SetWindowSubclass(hwnd, Some(resize_proc), SUBCLASS_ID, state as usize) }.as_bool()
     {
         unsafe { drop(Box::from_raw(state)) };
         return Err("Could not install Fox corner resize handler".into());
+    }
+    if let Some(corners) = unsafe { &(*state).legacy_corners } {
+        unsafe { update_legacy_corners(hwnd, corners) };
     }
     Ok(())
 }
@@ -82,6 +129,11 @@ unsafe extern "system" fn resize_proc(
             }
         }
         WM_EXITSIZEMOVE => (*state).start = None,
+        WM_SIZE | WM_DPICHANGED => {
+            if let Some(corners) = &(*state).legacy_corners {
+                update_legacy_corners(hwnd, corners);
+            }
+        }
         WM_NCDESTROY => {
             let _ = RemoveWindowSubclass(hwnd, Some(resize_proc), id);
             drop(Box::from_raw(state));
@@ -89,6 +141,49 @@ unsafe extern "system" fn resize_proc(
         _ => {}
     }
     DefSubclassProc(hwnd, message, wparam, lparam)
+}
+
+unsafe fn update_legacy_corners(hwnd: HWND, corners: &LegacyCorners) {
+    if IsIconic(hwnd).as_bool() {
+        return;
+    }
+
+    let shape = if IsZoomed(hwnd).as_bool() {
+        None
+    } else {
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &mut rect).is_err() {
+            return;
+        }
+        let diameter = (LEGACY_CORNER_DIAMETER_DIP * GetDpiForWindow(hwnd).max(96) + 48) / 96;
+        Some((
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+            diameter as i32,
+        ))
+    };
+    let previous = corners.applied.get();
+    if shape == previous {
+        return;
+    }
+    let region = if let Some((width, height, diameter)) = shape {
+        let region = CreateRoundRectRgn(0, 0, width, height, diameter, diameter);
+        if region.is_invalid() {
+            return;
+        }
+        Some(region)
+    } else {
+        None
+    };
+
+    // SetWindowRgn sends window position messages synchronously and owns the region on success.
+    corners.applied.set(shape);
+    if SetWindowRgn(hwnd, region, true) == 0 {
+        corners.applied.set(previous);
+        if let Some(region) = region {
+            let _ = DeleteObject(region.into());
+        }
+    }
 }
 
 unsafe fn corner_hit(hwnd: HWND, hit: u32) -> u32 {
@@ -205,6 +300,69 @@ mod tests {
     }
 
     #[test]
+    fn legacy_corners_follow_window_size_and_clear_when_maximized() {
+        use windows::{
+            core::w,
+            Win32::{
+                Graphics::Gdi::{CreateRectRgn, GetWindowRgn, PtInRegion},
+                UI::WindowsAndMessaging::{
+                    CreateWindowExW, DestroyWindow, GetWindowLongPtrW, SetWindowLongPtrW,
+                    SetWindowPos, GWL_STYLE, SWP_NOACTIVATE, SWP_NOZORDER, WINDOW_EX_STYLE,
+                    WS_MAXIMIZE, WS_OVERLAPPEDWINDOW,
+                },
+            },
+        };
+        unsafe {
+            let hwnd = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("Fox corner test"),
+                WS_OVERLAPPEDWINDOW,
+                100,
+                100,
+                600,
+                480,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let region = CreateRectRgn(0, 0, 0, 0);
+            install_on_window(hwnd, true).unwrap();
+            assert_ne!(GetWindowRgn(hwnd, region).0, 0);
+            assert!(!PtInRegion(region, 0, 0).as_bool());
+            assert!(!PtInRegion(region, 650, 50).as_bool());
+
+            SetWindowPos(
+                hwnd,
+                None,
+                100,
+                100,
+                700,
+                480,
+                SWP_NOACTIVATE | SWP_NOZORDER,
+            )
+            .unwrap();
+            assert_ne!(GetWindowRgn(hwnd, region).0, 0);
+            assert!(PtInRegion(region, 650, 50).as_bool());
+
+            let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            SetWindowLongPtrW(hwnd, GWL_STYLE, style | WS_MAXIMIZE.0 as isize);
+            assert!(IsZoomed(hwnd).as_bool());
+            SendMessageW(hwnd, WM_SIZE, None, None);
+            assert_eq!(GetWindowRgn(hwnd, region).0, 0);
+
+            SetWindowLongPtrW(hwnd, GWL_STYLE, style);
+            SendMessageW(hwnd, WM_SIZE, None, None);
+            assert_ne!(GetWindowRgn(hwnd, region).0, 0);
+            assert!(!PtInRegion(region, 0, 0).as_bool());
+            let _ = DeleteObject(region.into());
+            DestroyWindow(hwnd).unwrap();
+        }
+    }
+
+    #[test]
     fn native_messages_capture_each_gesture_and_release_state() {
         use windows::{
             core::w,
@@ -230,7 +388,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            install_on_window(hwnd).unwrap();
+            install_on_window(hwnd, false).unwrap();
             for (width, height) in [(1120, 800), (960, 800)] {
                 SetWindowPos(
                     hwnd,

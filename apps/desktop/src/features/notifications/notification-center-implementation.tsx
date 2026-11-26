@@ -1,5 +1,4 @@
-import '@/components/fox-ui/sidebar-list-pane.css'
-import type { NotificationBridge } from './notification-center'
+import { inNotificationHost, type NotificationBridge, type NotificationCenterProps } from './notification-center'
 import { createPortal } from 'react-dom'
 import './notification-center.css'
 import { ToastStack, ToastStackProvider, useToastStack, type ToastType } from '@/components/arc/toast-stack/toast-stack'
@@ -8,17 +7,16 @@ import { FoxEmptyState } from '@/components/fox-ui/empty-state'
 import { SkeletonContent } from '@/components/ui/skeleton'
 import { Progress } from '@/components/ui/progress'
 import { Button } from '@/components/ui/button'
-import { ScrollArea } from '@/components/ui/scroll-area'
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { desktopClient, desktopErrorDetails, desktopRuntimeAvailable } from '@/features/conversations/api/desktop-client'
 import { readDeveloperUi } from '@/features/chat/developer-ui'
 import { userFacingError } from '@/features/chat/send-failure-notice'
 import { type AppNotificationRecord, type NotificationPreferencesRecord } from '@/features/conversations/model/types'
 import { FOX_IN_APP_NOTIFICATION_EVENT, FOX_NOTIFICATIONS_CHANGED_EVENT, FOX_NOTIFICATION_PREFERENCES_CHANGED_EVENT, type InAppNotificationEventDetail, directToastRecently, normalizeNotificationSoundId, notificationIsVisibleInContext, playNotificationSound, notify as toast } from '@/features/notifications'
-import { type NavigateWorkspace, type WorkspaceView } from '@/features/workspace/types'
+import { type WorkspaceView } from '@/features/workspace/types'
 import { ContactAvatar } from '@/features/companions/chat-controls'
 import { useContacts } from '@/features/companions/context'
-import { AlertTriangle, Bell, CheckCheck, CircleDot, Eraser, ExternalLink, FolderOpen, MoreHorizontal, RotateCcw, Bot, Database, ListTodo, MessageSquare, Settings } from 'lucide-react'
+import { AlertTriangle, Bell, CheckCheck, Eraser, ExternalLink, FolderOpen, MoreHorizontal, RotateCcw, Bot, Database, ListTodo, MessageSquare, Settings, X, Check } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 type ToastNotification = Pick<AppNotificationRecord, 'id' | 'kind' | 'title' | 'body'> & Partial<AppNotificationRecord>
@@ -83,21 +81,14 @@ function NotificationCenterContent({
   open,
   onOpenChange,
   showTrigger,
+  triggerHost,
+  panelHost,
   activeView,
   activeEntityId,
   activeConversationId,
   bridge,
-}: {
-  bridge: NotificationBridge
-  onNavigate: NavigateWorkspace
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  showTrigger: boolean
-  activeView: WorkspaceView
-  activeEntityId?: string | null
-  activeConversationId?: string | null
-}) {
-  const [unreadOnly, setUnreadOnly] = useState(false)
+}: NotificationCenterProps & { bridge: NotificationBridge }) {
+  const [filter, setFilter] = useState<'all' | 'unread' | 'action'>('all')
   const contactsContext = useContacts()
   const [items, setItems] = useState<AppNotificationRecord[]>([])
   const [preferences, setPreferences] = useState<NotificationPreferencesRecord | null>(null)
@@ -108,6 +99,13 @@ function NotificationCenterContent({
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const observedNotifications = useRef<Map<string, string> | null>(null)
   const loadGeneration = useRef(0)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const closeRef = useRef<HTMLButtonElement>(null)
+  useEffect(() => { if (open) closeRef.current?.focus() }, [open, panelHost])
+  const closeCenter = () => {
+    onOpenChange(false)
+    triggerRef.current?.focus()
+  }
   const openCenter = useRef(onOpenChange)
   openCenter.current = onOpenChange
   const navigateRef = useRef(onNavigate)
@@ -139,7 +137,7 @@ function NotificationCenterContent({
           .catch(() => {})
       } } : notification.sourceType ? { label: '查看', onClick: () => {
         openCenter.current(true)
-        setUnreadOnly(false)
+        setFilter('all')
         setExpandedId(notification.id)
         if (notification.readAt == null) void desktopClient.setAppNotificationRead(notification.id, true)
           .then(() => window.dispatchEvent(new Event(FOX_NOTIFICATIONS_CHANGED_EVENT)))
@@ -168,7 +166,7 @@ function NotificationCenterContent({
         }
       }
       const [nextItems, nextPreferences] = await Promise.all([
-        desktopClient.listAppNotifications(unreadOnly, 100),
+        desktopClient.listAppNotifications(false, 100),
         desktopClient.getNotificationPreferences(),
       ])
       if (generation !== loadGeneration.current) return
@@ -176,7 +174,7 @@ function NotificationCenterContent({
         .filter((item) => item.readAt == null && notificationIsVisibleInContext(item, {
           appVisible: document.visibilityState === 'visible',
           appFocused: document.hasFocus(),
-          activeView,
+          activeView: open ? 'notifications' : activeView,
           activeEntityId,
           activeConversationId,
         }))
@@ -217,7 +215,7 @@ function NotificationCenterContent({
     } finally {
       if (generation === loadGeneration.current) setLoading(false)
     }
-  }, [activeConversationId, activeEntityId, activeView, bridge, enqueueToast, unreadOnly])
+  }, [activeConversationId, activeEntityId, activeView, bridge, enqueueToast, open])
 
   useEffect(() => () => { loadGeneration.current += 1 }, [load])
 
@@ -247,17 +245,26 @@ function NotificationCenterContent({
 
   const unreadCount = items.filter((item) => item.readAt == null).length
   const hasReadNotifications = items.some((item) => item.readAt != null)
-  const priorityItems = useMemo(() => items.filter(isAutomaticPriorityNotification), [items])
-  const datedItems = useMemo(() => items.filter((item) => !isAutomaticPriorityNotification(item)), [items])
-  const notificationGroups = useMemo(() => datedItems.reduce<Array<{ key: string; label: string; items: AppNotificationRecord[] }>>((groups, item) => {
-    const day = notificationDay(item)
-    const current = groups.at(-1)
-    if (current?.key === day.key) current.items.push(item)
-    else groups.push({ ...day, items: [item] })
-    return groups
-  }, []), [datedItems])
-  const inspectItem = async (item: AppNotificationRecord) => {
-    setExpandedId((current) => current === item.id ? null : item.id)
+  const actionCount = items.filter(isAutomaticPriorityNotification).length
+  const filters = [
+    { id: 'all', label: '全部', count: items.length },
+    { id: 'unread', label: '未读', count: unreadCount },
+    { id: 'action', label: '需处理', count: actionCount },
+  ] as const
+  const notificationGroups = useMemo(() => {
+    const groups = new Map<string, { key: string; label: string; items: AppNotificationRecord[] }>()
+    for (const item of items) {
+      if (filter === 'unread' && item.readAt != null) continue
+      if (filter === 'action' && !isAutomaticPriorityNotification(item)) continue
+      const day = notificationDay(item)
+      const group = groups.get(day.key)
+      if (group) group.items.push(item)
+      else groups.set(day.key, { ...day, items: [item] })
+    }
+    return [...groups.values()]
+  }, [items, filter])
+
+  const markRead = async (item: AppNotificationRecord) => {
     try {
       if (item.readAt == null) await desktopClient.setAppNotificationRead(item.id, true)
       dismissToast(item.id)
@@ -273,7 +280,6 @@ function NotificationCenterContent({
       const coordinationId = item.action?.coordinationConversationId
       if (typeof coordinationId === 'string') {
         onNavigate('companions', undefined, { conversationId: coordinationId })
-        onOpenChange(false)
       } else if (item.sourceType === 'companion') {
         const companion = contactsContext?.list.companions.find(contact => contact.id === item.sourceId && !contact.archivedAt && !contact.deletingAt)
         if (companion) {
@@ -281,10 +287,10 @@ function NotificationCenterContent({
           else onNavigate('companions', companion.id)
         }
         else if (item.workspaceView) onNavigate(item.workspaceView as WorkspaceView, item.entityId ?? undefined)
-        onOpenChange(false)
+      } else if (item.workspaceView === 'chat' && item.entityId) {
+        onNavigate('chat', undefined, { conversationId: item.entityId })
       } else if (item.workspaceView) {
         onNavigate(item.workspaceView as WorkspaceView, item.entityId ?? undefined)
-        onOpenChange(false)
       }
       await load(true)
     } catch (cause) {
@@ -332,64 +338,83 @@ function NotificationCenterContent({
               : item.kind === 'question' ? '等待回答'
                 : item.status === 'queued' ? '任务正在排队' : '任务正在执行'
       : companion?.displayName ?? item.title
-    const source = item.sourceType === 'run' ? item.title : item.sourceType === 'companion' ? (item.kind === 'approval' || item.kind === 'question' ? item.title : displayBody(item)) : label
-    const status = item.kind === 'failed' ? '失败' : item.readAt == null ? '未读' : '已读'
+    const body = displayBody(item)
+    const summary = item.sourceType === 'run' ? [item.title, body].filter(Boolean).join(' · ')
+      : companion && item.title !== body && item.title !== companion.displayName
+        ? [item.title, body].filter(Boolean).join(' · ') : body
+    const expandable = summary.length > 42 || summary.includes('\n')
+    const status = item.kind === 'failed' ? '异常' : item.kind === 'approval' ? '待确认' : item.kind === 'question' ? '待回答' : null
     const downloadedFile = item.action.type === 'downloaded_file' && typeof item.action.path === 'string'
-    const canOpenDirectly = downloadedFile && item.action.canOpenDirectly === true
-    return <article key={item.id} className={`fox-notification-entry ${item.readAt == null ? 'is-unread' : ''} ${expanded ? 'is-expanded' : ''}`} >
-      <div className={`fox-notification-item fox-sidebar-tree-row is-${item.kind} ${item.readAt == null ? 'is-unread' : ''} ${expanded ? 'is-active' : ''}`}>
-        <button type="button" className="fox-notification-item-main" onClick={() => void inspectItem(item)} aria-expanded={expanded}>
-          <span className={`fox-notification-source-icon ${companion ? 'is-companion' : ''}`} role="img" aria-label={`${label}通知，${status}`}>{companion ? <ContactAvatar contact={companion} /> : <Icon aria-hidden="true" />}{item.kind === 'failed' ? <i className="fox-notification-badge is-failed" /> : item.readAt == null ? <i className="fox-notification-badge is-unread" /> : null}</span>
-          <span className="fox-notification-copy"><span className="fox-notification-line"><strong>{title}</strong><time>{new Date(item.updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time></span><small>{source}</small>{item.progress != null && item.kind === 'progress' && <Progress value={item.progress} aria-label={`${item.title}进度`} className="mt-1 h-1" />}</span>
-        </button>
-
+    const canNavigate = item.workspaceView || companion || typeof item.action.coordinationConversationId === 'string'
+    return <article key={item.id} className={`fox-notification-row ${item.readAt == null ? 'is-unread' : ''}`}>
+      <span className={`fox-notification-avatar is-${item.kind} ${companion ? 'is-companion' : ''}`} role="img" aria-label={`${label}通知，${item.readAt == null ? '未读' : '已读'}`}>
+        {companion ? <ContactAvatar contact={companion} /> : <Icon size={18} aria-hidden="true" />}
+        {item.readAt == null && <i aria-hidden="true" />}
+      </span>
+      <div className="fox-notification-summary">
+        <div className="fox-notification-row-head">
+          <strong>{title}</strong>
+          {status && <span className={`fox-notification-status is-${item.kind}`}>{status}</span>}
+          <time dateTime={new Date(item.updatedAt).toISOString()}>{new Date(item.updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time>
+        </div>
+        {summary && <div className={`fox-notification-body ${expanded ? 'is-expanded' : ''}`}>
+          <span>{summary}</span>
+          {expandable && <button type="button" aria-expanded={expanded} onClick={() => setExpandedId(expanded ? null : item.id)}>{expanded ? '收起' : '展开'}</button>}
+        </div>}
+        {item.progress != null && item.kind === 'progress' && <Progress value={item.progress} aria-label={`${item.title}进度`} className="mt-1 h-1" />}
       </div>
-      {expanded && <div className="fox-notification-details">
-        <p>{displayBody(item)}</p>
-        <footer><div>{canOpenDirectly && <Button variant="outline" size="sm" onClick={() => void openNotificationFile(item, false)}><ExternalLink />打开文件</Button>}{downloadedFile && <Button variant="outline" size="sm" onClick={() => void openNotificationFile(item, true)}><FolderOpen />打开所在文件夹</Button>}{item.workspaceView && <Button variant="outline" size="sm" onClick={() => void openItem(item)}><ExternalLink />{action}</Button>}</div></footer>
-      </div>}
+      <div className="fox-notification-row-actions">
+        {item.readAt == null && <Button variant="ghost" size="icon-sm" aria-label={`标记「${title}」为已读`} title="标记为已读" onClick={() => void markRead(item)}><Check /></Button>}
+        {downloadedFile && item.action.canOpenDirectly === true && <Button variant="outline" size="sm" onClick={() => void openNotificationFile(item, false)}><ExternalLink />打开文件</Button>}
+        {downloadedFile && <Button variant="outline" size="sm" onClick={() => void openNotificationFile(item, true)}><FolderOpen />打开所在文件夹</Button>}
+        {canNavigate && <Button variant={item.kind === 'approval' ? 'default' : 'outline'} size="sm" onClick={() => void openItem(item)}>{action}</Button>}
+      </div>
     </article>
   }
+  const emptyTitle = filter === 'unread' ? '没有未读消息' : filter === 'action' ? '没有需处理的消息' : '暂无消息'
   return <>
-    {showTrigger && <AnimatedIconTrigger><button type="button" className={`fox-notification-trigger ${open ? 'is-active' : ''}`} aria-label={unreadCount ? `${unreadCount} 条未读通知` : '通知'} aria-pressed={open} title="通知" onClick={() => onOpenChange(!open)}>
+    {showTrigger && inNotificationHost(<AnimatedIconTrigger><button ref={triggerRef} type="button" className={`fox-notification-trigger ${open ? 'is-active' : ''}`} aria-label={unreadCount ? `消息中心，${unreadCount} 条未读消息` : '消息中心'} aria-pressed={open} aria-controls={open ? 'fox-notification-page' : undefined} title="消息中心" onClick={() => open ? closeCenter() : onOpenChange(true)}>
         <AnimatedBell />{preferences?.badge !== false && unreadCount > 0 && <span aria-hidden="true" />}
-      </button></AnimatedIconTrigger>}
-    {open && <section className="fox-notification-sidebar fox-sidebar-list-pane" aria-label="通知">
-      <header className="fox-section-head">
-        <span>通知</span>
-        <span>
-          <Button variant="ghost" size="icon" className="fox-icon-button fox-notification-mark-read" aria-label="全部已读" title="全部已读" disabled={!unreadCount} onClick={() => void markAllRead()}><CheckCheck size={14} /></Button>
-          <DropdownMenu>
-          <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button fox-notification-more" aria-label="管理通知"><MoreHorizontal /></Button></DropdownMenuTrigger>
-          <DropdownMenuContent align="end" side="right" sideOffset={6} className="fox-notification-menu">
-            <DropdownMenuItem onSelect={() => setUnreadOnly((value) => !value)}>{unreadOnly ? <Bell /> : <CircleDot />}{unreadOnly ? '全部通知' : '只看未读'}</DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => void load()}><RotateCcw />刷新通知</DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => { onNavigate('settings'); onOpenChange(false) }}><Settings />通知设置</DropdownMenuItem>
-            <DropdownMenuItem disabled={!hasReadNotifications} onSelect={() => void clearRead()}><Eraser />清除已读</DropdownMenuItem>
-          </DropdownMenuContent>
-          </DropdownMenu>
-        </span>
+      </button></AnimatedIconTrigger>, triggerHost ?? undefined)}
+    {open && inNotificationHost(<section id="fox-notification-page" className="fox-notification-page" aria-labelledby="fox-notification-heading" onKeyDown={event => {
+      if (event.key === 'Escape' && !event.defaultPrevented) {
+        event.stopPropagation()
+        closeCenter()
+      }
+    }}>
+      <header className="fox-notification-page-header">
+        <h1 id="fox-notification-heading">消息中心</h1>
+        <Button ref={closeRef} variant="ghost" size="icon-sm" aria-label="关闭消息中心" title="关闭消息中心" onClick={closeCenter}><X /></Button>
       </header>
-      <ScrollArea className="fox-sidebar-scroll"><div className="fox-notification-list" aria-live="polite">
-        {error && items.length > 0 && <div className="fox-notification-error" role="alert"><AlertTriangle />{error}</div>}
-        {loading && !items.length && <div className="p-3"><SkeletonContent label="正在同步任务状态" avatar lines={3} /></div>}
-        {!loading && !items.length && !error && <FoxEmptyState title={unreadOnly ? '没有未读通知' : '暂无通知'} description={unreadOnly ? '已读记录仍保存在通知中心。' : '任务更新、审批和操作结果会显示在这里。'} action={unreadOnly ? <Button variant="outline" size="sm" onClick={() => setUnreadOnly(false)}>查看全部通知</Button> : undefined} />}
-        {!loading && !items.length && error && <FoxEmptyState variant="error" title="通知同步失败" description={error} action={<Button variant="outline" size="sm" onClick={() => void load()}>重试</Button>} />}
-        {priorityItems.length > 0 && <section className="fox-notification-day is-priority" aria-labelledby="notification-priority-title">
-          <div className="fox-notification-day-title" id="notification-priority-title">需要处理</div>
-          <div className="fox-notification-day-items">
-            {priorityItems.map(renderNotificationItem)}
+      <div className="fox-notification-page-content">
+        <div className="fox-notification-toolbar">
+          <div className="fox-notification-filters" role="group" aria-label="筛选消息">
+            {filters.map(item => <Button key={item.id} variant={filter === item.id ? 'secondary' : 'ghost'} size="sm" aria-pressed={filter === item.id} onClick={() => setFilter(item.id)}>{item.label}<span>{item.count}</span></Button>)}
           </div>
-        </section>}
-        {notificationGroups.map((group) => <section className="fox-notification-day" key={group.key} aria-labelledby={`notification-day-${group.key}`}>
-          <div className="fox-notification-day-title" id={`notification-day-${group.key}`}>{group.label}</div>
-          <div className="fox-notification-day-items">
+          <div className="fox-notification-toolbar-actions">
+            <Button variant="ghost" size="sm" disabled={!unreadCount} onClick={() => void markAllRead()}><CheckCheck />全部已读</Button>
+            <Button variant="ghost" size="sm" disabled={!hasReadNotifications} onClick={() => void clearRead()}><Eraser />清除已读</Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="管理消息"><MoreHorizontal /></Button></DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onSelect={() => void load()}><RotateCcw />刷新消息</DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => onNavigate('settings')}><Settings />通知设置</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        </div>
+        <div className="fox-notification-stream" aria-live="polite">
+          {error && items.length > 0 && <div className="fox-notification-error" role="alert"><AlertTriangle />{error}</div>}
+          {loading && !items.length && <SkeletonContent label="正在同步消息" avatar lines={3} />}
+          {!loading && !notificationGroups.length && !error && <FoxEmptyState title={emptyTitle} description={filter === 'all' ? '任务更新、审批和操作结果会显示在这里。' : undefined} action={filter !== 'all' ? <Button variant="outline" size="sm" onClick={() => setFilter('all')}>查看全部消息</Button> : undefined} />}
+          {!loading && !items.length && error && <FoxEmptyState variant="error" title="消息同步失败" description={error} action={<Button variant="outline" size="sm" onClick={() => void load()}>重试</Button>} />}
+          {notificationGroups.map(group => <section className="fox-notification-group" key={group.key} aria-labelledby={`notification-day-${group.key}`}>
+            <h2 id={`notification-day-${group.key}`}>{group.label}</h2>
             {group.items.map(renderNotificationItem)}
-          </div>
-        </section>)}
-      </div></ScrollArea>
-    </section>}
+          </section>)}
+        </div>
+      </div>
+    </section>, panelHost)}
     {createPortal(<ToastStack label="通知更新" position="top-right" visibleToasts={3} />, document.body)}
   </>
 }

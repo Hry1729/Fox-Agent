@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Archive, ExternalLink, FolderOpen, Info, LoaderCircle, MoreHorizontal, RotateCcw, ShieldCheck } from 'lucide-react'
+import { Archive, ExternalLink, FolderOpen, LoaderCircle, MoreHorizontal, RotateCcw, ShieldCheck } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger, runAfterMenuClose } from '@/components/ui/dropdown-menu'
@@ -144,7 +144,6 @@ export function SecuritySettingsPage({ sidebarCollapsed, onSidebar, section }: {
         </SettingsRow>
         {hooks.error && <p className="fox-settings-error" role="alert">暂时无法读取 Hook 列表：{hooks.error} <Button variant="ghost" size="sm" onClick={() => void hooks.refresh()}>重试</Button></p>}
       </SettingsGroup>
-      <p className="fox-settings-note"><Info />Agent 的默认权限在 Agent 页设置；新伙伴的执行方式在伙伴页设置。全局规则不会替代项目权限和运行时审批。</p>
     </SettingsPageLayout>
 
     <Sheet open={openProject !== null} onOpenChange={open => { if (!open) setProjectId(null) }}>

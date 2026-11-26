@@ -5,7 +5,6 @@ import { approvalInvalidation } from './approval-labels'
 const terminalOwners = new Set(['completed', 'failed', 'cancelled', 'interrupted', 'budget_exhausted', 'approval_expired'])
 const terminalTools = new Set(['completed', 'failed', 'cancelled', 'interrupted', 'denied', 'expired'])
 
-/** An old ticket cannot block the composer after its owning Run or tool settles. */
 export function pendingRuntimeApprovals(detail: ConversationDetail | null): ApprovalRecord[] {
   if (!detail) return []
   const runs = new Map((detail.runs ?? []).map(run => [run.id, run.status as string]))
@@ -14,8 +13,9 @@ export function pendingRuntimeApprovals(detail: ConversationDetail | null): Appr
   const tools = new Map(detail.toolCalls.map(tool => [tool.id, tool]))
   return detail.approvals.filter(approval => approval.status === 'pending'
     && approvalInvalidation(approval.decision) === null
-    && !terminalOwners.has(runs.get(approval.runId) ?? '')
-    && !terminalTools.has(tools.get(approval.toolCallId)?.status ?? ''))
+    && (approval.request.interruptedByRestart === true
+      || (!terminalOwners.has(runs.get(approval.runId) ?? '')
+        && !terminalTools.has(tools.get(approval.toolCallId)?.status ?? ''))))
 }
 
 export type RuntimeQuestionOption = {
@@ -122,6 +122,7 @@ export interface RuntimeQuestionHistory extends RuntimeQuestionRequest {
   createdAt: number
   status: 'pending' | 'answered' | 'closed'
   answerText: string
+  answerMessageId?: string
 }
 
 export function runtimeQuestionHistory(detail: ConversationDetail): RuntimeQuestionHistory[] {
@@ -141,6 +142,7 @@ export function runtimeQuestionHistory(detail: ConversationDetail): RuntimeQuest
     return [{ runId: requested.runId, requestId, questions, createdAt: requested.createdAt,
       status: active?.runId === requested.runId && active.seq === requested.seq ? 'pending' as const : response || answer ? 'answered' as const : 'closed' as const,
       answerText: answer?.content ?? '',
+      answerMessageId: answer?.id,
     }]
   })
 }

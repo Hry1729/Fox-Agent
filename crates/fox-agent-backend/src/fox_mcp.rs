@@ -91,7 +91,46 @@ pub mod rpc_code {
 }
 
 /// The tools the bridge offers, in `tools/list` order.
-pub const TOOL_NAMES: [&str; 6] = ["present_files", "list_knowledge_bases", "search_knowledge", "read_knowledge_document", "ask_user", "fox_web_search"];
+pub const TOOL_NAMES: [&str; 18] = [
+    "present_files", "list_knowledge_bases", "search_knowledge", "read_knowledge_document",
+    "ask_user", "fox_web_search", "list_mcp_tools", "call_mcp_tool", "companion_list",
+    "companion_coordinate", "companion_assignment_status", "work_snapshot_get", "goal_propose",
+    "task_create_many", "task_update", "task_evidence_add", "task_evidence_validate", "goal_complete",
+];
+
+pub const WORK_TOOL_NAMES: [&str; 7] = [
+    "work_snapshot_get", "goal_propose", "task_create_many", "task_update",
+    "task_evidence_add", "task_evidence_validate", "goal_complete",
+];
+
+fn work_tool_definitions() -> Vec<Value> {
+    let text = json!({"type": "string", "minLength": 1});
+    let version = json!({"type": "integer", "minimum": 1});
+    [
+        ("work_snapshot_get", "Read the Fox goal, tasks, latest versions and recentEvidenceSources. For an active goal, call this after performing work to obtain real refs for task_evidence_add.",
+         json!({}), json!([])),
+        ("goal_propose", "Propose a persistent Fox goal only for an explicit request to use Fox goal tracking. If Fox already opened a goal, use work_snapshot_get instead. Keep native plans and native goals in the agent.",
+         json!({"title":text,"objective":text,"acceptanceSummary":text}), json!(["title","objective"])),
+        ("task_create_many", "Add ordered tasks to an active tracked Fox goal. Use the returned task IDs and versions.",
+         json!({"goalId":text,"tasks":{"type":"array","minItems":1,"maxItems":64,"items":{
+             "type":"object","properties":{"title":text,"detail":text,"ordinal":{"type":"integer","minimum":0}},
+             "required":["title","ordinal"],"additionalProperties":false}}}), json!(["goalId","tasks"])),
+        ("task_update", "Advance a Fox task from queued to in_progress before work. After the work, attach and validate evidence, then set completed. Use the latest task version on each update.",
+         json!({"taskId":text,"status":{"enum":["queued","in_progress","completed","blocked","interrupted","skipped"]},
+                "expectedVersion":version,"blockedReason":text}), json!(["taskId","status","expectedVersion"])),
+        ("task_evidence_add", "Attach a matching reference from work_snapshot_get.recentEvidenceSources. Copy evidenceType, refKind and refId exactly. A file card ID from present_files uses artifact for both types. Then call task_evidence_validate with the returned evidence ID.",
+         json!({"taskId":text,"evidenceType":{"enum":["tool_call","test_result","file_diff","artifact","user_confirmation","external_reference"]},
+                "refKind":{"enum":["tool_call","artifact","run_event","message","source"]},"refId":text,"summary":text}),
+         json!(["taskId","evidenceType","refKind","refId","summary"])),
+        ("task_evidence_validate", "Revalidate a tracked task's evidence reference.",
+         json!({"evidenceId":text}), json!(["evidenceId"])),
+        ("goal_complete", "Complete a tracked Fox goal once its required tasks have real validated evidence.",
+         json!({"goalId":text,"expectedVersion":version}), json!(["goalId","expectedVersion"])),
+    ].into_iter().map(|(name, description, properties, required)| json!({
+        "name":name,"description":description,
+        "inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}
+    })).collect()
+}
 
 fn knowledge_reference_schema() -> Value {
     json!({
@@ -108,7 +147,7 @@ fn knowledge_reference_schema() -> Value {
 pub fn tool_definitions() -> Vec<Value> {
     let reference = knowledge_reference_schema();
     let references = json!({ "type": "array", "items": reference.clone(), "minItems": 1 });
-    vec![
+    let mut tools = vec![
         json!({
             "name": "present_files",
             "title": "Present final files",
@@ -202,7 +241,61 @@ pub fn tool_definitions() -> Vec<Value> {
                 "required": ["query"], "additionalProperties": false
             }
         }),
-    ]
+        json!({
+            "name": "list_mcp_tools",
+            "description": "Discover tools from the MCP connectors enabled in this Fox conversation. Use this when the user asks to use an external service. If a search returns no results, call again without a query to discover authorized tools with different names or languages.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "query": { "type": "string" } },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "call_mcp_tool",
+            "description": "Call a tool returned by list_mcp_tools using its serverId, tool name and input schema. Fox requests approval before executing the operation.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "serverId": { "type": "string" }, "tool": { "type": "string" },
+                    "arguments": { "type": "object", "additionalProperties": true }
+                },
+                "required": ["serverId", "tool", "arguments"], "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "companion_list",
+            "description": "List the Fox companions available for this conversation.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        json!({
+            "name": "companion_coordinate",
+            "description": "Send a well-scoped task or consultation to Fox companions. Use IDs or unique names returned by companion_list. With reply=resume, end the turn once queued and wait for Fox to resume it with the result.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "targets": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 4, "uniqueItems": true },
+                    "instructions": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                    "reply": { "type": "string", "enum": ["resume", "none"] },
+                    "consult": { "type": "boolean" },
+                    "rework": { "type": "boolean" },
+                    "title": { "type": "string", "maxLength": 80 },
+                    "done_when": { "type": "string", "maxLength": 1000 }
+                },
+                "required": ["targets", "instructions"], "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "companion_assignment_status",
+            "description": "Inspect a Fox companion assignment or list open assignments from earlier turns of this conversation. Do not poll assignments from the current turn.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "string", "minLength": 1 } },
+                "additionalProperties": false
+            }
+        }),
+    ];
+    tools.extend(work_tool_definitions());
+    tools
 }
 
 /// Who a tool call is for. Fixed by the token, never by the wire.
@@ -340,7 +433,7 @@ pub fn dispatch(session: &mut McpSession, message: &Value) -> Dispatch {
                     "protocolVersion": version,
                     "capabilities": { "tools": { "listChanged": false } },
                     "serverInfo": { "name": SERVER_INFO_NAME, "version": env!("CARGO_PKG_VERSION") },
-                    "instructions": "Fox Host tools. present_files hands finished files to the user as file cards; list_knowledge_bases / search_knowledge / read_knowledge_document read the conversation's knowledge bases; ask_user shows a question card, after which you end the turn and wait for the user's answer. For web research use your native search if available, otherwise call fox_web_search. Respect a denied search and stop."
+                    "instructions": "Fox Host tools. present_files hands finished files to the user as file cards; list_knowledge_bases / search_knowledge / read_knowledge_document read the conversation's knowledge bases; ask_user shows a question card, after which you end the turn and wait for the user's answer. Use list_mcp_tools to find tools from Fox connectors and call_mcp_tool to invoke them. For web research use your native search if available, otherwise call fox_web_search. Respect a denied operation."
                 }),
             ))
         }
@@ -684,18 +777,30 @@ pub struct McpAssets {
 /// Write the embedded relay and pi extension under `<state_root>/fox-mcp/`
 /// (rewritten when the content differs, so an edited copy never runs).
 pub fn write_assets(state_root: &std::path::Path) -> Result<McpAssets, String> {
+    Ok(McpAssets {
+        relay: write_asset(state_root, RELAY_FILE, RELAY_SCRIPT)?,
+        pi_extension: write_asset(state_root, PI_EXTENSION_FILE, PI_EXTENSION_SCRIPT)?,
+    })
+}
+
+pub(crate) fn write_pi_rpc_adapter(state_root: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    write_asset(state_root, "fox-pi-turn-outcome.mjs", include_str!("../runtime-assets/model-adapters/pi-turn-outcome.mjs"))?;
+    write_asset(state_root, "fox-pi-rpc.mjs", include_str!("../runtime-assets/fox-mcp/fox-pi-rpc.mjs"))
+}
+
+fn write_asset(state_root: &std::path::Path, name: &str, content: &str) -> Result<std::path::PathBuf, String> {
     let dir = state_root.join("fox-mcp");
     std::fs::create_dir_all(&dir).map_err(|error| format!("无法创建 {}：{error}", dir.display()))?;
-    let write = |name: &str, content: &str| -> Result<std::path::PathBuf, String> {
-        let path = dir.join(name);
-        if std::fs::read(&path).ok().as_deref() != Some(content.as_bytes()) {
-            let staging = dir.join(format!(".{name}.tmp"));
-            std::fs::write(&staging, content).map_err(|error| format!("无法写入 {}：{error}", staging.display()))?;
-            std::fs::rename(&staging, &path).map_err(|error| format!("无法写入 {}：{error}", path.display()))?;
+    let path = dir.join(name);
+    if std::fs::read(&path).ok().as_deref() != Some(content.as_bytes()) {
+        let staging = dir.join(format!(".{name}.{}.tmp", crate::launch::random_hex(8)?));
+        std::fs::write(&staging, content).map_err(|error| error.to_string())?;
+        if let Err(error) = std::fs::rename(&staging, &path) {
+            let _ = std::fs::remove_file(&staging);
+            return Err(format!("无法写入 {}：{error}", path.display()));
         }
-        Ok(path)
-    };
-    Ok(McpAssets { relay: write(RELAY_FILE, RELAY_SCRIPT)?, pi_extension: write(PI_EXTENSION_FILE, PI_EXTENSION_SCRIPT)? })
+    }
+    Ok(path)
 }
 
 /// How a launch hands the bridge to its Agent (plan C3, per Agent).

@@ -90,6 +90,11 @@ fn aggregate_plugin_cards(
         .list_plugin_installations()
         .map_err(PluginAdapterError::storage)?;
     let mut cards = catalog_cards(&catalog_entries);
+    for preset in crate::connector_catalog::cards() {
+        if !cards.iter().any(|card| card.id == preset.id) {
+            cards.push(preset);
+        }
+    }
 
     let mcp_servers = database
         .list_mcp_servers()
@@ -514,6 +519,11 @@ fn merge_live_card(cards: &mut Vec<PluginCardView>, index: Option<usize>, live: 
         let id = existing.id.clone();
         let mut merged = live;
         merged.id = id;
+        if merged.id.starts_with("mcp:fox-catalog-") {
+            merged.category = existing.category.clone();
+            merged.origin = existing.origin.clone();
+            merged.description = existing.description.clone();
+        }
         if merged.description.starts_with("连接 ") && !existing.description.is_empty() {
             merged.description = existing.description.clone();
         }
@@ -801,8 +811,20 @@ mod tests {
         let skills = skill_dir();
         let cards = aggregate_plugin_cards(&database, &skills).expect("aggregate cards");
         assert!(cards.iter().any(|card| card.kind == PluginKind::Mcp));
+        let presets: Vec<_> = cards.iter().filter(|card| card.id.starts_with("mcp:fox-catalog-")).collect();
+        assert_eq!(presets.len(), 108);
+        assert_eq!(presets.iter().map(|card| &card.id).collect::<BTreeSet<_>>().len(), 108);
+        assert!(presets.iter().all(|card| card.install_status == PluginInstallStatus::NotInstalled));
+        database.save_mcp_server("fox-catalog-deepwiki", "DeepWiki", "", &[], "streamable_http",
+            Some("https://mcp.deepwiki.com/mcp"), None).expect("save preset");
+        let configured = aggregate_plugin_cards(&database, &skills).unwrap();
+        let deepwiki: Vec<_> = configured.iter().filter(|c| c.id == "mcp:fox-catalog-deepwiki").collect();
+        assert_eq!(deepwiki.len(), 1);
+        assert_eq!(deepwiki[0].install_status, PluginInstallStatus::Installed);
         assert!(cards.iter().any(|card| card.kind == PluginKind::Skill));
         assert!(cards.iter().any(|card| card.kind == PluginKind::Tool));
+        assert!(cards.iter().any(|card| card.id == "search:auto"
+            && card.activation == (PluginActivation::Global { enabled: true })));
         assert!(cards.iter().any(|card| card.id == "mcp:mcp-test"
             && card.install_status == PluginInstallStatus::Installed));
         let tool_cards = cards

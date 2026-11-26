@@ -81,6 +81,39 @@ async fn initialize_reads_capabilities_and_answer_is_written_not_acknowledged() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn steering_sends_a_typed_request_during_the_live_prompt() {
+    let Some(spec) = mock_spec() else { return };
+    let mut connection = AcpConnection::spawn(&spec, &std::env::temp_dir()).await.expect("spawn mock");
+    let _ = next(&mut connection).await;
+    let session = connection.new_session(std::env::temp_dir()).await.expect("session");
+    connection.prompt(&session, "initial target").unwrap();
+    until(&mut connection, |event| matches!(event, BackendEvent::PermissionRequested { .. })).await;
+    assert!(connection.steer(session.clone(), "uncertain".into(), false).await.is_err());
+    connection.steer(session.clone(), "corrected target".into(), false).await.unwrap();
+    connection.cancel(&session);
+    let events = until(&mut connection, |event| matches!(event, BackendEvent::TurnEnded { .. })).await;
+    assert!(text_of(&events).contains("corrected target"));
+    connection.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_passes_existing_session_and_current_mcp_binding() {
+    let Some(spec) = mock_spec() else { return };
+    let cwd = std::env::temp_dir();
+    let mut connection = AcpConnection::spawn(&spec, &cwd).await.unwrap();
+    connection.set_mcp_servers(vec![fox_agent_backend::fox_mcp::McpStdioServer {
+        name: fox_agent_backend::fox_mcp::SERVER_NAME.into(),
+        command: "node".into(),
+        args: vec!["bridge.mjs".into()],
+        env: vec![("FOX_MCP_TOKEN".into(), "fresh-token".into())],
+    }]);
+    connection.resume_session("stored-session", cwd).await.unwrap();
+    let events = until(&mut connection, |event| matches!(event, BackendEvent::LoadSettled { .. })).await;
+    assert!(matches!(&events.last().unwrap(), BackendEvent::LoadSettled { session_id } if session_id == "stored-session"));
+    connection.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn cancel_answers_pending_permissions_with_cancelled() {
     let Some(spec) = mock_spec() else { return };
     let mut connection = AcpConnection::spawn(&spec, &std::env::temp_dir()).await.expect("spawn mock");

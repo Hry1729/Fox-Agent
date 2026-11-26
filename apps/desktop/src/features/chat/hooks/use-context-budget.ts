@@ -5,7 +5,13 @@ import type { ApiResponse } from '@/features/conversations/model/types'
 import type { JobSnapshot } from '@/features/jobs/job-presentation'
 import type { ContextBudgetDto } from '../components/context-budget-presentation'
 
-export interface RuntimeContextWindow { usedTokens: number; limitTokens: number; source: 'session' | 'last_request' }
+export interface RuntimeContextWindow {
+  usedTokens: number
+  limitTokens: number
+  source: 'session' | 'last_request'
+  systemTokens?: number
+  toolsTokens?: number
+}
 
 interface ReliabilitySnapshot { runId: string | null; contextBudget: ContextBudgetDto | null; contextWindow?: RuntimeContextWindow | null; jobs: JobSnapshot[] }
 

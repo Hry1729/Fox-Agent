@@ -75,6 +75,17 @@ impl RuntimeHost {
                 "协作已达到原定时任务的用量上限。",
             )?;
         } else {
+            let backend = self.database.conversation_agent_backend(&started.run.conversation_id)?;
+            let backend = backend.as_deref().and_then(fox_agent_backend::port::AgentBackend::parse);
+            if let Some(backend) = backend.filter(|backend| *backend != fox_agent_backend::port::AgentBackend::Fox) {
+                use tauri::Manager;
+                let run_id = started.run.id.clone();
+                let external = self.app.state::<crate::external_backend::ExternalBackendHost>();
+                if let Some(error) = external.start_companion_run(started, backend).error {
+                    self.database.mark_run_failed(&run_id, &error.code, &error.message)?;
+                }
+                return Ok(());
+            }
             let text = started.user_message.content.clone();
             self.start_run_detached(started, text, Vec::new());
         }

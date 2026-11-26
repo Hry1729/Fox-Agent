@@ -1,4 +1,4 @@
-import type { ConversationDetail, RunEventRecord } from '@/features/conversations/model/types'
+import type { ConversationDetail, RunEventRecord, WorkTaskRecord } from '@/features/conversations/model/types'
 import { conversationRunState, snapshotForRun } from '@/features/conversations/model/kernel-snapshot'
 import { previewBelongsToSnapshot } from '@/features/conversations/model/kernel-model-preview'
 import { pendingRuntimeApprovals, pendingRuntimeQuestion } from '@/features/conversations/model/pending-interactions'
@@ -105,6 +105,27 @@ export interface RunActivityPresentation {
   urgent: boolean
   progress?: number
   outcome?: 'completed' | 'failed' | 'cancelled' | 'interrupted'
+}
+
+export type LivePlanStep = Pick<WorkTaskRecord, 'id' | 'title' | 'status'>
+
+export function presentConversationPlan(detail: ConversationDetail | null, activity: RunActivityPresentation): LivePlanStep[] {
+  if (!activity.active || !detail || detail.lastRun?.id !== activity.runId) return []
+
+  const goal = detail.goals.find(item => item.status === 'active')
+  let steps: LivePlanStep[] = goal ? detail.tasks.filter(task => task.goalId === goal.id).sort((a, b) => a.ordinal - b.ordinal) : []
+  if (!steps.length) {
+    const entries = detail.runtimeEvents.findLast(item => item.runId === activity.runId && item.eventType === 'plan.updated')?.event.entries
+    if (!Array.isArray(entries)) return []
+    steps = entries.flatMap((entry, index) => {
+      const { content, status } = object(entry)
+      const title = text(content)
+      if (!title || (status !== 'pending' && status !== 'in_progress' && status !== 'completed')) return []
+      return [{ id: `${activity.runId}:${index}`, title, status: status === 'pending' ? 'queued' : status }]
+    })
+  }
+
+  return steps.some(step => step.status !== 'completed' && step.status !== 'skipped') ? steps : []
 }
 
 export function presentRunActivity(events: readonly RunEventRecord[], options: {

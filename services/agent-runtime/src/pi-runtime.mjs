@@ -25,7 +25,7 @@ import { createPiEventMapper, sanitizeAssistantHistory } from './pi-event-mapper
 import { createReadOnlyTools } from './read-only-tools.mjs'
 import { createGraphReadonlyTools } from './graph-readonly-tools.mjs'
 import { hostToolResultStorage, createHostTools, createKnowledgeTools, createMcpTools } from './host-tools.mjs'
-import { createSessionState, loadSessionState, normalizeHistory, sanitizeProviderHistory, saveSessionState, transcriptFromSession } from './runtime-session.mjs'
+import { createSessionState, loadSessionState, normalizeHistory, previousTurnComputedData, sanitizeProviderHistory, saveSessionState, transcriptFromSession } from './runtime-session.mjs'
 import { RUNTIME_TOOL_CATALOG, assertRegisteredToolsMatchCatalog, createCapabilityManifest } from './runtime-contract.mjs'
 import { createFoxPlanningExtension } from './fox-planning-extension.mjs'
 import {
@@ -36,7 +36,7 @@ import {
   replaceLatestAssistantText,
 } from './runtime-instructions.mjs'
 import { stablePromptHash, buildFilePlacement } from './prompt-composer.mjs'
-import { promptTokenPreflight } from './prompt-budget.mjs'
+import { estimatePromptTokens, promptTokenPreflight } from './prompt-budget.mjs'
 import { plannerHandoff, runPlanner, shouldUsePlanner } from './planner-runtime.mjs'
 import { diagnoseToolsForAgentContext, selectToolsForProjectContext } from './expert-package.mjs'
 import { selectToolsForHostRuntime } from './host-runtime-capabilities.mjs'
@@ -840,8 +840,12 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
   )
   const projectToolSelection = { tools: hostRuntimeSelection.tools }
   const effectiveToolNames = projectToolSelection.tools.map(({ name }) => name)
+  const companionToolNames = new Set(companionTools.map(({ name }) => name))
   const excludedTools = [
     ...toolDiagnostics.excludedTools.filter(({ name }) => name !== CONTINUATION_PROPOSAL_TOOL_NAME),
+    ...(companionOwner || consultation ? toolDiagnostics.tools
+      .filter(({ name }) => !companionToolNames.has(name))
+      .map(({ name }) => ({ name, reason: 'companion_scope' })) : []),
     ...profileToolSelection.excludedTools,
     ...projectSelection.excludedTools,
     ...hostRuntimeSelection.excludedTools,
@@ -896,6 +900,7 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     .map((tool) => tool.name))
   const workTools = tools.filter((tool) => workToolNames.has(tool.name))
   const customTools = tools.filter((tool) => !workToolNames.has(tool.name))
+  const priorComputation = previousTurnComputedData(session, transcript)
   const composePrompt = (plannerPlan = null, plannerFallback = false) => composeRuntimePrompt({
     systemPrompt: request.payload?.systemPrompt,
     modelInstructions: [modelProfilePrompt(modelProfile), executionProfilePrompt(activeExecutionProfile)]
@@ -910,6 +915,11 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     },
     context: planningContext,
     turn: {
+      text: currentText,
+      attachmentExtensions: request.payload?.attachmentExtensions,
+      priorComputation,
+      computeAvailable: effectiveToolNames.includes('attachment_compute') || effectiveToolNames.includes('compute_job_start'),
+      reportDeliveryAvailable: Boolean(planningContext.projectRoot) && ['write_file', 'present_files'].every(name => effectiveToolNames.includes(name)),
       cwd,
       recovery: request.payload?.recoveryContext || null,
       plannerPlan: plannerPlan ? plannerHandoff(plannerPlan) : null,
@@ -922,11 +932,12 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
   // counted, not just the caller's short systemPrompt. History is deliberately
   // excluded: Pi compaction owns it.
   const preflightPrompt = composePrompt(null)
+  const toolDefinitions = JSON.stringify(tools.map(({ name, description, parameters }) => ({
+    name, description, parameters,
+  })))
   const promptPreflight = promptTokenPreflight({
     systemPrompt: preflightPrompt.prompt,
-    toolDefinitions: JSON.stringify(tools.map(({ name, description, parameters }) => ({
-      name, description, parameters,
-    }))),
+    toolDefinitions,
     userText: promptText,
     contextWindow: modelProfile.contextWindow,
     reserveTokens: modelProfile.runtime.reserveTokens,
@@ -1267,7 +1278,12 @@ async function executePrompt(request, { modelService, executionProfile }, slot) 
     }
     const contextUsage = agent.getContextUsage()
     if (contextUsage?.tokens != null) {
-      emit('context.usage', { usedTokens: contextUsage.tokens, limitTokens: contextUsage.contextWindow })
+      emit('context.usage', {
+        usedTokens: contextUsage.tokens,
+        limitTokens: contextUsage.contextWindow,
+        systemTokens: estimatePromptTokens(promptComposition.prompt),
+        toolsTokens: tools.length ? estimatePromptTokens(toolDefinitions) : 0,
+      })
     }
     emit('run.phase', { phase: 'finalizing', outcome: 'completed' })
     mapper.finish(contactQuestion)

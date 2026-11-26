@@ -1,19 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
+import { Bot, ChevronRight, Plus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { Switch } from '@/components/ui/switch'
 import { RuntimeApprovalPrompt } from '@/features/chat/components/RuntimeApprovalPrompt'
 import { useDeveloperUi } from '@/features/chat/developer-ui'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
 import { setExternalAgentEnabled } from '@/features/conversations/model/external-agent-enablement'
 import type { ApprovalRecord } from '@/features/conversations/model/types'
-import { SettingsGroup } from '../settings-layout'
+import { SettingsGroup, SettingsRow } from '../settings-layout'
 import { useModelProviders } from '../use-model-providers'
 import { AgentBindingForm } from './agent-binding-form'
-import { AGENT_NAMES, STATE_LABELS, configErrorText } from './agent-config-copy'
-import type { AgentConfigOverview, AgentConfigStatus, AgentId, VerificationReport, VerifyDepth } from './agent-config-types'
+import { AgentCatalog, AgentEntry, AgentMark, type ExternalAgentStatus } from './agent-catalog'
+import { AGENT_NAMES, configErrorText } from './agent-config-copy'
+import type { AgentConfigOverview, ExternalAgentId, VerificationReport, VerifyDepth } from './agent-config-types'
 import { FullVerificationControl } from './full-verification-control'
 import { VerificationLadder } from './verification-ladder'
+import './model-agent.css'
+
+type AgentPanel = { kind: 'catalog'; unavailable: boolean } | { kind: 'configure'; agent: ExternalAgentId }
 
 /** External Agent bindings and verification, kept separate from model services. */
 export function AgentServiceSettings({ onOpenModelSettings }: { onOpenModelSettings: () => void }) {
@@ -21,13 +27,15 @@ export function AgentServiceSettings({ onOpenModelSettings }: { onOpenModelSetti
   const developer = useDeveloperUi()
   const [overview, setOverview] = useState<AgentConfigOverview | null>(null)
   const [error, setError] = useState('')
-  const [binding, setBinding] = useState<{ agent: AgentId; native: boolean } | null>(null)
-  const [running, setRunning] = useState<AgentId | null>(null)
-  const [reports, setReports] = useState<Partial<Record<AgentId, VerificationReport>>>({})
+  const [panel, setPanel] = useState<AgentPanel | null>(null)
+  const [detecting, setDetecting] = useState(false)
+  const [running, setRunning] = useState<ExternalAgentId | null>(null)
+  const [reports, setReports] = useState<Partial<Record<ExternalAgentId, VerificationReport>>>({})
   const [approval, setApproval] = useState<ApprovalRecord | null>(null)
-  const active = useRef<AgentId | null>(null)
-  const [showReport, setShowReport] = useState<AgentId | null>(null)
-  const [enableBusy, setEnableBusy] = useState<AgentId | null>(null)
+  const active = useRef<ExternalAgentId | null>(null)
+  const panelTrigger = useRef<HTMLButtonElement | null>(null)
+  const [agentError, setAgentError] = useState<{ agent: ExternalAgentId; message: string } | null>(null)
+  const [enableBusy, setEnableBusy] = useState<ExternalAgentId | null>(null)
 
   const refresh = useCallback(async () => {
     try { setOverview(await desktopClient.agentConfigOverview(developer)); setError('') }
@@ -47,56 +55,120 @@ export function AgentServiceSettings({ onOpenModelSettings }: { onOpenModelSetti
     if (!running) return
     let disposed = false
     let unlisten: (() => void) | undefined
-    void listen<{ backend: AgentId; report: VerificationReport }>('agent-config-verification', event => {
+    void listen<{ backend: ExternalAgentId; report: VerificationReport }>('agent-config-verification', event => {
       if (event.payload.backend === running) setReports(previous => ({ ...previous, [running]: event.payload.report }))
     }).then(stop => { if (disposed) stop(); else unlisten = stop }).catch(() => {})
     return () => { disposed = true; unlisten?.() }
   }, [running])
 
-  const verify = async (agent: AgentId, depth: VerifyDepth = 'model', selection?: { permissionMode: string; confirmFullAccess: boolean }) => {
+  const verify = async (agent: ExternalAgentId, depth: VerifyDepth = 'model', selection?: { permissionMode: string; confirmFullAccess: boolean }) => {
     if (active.current) return
     active.current = agent
     setApproval(null)
-    setRunning(agent); setShowReport(agent); setReports(previous => { const next = { ...previous }; delete next[agent]; return next }); setError('')
+    setRunning(agent)
+    setReports(previous => ({ ...previous, [agent]: undefined }))
+    setAgentError(null)
     try {
       const report = await desktopClient.agentConfigVerify(agent, depth, developer, selection && { ...selection, onApproval: setApproval })
       setReports(previous => ({ ...previous, [agent]: report }))
-    } catch (cause) { setError(configErrorText(cause)) }
+    } catch (cause) { setAgentError({ agent, message: configErrorText(cause) }) }
     finally { active.current = null; setApproval(null); setRunning(null); await refresh() }
   }
-  const statusText = (agent: AgentConfigStatus) => {
-    if (agent.state === 'read_failed') return '没能读取配置，请重试。'
-    if (agent.state === 'not_installed') return agent.install.blocker === 'system_only' ? '电脑上装了这个 Agent，但 Fox 需要自带运行时。请修复 Fox。' : agent.install.detected ? '这个 Agent 的运行时不完整，请修复 Fox 外部运行时。' : 'Fox 运行时里没有这个 Agent。'
+  const statusText = (agent: ExternalAgentStatus) => {
+    if (agent.state === 'read_failed' || agent.state === 'not_installed') return undefined
     if (agent.binding?.source === 'native') return agent.native.changed ? '本机配置已变化，请重新导入。' : '使用从这台电脑导入的配置'
     const bound = agent.binding
     if (bound?.source === 'fox_service') return `${providers.items.find(provider => provider.id === bound.providerId)?.name ?? '服务已删除'} · ${bound.modelId}`
     if (agent.state === 'native_importable') return `在这台电脑上找到了 ${AGENT_NAMES[agent.agent]} 的登录配置。`
     return agent.candidates.length ? '选择一个模型服务' : `请添加支持 ${agent.agent === 'codex' ? 'Responses' : agent.agent === 'deepseek' ? 'Messages' : '匹配协议'} 的服务`
   }
-  const agents = (overview?.agents ?? []).filter((agent): agent is AgentConfigStatus & { agent: Exclude<AgentId, 'fox'> } => agent.agent !== 'fox')
+  const agents = (overview?.agents ?? []).filter((agent): agent is ExternalAgentStatus => agent.agent !== 'fox')
+  const configured = panel?.kind === 'configure' ? agents.find(agent => agent.agent === panel.agent) : undefined
+  const report = configured ? reports[configured.agent] ?? (running === configured.agent ? null : configured.verification) : null
+  const failedLayer = report?.layers.find(layer => layer.status === 'failed')
+  const operationError = configured && agentError?.agent === configured.agent ? agentError.message : undefined
+  const detect = () => {
+    setDetecting(true)
+    void refresh().finally(() => setDetecting(false))
+  }
+  const openPanel = (next: AgentPanel, trigger: HTMLButtonElement) => {
+    panelTrigger.current = trigger
+    setPanel(next)
+  }
+  const closePanel = () => setPanel(null)
 
-  return <SettingsGroup title="外部 Agent" aside="启用后可在新对话中选择">
-    {error && <p role="alert" className="fox-model-error">{error}<Button variant="ghost" size="sm" onClick={() => void refresh()}>重试</Button></p>}
-    {!overview && !error && <p className="fox-model-section" role="status">正在读取 Agent 配置…</p>}
-    {agents.map(agent => <div className="fox-agent-config-row" key={agent.agent}>
-      <div className="fox-agent-config-main"><div><b>{AGENT_NAMES[agent.agent]}</b><small data-ready={agent.state === 'ready'}>{STATE_LABELS[agent.state]}</small></div><div className="fox-agent-description"><span>{statusText(agent)}</span>{agent.enabled && !['ready', 'not_installed', 'read_failed'].includes(agent.state) && <small>启用后需要先配置并验证，才能在对话里使用。</small>}{developer && agent.diagnostic && <code>{agent.diagnostic.code}{agent.diagnostic.detail && ` · ${agent.diagnostic.detail}`}</code>}</div><div className="fox-model-actions">
-        {agent.state === 'read_failed' ? <Button variant="outline" size="sm" onClick={() => void refresh()}>重试</Button> : agent.state !== 'not_installed' && <>
-          {agent.binding && <Button variant="outline" size="sm" disabled={running !== null} onClick={() => void verify(agent.agent)}>验证</Button>}
-          {agent.state === 'native_importable' && <Button variant="outline" size="sm" onClick={() => setBinding({ agent: agent.agent, native: true })}>导入…</Button>}
-          <Button variant="ghost" size="sm" disabled={running === agent.agent} onClick={() => { if (!agent.candidates.length && !agent.native.available) onOpenModelSettings(); else setBinding({ agent: agent.agent, native: false }) }}>{agent.binding ? '更改' : agent.candidates.length || agent.native.available ? '配置' : '添加模型'}</Button>
+  return <>
+    <SettingsGroup title="外部 Agent" aside={<Button variant="outline" size="sm" aria-haspopup="dialog" onClick={event => openPanel({ kind: 'catalog', unavailable: false }, event.currentTarget)}><Plus />添加 Agent</Button>}>
+      {error && <p role="alert" className="fox-model-error">{error}<Button variant="ghost" size="sm" onClick={detect} disabled={detecting}>重试</Button></p>}
+      {!overview && !error && <p className="fox-model-section" role="status">正在读取 Agent 配置…</p>}
+      {agents.map(agent => <AgentEntry key={agent.agent} status={agent} description={statusText(agent)}>
+        {agent.state === 'read_failed' ? <Button variant="ghost" size="sm" onClick={detect} disabled={detecting}>重试</Button>
+          : agent.state !== 'not_installed' && <Button variant="outline" size="sm" aria-haspopup="dialog" aria-label={`配置 ${AGENT_NAMES[agent.agent]}`} onClick={event => openPanel({ kind: 'configure', agent: agent.agent }, event.currentTarget)}>{running === agent.agent ? '检查中…' : '配置'}</Button>}
+      </AgentEntry>)}
+      {agents.some(agent => agent.state === 'not_installed') && <SettingsRow title="安装或修复运行时">
+        <Button variant="ghost" size="sm" aria-haspopup="dialog" onClick={event => openPanel({ kind: 'catalog', unavailable: true }, event.currentTarget)}>查看安装指引<ChevronRight /></Button>
+      </SettingsRow>}
+    </SettingsGroup>
+    <Sheet open={panel !== null} onOpenChange={open => { if (!open) closePanel() }}>
+      <SheetContent side="right" className="fox-settings-sheet fox-agent-sheet" onCloseAutoFocus={event => {
+        if (!panelTrigger.current?.isConnected) return
+        event.preventDefault()
+        panelTrigger.current.focus()
+      }}>
+        {panel?.kind === 'catalog' && <>
+          <SheetHeader className="fox-settings-sheet-head">
+            <span className="fox-settings-provider-mark is-large"><Bot aria-hidden="true" /></span>
+            <div className="fox-settings-sheet-title"><SheetTitle>添加 Agent</SheetTitle><SheetDescription>查找和配置 Fox 支持的外部 Agent。</SheetDescription></div>
+          </SheetHeader>
+          <div className="fox-settings-sheet-body">
+            <AgentCatalog agents={agents} unavailable={panel.unavailable} loading={detecting || (!overview && !error)} error={error} onDetect={detect} onConfigure={agent => setPanel({ kind: 'configure', agent: agent.agent })} />
+          </div>
+          <footer className="fox-settings-sheet-foot fox-agent-sheet-foot"><Button variant="outline" onClick={closePanel}>关闭</Button></footer>
         </>}
-        <Switch aria-label={`启用 ${AGENT_NAMES[agent.agent]}`} checked={agent.enabled} disabled={agent.state === 'not_installed' || agent.state === 'read_failed' || enableBusy === agent.agent} onCheckedChange={value => { setEnableBusy(agent.agent); void setExternalAgentEnabled(agent.agent, value).then(refresh).catch(cause => setError(configErrorText(cause))).finally(() => setEnableBusy(null)) }} />
-      </div></div>
-      {binding?.agent === agent.agent && <AgentBindingForm status={agent} providers={providers.items} developer={developer} initialNative={binding.native} onCancel={() => setBinding(null)} onDone={shouldVerify => { setBinding(null); void refresh(); if (shouldVerify) void verify(agent.agent) }} />}
-      {(showReport === agent.agent || agent.verification) && <>
-        <VerificationLadder report={running === agent.agent ? reports[agent.agent] ?? null : reports[agent.agent] ?? agent.verification} running={running === agent.agent} developer={developer} onStop={() => { void desktopClient.agentConfigVerifyCancel(agent.agent).catch(cause => setError(configErrorText(cause))) }} />
-        {running === agent.agent && approval && <RuntimeApprovalPrompt key={approval.id} approval={approval} onResolve={async (id, decision) => {
-          const answered = await desktopClient.agentConfigVerifyAnswer(agent.agent, id, decision === 'allow_once')
-          if (answered) setApproval(current => current?.id === id ? null : current)
-          return answered
-        }} />}
-        <FullVerificationControl backend={agent.agent} busy={running !== null} onStart={(permissionMode, confirmFullAccess) => verify(agent.agent, 'tool', { permissionMode, confirmFullAccess })} />
-      </>}
-    </div>)}
-  </SettingsGroup>
+        {configured && <>
+          <SheetHeader className="fox-settings-sheet-head">
+            <AgentMark agent={configured.agent} large />
+            <div className="fox-settings-sheet-title"><SheetTitle>配置 {AGENT_NAMES[configured.agent]}</SheetTitle><SheetDescription>设置模型来源并检查连接。</SheetDescription></div>
+          </SheetHeader>
+          <AgentBindingForm key={configured.agent} status={configured} providers={providers.items} developer={developer} checking={running !== null}
+            operationError={operationError}
+            failure={failedLayer && running !== configured.agent ? {
+              message: failedLayer.message,
+              retryConnection: failedLayer.layer === 'config_saved' || failedLayer.layer === 'model_request',
+            } : undefined}
+            environment={<section className="fox-settings-sheet-section">
+              <div className="fox-settings-sheet-section-head"><h3>本机运行环境</h3></div>
+              <dl className="fox-settings-facts">
+                <div><dt>运行时</dt><dd>{configured.install.launchable ? 'Fox 自带运行时' : '不可用'}</dd></div>
+                <div><dt>本机配置</dt><dd>{configured.native.changed ? '有更新，可重新导入' : configured.native.available ? '可导入' : '未检测到'}</dd></div>
+                {developer && configured.diagnostic && <div><dt>诊断</dt><dd><code>{configured.diagnostic.code}{configured.diagnostic.detail && ` · ${configured.diagnostic.detail}`}</code></dd></div>}
+              </dl>
+              <div className="fox-settings-switch-row fox-agent-enable"><span><b>启用 Agent</b><small>连接验证通过后可用于新对话。</small></span>
+                <Switch aria-label={`启用 ${AGENT_NAMES[configured.agent]}`} checked={configured.enabled} disabled={!configured.install.launchable || enableBusy === configured.agent} onCheckedChange={value => {
+                  setEnableBusy(configured.agent); setAgentError(null)
+                  void setExternalAgentEnabled(configured.agent, value).then(refresh).catch(cause => setAgentError({ agent: configured.agent, message: configErrorText(cause) })).finally(() => setEnableBusy(null))
+                }} />
+              </div>
+            </section>}
+            verification={(report || running === configured.agent) && <section className="fox-settings-sheet-section">
+              <VerificationLadder report={report} running={running === configured.agent} developer={developer} onStop={() => {
+                void desktopClient.agentConfigVerifyCancel(configured.agent).catch(cause => setAgentError({ agent: configured.agent, message: configErrorText(cause) }))
+              }} />
+              {running === configured.agent && approval && <RuntimeApprovalPrompt key={approval.id} approval={approval} onResolve={async (id, decision) => {
+                const answered = await desktopClient.agentConfigVerifyAnswer(configured.agent, id, decision === 'allow_once')
+                if (answered) setApproval(current => current?.id === id ? null : current)
+                return answered
+              }} />}
+              <FullVerificationControl backend={configured.agent} busy={running !== null} onStart={(permissionMode, confirmFullAccess) => verify(configured.agent, 'tool', { permissionMode, confirmFullAccess })} />
+            </section>}
+            onVerify={() => void verify(configured.agent)} onDone={shouldVerify => {
+              setReports(previous => ({ ...previous, [configured.agent]: undefined }))
+              setAgentError(null)
+              if (shouldVerify) void verify(configured.agent)
+              else void refresh()
+            }} onClose={closePanel} onOpenModelSettings={() => { closePanel(); onOpenModelSettings() }} />
+        </>}
+      </SheetContent>
+    </Sheet>
+  </>
 }

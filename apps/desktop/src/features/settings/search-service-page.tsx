@@ -7,13 +7,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '
 import { notify as toast } from '@/features/notifications'
 import { cn } from '@/lib/utils'
 
-const services = [
-  { id: 'auto', name: '免 Key 搜索', description: 'DuckDuckGo 优先，必要时尝试 Yahoo', mark: 'globe' },
-  { id: 'tavily', name: 'Tavily', description: '为 AI 优化的搜索 · 需 API Key', mark: 'T' },
-  { id: 'brave', name: 'Brave Search', description: '使用独立索引 · 需 API Key', mark: 'B' },
-  { id: 'exa', name: 'Exa', description: '按语义检索网页 · 需 API Key', mark: 'E' },
-  { id: 'searxng', name: 'SearXNG', description: '使用自建搜索实例 · 需实例地址', mark: 'S' },
-] as const
+import { searchProviders as services } from './search-providers'
 
 export type SearchProvider = (typeof services)[number]['id']
 export type SearchView = { provider: SearchProvider; searxngUrl: string; configuredKeys: SearchProvider[] }
@@ -22,9 +16,14 @@ type SearchSheetProps = {
   open: boolean
   onOpenChange: (open: boolean) => void
   onSaved: (value: SearchView) => void
+  initialProvider?: SearchProvider
 }
 
-export function SearchServiceSheet({ open, onOpenChange, onSaved }: SearchSheetProps) {
+export function searchProviderForPlugin(pluginId: string): SearchProvider | undefined {
+  return services.find(service => `search:${service.id}` === pluginId)?.id
+}
+
+export function SearchServiceSheet({ open, onOpenChange, onSaved, initialProvider }: SearchSheetProps) {
   const [saved, setSaved] = useState<SearchView | null>(null)
   const [provider, setProvider] = useState<SearchProvider>('auto')
   const [url, setUrl] = useState('')
@@ -44,7 +43,7 @@ export function SearchServiceSheet({ open, onOpenChange, onSaved }: SearchSheetP
     invoke<SearchView>('search_service_get').then(value => {
       if (!active) return
       setSaved(value)
-      setProvider(value.provider)
+      setProvider(initialProvider ?? value.provider)
       setUrl(value.searxngUrl)
     }).catch(error => {
       if (active) setMessage(`无法读取搜索服务配置：${String(error)}`)
@@ -52,7 +51,7 @@ export function SearchServiceSheet({ open, onOpenChange, onSaved }: SearchSheetP
       if (active) setLoading(false)
     })
     return () => { active = false }
-  }, [open, loadAttempt])
+  }, [open, loadAttempt, initialProvider])
 
   async function save() {
     if (!saved || busy) return
@@ -127,7 +126,7 @@ export function SearchServiceSheet({ open, onOpenChange, onSaved }: SearchSheetP
   </Sheet>
 }
 
-/** Built-in tool row and its Sheet. The summary is refreshed only while the Sheet is closed. */
+/** Search service row and its Sheet. The summary is refreshed only while the Sheet is closed. */
 export function SearchServiceSettings({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const [summary, setSummary] = useState<SearchView | null>(null)
   const [summaryError, setSummaryError] = useState('')

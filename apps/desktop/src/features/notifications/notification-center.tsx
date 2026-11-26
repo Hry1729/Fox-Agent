@@ -1,4 +1,5 @@
-import '@/components/fox-ui/sidebar-list-pane.css'
+import { createPortal } from 'react-dom'
+import type { ReactNode } from 'react'
 import { useLayoutEffect, useRef } from 'react'
 import { Bell } from 'lucide-react'
 import { deferredModule } from '@/components/fox-ui/use-deferred-module'
@@ -13,10 +14,17 @@ export interface NotificationCenterProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   showTrigger: boolean
+  triggerHost?: HTMLElement | null
+  panelHost?: HTMLElement | null
   activeView: WorkspaceView
   activeEntityId?: string | null
   activeConversationId?: string | null
 }
+export function inNotificationHost(content: ReactNode, host?: HTMLElement | null) {
+  if (host === undefined) return content
+  return host ? createPortal(content, host) : null
+}
+
 type Handlers = { preview: (detail: InAppNotificationEventDetail) => void; preferences: (value: NotificationPreferencesRecord) => void; refresh: () => void; failure: () => void }
 export interface NotificationBridge {
   initial: Promise<AppNotificationRecord[] | null> | null
@@ -72,7 +80,7 @@ export function NotificationCenter(props: NotificationCenterProps) {
   }, [])
   if (loaded) return <loaded.NotificationCenter {...props} bridge={bridge.current} />
   return <>
-    {props.showTrigger && <button type="button" className={`fox-notification-trigger ${props.open ? 'is-active' : ''}`} aria-label="通知" aria-pressed={props.open} title="通知" onPointerEnter={implementation.preload} onFocus={implementation.preload} onClick={() => { implementation.preload(); props.onOpenChange(!props.open) }}><Bell /></button>}
-    {props.open && <section className="fox-notification-sidebar fox-sidebar-list-pane" aria-label="通知"><header className="fox-section-head"><span>通知</span></header><div className="fox-notification-list" role="status" aria-label="正在同步任务状态" /></section>}
+    {props.showTrigger && inNotificationHost(<button type="button" className={`fox-notification-trigger ${props.open ? 'is-active' : ''}`} aria-label="消息中心" aria-pressed={props.open} title="消息中心" onPointerEnter={implementation.preload} onFocus={implementation.preload} onClick={() => { implementation.preload(); props.onOpenChange(!props.open) }}><Bell /></button>, props.triggerHost ?? undefined)}
+    {props.open && inNotificationHost(<section className="fox-route-loading" role="status" aria-label="正在同步消息"><span /><p>正在同步消息</p></section>, props.panelHost)}
   </>
 }

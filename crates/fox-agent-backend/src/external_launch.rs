@@ -151,6 +151,7 @@ impl HostLaunchConfig {
     /// Unlike launch_spec_with, detection never creates a missing dsh preset.
     pub fn install_preflight(&self, backend: AgentBackend) -> Result<(), LaunchFailure> {
         match backend {
+            AgentBackend::Pi if self.uses_pi_rpc() => self.pi_rpc_preflight(),
             AgentBackend::Pi => self.pi_preflight(self.pi_launch(), || self.pi_turn_adapter_verified()),
             AgentBackend::Deepseek => {
                 use crate::backends::deepseek::{default_preset_patch_path, verify_installed_preset_patch};
@@ -287,7 +288,31 @@ impl HostLaunchConfig {
             let program = PathBuf::from(program);
             return program.is_file().then_some(program);
         }
+        if backend == AgentBackend::Pi && self.uses_pi_rpc() {
+            return Some(self.pi_rpc_cli());
+        }
         crate::launch::managed_entry(&self.runtime_root, backend, self.os == HostOs::Windows)
+    }
+
+    fn pi_rpc_cli(&self) -> PathBuf {
+        self.runtime_root.join("backends/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js")
+    }
+
+    fn uses_pi_rpc(&self) -> bool {
+        crate::launch::program_override(AgentBackend::Pi).is_none() && self.pi_rpc_cli().is_file()
+    }
+
+    fn pi_rpc_preflight(&self) -> Result<(), LaunchFailure> {
+        if self.pi_rpc_gate().is_file() && self.managed_node().is_some() {
+            Ok(())
+        } else {
+            Err(LaunchFailure::new("agent_backend_pi_gate_missing", "Pi 原生 RPC 缺少 Node 或 Fox 审批扩展。")
+                .remedy("安装或修复 Fox 外部运行时后重试"))
+        }
+    }
+
+    fn pi_rpc_gate(&self) -> PathBuf {
+        self.runtime_root.join("pi-gate/fox-approval-gate.ts")
     }
 
     pub fn managed_node(&self) -> Option<PathBuf> {
@@ -308,7 +333,8 @@ impl HostLaunchConfig {
     /// Which pi launch a session would get: gated when the managed runtime
     /// ships the Fox approval gate (`pi-gate/`), else stock (no Host approvals).
     pub fn pi_launch(&self) -> PiLaunch {
-        if self.pi_gate_script().is_file() { PiLaunch::Gated } else { PiLaunch::Stock }
+        let gate = if self.uses_pi_rpc() { self.pi_rpc_gate() } else { self.pi_gate_script() };
+        if gate.is_file() { PiLaunch::Gated } else { PiLaunch::Stock }
     }
 
     fn pi_gate_script(&self) -> PathBuf {
@@ -391,6 +417,19 @@ impl HostLaunchConfig {
                 // approval policy stay exactly in that mode; Fox never turns
                 // it into full access.
                 spec.session_env = crate::backends::codex::session_env_for_mode(crate::native_permission::codex_mode(native));
+            }
+            AgentBackend::Pi if self.uses_pi_rpc() => {
+                self.pi_rpc_preflight()?;
+                let script = crate::fox_mcp::write_pi_rpc_adapter(&self.state_root)
+                    .map_err(|error| LaunchFailure::new("agent_backend_launch_invalid", error))?;
+                let node = self.managed_node().ok_or_else(|| LaunchFailure::new(
+                    "agent_backend_runtime_adapter_missing", "Pi 原生 RPC 缺少 Node。"
+                ))?;
+                spec.program = node.to_string_lossy().into_owned();
+                spec.args = [script, program, self.pi_rpc_gate()]
+                    .into_iter().map(|path| path.to_string_lossy().into_owned()).collect();
+                spec.version_pin = crate::backends::pi::PI_VERSION;
+                pi_launch = PiLaunch::Gated;
             }
             AgentBackend::Pi => {
                 let gate = self.pi_gate_script();
@@ -732,7 +771,7 @@ impl HostLauncher {
             LaunchFailure::new("agent_backend_fox_tools_unavailable", message).remedy("安装或修复 Fox 外部运行时后重试")
         };
         let node = config.managed_node().ok_or_else(|| unavailable(format!("找不到运行 Fox 工具桥（MCP）的 Node：{}", config.runtime_root.display())))?;
-        if request.backend == AgentBackend::Pi {
+        if request.backend == AgentBackend::Pi && !config.uses_pi_rpc() {
             // The installed gate must know how to load the Fox tool extension
             // (runtime packages before C3 do not).
             let gate = config.pi_gate_script();
@@ -777,7 +816,7 @@ impl HostLauncher {
             AgentBackend::Fox => Ok(()),
         };
         let pinned = match backend {
-            AgentBackend::Pi => format!("pi-acp {}", crate::launch::PI_ACP_VERSION),
+            AgentBackend::Pi => format!("Pi {}", crate::backends::pi::PI_VERSION),
             AgentBackend::Codex => format!("codex-acp {}", crate::launch::CODEX_ACP_VERSION),
             AgentBackend::Deepseek => format!("dsh {}", crate::launch::DSH_VERSION),
             AgentBackend::Fox => String::new(),
@@ -798,7 +837,7 @@ impl HostLauncher {
         // The native mode is the user's stored per-Agent choice. A pi that is
         // not installed is refused here first (`agent_backend_not_installed`).
         let (mut spec, pi_launch) = config.launch_spec_with(request.backend, request.native_mode(), &request.project_root)?;
-        if request.backend == AgentBackend::Pi {
+        if request.backend == AgentBackend::Pi && !config.uses_pi_rpc() {
             config.pi_preflight(pi_launch, || config.pi_turn_adapter_verified())?;
         }
         // Unified login first: the Codex key goes into the backend's

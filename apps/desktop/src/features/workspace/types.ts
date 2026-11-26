@@ -1,10 +1,20 @@
+export type CompanionWorkspaceView = 'companion-inbox' | 'companion-schedules' | 'companion-overview'
+
+export function isCompanionWorkspaceView(view: WorkspaceView): view is 'companions' | CompanionWorkspaceView {
+  return view === 'companions' || view === 'companion-inbox' || view === 'companion-schedules' || view === 'companion-overview'
+}
+
 export type WorkspaceView =
+  | CompanionWorkspaceView
   | 'service'
   | 'model-service'
   | 'login'
   | 'chat'
   | 'companions'
+  | 'notifications'
   | 'plugins'
+  | 'plugin-detail'
+  | 'settings-plugin-detail'
   | 'agents'
   | 'agent-detail'
   | 'knowledge'
@@ -40,6 +50,7 @@ export type WorkspaceView =
   | 'settings-data'
 
 export interface WorkspaceNavigationContext {
+  draftPrompt?: string
   conversationId?: string
   documentId?: string
   sourceLocator?: KnowledgeSourceLocator

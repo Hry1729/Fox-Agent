@@ -389,6 +389,46 @@ impl Database {
             })?;
         }
 
+        let failed_chats = self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT r.id, c.id, r.status, r.error_code
+                 FROM runs r JOIN conversations c ON c.id=r.conversation_id
+                 JOIN companion_profiles p ON p.id=c.companion_id
+                 WHERE p.archived_at IS NULL AND p.deleting_at IS NULL AND c.trashed_at IS NULL
+                   AND r.run_kind='primary' AND r.status IN ('failed','interrupted')
+                 ORDER BY r.finished_at DESC LIMIT 100",
+            )?;
+            let rows = statement.query_map([], |row| Ok((
+                row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?,
+            )))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })?;
+        for (run_id, conversation_id, status, error_code) in failed_chats {
+            let Some((companion_id, _, name)) = contacts.get(&conversation_id) else { continue };
+            let body = match error_code.as_deref() {
+                Some("provider.rate_limited") => "模型服务暂时限流。打开对话可查看进度。",
+                Some("provider.auth_failed") => "模型服务认证失败。请检查模型设置。",
+                Some("provider.request_failed") => "模型服务连接中断。打开对话可查看进度。",
+                Some("runtime.crashed" | "agent_backend_exited") => "运行进程意外退出。打开对话可查看进度。",
+                _ => "这次任务未完成。打开对话查看失败原因和已生成的内容。",
+            };
+            self.upsert_app_notification(AppNotificationUpsert {
+                merge_key: format!("companion-chat-failure:{run_id}"),
+                kind: "failed".to_owned(),
+                severity: "high".to_owned(),
+                title: name.clone(),
+                body: body.to_owned(),
+                source_type: "companion".to_owned(),
+                source_id: companion_id.clone(),
+                workspace_view: Some("chat".to_owned()),
+                entity_id: Some(conversation_id.clone()),
+                progress: None,
+                status,
+                action: contact_action(conversation_action(&conversation_id), &contacts, &conversation_id),
+            })?;
+        }
+
         // K6: "仅需要处理" alerts on questions, so pending contact questions need a
         // center entry of their own (approvals already produce one above).
         let mut pending_question_companions = Vec::new();
@@ -1592,6 +1632,29 @@ mod tests {
             Some(companions[3].profile.id.as_str())
         );
 
+        drop(database);
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn contact_chat_failure_is_visible_once_after_refresh() {
+        let (database, path) = test_database();
+        let root = std::env::temp_dir().join(format!("fox-contact-failed-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let contact = database.seed_default_companion(&root).unwrap();
+        let chat = contact.conversation_id;
+        let run = database.create_run(&chat, "分析表格", None).unwrap().run;
+        database.mark_run_interrupted(&run.id, "provider.request_failed", "connection reset").unwrap();
+        database.sync_app_notifications().unwrap();
+        database.sync_app_notifications().unwrap();
+        let notices = database.list_app_notifications(false, 50).unwrap();
+        let key = format!("companion-chat-failure:{}", run.id);
+        let notice = notices.iter().find(|notice| notice.merge_key == key).unwrap();
+        assert_eq!(notices.iter().filter(|notice| notice.merge_key == key).count(), 1);
+        assert_eq!(notice.kind, "failed");
+        assert_eq!(notice.entity_id.as_deref(), Some(chat.as_str()));
+        assert!(notice.body.contains("模型服务连接中断"));
         drop(database);
         let _ = fs::remove_file(path);
         let _ = fs::remove_dir_all(root);

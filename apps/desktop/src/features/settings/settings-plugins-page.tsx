@@ -1,262 +1,141 @@
-import { useEffect, useState } from 'react'
-import { ArrowLeft, Cable, ChevronRight, LoaderCircle, MoreHorizontal, Pencil, Plus, Puzzle, RotateCcw, Trash2, Wrench, Zap } from 'lucide-react'
+import { useEffect, useState, type ReactNode } from 'react'
+import { ArrowLeft, ChevronDown, ChevronRight, Plus, Puzzle, Search, ShieldCheck } from 'lucide-react'
 import { notify as toast } from '@/features/notifications'
-import { cn } from '@/lib/utils'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Textarea } from '@/components/ui/textarea'
 import { Switch } from '@/components/ui/switch'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger, runAfterMenuClose } from '@/components/ui/dropdown-menu'
-import { confirmDialog } from '@/components/ui/confirm-dialog'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, runAfterMenuClose } from '@/components/ui/dropdown-menu'
+import { FoxEmptyState } from '@/components/fox-ui/empty-state'
 import { WorkspacePage } from '@/features/workspace/page-shell'
 import type { NavigateWorkspace } from '@/features/workspace/types'
 import type { SettingsSectionAnchor } from '@/features/workspace/management-navigation'
-import type { McpServerRecord, SkillRecord } from '@/features/conversations/model/types'
+import type { PluginCardView, PluginGateway } from '@/features/plugins/model'
+import { defaultPluginGateway } from '@/features/plugins/tauri-gateway'
+import { matchesPluginQuery, matchesPluginResource, pluginSection, usePluginEntries, type PluginSection } from '@/features/plugins/plugin-browser-data'
+import { PluginMark, PluginPolicySheet, PluginStatusBadge, PluginTabs, SkillImportDialog, openPluginDetail } from '@/features/plugins/plugin-controls'
 import { useSkills } from './use-skills'
-import { useMcpServers, type SaveMcpServerInput } from './use-mcp-servers'
-import { SettingsGroup, SettingsPageLayout, SettingsRow, settingsSectionId, useScrollToSettingsSection } from './settings-layout'
-import { clearPluginReturn, readPluginReturn, type PluginReturnTarget } from './settings-shared'
-import { SearchServiceSettings } from './search-service-page'
+import { useMcpServers } from './use-mcp-servers'
+import { clearPluginReturn, readPluginReturn } from './settings-shared'
+import { ConnectorSetupSheet, extensionTransportLabel, mcpStatus } from './connector-setup-sheet'
+import { SearchServiceSheet } from './search-service-page'
 
-interface McpFormState {
-  id?: string
-  name: string
-  command: string
-  argsText: string
-  transport: McpServerRecord['transport']
-  endpointUrl: string
-  definition: string
-  environmentText: string
-  clearEnvironment: boolean
-}
+export { extensionTransportLabel, parseEnvironment } from './connector-setup-sheet'
 
-const emptyMcpForm: McpFormState = { name: '', command: '', argsText: '', transport: 'stdio', endpointUrl: '', definition: '', environmentText: '', clearEnvironment: false }
-
-const BUILTIN_CONNECTOR_ID = 'fox-office'
-
-export function extensionTransportLabel(transport: McpServerRecord['transport']) {
-  if (transport === 'streamable_http') return 'HTTP MCP'
-  if (transport === 'openapi') return 'OpenAPI'
-  return 'stdio MCP'
-}
-
-function mcpStatus(server: McpServerRecord) {
-  if (!server.enabled) return { tone: 'is-empty', label: '已停用' }
-  if (server.status === 'connected') return { tone: 'is-ok', label: '可用' }
-  if (server.status === 'unavailable') return { tone: 'is-error', label: '不可用' }
-  return { tone: '', label: '未测试' }
-}
-
-export function parseEnvironment(value: string) {
-  const environment: Record<string, string> = {}
-  for (const rawLine of value.split(/\r?\n/)) {
-    const line = rawLine.trim()
-    if (!line) continue
-    const separator = line.indexOf('=')
-    if (separator < 1) throw new Error(`环境变量格式无效：${line}`)
-    environment[line.slice(0, separator).trim()] = line.slice(separator + 1)
-  }
-  return environment
-}
-
-function connectorTarget(server: McpServerRecord) {
-  return server.transport === 'stdio' ? `${server.command}${server.args.length ? ` ${server.args.join(' ')}` : ''}` : server.endpointUrl ?? ''
-}
-
-function formFor(server: McpServerRecord): McpFormState {
-  return { id: server.id, name: server.name, command: server.command, argsText: server.args.join('\n'), transport: server.transport, endpointUrl: server.endpointUrl ?? '', definition: server.definition ?? '', environmentText: '', clearEnvironment: false }
-}
-
-function SkillSheet({ skill, busy, onClose, onToggle }: { skill: SkillRecord | null; busy: boolean; onClose: () => void; onToggle: (skill: SkillRecord, enabled: boolean) => void }) {
-  return <Sheet open={skill !== null} onOpenChange={(open) => { if (!open) onClose() }}>
-    <SheetContent side="right" className="fox-settings-sheet">
-      {skill && <>
-        <SheetHeader className="fox-settings-sheet-head">
-          <span className="fox-settings-provider-mark is-large"><Puzzle /></span>
-          <div className="fox-settings-sheet-title"><SheetTitle><span>{skill.name || skill.id}</span>{skill.valid ? <Badge variant="secondary" className="fox-settings-pill">v{skill.version}</Badge> : <Badge variant="destructive" className="fox-settings-pill">校验失败</Badge>}</SheetTitle><SheetDescription>技能只注入指令，不会获得新的工具权限。</SheetDescription></div>
-        </SheetHeader>
-        <div className="fox-settings-sheet-body">
-          <section className="fox-settings-sheet-section">
-            <div className="fox-settings-switch-row"><span><b>启用</b><small>{skill.valid ? '启用后 Fox 通用助手会加载这条技能' : '校验失败的技能不能启用'}</small></span><Switch aria-label={`启用 ${skill.name || skill.id}`} checked={skill.enabled} disabled={!skill.valid || busy} onCheckedChange={(enabled) => onToggle(skill, enabled)} /></div>
-            {skill.validationError && <p className="fox-settings-sheet-error" role="alert">{skill.validationError}</p>}
-          </section>
-          <section className="fox-settings-sheet-section">
-            <div className="fox-settings-sheet-section-head"><h3>说明</h3></div>
-            <dl className="fox-settings-facts">
-              <div><dt>简介</dt><dd>{skill.description || '未填写'}</dd></div>
-              <div><dt>需要的工具</dt><dd>{skill.requiredTools.length ? skill.requiredTools.join(' · ') : '不要求额外工具'}</dd></div>
-              <div><dt>来源</dt><dd title={skill.sourcePath}><code>{skill.sourcePath}</code></dd></div>
-            </dl>
-          </section>
-          {skill.instructions && <section className="fox-settings-sheet-section">
-            <div className="fox-settings-sheet-section-head"><h3>指令</h3></div>
-            <pre className="fox-settings-code">{skill.instructions}</pre>
-          </section>}
-        </div>
-        <div className="fox-settings-sheet-foot"><span className="is-grow" /><Button type="button" variant="outline" onClick={onClose}>关闭</Button></div>
-      </>}
-    </SheetContent>
-  </Sheet>
-}
-
-export function ExtensionsSettingsPage({ sidebarCollapsed, onSidebar, navigate, section }: { sidebarCollapsed: boolean; onSidebar: () => void; navigate: NavigateWorkspace; section?: SettingsSectionAnchor }) {
-  useScrollToSettingsSection(section)
-  const skills = useSkills()
+export function ExtensionsSettingsPage({ sidebarCollapsed, onSidebar, navigate, section, initialKind, gateway = defaultPluginGateway }: {
+  sidebarCollapsed: boolean
+  onSidebar: () => void
+  navigate: NavigateWorkspace
+  section?: SettingsSectionAnchor
+  initialKind?: PluginSection
+  gateway?: PluginGateway
+}) {
+  const startingSection = section === 'search' ? 'plugin' : section === 'skills' ? 'skill' : section === 'mcp' ? 'mcp' : initialKind ?? 'mcp'
+  const [kind, setKind] = useState<PluginSection>(startingSection)
+  const [search, setSearch] = useState('')
+  const [dialog, setDialog] = useState<'mcp' | 'search' | 'skill' | 'policy' | null>(section === 'search' ? 'search' : null)
+  const [searchBusy, setSearchBusy] = useState(false)
+  const [skillBusy, setSkillBusy] = useState(false)
+  const [returnTarget] = useState(readPluginReturn)
   const mcp = useMcpServers()
-  const [returnTarget] = useState<PluginReturnTarget | null>(() => readPluginReturn())
+  const skills = useSkills()
+  const entries = usePluginEntries(gateway)
   useEffect(() => { clearPluginReturn() }, [])
-  const [skillId, setSkillId] = useState<string | null>(null)
-  const [skillBusy, setSkillBusy] = useState<string | null>(null)
-  const [form, setForm] = useState<McpFormState | null>(null)
-  const [formError, setFormError] = useState<string | null>(null)
-  const [searchOpen, setSearchOpen] = useState(false)
-  useEffect(() => { if (section === 'search') setSearchOpen(true) }, [section])
-  const openSkill = skillId ? skills.items.find((item) => item.id === skillId) ?? null : null
-  const editingServer = form?.id ? mcp.items.find((item) => item.id === form.id) ?? null : null
-  const isBuiltin = form?.id === BUILTIN_CONNECTOR_ID
+  useEffect(() => { if (section === 'search') setDialog('search') }, [section])
+  useEffect(() => setKind(startingSection), [startingSection])
 
-  const toggleSkill = async (skill: SkillRecord, enabled: boolean) => {
-    setSkillBusy(skill.id)
-    const ok = await skills.setEnabled(skill.id, enabled)
-    setSkillBusy(null)
-    if (ok) toast.success(enabled ? `已启用 ${skill.name}` : `已停用 ${skill.name}`)
+  const providers = entries.items.filter(card => pluginSection(card) === 'plugin')
+    .sort((left, right) => Number(right.id === 'search:auto') - Number(left.id === 'search:auto'))
+  const counts = { mcp: mcp.items.length, plugin: providers.length, skill: skills.items.length }
+  const query = search.trim().toLocaleLowerCase()
+  const matches = (...texts: string[]) => texts.some(text => text.toLocaleLowerCase().includes(query))
+  const closeDialog = () => setDialog(null)
+  const updateSearch = async (card: PluginCardView, enabled: boolean) => {
+    setSearchBusy(true)
+    try { await gateway.setActivation(card.id, { mode: 'global', enabled }); entries.refresh() }
+    catch (error) { toast.error('搜索服务未切换', { description: error instanceof Error ? error.message : String(error) }) }
+    finally { setSearchBusy(false) }
   }
-  const openConnector = (server?: McpServerRecord) => { setFormError(null); setForm(server ? formFor(server) : { ...emptyMcpForm }) }
-  const closeConnector = () => { setForm(null); setFormError(null) }
-  const saveConnector = async () => {
-    if (!form) return
-    try {
-      const environment = parseEnvironment(form.environmentText)
-      const input: SaveMcpServerInput = { id: form.id, name: form.name.trim(), command: form.command.trim(), args: form.argsText.split(/\r?\n/).map((value) => value.trim()).filter(Boolean), transport: form.transport, endpointUrl: form.endpointUrl.trim() || undefined, definition: form.definition.trim() || undefined, clearEnvironment: form.clearEnvironment }
-      if (Object.keys(environment).length) input.environment = environment
-      const saved = await mcp.save(input)
-      if (!saved) return
-      closeConnector()
-      toast.success(form.id ? '连接器已更新' : '连接器已添加')
-    } catch (cause) { setFormError(cause instanceof Error ? cause.message : String(cause)) }
-  }
-  const testConnector = (server: McpServerRecord) => void mcp.test(server.id).then((result) => { if (result) toast.success(`健康检查通过，发现 ${result.toolCount} 个工具`) })
-  const removeConnector = async (server: McpServerRecord) => {
-    const confirmed = await confirmDialog({ title: '删除连接器', description: `删除连接器“${server.name}”？已保存的凭证也会被清除。`, confirmLabel: '删除', destructive: true })
-    if (!confirmed) return
-    if (await mcp.remove(server.id)) { if (form?.id === server.id) closeConnector(); toast.success('连接器已删除') }
-  }
-  const goBack = () => {
-    if (!returnTarget) return
-    navigate(returnTarget.view, returnTarget.entityId, returnTarget.documentId ? { documentId: returnTarget.documentId } : undefined)
-  }
-  const enabledSkills = skills.items.filter((item) => item.enabled).length
-  const enabledConnectors = mcp.items.filter((item) => item.enabled).length
-  const formInvalid = !form?.name.trim() || (form.transport === 'stdio' && !form.command.trim()) || (form.transport === 'streamable_http' && !form.endpointUrl.trim()) || (form.transport === 'openapi' && !form.definition.trim())
-  const test = form?.id ? mcp.tests[form.id] : undefined
+  const connectorRows = mcp.items.filter(server => matches(server.name, extensionTransportLabel(server.transport), mcpStatus(server).label)).map(server => {
+    const card = entries.items.find(item => item.kind === 'mcp' && matchesPluginResource(item.id, 'mcp', server.id))
+    const open = () => navigate('settings-plugin-detail', card?.id ?? `mcp:${server.id}`, { documentId: 'mcp' })
+    const status = mcpStatus(server)
+    return <PluginSettingRow key={server.id} kind="mcp" id={card?.id ?? `mcp:${server.id}`} name={server.name} onOpen={open} badge={<small className="fox-extension-status">{status.label}</small>}
+      description={server.lastError || extensionTransportLabel(server.transport)}>
+      <Switch checked={server.enabled} disabled={mcp.busyId != null} aria-label={`启用 ${server.name}`}
+        onCheckedChange={enabled => void mcp.setEnabled(server.id, enabled).then(entries.refresh)} />
+    </PluginSettingRow>
+  })
+  const skillRows = skills.items.filter(skill => matches(skill.name, skill.description, skill.id)).map(skill => {
+    const card = entries.items.find(item => item.kind === 'skill' && matchesPluginResource(item.id, 'skill', skill.id))
+    const name = skill.name || skill.id
+    return <PluginSettingRow key={skill.id} kind="skill" id={card?.id ?? `skill:${skill.id}`} name={name}
+      description={skill.validationError || skill.description}
+      badge={card?.activation.mode === 'per_agent' ? <small className="fox-extension-status">{card.activation.enabledAgentCount} 个助手</small> : undefined}
+      onOpen={() => navigate('settings-plugin-detail', card?.id ?? `skill:${skill.id}`, { documentId: 'skill' })}>
+      <Switch checked={skill.enabled} disabled={!skill.valid || skillBusy} aria-label={`为 Fox 通用助手启用 ${name}`}
+        onCheckedChange={async enabled => {
+          setSkillBusy(true)
+          try { if (await skills.setEnabled(skill.id, enabled)) entries.refresh() }
+          finally { setSkillBusy(false) }
+        }} />
+    </PluginSettingRow>
+  })
+  const rows = kind === 'mcp' ? connectorRows : kind === 'skill' ? skillRows : providers
+    .filter(card => matchesPluginQuery(card, query)).map(card => <PluginSettingRow key={card.id} kind={kind} id={card.id} name={card.name} description={card.description}
+      badge={<PluginStatusBadge card={card} />} onOpen={() => openPluginDetail(navigate, card, true)}>
+      {card.activation.mode === 'global' && <Switch checked={card.activation.enabled} disabled={searchBusy || entries.loading || (card.id === 'search:auto' && card.activation.enabled)}
+        aria-label={`使用 ${card.name} 搜索`} onCheckedChange={enabled => void updateSearch(card, enabled)} />}
+    </PluginSettingRow>)
+  const loading = kind === 'mcp' ? mcp.loading : kind === 'skill' ? skills.loading : entries.loading
+  const error = kind === 'mcp' ? mcp.error : kind === 'skill' ? skills.error : entries.error
+  const refresh = kind === 'mcp' ? mcp.refresh : kind === 'skill' ? skills.refresh : entries.refresh
 
-  return <WorkspacePage title="插件" subtitle="内置工具、技能与连接器" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
-    <SettingsPageLayout title="插件" description="配置内置工具，管理技能和连接器；所有工具调用仍经过 Fox 审批和审计。" actions={<>
-      {returnTarget && <Button type="button" variant="outline" onClick={goBack}><ArrowLeft />返回 {returnTarget.label}</Button>}
-      <Button type="button" onClick={() => openConnector()}><Plus />添加连接器</Button>
-    </>}>
-      <SettingsGroup id={settingsSectionId('search')} title="内置工具">
-        <SearchServiceSettings open={searchOpen} onOpenChange={setSearchOpen} />
-      </SettingsGroup>
-
-      <SettingsGroup id={settingsSectionId('skills')} title="技能" aside={<>{skills.items.length > 0 && <span>{skills.items.length} 个，{enabledSkills} 个已启用</span>}<Button type="button" variant="ghost" size="sm" disabled={skills.loading} onClick={() => void skills.refresh()}>{skills.loading ? <LoaderCircle className="animate-spin" /> : <RotateCcw />}重新扫描</Button></>}>
-        {skills.error && <p className="fox-settings-error" role="alert">暂时无法读取技能列表：{skills.error}</p>}
-        {!skills.loading && !skills.error && skills.items.length === 0 && <p className="fox-settings-empty">还没有技能。在 Fox 数据目录的 skills 子目录中放入包含 SKILL.md 的文件夹后点「重新扫描」。</p>}
-        <div className="fox-settings-providers">
-          {skills.items.map((skill) => <div className={cn('fox-settings-provider', skillId === skill.id && 'is-open')} key={skill.id}>
-            <button type="button" className="fox-settings-provider-main" onClick={() => setSkillId(skill.id)} aria-haspopup="dialog" aria-label={`查看 ${skill.name || skill.id}`}>
-              <span className="fox-settings-provider-mark"><Puzzle /></span>
-              <span className="fox-settings-provider-text"><span className="fox-settings-provider-name"><b>{skill.name || skill.id}</b>{skill.valid ? <Badge variant="secondary" className="fox-settings-pill">v{skill.version}</Badge> : <Badge variant="destructive" className="fox-settings-pill">校验失败</Badge>}</span><small title={skill.validationError ?? skill.description}>{skill.validationError || skill.description || skill.id}</small></span>
-            </button>
-            <Switch className="fox-settings-provider-switch" aria-label={`启用 ${skill.name || skill.id}`} checked={skill.enabled} disabled={!skill.valid || skillBusy === skill.id} onCheckedChange={(enabled) => void toggleSkill(skill, enabled)} />
-          </div>)}
+  return <WorkspacePage title="插件" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
+    <div className="fox-settings-page fox-extension-settings">
+      <header className="fox-extension-page-head"><h1>插件</h1>
+        <div>
+          {returnTarget && <Button variant="ghost" onClick={() => navigate(returnTarget.view, returnTarget.entityId, returnTarget.documentId ? { documentId: returnTarget.documentId } : undefined)}><ArrowLeft />返回 {returnTarget.label}</Button>}
+          <Button variant="outline" onClick={() => navigate('plugins', kind)}>浏览目录</Button>
+          <DropdownMenu><DropdownMenuTrigger asChild><Button><Plus />添加<ChevronDown /></Button></DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={() => runAfterMenuClose(() => setDialog('mcp'))}><Plus />添加连接器</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => runAfterMenuClose(() => setDialog('skill'))}><Puzzle />导入技能</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => runAfterMenuClose(() => setDialog('policy'))}><ShieldCheck />插件策略与 Hook</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
-      </SettingsGroup>
-
-      <SettingsGroup id={settingsSectionId('mcp')} title="连接器" aside={mcp.items.length ? `${mcp.items.length} 个，${enabledConnectors} 个已启用` : undefined}>
-        {mcp.error && !form && <p className="fox-settings-error" role="alert">{mcp.error}</p>}
-        {!mcp.loading && mcp.items.length === 0 && <p className="fox-settings-empty">还没有连接器。点右上角「添加连接器」接入本机 MCP、HTTP MCP 或 OpenAPI。</p>}
-        <div className="fox-settings-providers">
-          {mcp.items.map((server) => {
-            const status = mcpStatus(server)
-            const result = mcp.tests[server.id]
-            const toolCount = result ? result.toolCount : server.toolCount
-            const builtin = server.id === BUILTIN_CONNECTOR_ID
-            return <div className={cn('fox-settings-provider', form?.id === server.id && 'is-open')} key={server.id}>
-              <button type="button" className="fox-settings-provider-main" onClick={() => openConnector(server)} aria-haspopup="dialog" aria-label={`编辑 ${server.name}`}>
-                <span className="fox-settings-provider-mark"><Cable /></span>
-                <span className="fox-settings-provider-text"><span className="fox-settings-provider-name"><b>{server.name}</b>{builtin && <Badge variant="secondary" className="fox-settings-pill">内置</Badge>}</span><small title={server.lastError ?? connectorTarget(server)}>{server.lastError || `${builtin ? '内置 CLI' : extensionTransportLabel(server.transport)} · ${connectorTarget(server)}`}</small></span>
-                <span className="fox-settings-provider-status"><i className={cn('fox-settings-dot', status.tone)} aria-hidden="true" /><b>{status.label}</b>{toolCount != null && <><span className="is-separator">·</span><span>{toolCount} 个工具</span></>}</span>
-              </button>
-              <Switch className="fox-settings-provider-switch" aria-label={`启用 ${server.name}`} checked={server.enabled} disabled={mcp.busyId === server.id} onCheckedChange={(enabled) => void mcp.setEnabled(server.id, enabled)} />
-              <DropdownMenu modal={false}>
-                <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" className="fox-settings-provider-more" aria-label={`管理 ${server.name}`}><MoreHorizontal /></Button></DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem disabled={!server.enabled || mcp.busyId === server.id} onSelect={() => testConnector(server)}><Zap />健康检查</DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => runAfterMenuClose(() => openConnector(server))}><Pencil />{builtin ? '查看' : '编辑'}</DropdownMenuItem>
-                  {!builtin && <><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onSelect={() => runAfterMenuClose(() => void removeConnector(server))}><Trash2 />删除</DropdownMenuItem></>}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-          })}
-        </div>
-      </SettingsGroup>
-
-      <SettingsGroup title="工具插件">
-        <SettingsRow title="已安装工具" description="查看内置工具和工具插件的状态与兼容性；全局调用规则位于「权限与安全」">
-          <Button type="button" variant="ghost" size="sm" onClick={() => navigate('plugins', 'tool')}><Wrench />插件中心<ChevronRight /></Button>
-        </SettingsRow>
-      </SettingsGroup>
-    </SettingsPageLayout>
-
-    <SkillSheet skill={openSkill} busy={skillBusy !== null} onClose={() => setSkillId(null)} onToggle={(skill, enabled) => void toggleSkill(skill, enabled)} />
-
-    <Sheet open={form !== null} onOpenChange={(open) => { if (!open) closeConnector() }}>
-      <SheetContent side="right" className="fox-settings-sheet">
-        {form && <>
-          <SheetHeader className="fox-settings-sheet-head">
-            <span className="fox-settings-provider-mark is-large"><Cable /></span>
-            <div className="fox-settings-sheet-title">
-              <SheetTitle><span>{form.id ? editingServer?.name ?? form.name : '添加连接器'}</span>{editingServer && <Badge variant="secondary" className="fox-settings-pill">{mcpStatus(editingServer).label}</Badge>}</SheetTitle>
-              <SheetDescription>凭证只存入系统凭证库；HTTP MCP 和 OpenAPI 禁止自动重定向，超时 15 秒，响应上限 10 MB。</SheetDescription>
-            </div>
-          </SheetHeader>
-          <div className="fox-settings-sheet-body">
-            {isBuiltin
-              ? <section className="fox-settings-sheet-section"><p className="fox-settings-sheet-hint">Fox 内置 CLI 连接器不能编辑或删除，可以启停和做健康检查。</p></section>
-              : <section className="fox-settings-sheet-section">
-                <label className="fox-settings-field"><span>名称</span><Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如 Filesystem 或 Pet API" /></label>
-                <div className="fox-settings-field"><span>扩展类型</span><Select value={form.transport} onValueChange={(transport: McpServerRecord['transport']) => setForm({ ...form, transport })}><SelectTrigger aria-label="扩展类型"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="stdio">stdio MCP</SelectItem><SelectItem value="streamable_http">Streamable HTTP MCP</SelectItem><SelectItem value="openapi">OpenAPI 3.x Connector</SelectItem></SelectContent></Select></div>
-                {form.transport === 'stdio'
-                  ? <>
-                    <label className="fox-settings-field"><span>命令</span><Input value={form.command} onChange={(event) => setForm({ ...form, command: event.target.value })} placeholder="例如 npx.cmd 或 MCP Server 可执行文件路径" /></label>
-                    <label className="fox-settings-field"><span>参数（每行一项）</span><Textarea className="fox-settings-textarea" value={form.argsText} onChange={(event) => setForm({ ...form, argsText: event.target.value })} placeholder={'-y\n@modelcontextprotocol/server-filesystem\nD:\\projects'} /></label>
-                  </>
-                  : <label className="fox-settings-field"><span>端点 URL{form.transport === 'openapi' ? '（可选，覆盖 servers[0].url）' : ''}</span><Input value={form.endpointUrl} onChange={(event) => setForm({ ...form, endpointUrl: event.target.value })} placeholder={form.transport === 'openapi' ? '可留空使用定义中的 servers[0].url' : 'https://mcp.example.com/mcp'} /></label>}
-                {form.transport === 'openapi' && <label className="fox-settings-field"><span>OpenAPI JSON / YAML</span><Textarea className="fox-settings-textarea is-tall" value={form.definition} onChange={(event) => setForm({ ...form, definition: event.target.value })} placeholder={'openapi: 3.0.3\ninfo: ...\npaths: ...'} /></label>}
-                <label className="fox-settings-field"><span>{form.transport === 'stdio' ? '环境变量' : '请求 Header'}（每行 KEY=VALUE）</span><Textarea className="fox-settings-textarea" value={form.environmentText} onChange={(event) => setForm({ ...form, environmentText: event.target.value, clearEnvironment: false })} placeholder={form.id ? '已保存的值不会回显；留空保持不变' : form.transport === 'stdio' ? 'API_KEY=...' : 'Authorization=Bearer ...'} /></label>
-                {form.id && <div className="fox-settings-switch-row fox-settings-field"><span><b>清除登录信息</b><small>{editingServer?.credentialConfigured ? '保存时同时从系统凭证库删除' : '当前没有保存凭证'}</small></span><Switch aria-label="清除登录信息" checked={form.clearEnvironment} onCheckedChange={(clearEnvironment) => setForm({ ...form, clearEnvironment, environmentText: clearEnvironment ? '' : form.environmentText })} /></div>}
-              </section>}
-            {editingServer && <section className="fox-settings-sheet-section">
-              <div className="fox-settings-sheet-section-head"><h3>工具</h3><Button type="button" variant="ghost" size="sm" disabled={!editingServer.enabled || mcp.busyId === editingServer.id} onClick={() => testConnector(editingServer)}>{mcp.busyId === editingServer.id ? <LoaderCircle className="animate-spin" /> : <Zap />}健康检查</Button></div>
-              {editingServer.lastError && <p className="fox-settings-sheet-error" role="alert">{editingServer.lastError}</p>}
-              {test?.tools.length
-                ? <div className="fox-settings-tool-list">{test.tools.map((tool) => <div key={tool.name}><b>{tool.name}</b><small>{tool.description || '此工具没有提供说明。'}</small></div>)}</div>
-                : <p className="fox-settings-sheet-hint">{editingServer.toolCount != null ? `上次检查发现 ${editingServer.toolCount} 个工具${editingServer.lastLatencyMs != null ? ` · ${editingServer.lastLatencyMs} ms` : ''}。` : '还没有做过健康检查。'}点「健康检查」读取并校验工具目录，每个连接器最多 200 个工具。</p>}
-            </section>}
-            {(formError || (mcp.error && form)) && <p className="fox-settings-sheet-error" role="alert">{formError ?? mcp.error}</p>}
-          </div>
-          <div className="fox-settings-sheet-foot">
-            {editingServer && !isBuiltin && <Button type="button" variant="ghost" className="fox-settings-danger" disabled={mcp.busyId === editingServer.id} onClick={() => void removeConnector(editingServer)}><Trash2 />删除连接器</Button>}
-            <span className="is-grow" />
-            <Button type="button" variant="outline" onClick={closeConnector}>{isBuiltin ? '关闭' : '取消'}</Button>
-            {!isBuiltin && <Button type="button" disabled={formInvalid || mcp.busyId != null} onClick={() => void saveConnector()}>{mcp.busyId === (form.id ?? 'new') && <LoaderCircle className="animate-spin" />}{form.id ? '保存' : '添加'}</Button>}
-          </div>
-        </>}
-      </SheetContent>
-    </Sheet>
+      </header>
+      <div className="fox-extension-toolbar">
+        <PluginTabs section={kind} counts={counts} onChange={next => {
+          setKind(next)
+          navigate('settings-extensions', next)
+        }} />
+        <label className="fox-extension-search"><Search size={14} /><Input placeholder="搜索" aria-label="搜索已安装插件" value={search} onChange={event => setSearch(event.target.value)} /></label>
+      </div>
+      {kind === 'skill' && <div className="fox-extension-settings-action"><Button variant="ghost" size="sm" disabled={skills.loading} onClick={() => { void skills.refresh(); entries.refresh() }}>重新扫描</Button></div>}
+      {error && <div className="fox-settings-error" role="alert">{error}<Button size="sm" variant="ghost" onClick={() => void refresh()}>重试</Button></div>}
+      {rows.length > 0 ? <div className="fox-extension-list">{rows}</div>
+        : loading ? <p className="fox-settings-empty" role="status">正在加载…</p>
+          : !error && <FoxEmptyState title={query ? '没有匹配的条目' : '当前分类没有已安装条目'} />}
+    </div>
+    {dialog === 'mcp' && <ConnectorSetupSheet mcp={mcp} onClose={closeDialog} onSaved={entries.refresh} />}
+    <SearchServiceSheet open={dialog === 'search'} onOpenChange={open => { if (!open) closeDialog() }} onSaved={entries.refresh} />
+    <SkillImportDialog open={dialog === 'skill'} onOpenChange={open => { if (!open) closeDialog() }} onRescan={() => {
+      setKind('skill'); navigate('settings-extensions', 'skill'); void skills.refresh(); entries.refresh()
+    }} />
+    <PluginPolicySheet open={dialog === 'policy'} onOpenChange={open => { if (!open) closeDialog() }} navigate={navigate} />
   </WorkspacePage>
+}
+
+function PluginSettingRow({ kind, id, name, description, badge, onOpen, children }: {
+  kind: PluginSection; id: string; name: string; description: string; badge?: ReactNode; onOpen: () => void; children?: ReactNode
+}) {
+  return <div className="fox-extension-list-row">
+    <button className="fox-extension-list-main" type="button" onClick={onOpen} aria-label={`查看 ${name} 详情`}>
+      <PluginMark kind={kind} id={id} />
+      <span className="fox-extension-list-copy"><span><strong>{name}</strong>{badge}</span><small>{description}</small></span>
+    </button>
+    {children}
+    <Button variant="ghost" size="icon-sm" aria-label={`打开 ${name}`} onClick={onOpen}><ChevronRight /></Button>
+  </div>
 }

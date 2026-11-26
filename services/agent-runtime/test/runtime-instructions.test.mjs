@@ -13,6 +13,7 @@ import {
   APPROVAL_DEMO_TURN_INSTRUCTIONS,
   FOX_LANGUAGE_CONTRACT,
   FOX_RUNTIME_INSTRUCTIONS,
+  composeRuntimePrompt,
   isApprovalDemoFollowup,
   isApprovalDemoRequest,
   replaceLatestAssistantText,
@@ -55,10 +56,49 @@ test('publishes protected tools and truthful approval rules in the system prompt
 })
 
 test('requires Host-validated goal completion and distinguishes A0 from A1 acceptance', () => {
-  assert.match(FOX_RUNTIME_INSTRUCTIONS, /work_snapshot_get/)
-  assert.match(FOX_RUNTIME_INSTRUCTIONS, /goal_complete/)
-  assert.match(FOX_RUNTIME_INSTRUCTIONS, /Host remains authoritative/)
-  assert.match(FOX_RUNTIME_INSTRUCTIONS, /Independent review and acceptance are A1 capabilities/)
+  const ordinary = composeRuntimePrompt()
+  assert.match(ordinary.stablePrefix, /Call goal_propose only when/)
+  assert.match(ordinary.stablePrefix, /Only the Fox Host can activate/)
+  assert.match(ordinary.stablePrefix, /confirm a draft or outline/)
+  assert.doesNotMatch(ordinary.prompt, /Independent review and acceptance are A1 capabilities/)
+  for (const status of ['proposed', 'active', 'blocked', 'completed', 'cancelled']) {
+    const run = composeRuntimePrompt({ context: { workSnapshot: { goal: { status }, tasks: [], evidence: [] } } })
+    assert.equal(run.stablePrefix, ordinary.stablePrefix)
+    if (['completed', 'cancelled'].includes(status)) {
+      assert.doesNotMatch(run.dynamicTail, /Independent review and acceptance/)
+    } else {
+      for (const rule of [/work_snapshot_get/, /goal_complete/, /Host remains authoritative/, /Independent review and acceptance/]) {
+        assert.match(run.dynamicTail, rule)
+      }
+    }
+  }
+})
+
+test('selects Workflow and Team instructions from declarations or persisted activity independently', () => {
+  const sections = context => composeRuntimePrompt({ context }).diagnostics.fragments
+    .map(({ id }) => id).filter(id => id.endsWith('_guidance'))
+  assert.deepEqual(sections({ expertPackage: { packageManifest: { workflow: null, team: null } } }), [])
+  assert.deepEqual(sections({ expertPackage: { packageManifest: { workflow: { stages: [] } } } }), ['workflow_guidance'])
+  assert.deepEqual(sections({ expertPackage: { packageManifest: { team: { members: [] } } } }), ['team_guidance'])
+  assert.deepEqual(sections({ runContext: { activeExpertWorkflow: true, activeExpertTeam: true } }),
+    ['work_guidance', 'workflow_guidance', 'team_guidance'])
+})
+
+test('selects detailed data guidance from sources in the current task without granting tools', () => {
+  const cases = [
+    [{}, '核对 input/sales.xlsx。', true],
+    [{}, 'Read sales.csv.md', false],
+    [{ runContext: { tabularInput: true } }, '比较这两组', true],
+    [{ filePlacement: { deliveryTargets: { targets: [{ path: null, itemKey: 'slot:csv:1' }] } } }, '导出', true],
+    [{ runContext: { runRole: 'child_worker' } }, '核对父任务指定的文件 input/sales.tsv', true],
+    [{}, '写一封会议邀请', false],
+  ]
+  for (const [context, text, expected] of cases) {
+    const run = composeRuntimePrompt({ context, turn: { text } })
+    assert.equal(run.diagnostics.fragments.some(({ id }) => id === 'data_guidance'), expected)
+    assert.match(run.stablePrefix, /verify the overall denominator/)
+    assert.doesNotMatch(run.stablePrefix, /saveTable\(|daily_sum:|team_member_start/)
+  }
 })
 
 test('keeps assistant presentation plain and structurally aligned', () => {

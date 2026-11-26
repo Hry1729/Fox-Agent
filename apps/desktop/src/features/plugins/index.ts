@@ -1,4 +1,4 @@
-export { PluginCenterPage, PluginCard, ScopeDialog } from './plugin-center-page'
+export { PluginCenterPage, PluginCard } from './plugin-center-page'
 export { MockPluginGateway, createMockPluginCatalog, createMockPluginGateway } from './gateway'
 export {
   PluginGatewayError,

@@ -104,4 +104,14 @@ describe('settings destinations after the seven-item regrouping', () => {
     const entered = captureManagementReturnRoutes(routes(), documentRoute, 'settings-data')
     expect(managementExitRoute('settings-data', entered)).toEqual(documentRoute)
   })
+
+  test('设置中的插件详情保留插件侧栏和工作区返回目标', () => {
+    expect(settingsNavigationView('settings-plugin-detail')).toBe('settings-extensions')
+    expect(settingsRouteRedirect('settings-search')).toEqual({ view: 'settings-extensions', section: 'search' })
+    const work: WorkspaceReturnRoute = { view: 'companion-overview', entityId: null, documentId: null }
+    const settings: WorkspaceReturnRoute = { view: 'settings-extensions', entityId: 'mcp', documentId: null }
+    const enteredSettings = captureManagementReturnRoutes(routes(), work, settings.view)
+    const openedDetail = captureManagementReturnRoutes(enteredSettings, settings, 'settings-plugin-detail')
+    expect(managementExitRoute('settings-plugin-detail', openedDetail)).toEqual(work)
+  })
 })

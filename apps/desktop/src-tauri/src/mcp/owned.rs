@@ -119,9 +119,9 @@ struct OwnedStdio {
 
 impl OwnedStdio {
     fn start(server: &McpServerRecord) -> Result<Self, String> {
-        let mut command = Command::new(&server.command);
+        let mut command = crate::connector_catalog::command(server)?;
         command
-            .args(&server.args)
+            .args(crate::connector_catalog::command_args(server)?)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());

@@ -14,19 +14,19 @@ export interface SaveMcpServerInput {
   clearEnvironment?: boolean
 }
 
-export function useMcpServers() {
+export function useMcpServers(enabled = true) {
   const [items, setItems] = useState<McpServerRecord[]>([])
   const [tests, setTests] = useState<Record<string, McpConnectionTest>>({})
-  const [loading, setLoading] = useState(desktopRuntimeAvailable)
+  const [loading, setLoading] = useState(enabled && desktopRuntimeAvailable)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const refresh = useCallback(async () => {
-    if (!desktopRuntimeAvailable) return
+    if (!enabled || !desktopRuntimeAvailable) return
     setLoading(true)
     try { setItems(await desktopClient.listMcpServers()); setError(null) }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
     finally { setLoading(false) }
-  }, [])
+  }, [enabled])
   useEffect(() => { void refresh() }, [refresh])
   const save = useCallback(async (input: SaveMcpServerInput) => {
     setBusyId(input.id ?? 'new')
@@ -37,7 +37,7 @@ export function useMcpServers() {
   const test = useCallback(async (serverId: string) => {
     setBusyId(serverId)
     try { const result = await desktopClient.testMcpServer(serverId); setTests((value) => ({ ...value, [serverId]: result })); await refresh(); setError(null); return result }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); await refresh(); return null }
+    catch (cause) { await refresh(); setError(cause instanceof Error ? cause.message : String(cause)); return null }
     finally { setBusyId(null) }
   }, [refresh])
   const setEnabled = useCallback(async (serverId: string, enabled: boolean) => {

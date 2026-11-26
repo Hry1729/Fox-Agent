@@ -8,7 +8,7 @@ if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register()
 const React = await import('react')
 const { cleanup, fireEvent, render, screen, within } = await import('@testing-library/react')
 const { RuntimeArtifacts, artifactVerificationLabel } = await import('../src/features/chat/runtime-artifacts')
-const { finalArtifactIds, resolveFinalArtifactReference } = await import('../src/features/chat/final-artifact-references')
+const { finalArtifactIds, normalizeFinalArtifactLinks, resolveFinalArtifactReference } = await import('../src/features/chat/final-artifact-references')
 
 afterEach(cleanup)
 
@@ -37,6 +37,16 @@ describe('reply file results', () => {
     expect(resolveFinalArtifactReference('#fox-artifact=output%2Freview.md', [review, other])).toBe(review)
     expect(resolveFinalArtifactReference('#fox-artifact=review.md', [review, other])).toBeUndefined()
     expect(resolveFinalArtifactReference('#fox-artifact=../output/review.md', [review])).toBeUndefined()
+  })
+  test('a generated Windows file link resolves to the recorded artifact only', () => {
+    const output = { ...artifact('saved', 'process', '表格.xlsx'), storagePath: 'D:/project/fox/run/表格.xlsx' }
+    expect(normalizeFinalArtifactLinks('[表格](file:///d:/Project/fox/run/%E8%A1%A8%E6%A0%BC.xlsx)', [output])).toBe('[表格](#fox-artifact=saved)')
+    expect(normalizeFinalArtifactLinks('[表格](fox/run/表格.xlsx)', [output])).toBe('[表格](#fox-artifact=saved)')
+    expect(normalizeFinalArtifactLinks('[表格](output/表格.xlsx)', [output])).toBe('[表格](#fox-artifact=saved)')
+    const sameName = { ...output, id: 'other', storagePath: 'D:/project/fox/other/表格.xlsx' }
+    expect(normalizeFinalArtifactLinks('[表格](output/表格.xlsx)', [output, sameName])).toBe('[表格](output/表格.xlsx)')
+    expect(normalizeFinalArtifactLinks('[外链](https://example.com/表格.xlsx)', [output])).toBe('[外链](https://example.com/表格.xlsx)')
+    expect(normalizeFinalArtifactLinks('`[示例](fox/run/表格.xlsx)`', [output])).toBe('`[示例](fox/run/表格.xlsx)`')
   })
   test('a declared private PDF is delivered while intermediate files stay collapsed, without changing Host facts', () => {
     const pdf = declared({ ...artifact('compute-artifact:pdf', 'process', 'AGV报告.pdf'), artifactOrigin: 'host_private' })

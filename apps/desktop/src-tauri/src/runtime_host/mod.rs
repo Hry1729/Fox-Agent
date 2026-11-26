@@ -1044,11 +1044,6 @@ pub(crate) fn conversation_prompt_context(
             ("digital_colleague", _) => "digital_colleague",
             _ => "user_facing_lead",
         };
-        let run_context = json!({
-            "runKind": run_kind,
-            "runRole": run_role,
-            "isUserFacingLead": run_role == "user_facing_lead",
-        });
         let expert_binding = database.runtime_conversation_expert_binding(conversation_id)?;
         let private_expert = expert_binding.is_some()
             && database
@@ -1146,6 +1141,25 @@ pub(crate) fn conversation_prompt_context(
             text,
             8_000,
         )?;
+        let mut run_context = json!({
+            "runKind": run_kind,
+            "runRole": run_role,
+            "isUserFacingLead": run_role == "user_facing_lead",
+        });
+        let manifest = expert_package.as_ref().map(|package| &package["packageManifest"]);
+        if manifest.is_none_or(|value| value["workflow"].is_null())
+            && database.active_expert_workflow(conversation_id)?.is_some()
+        {
+            run_context["activeExpertWorkflow"] = json!(true);
+        }
+        if manifest.is_none_or(|value| value["team"].is_null())
+            && database.active_expert_team(conversation_id)?.is_some()
+        {
+            run_context["activeExpertTeam"] = json!(true);
+        }
+        if skill_plan.included.iter().any(|skill| skill.id == "fox-office-excel") {
+            run_context["tabularInput"] = json!(true);
+        }
         let expert_binding_payload = expert_binding.as_ref().map(|binding| {
             json!({
                 "bindingId": binding.id,
@@ -2643,6 +2657,8 @@ impl RuntimeHost {
                 "systemPrompt": context.system_prompt,
                 "skillPrompt": context.skill_prompt,
                 "images": images,
+                "attachmentExtensions": attachments.iter().filter_map(|attachment|
+                    Path::new(&attachment.display_name).extension()?.to_str()).collect::<Vec<_>>(),
                 "assistantPackage": context.assistant_package,
                 "expertBinding": context.expert_binding_payload,
                 "expertPackage": context.expert_package,
@@ -5771,6 +5787,15 @@ impl RuntimeHost {
                             }
                             if !applied {
                                 continue;
+                            }
+                            if payload["type"] == "run.completed" && payload["completionReason"] != "awaiting_user" {
+                                if let Some(app_state) = app.try_state::<AppState>() {
+                                    if let Err(error) = crate::companion_workspace::save_long_reply_report(
+                                        &database, &app_state.data_dir, &conversation_id, &run_id,
+                                    ) {
+                                        eprintln!("fox.runtime run={run_id} companion reply export failed: {error}");
+                                    }
+                                }
                             }
                             if payload["type"] == "usage.updated" {
                                 match database.digital_colleague_budget_exceeded(&run_id) {
@@ -11723,6 +11748,7 @@ pub(crate) async fn execute_external_mcp_tool(
     tool_call_id: &str,
     tool: &str,
     input: &Value,
+    emit_source: impl Fn(Value) -> Result<(), String>,
 ) -> Result<Value, String> {
     ensure_expert_tool_allowed(database, conversation_id, tool)?;
     let hook_decision =
@@ -11763,6 +11789,9 @@ pub(crate) async fn execute_external_mcp_tool(
                 control,
             )
             .await?;
+            if matches!(tool, "search_knowledge" | "read_knowledge_document") {
+                emit_local_knowledge_sources(&result["details"], &emit_source)?;
+            }
             // The model-facing text of the bounded result (the bridge caps it
             // again at 64 KiB, the one ceiling every tool shares).
             Ok(result
@@ -11775,6 +11804,50 @@ pub(crate) async fn execute_external_mcp_tool(
             "[tool.invalid_input] {other} is not a Fox bridge tool"
         )),
     }
+}
+
+fn emit_local_knowledge_sources(
+    value: &Value,
+    emit: &impl Fn(Value) -> Result<(), String>,
+) -> Result<(), String> {
+    let value = value.get("result").unwrap_or(value);
+    let items = value["items"]
+        .as_array()
+        .or_else(|| value["chunks"].as_array());
+    let mut page_content = value["content"].as_str().unwrap_or_default().chars();
+    for item in items.into_iter().flatten() {
+        if item.get("result").is_some() {
+            emit_local_knowledge_sources(item, emit)?;
+            continue;
+        }
+        let metadata = &item["sourceMetadata"];
+        if metadata["source"] != "local" {
+            continue;
+        }
+        let (Some(base), Some(document), Some(chunk)) = (
+            metadata["knowledgeBaseId"].as_str(),
+            metadata["documentId"].as_str(),
+            metadata["chunkId"].as_str(),
+        ) else {
+            continue;
+        };
+        let excerpt: String = if let Some(content) = item["content"].as_str() {
+            content.chars().take(320).collect()
+        } else {
+            // The document reader joins chunks with two newlines.
+            let len = item["charCount"].as_u64().unwrap_or_default() as usize;
+            let excerpt = page_content.by_ref().take(len.min(320)).collect();
+            page_content.by_ref().nth(len.saturating_sub(320) + 1);
+            excerpt
+        };
+        emit(json!({
+            "type": "source.added", "id": format!("local:{base}:{chunk}"), "source": "local",
+            "knowledgeBaseId": base, "documentId": document, "chunkId": chunk,
+            "title": metadata["displayName"], "excerpt": excerpt,
+            "anchor": metadata["anchor"], "page": metadata["pageNumber"], "metadata": metadata
+        }))?;
+    }
+    Ok(())
 }
 
 /// KB-1: the cancellation probe for one knowledge tool call. A Run that has no
@@ -13421,6 +13494,245 @@ impl RuntimeHost {
             .cloned()
             .ok_or_else(|| "搜索结果缺失。".into())
     }
+
+    pub(crate) fn external_work_tool(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        call_id: &str,
+        tool: &str,
+        input: &Value,
+        mode: approval_policy::AccessMode,
+    ) -> Result<Value, String> {
+        let database = &self.database;
+        ensure_expert_tool_allowed(database, conversation_id, tool)?;
+        database.ensure_companion_tool_granted(run_id, tool, Some(input))?;
+        if mode == approval_policy::AccessMode::ReadOnly && tool != "work_snapshot_get" {
+            return Err("[permission.read_only] 当前会话为只读模式。".to_owned());
+        }
+        if tool == "goal_propose" && !database.run_user_message_content(conversation_id, run_id)?
+            .as_deref().is_some_and(crate::work_mode_gate::is_explicit_fox_goal_request) {
+            return Err("[goal.fox_tracking_not_requested] 当前请求没有选择 Fox 目标跟踪。请使用 Agent 自己的计划。".to_owned());
+        }
+        let hooks = crate::lifecycle_hooks::before_tool(database, run_id, call_id, tool, input)?;
+        if let Some(reason) = hooks.blocked {
+            return Err(format!("[hook.blocked] {reason}"));
+        }
+        if hooks.requires_approval {
+            return Err("[hook.approval_unsupported] 此目标操作需要单独授权。".to_owned());
+        }
+        let call = match create_fresh_host_tool_call(database, run_id, call_id, tool, input, "running", false)? {
+            HostToolCallExecution::Execute(call) => call,
+            HostToolCallExecution::Replay(response) => return bridge_host_result(response),
+        };
+        let outcome = work_tools::execute_with_host_tool_call_id(database, conversation_id, run_id, &call.id, tool, input)
+            .map(|outcome| {
+                for event in outcome.events {
+                    let _ = self.app.emit("fox://work-event", event);
+                }
+                outcome.result
+            })
+            .map_err(|error| format!("[{}] {}", error.code, error.message));
+        let outcome = outcome.and_then(|mut result| {
+            if tool == "work_snapshot_get" {
+                result["recentEvidenceSources"] = json!(database.external_work_evidence(conversation_id, run_id)?);
+            }
+            Ok(result)
+        });
+        bridge_host_result(finalize_host_tool_execution(
+            database, run_id, call_id, tool, input, hooks.annotations, outcome,
+        )?)
+    }
+
+    pub(crate) fn external_connector(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        call_id: &str,
+        tool: &str,
+        input: &Value,
+        mode: approval_policy::AccessMode,
+        runtime: &crate::external_backend::DesktopRuntime,
+    ) -> Result<Value, String> {
+        let database = &self.database;
+        ensure_expert_tool_allowed(database, conversation_id, tool)?;
+        let (_, scope) = effective_conversation_delegation_scope(database, conversation_id)?;
+        let hooks = crate::lifecycle_hooks::before_tool(database, run_id, call_id, tool, input)?;
+        if let Some(reason) = &hooks.blocked {
+            return Err(format!("[hook.blocked] {reason}"));
+        }
+        let servers = database.list_mcp_servers()?.into_iter().filter(|server| {
+            server.enabled && server.id != crate::office::SERVER_ID
+                && scope.as_ref().is_none_or(|scope| scope.contains(&server.id))
+        });
+        let outcome = if tool == "list_mcp_tools" {
+            if hooks.requires_approval {
+                return Err("[hook.approval_unsupported] 此连接器目录需要单独授权。".into());
+            }
+            let query = input["query"].as_str().unwrap_or_default().to_lowercase();
+            let mut items = Vec::new();
+            for server in servers {
+                if let Ok(tools) = crate::mcp::list_tools(&server) {
+                    let tools = tools.into_iter().filter(|item| {
+                        let target = json!({"serverId":server.id,"tool":item["name"]});
+                        database.ensure_companion_tool_granted(run_id, "call_mcp_tool", Some(&target)).is_ok()
+                            && (query.is_empty()
+                                || server.name.to_lowercase().contains(&query)
+                                || item.to_string().to_lowercase().contains(&query))
+                    }).collect();
+                    let tools = mcp_catalog::compact_tools(tools);
+                    if !tools.is_empty() {
+                        items.push(json!({"serverId":server.id,"serverName":server.name,"tools":tools}));
+                    }
+                }
+            }
+            if items.is_empty() && !query.is_empty() {
+                Ok(json!({"servers":items,"searchSuggestion":"Retry list_mcp_tools without a query to list the authorized connector tools."}))
+            } else {
+                Ok(json!({"servers":items}))
+            }
+        } else {
+            if mode == approval_policy::AccessMode::ReadOnly
+                || companion_run_permission_mode(database, conversation_id, run_id)? == "read_only"
+            {
+                return Err("[permission.read_only] 只读模式下不能调用外部连接器。".into());
+            }
+            let server_id = input["serverId"].as_str().ok_or("serverId is required")?;
+            let remote_tool = input["tool"].as_str().ok_or("MCP tool name is required")?;
+            let arguments = input["arguments"].as_object().ok_or("MCP arguments must be an object")?;
+            database.ensure_companion_tool_granted(run_id, tool, Some(input))?;
+            let server = servers.into_iter().find(|server| server.id == server_id)
+                .ok_or("[tool.permission_denied] 连接器未启用或不在当前会话的范围内。")?;
+            let fingerprint = crate::mcp::server_fingerprint(&server);
+            ensure_plan_approved_before_mutation(database, conversation_id, tool, input)?;
+            let call = match create_fresh_host_tool_call(database, run_id, call_id, tool, input, "pending", true)? {
+                HostToolCallExecution::Execute(call) => call,
+                HostToolCallExecution::Replay(response) => return bridge_host_result(response),
+            };
+            (|| {
+                let summary = format!("调用 MCP 工具 {} / {remote_tool}", server.name);
+                let request = json!({
+                    "tool": tool, "title": "调用 MCP 工具", "summary": summary,
+                    "target": format!("{} / {remote_tool}", server.name),
+                    "serverId": server_id, "serverName": server.name,
+                    "mcpTool": remote_tool, "arguments": arguments,
+                    "availableDecisions": ["allow_once", "deny"]
+                });
+                let approval = database.create_approval(&call.id, &summary, &request)?;
+                if !wait_external_bridge_approval(&self.app, database, runtime, conversation_id, run_id, call_id, &approval)? {
+                    return Err("[permission.denied] 用户拒绝了此连接器操作。".into());
+                }
+                claim_approved_tool_call_for_execution(database, run_id, call_id)?;
+                let enabled = database.get_mcp_server(server_id)?
+                    .filter(|current| current.enabled && crate::mcp::server_fingerprint(current) == fingerprint)
+                    .ok_or("[tool.permission_denied] 连接器配置已变更，请重新发起操作。")?;
+                let result = crate::mcp::call_tool(&enabled, remote_tool, &input["arguments"])?;
+                let is_error = result["isError"] == true;
+                let content = result["content"].clone();
+                let mut envelope = connector_provenance::mcp_result_envelope(tool, input, content, result);
+                envelope["isError"] = json!(is_error);
+                Ok(envelope)
+            })()
+        };
+        if tool == "list_mcp_tools" {
+            return outcome;
+        }
+        bridge_host_result(finalize_host_tool_execution(
+            database, run_id, call_id, tool, input, hooks.annotations, outcome,
+        )?)
+    }
+
+    pub(crate) fn external_companion(
+        &self,
+        context: &fox_agent_backend::fox_mcp::ToolCallContext,
+        run_id: &str,
+        tool: &str,
+        input: &Value,
+        mode: approval_policy::AccessMode,
+        needs_approval: bool,
+        runtime: &crate::external_backend::DesktopRuntime,
+    ) -> Result<Value, String> {
+        let database = &self.database;
+        let conversation_id = &context.conversation_id;
+        let call_id = &context.tool_call_id;
+        ensure_expert_tool_allowed(database, conversation_id, tool)?;
+        database.ensure_companion_tool_granted(run_id, tool, Some(input))?;
+        if tool == "companion_coordinate" {
+            if mode == approval_policy::AccessMode::ReadOnly
+                || companion_run_permission_mode(database, conversation_id, run_id)? == "read_only"
+            {
+                return Err("[permission.read_only] 只读模式下不能向伙伴派活。".into());
+            }
+            ensure_plan_approved_before_mutation(database, conversation_id, tool, input)?;
+        }
+        let hooks = crate::lifecycle_hooks::before_tool(database, run_id, call_id, tool, input)?;
+        if let Some(reason) = &hooks.blocked {
+            return Err(format!("[hook.blocked] {reason}"));
+        }
+        let approval = needs_approval || hooks.requires_approval;
+        let call = match create_fresh_host_tool_call(
+            database, run_id, call_id, tool, input, if approval { "pending" } else { "running" }, approval,
+        )? {
+            HostToolCallExecution::Execute(call) => call,
+            HostToolCallExecution::Replay(response) => return bridge_host_result(response),
+        };
+        let outcome = (|| {
+            if approval {
+                let summary = hooks.approval_reason.as_deref().unwrap_or("允许本次伙伴操作");
+                let review = database.create_approval(&call.id, summary, &json!({
+                    "tool": tool, "title": "伙伴协作", "summary": summary,
+                    "arguments": input, "availableDecisions": ["allow_once", "deny"]
+                }))?;
+                if !wait_external_bridge_approval(&self.app, database, runtime, conversation_id, run_id, call_id, &review)? {
+                    return Err("[permission.denied] 用户拒绝了本次伙伴操作。".into());
+                }
+                claim_approved_tool_call_for_execution(database, run_id, call_id)?;
+            }
+            companion_coordination::execute(&self.app, database, conversation_id, run_id, tool, input.clone())
+        })();
+        bridge_host_result(finalize_host_tool_execution(
+            database, run_id, call_id, tool, input, hooks.annotations, outcome,
+        )?)
+    }
+}
+
+fn bridge_host_result(response: Value) -> Result<Value, String> {
+    let error = response["error"].as_str().unwrap_or("连接器调用失败。").to_owned();
+    let is_error = response["isError"] == true;
+    let result = response.get("result").cloned().unwrap_or(response);
+    if is_error || result["isError"] == true {
+        let text = result["content"].as_array().into_iter().flatten()
+            .filter_map(|item| item["text"].as_str()).collect::<Vec<_>>().join("\n");
+        return Err(format!("[mcp.tool_error] {}", if text.is_empty() { error } else { text }));
+    }
+    Ok(result)
+}
+
+fn wait_external_bridge_approval(
+    app: &AppHandle,
+    database: &Database,
+    runtime: &crate::external_backend::DesktopRuntime,
+    conversation_id: &str,
+    run_id: &str,
+    tool_call_id: &str,
+    approval: &crate::database::ApprovalRecord,
+) -> Result<bool, String> {
+    use fox_agent_backend::external::ExternalSink;
+    runtime.sink().emit(run_id, conversation_id, json!({
+        "type": "run.waiting_approval", "approvalId": approval.id, "toolCallId": tool_call_id
+    }))?;
+    emit_approval_event(app, database, "fox://approval-requested", approval)?;
+    loop {
+        if runtime.active_run_of(conversation_id).as_deref() != Some(run_id) {
+            let _ = database.resolve_approval(&approval.id, ApprovalDecision::Deny);
+            return Err("工具调用已取消。".into());
+        }
+        match database.approval_record(&approval.id)?.status.as_str() {
+            "approved" => return Ok(true),
+            "pending" => std::thread::sleep(Duration::from_millis(120)),
+            _ => return Ok(false),
+        }
+    }
 }
 
 fn execute_capability_call(
@@ -13437,7 +13749,6 @@ fn execute_capability_call(
         &crate::external_backend::DesktopRuntime,
     )>,
 ) -> Result<Value, String> {
-    use fox_agent_backend::external::ExternalSink;
     ensure_expert_tool_allowed(database, conversation_id, tool)?;
     if let Some(response) =
         inspect_existing_host_tool_call(database, run_id, tool_call_id, tool, &input)?
@@ -13530,21 +13841,7 @@ fn execute_capability_call(
             let approval =
                 database.create_approval(&tool_call.id, &prepared.preview().summary, &request)?;
             let approved = if let Some((_, runtime)) = external {
-                runtime.sink().emit(run_id, conversation_id, json!({
-                    "type": "run.waiting_approval", "approvalId": approval.id, "toolCallId": tool_call_id
-                }))?;
-                emit_approval_event(app, database, "fox://approval-requested", &approval)?;
-                loop {
-                    if runtime.active_run_of(conversation_id).as_deref() != Some(run_id) {
-                        let _ = database.resolve_approval(&approval.id, ApprovalDecision::Deny);
-                        return Err("搜索已取消。".into());
-                    }
-                    match database.approval_record(&approval.id)?.status.as_str() {
-                        "approved" => break true,
-                        "pending" => std::thread::sleep(Duration::from_millis(120)),
-                        _ => break false,
-                    }
-                }
+                wait_external_bridge_approval(app, database, runtime, conversation_id, run_id, tool_call_id, &approval)?
             } else {
                 let (sender, receiver) = mpsc::channel();
                 state

@@ -208,6 +208,8 @@ test('runs the real Pi Agent loop through Fox JSONL with a faux provider', async
   const contextUsage = runtime.messages.find(message => message.runId === 'run-1' && message.payload?.type === 'context.usage')
   assert.equal(contextUsage?.payload?.limitTokens, 32768)
   assert.ok(contextUsage.payload.usedTokens > 0)
+  assert.ok(contextUsage.payload.systemTokens > 0)
+  assert.ok(contextUsage.payload.toolsTokens > 0)
 })
 
 test('native Pi keeps Host delivery placement when applying frozen permissions', async context => {
@@ -236,6 +238,64 @@ test('native Pi keeps Host delivery placement when applying frozen permissions',
   const transcript = await readFile(created.payload.nativeSessionPath, 'utf8')
   assert.match(transcript, /fox\/placement-results/u)
   assert.match(transcript, /reports\/report\.csv/u)
+})
+
+test('native Pi scopes compute guidance across turns and respects the current tool catalog', async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-native-data-guidance-'))
+  const runtime = startRuntime()
+  registerRuntimeCleanup(context, runtime, directory)
+  const modelService = {
+    baseUrl: 'faux://data-guidance', modelId: 'data-test', apiType: 'faux',
+    contextWindow: 32768, maxOutputTokens: 512,
+  }
+  const init = runtime.send('initialize', { payload: { modelService } })
+  await runtime.waitFor(message => message.requestId === init.id && message.type === 'ready')
+  const identity = { conversationId: 'data-chat', runtimeSessionId: 'data-session' }
+  const create = runtime.send('create_session', { ...identity, payload: {
+    sessionFormat: 'pi-native', cwd: directory, sessionDir: join(directory, 'sessions'),
+  } })
+  await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+  const hashes = new Set()
+  const salesResult = { result: { value: 3 } }
+  for (const [runId, text, allowedTools, detailed] of [
+    ['project-input', '比较 input/sales.xlsx 的各组销量', ['attachment_compute'], true],
+    ['followup', '那各占总体的多少？', ['attachment_compute'], false],
+    ['switch-topic', '帮我写一封会议邀请', ['attachment_compute'], false],
+    ['uploaded-table', '看看这里面有几组数据', ['attachment_compute'], true],
+    ['child-compute', '核对 input/sales.xlsx', ['attachment_compute'], true],
+    ['child-read', '读取 input/sales.xlsx', ['read'], false],
+  ]) {
+    runtime.send('prompt', { ...identity, runId, payload: {
+      text, assistantPackage: { packageManifest: { allowedTools } },
+      attachmentExtensions: runId === 'uploaded-table' ? ['ODS'] : [],
+      modelService: { ...modelService, fauxResponses: runId === 'project-input' ? [
+        { content: [{ type: 'toolCall', id: 'sales', name: 'attachment_compute',
+          arguments: { projectPaths: ['input/sales.xlsx'], code: 'return attachments[0].sheets[0].rows.length' } }], stopReason: 'toolUse' },
+        '已读取所选数据。',
+      ] : ['收到。'] },
+      runContext: { runRole: runId.startsWith('child-') ? 'child_worker' : 'user_facing_lead' },
+      controlBinding: nativeProjectBinding(identity.conversationId, runId, directory),
+    } })
+    if (runId === 'project-input') {
+      const batch = await runtime.waitFor(message => message.type === 'tool_batch.register' && message.runId === runId)
+      runtime.respond(batch, 'tool_batch.registered', { batchId: 'sales-batch', registeredCalls: 1 })
+      const call = await runtime.waitFor(message => message.type === 'tool_call.execute' && message.payload?.callId === 'sales')
+      runtime.respond(call, 'tool.execute_completed', salesResult)
+    } else {
+      const facts = await runtime.waitFor(message => message.type === 'tool_call.facts' && message.runId === runId)
+      runtime.respond(facts, 'tool_call.facts_result', { contextGeneration: 1, blocked: false,
+        facts: [{ callId: 'sales', state: 'committed', response: salesResult }],
+      })
+    }
+    await runtime.waitFor(message => message.runId === runId && message.type === 'run_released')
+    assert.ok(runtime.messages.some(message => message.runId === runId && message.payload?.type === 'run.completed'), runId)
+    const { payload } = runtime.messages.find(message => message.runId === runId && message.payload?.type === 'run.request_snapshot')
+    assert.equal(payload.toolNames.includes('attachment_compute'), allowedTools.includes('attachment_compute'), runId)
+    assert.equal(payload.promptDiagnostics.fragments.some(({ id }) => id === 'data_guidance'), detailed, runId)
+    assert.equal(payload.promptDiagnostics.fragments.some(({ id }) => id === 'data_continuation'), runId === 'followup', runId)
+    hashes.add(payload.stablePromptHash)
+  }
+  assert.equal(hashes.size, 1)
 })
 
 test('native Pi keeps fresh collaboration and persisted card states in each current turn', async context => {
@@ -415,7 +475,10 @@ test('real Pi runtime dispatches an allowed partner handoff and rejects writes d
     const identity = { conversationId: runId + '-chat', runtimeSessionId: runId + '-session' }
     const create = runtime.send('create_session', { ...identity, payload: { sessionPath: join(directory, runId + '.json') } })
     await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
-    runtime.send('prompt', { ...identity, runId, payload: { text, projectContext: { projectRoot }, companionCoordination } })
+    runtime.send('prompt', { ...identity, runId, payload: {
+      text, projectContext: { projectRoot }, companionCoordination,
+      companionContext: { role: 'owner', displayName: '资料伙伴', canUpdateProfile: true, allowedTools: companionCoordination.allowedTools, notes: [], topics: [], snippets: [], usedChars: 0 },
+    } })
   }
   await begin('send', '@资料助手核对报表', {
     allowedTools: ['companion_coordinate', 'companion_assignment_status'],
@@ -433,6 +496,7 @@ test('real Pi runtime dispatches an allowed partner handoff and rejects writes d
   }, directory)
   const snapshot = await runtime.waitFor(message => message.runId === 'consult' && message.payload?.type === 'run.request_snapshot')
   assert.deepEqual(snapshot.payload.effectiveToolNames, [])
+  assert.ok(snapshot.payload.excludedTools.some(({ name, reason }) => name === 'write_file' && reason === 'companion_scope'))
   assert.ok(snapshot.payload.promptDiagnostics.fragments.some(({ id, authority }) => id === 'companion_assignment' && authority === 'untrusted'))
   await runtime.waitFor(message => message.runId === 'consult' && message.payload?.type === 'run.completed')
   assert.ok(!runtime.messages.some(message => message.runId === 'consult' && /^tool\.(execute|preflight)$/.test(message.type)))

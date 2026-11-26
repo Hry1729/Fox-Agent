@@ -32,6 +32,7 @@ pub const PI_ACP_PACKAGE: &str = "pi-acp";
 pub const PI_ACP_VERSION: &str = crate::launch::PI_ACP_VERSION;
 /// The pi binary the measurements were taken with (Fox's existing lock).
 pub const PI_VERSION: &str = "1.4.0";
+pub const NATIVE_RPC_AGENT: &str = "fox-pi-rpc";
 /// pi-acp README: "`pi` v0.81.0+ installed and available on your PATH".
 pub const PI_MIN_VERSION_FOR_PI_ACP: &str = "0.81.0";
 
@@ -71,7 +72,7 @@ fn session_capabilities(initialize_response: &Value) -> SessionCapabilities {
         // (position n)"), not delivered as pi `steer`. `/steering` only sets pi's
         // steering mode. So steer is unsupported over ACP; the Host must queue
         // or cancel-and-resend and say so (plan 6.7).
-        steer: false,
+        steer: native_rpc(initialize_response) && crate::backends::codex::steer_supported(initialize_response),
     }
 }
 
@@ -176,16 +177,22 @@ pub fn check_initialize(initialize_response: &Value) -> Result<(), String> {
     let info = initialize_response.get("agentInfo").unwrap_or(&Value::Null);
     let name = info.get("name").and_then(Value::as_str).unwrap_or("");
     let version = info.get("version").and_then(Value::as_str).unwrap_or("");
-    if name != PI_ACP_PACKAGE {
-        return Err(format!("expected agent {PI_ACP_PACKAGE}, got {name:?}"));
-    }
-    if version != PI_ACP_VERSION {
-        return Err(format!("pi-acp {version} is not the validated version {PI_ACP_VERSION}"));
+    let pin = match name {
+        NATIVE_RPC_AGENT => PI_VERSION,
+        PI_ACP_PACKAGE => PI_ACP_VERSION,
+        _ => return Err(format!("unexpected Pi adapter {name:?}")),
+    };
+    if version != pin {
+        return Err(format!("{name} {version} is not the validated version {pin}"));
     }
     match initialize_response.get("protocolVersion").and_then(Value::as_u64) {
         Some(1) => Ok(()),
         other => Err(format!("unsupported ACP protocol version {other:?}")),
     }
+}
+
+pub fn native_rpc(initialize_response: &Value) -> bool {
+    initialize_response.pointer("/agentInfo/name").and_then(Value::as_str) == Some(NATIVE_RPC_AGENT)
 }
 
 /// A tool approval raised by `fox-approval-gate.ts`, decoded from the ACP

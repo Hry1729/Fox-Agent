@@ -226,6 +226,21 @@ test('上下文分类合并安全余量，隐藏零追加输入，保留剩余�
   expect(view.getByText('待追加输入')).toBeDefined()
 })
 
+test('实时上下文占用区分消息、工具定义和系统提示词', () => {
+  const view = render(<SummaryContextBudget budget={null} runtime={{
+    usedTokens: 20000, limitTokens: 100000, source: 'session', toolsTokens: 4000, systemTokens: 5000,
+  }} />)
+  const grid = view.getByRole('meter')
+  expect(grid.getAttribute('aria-valuenow')).toBe('20')
+  for (const group of ['history', 'tools', 'system', 'free']) {
+    expect(grid.querySelector(`.is-${group}`)).not.toBeNull()
+  }
+  expect(view.getByText('消息与其他上下文').parentElement?.textContent).toContain('11K')
+  expect(view.getByText('工具定义').parentElement?.querySelector('b')?.getAttribute('title')).toBe('4,000')
+  expect(view.getByText('系统提示词').parentElement?.querySelector('b')?.getAttribute('title')).toBe('5,000')
+  expect(view.getByText(/分类占用为估算/)).toBeDefined()
+})
+
 test('未保存页面状态时从摘要开始，已有页面状态继续恢复', () => {
   const priorMode = localStorage.getItem(layoutStorage.rightMode)
   const priorTabs = localStorage.getItem(layoutStorage.rightTabs)

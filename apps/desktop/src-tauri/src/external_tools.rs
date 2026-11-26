@@ -37,12 +37,11 @@ pub fn external_access_mode(backend: AgentBackend, native_mode: &str) -> AccessM
     }
 }
 
-/// The engine subject of a bridge tool: every bridge tool reads (knowledge)
-/// or declares (`present_files` records existing files, `ask_user` shows a
-/// card); none writes or runs anything.
+/// Connector execution uses the Host's per-call approval path.
 pub fn bridge_subject(tool: &str) -> Option<ToolSubject> {
     match tool {
         "fox_web_search" => Some(ToolSubject::Network),
+        "call_mcp_tool" | "companion_coordinate" => None,
         name if fox_agent_backend::fox_mcp::TOOL_NAMES.contains(&name) => Some(ToolSubject::Read),
         _ => None,
     }
@@ -177,6 +176,19 @@ impl FoxToolHost for DesktopFoxTools {
                 false,
                 &Default::default(),
             );
+            if fox_agent_backend::fox_mcp::WORK_TOOL_NAMES.contains(&tool.as_str()) {
+                let host = state.runtime_host.clone();
+                let mode = external_access_mode(context.backend, native_mode);
+                return tauri::async_runtime::spawn_blocking(move || {
+                    host.external_work_tool(
+                        &context.conversation_id, &run_id, &context.tool_call_id, &tool, &arguments,
+                        mode,
+                    )
+                })
+                .await
+                .map_err(|error| ToolError::new("tool.failed", error.to_string()))?
+                .map_err(split_code);
+            }
             if tool == "fox_web_search" {
                 let mode = runtime
                     .session_info(&context.conversation_id)
@@ -198,6 +210,28 @@ impl FoxToolHost for DesktopFoxTools {
                 .map_err(|error| ToolError::new("tool.failed", error.to_string()))?
                 .map_err(split_code);
             }
+            if matches!(tool.as_str(), "list_mcp_tools" | "call_mcp_tool") {
+                let mode = runtime
+                    .session_info(&context.conversation_id)
+                    .and_then(|info| info.native_mode)
+                    .ok_or_else(|| ToolError::new("fox_mcp.no_active_run", "连接器会话已结束。"))?;
+                let host = state.runtime_host.clone();
+                let mode = external_access_mode(context.backend, &mode);
+                return tauri::async_runtime::spawn_blocking(move || {
+                    host.external_connector(
+                        &context.conversation_id,
+                        &run_id,
+                        &context.tool_call_id,
+                        &tool,
+                        &arguments,
+                        mode,
+                        &runtime,
+                    )
+                })
+                .await
+                .map_err(|error| ToolError::new("tool.failed", error.to_string()))?
+                .map_err(split_code);
+            }
             let project_root = database
                 .external_conversation_context(&context.conversation_id)
                 .map_err(|error| ToolError::new("storage.operation_failed", error))?
@@ -209,6 +243,30 @@ impl FoxToolHost for DesktopFoxTools {
             let rules = database
                 .policy_rules_for_conversation(&context.conversation_id)
                 .map_err(|error| ToolError::new("storage.operation_failed", error))?;
+            if crate::companion_workspace::is_companion_peer_tool(&tool) {
+                let mode = external_access_mode(context.backend, native_mode);
+                let subject = if tool == "companion_coordinate" { ToolSubject::Other } else { ToolSubject::Read };
+                let home = approval_policy::host_home();
+                let decision = approval_policy::decide(&approval_policy::PolicyRequest {
+                    tool: &tool,
+                    subject: &subject,
+                    mode,
+                    project_root: project_root.as_deref(),
+                    home: home.as_deref(),
+                    rules: &rules,
+                });
+                let needs_approval = match decision.verdict {
+                    Verdict::Allow => false,
+                    Verdict::Ask => true,
+                    Verdict::Deny { code, message } => return Err(ToolError::new(code, message)),
+                };
+                let host = state.runtime_host.clone();
+                return tauri::async_runtime::spawn_blocking(move || {
+                    host.external_companion(&context, &run_id, &tool, &arguments, mode, needs_approval, &runtime)
+                }).await
+                    .map_err(|error| ToolError::new("tool.failed", error.to_string()))?
+                    .map_err(split_code);
+            }
             decide_bridge_call(
                 context.backend,
                 native_mode,
@@ -248,6 +306,7 @@ impl FoxToolHost for DesktopFoxTools {
                 &context.tool_call_id,
                 &tool,
                 &arguments,
+                |event| runtime.sink().emit(&run_id, &context.conversation_id, event),
             )
             .await
             .map_err(split_code)
@@ -313,7 +372,7 @@ mod tests {
         ] {
             for tool in fox_agent_backend::fox_mcp::TOOL_NAMES
                 .into_iter()
-                .filter(|tool| *tool != "fox_web_search")
+                .filter(|tool| !matches!(*tool, "fox_web_search" | "call_mcp_tool" | "companion_coordinate"))
             {
                 assert_eq!(
                     decide_bridge_call(AgentBackend::Pi, mode, tool, None, &rules),

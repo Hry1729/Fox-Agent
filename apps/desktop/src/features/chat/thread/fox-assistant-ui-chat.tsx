@@ -1,7 +1,6 @@
 import { AssistantRuntimeProvider } from '@assistant-ui/react'
 import type { ApprovalDecision, ArtifactRecord, ConversationMessage } from '../../conversations/model/types'
 import { useContacts } from '@/features/companions/context'
-import { splitAssistantContent } from '../timeline/fox-assistant-content'
 import { useDesktopConversation } from '../../conversations/hooks/use-desktop-conversation'
 import { type RuntimeSource } from '../timeline/fox-runtime-process-model'
 import type { GoalProgressData } from '../hooks/use-goal-progress'
@@ -68,8 +67,7 @@ export default function AssistantUiChat({ statusBar, approvalSlot, conversation,
     }
     return grouped
   }, [events])
-  // Committed contact bubbles are the authority for this window. Live preview
-  // bubbles keep rendering from run events until the run settles.
+  // Committed contact bubbles are the authority for this window.
   const contactBubblesByRun = useMemo(() => {
     const grouped = new Map<string, NonNullable<typeof detail>['bubbles']>()
     for (const bubble of detail?.bubbles ?? []) {
@@ -80,30 +78,15 @@ export default function AssistantUiChat({ statusBar, approvalSlot, conversation,
       else grouped.set(key, [bubble])
     }
     return grouped as Map<string, import('../../conversations/model/types').ContactBubbleRecord[]>
-  }, [detail])
-  // Live Kernel previews already carry the durable bubble identity, so the
-  // settled row (and later the committed Rust bubble) never remounts them.
-  const contactKernelPreviewsByRun = useMemo(() => {
-    const grouped = new Map<string, { id: string; text: string; createdAt: number }[]>()
-    for (const message of detail?.messages ?? []) {
-      if (!message.kernelPreview || !message.runId || message.role !== 'assistant') continue
-      const text = splitAssistantContent(message.content).answer
-      if (!text.trim()) continue
-      const entry = { id: `${message.runId}:kernel:${message.kernelPreview.checkpointSeq}:response`, text, createdAt: message.createdAt }
-      const bucket = grouped.get(message.runId)
-      if (bucket) bucket.push(entry)
-      else grouped.set(message.runId, [entry])
-    }
-    return grouped
-  }, [detail])
+  }, [detail?.bubbles])
   // C07: a user message is markable only once its own bubble is committed; an
   // attachment-only message has no bubble at all.
-  const contactUserBubbleIds = useMemo(() => new Set((detail?.bubbles ?? []).filter((bubble) => bubble.author === 'user').map((bubble) => bubble.id)), [detail])
+  const contactUserBubbleIds = useMemo(() => new Set((detail?.bubbles ?? []).filter((bubble) => bubble.author === 'user').map((bubble) => bubble.id)), [detail?.bubbles])
   // C07: the user's own marks and the quotes of the loaded window, keyed by the
   // durable identity they address (a user bubble's id is its message id).
-  const contactBubbleMarks = useMemo(() => new Map((detail?.bubbleMarks ?? []).map((mark) => [mark.bubbleId, mark])), [detail])
-  const contactMessageQuotes = useMemo(() => new Map((detail?.messageQuotes ?? []).map((quote) => [quote.messageId, quote])), [detail])
-  const attachments = useMemo(() => detail?.attachments ?? [], [detail])
+  const contactBubbleMarks = useMemo(() => new Map((detail?.bubbleMarks ?? []).map((mark) => [mark.bubbleId, mark])), [detail?.bubbleMarks])
+  const contactMessageQuotes = useMemo(() => new Map((detail?.messageQuotes ?? []).map((quote) => [quote.messageId, quote])), [detail?.messageQuotes])
+  const attachments = useMemo(() => detail?.attachments ?? [], [detail?.attachments])
   const attachmentNames = useMemo(() => new Map(attachments.map((attachment) => [attachment.id, attachment.displayName])), [attachments])
   const attachmentsByMessage = useMemo(() => {
     const grouped = new Map<string, typeof attachments>()
@@ -131,7 +114,6 @@ export default function AssistantUiChat({ statusBar, approvalSlot, conversation,
     events,
     eventsByRun,
     contactBubblesByRun,
-    contactKernelPreviewsByRun,
     contactUserBubbleIds,
     contactBubbleMarks,
     contactMessageQuotes,
@@ -144,7 +126,7 @@ export default function AssistantUiChat({ statusBar, approvalSlot, conversation,
     onOpenArtifact,
     onOpenFileInSidebar,
     onRevealFileInExplorer,
-  }), [companion?.privateChat, companion?.current?.conversationId, detail, onResolveApproval, onSubmitQuestion, events, eventsByRun, contactBubblesByRun, contactKernelPreviewsByRun, contactUserBubbleIds, contactBubbleMarks, contactMessageQuotes, toolCalls, attachmentNames, attachmentsByMessage, timelineContext.knowledgeBindings, timelineContext.onOpenSource, groupHelpers, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer])
+  }), [companion?.privateChat, companion?.current?.conversationId, detail, onResolveApproval, onSubmitQuestion, events, eventsByRun, contactBubblesByRun, contactUserBubbleIds, contactBubbleMarks, contactMessageQuotes, toolCalls, attachmentNames, attachmentsByMessage, timelineContext.knowledgeBindings, timelineContext.onOpenSource, groupHelpers, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer])
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <FoxThread statusBar={statusBar} approvalSlot={approvalSlot}

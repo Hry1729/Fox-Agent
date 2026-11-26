@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/react'
 import { clearMocks, mockIPC } from '@tauri-apps/api/mocks'
+import { CompanionSchedules } from '../src/features/companions/tasks'
 import { CompanionSidebar, WorkCompanionSidebar } from '../src/features/companions/sidebar'
 import { ContactsContext, type ContactsContextValue } from '../src/features/companions/context'
 import type { Companion } from '../src/features/companions/api'
@@ -31,6 +32,7 @@ beforeEach(() => {
     if (command === 'companion_create_blank') return payload.displayName === '已有伙伴'
       ? { ok: false, error: { code: 'companion.name_conflict', message: '已有伙伴使用这个名字', retryable: false } }
       : { ok: true, data: companion('new', String(payload.displayName), { avatarRef: String(payload.avatarRef) }) }
+    if (command === 'companion_task_create') return { ok: true, data: null }
     if (command === 'companion_open') return { ok: true, data: records.find(item => item.id === payload.companionId) }
     if (['companion_set_work_shortcuts', 'companion_restore', 'companion_archive', 'companion_set_pinned', 'companion_set_pinned_order', 'companion_update_profile',
       'companion_mark_read', 'companion_mark_unread'].includes(command)) return { ok: true, data: null }
@@ -211,6 +213,36 @@ describe('伙伴页面侧栏', () => {
     expect(opened).toHaveLength(0)
   })
 
+  test('伙伴全局入口显示实际计数，并打开各自历史路由', () => {
+    const opened: Companion[] = []
+    const routes: string[] = []
+    const items = [fox, companion('reader', '资料伙伴', { pendingActionCount: 2 })]
+    const view = render(<ContactsContext.Provider value={context(items, opened, { count: 0 })}>
+      <CompanionSidebar view="companion-inbox" enabledTaskCount={3} navigate={route => routes.push(route)} />
+    </ContactsContext.Provider>)
+    expect(view.getByRole('button', { name: '待我处理，2 项' }).getAttribute('aria-current')).toBe('page')
+    fireEvent.click(view.getByRole('button', { name: '定时任务，3 项' }))
+    fireEvent.click(view.getByRole('button', { name: '全部伙伴' }))
+    expect(routes).toEqual(['companion-schedules', 'companion-overview'])
+  })
+
+  test('定时任务弹窗按所选伙伴提交周五的时间与任务目标', async () => {
+    const view = render(<CompanionSchedules companions={[fox, companion('writer', '写作伙伴')]} navigate={() => {}}
+      schedules={{ entries: [], errors: [], loaded: true, enabledCount: 0, refresh: async () => {} }} />)
+    fireEvent.click(view.getByRole('button', { name: '新建定时任务' }))
+    const modal = within(await view.findByRole('dialog', { name: '新建定时任务' }))
+    fireEvent.click(modal.getByRole('radio', { name: '写作伙伴' }))
+    fireEvent.change(modal.getByRole('textbox', { name: '任务名称' }), { target: { value: '汇总周报' } })
+    fireEvent.click(modal.getByRole('button', { name: '每周五 17:00' }))
+    fireEvent.change(modal.getByRole('textbox', { name: '任务目标' }), { target: { value: '整理本周已完成事项' } })
+    fireEvent.click(modal.getByRole('button', { name: '创建' }))
+    await waitFor(() => expect(calls).toContainEqual({ command: 'companion_task_create', args: {
+      companionId: 'writer', name: '汇总周报', objective: '整理本周已完成事项', enabled: true,
+      schedule: { kind: 'weekly', weekdays: [5], localTime: '17:00', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
+    } }))
+    await waitFor(() => expect(view.queryByRole('dialog')).toBeNull())
+  })
+
   test('确认后一次提交自定义头像和名称，重名时保留选择', async () => {
     const { view, opened } = renderSidebar([fox], 'companions')
     const menu = await openMenu(view.getByRole('button', { name: '新建伙伴' }))
@@ -223,12 +255,12 @@ describe('伙伴页面侧栏', () => {
     const avatarRef = avatar.parentElement!.querySelector('img')!.getAttribute('src')
     fireEvent.click(avatar)
     fireEvent.change(name, { target: { value: '已有伙伴' } })
-    fireEvent.click(dialog.getByRole('button', { name: '创建伙伴' }))
+    fireEvent.click(dialog.getByRole('button', { name: '创建' }))
     expect((await dialog.findByRole('alert')).textContent).toBe('已有伙伴使用这个名字')
     expect(name.value).toBe('已有伙伴')
     expect(avatar.checked).toBe(true)
     fireEvent.change(name, { target: { value: '归纳伙伴' } })
-    fireEvent.click(dialog.getByRole('button', { name: '创建伙伴' }))
+    fireEvent.click(dialog.getByRole('button', { name: '创建' }))
     await waitFor(() => expect(opened.map(item => item.displayName)).toEqual(['归纳伙伴']))
     expect(calls.filter(item => item.command === 'companion_create_blank').at(-1)?.args).toEqual({ displayName: '归纳伙伴', avatarRef })
     expect(view.queryByRole('dialog')).toBeNull()
@@ -241,11 +273,11 @@ describe('伙伴页面侧栏', () => {
     fireEvent.click(within(menu).getByRole('menuitem', { name: '从专家创建' }))
     const dialog = within(await view.findByRole('dialog', { name: '从专家创建' }))
     await dialog.findByRole('button', { name: '选择汇报材料专家' })
-    expect((dialog.getByRole('button', { name: '确认创建' }) as HTMLButtonElement).disabled).toBe(true)
-    fireEvent.change(dialog.getByRole('textbox', { name: '搜索专家' }), { target: { value: '周报' } })
+    expect((dialog.getByRole('button', { name: '创建' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.change(dialog.getByRole('searchbox', { name: '搜索专家' }), { target: { value: '周报' } })
     expect(dialog.queryByRole('button', { name: '选择代码审查专家' })).toBeNull()
     fireEvent.click(dialog.getByRole('button', { name: '选择汇报材料专家' }))
-    fireEvent.click(dialog.getByRole('button', { name: '确认创建' }))
+    fireEvent.click(dialog.getByRole('button', { name: '创建' }))
     await waitFor(() => expect(opened.map(item => item.id)).toEqual(['from-expert']))
     expect(calls).toContainEqual({ command:'companion_add_from_expert', args:{ expertId:'writer' } })
   })

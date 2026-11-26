@@ -17,6 +17,14 @@ rl.on('line', line => {
     send({ id: msg.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true, sessionCapabilities: { close: {} } }, authMethods: [] } })
   } else if (msg.method === 'session/new') {
     send({ id: msg.id, result: { sessionId: 'mock-session' } })
+  } else if (msg.method === 'session/resume') {
+    const server = msg.params.mcpServers?.[0]
+    if (msg.params.sessionId === 'stored-session' && server?.name === 'fox_host_business_tools' &&
+        server.env?.find(entry => entry.name === 'FOX_MCP_TOKEN')?.value === 'fresh-token') {
+      send({ id: msg.id, result: {} })
+    } else {
+      send({ id: msg.id, error: { code: -32602, message: 'missing restored session or current MCP server' } })
+    }
   } else if (msg.method === 'session/prompt') {
     promptId = msg.id
     const leaked = process.env.FOX_TEST_BACKEND_SECRET_TOKEN ? 'leaked' : 'clean'
@@ -26,6 +34,13 @@ rl.on('line', line => {
     const id = nextId++
     waiting.set(id, 'permission')
     send({ id, method: 'session/request_permission', params: { sessionId: 'mock-session', toolCall: { toolCallId: 't1', title: 'run npm test' }, options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }, { optionId: 'reject', name: 'Reject', kind: 'reject_once' }] } })
+  } else if (msg.method === '_session/steering') {
+    const text = msg.params?.prompt?.[0]?.text
+    const injected = msg.params?.sessionId === 'mock-session' && waiting.size > 0 && text === 'corrected target'
+    send({ id: msg.id, result: { outcome: injected ? 'injected' : 'failed' } })
+    if (injected) {
+      send({ method: 'session/update', params: { sessionId: 'mock-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } } } })
+    }
   } else if (msg.method === 'session/cancel') {
     send({ method: 'session/update', params: { sessionId: 'mock-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'cancel-received' } } } })
     if (lateMode) {

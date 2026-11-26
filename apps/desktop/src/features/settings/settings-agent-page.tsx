@@ -150,8 +150,6 @@ export function AgentSettingsPage({ sidebarCollapsed, onSidebar, navigate, secti
         </div></div>
       </SettingsGroup>
       {desktopRuntimeAvailable && <AgentServiceSettings onOpenModelSettings={() => navigate('settings-models')} />}
-      <p className="fox-settings-note"><Info />专家的内容、技能和资料库在专家中心管理。项目权限位于「权限与安全」，新伙伴默认值位于「伙伴」。</p>
-      <Button variant="ghost" className="fox-settings-page-link" onClick={() => navigate('agents')}>打开专家中心<ChevronRight /></Button>
     </SettingsPageLayout>
 
     <Sheet open={assistantDraft !== null} onOpenChange={open => { if (!open) setAssistantDraft(null) }}>

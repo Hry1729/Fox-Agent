@@ -402,5 +402,8 @@
 }
 
 .dark .fox-composer-wrap.is-new-conversation .fox-prompt-shell:not(.is-decision) { background: var(--shell); }
+:is([data-color-theme='graphite'], [data-color-theme='mist']) .fox-composer-wrap.is-new-conversation .fox-prompt-shell:not(.is-decision) {
+  background: var(--fox-sidebar-surface, var(--shell));
+}
 .fox-composer-wrap.is-new-conversation .fox-prompt-textarea { padding: var(--fox-space-m) var(--fox-space-m) 0 !important; }
 .fox-composer-wrap.is-history .fox-prompt-textarea { padding-block: calc(var(--fox-space-xs) + var(--fox-space-micro)) var(--fox-space-micro) !important; }

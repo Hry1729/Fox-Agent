@@ -14,7 +14,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { SidebarModeTabs, SidebarModeTab, UserMenu } from './fox-sidebar-controls'
 import { FoxEmptyState } from '@/components/fox-ui/empty-state'
-import { AnimatedIconTrigger, Bell, Blocks, BookCopy, CatPaw, MessageCirclePlus, Search, Settings, Sparkles, SquareKanban, SunMoon, Users } from '@/components/fox-ui/animated-icons'
+import { AnimatedIconTrigger, Blocks, BookCopy, CatPaw, MessageCirclePlus, Search, Settings, Sparkles, SquareKanban, SunMoon, Users } from '@/components/fox-ui/animated-icons'
 import { SidebarMotion, SidebarMotionItem } from './fox-sidebar-motion'
 import './fox-sidebar.css'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -29,6 +29,7 @@ import { type NavigateWorkspace, type WorkspaceView } from '@/features/workspace
 import { AlertTriangle, Archive, ArrowLeft, Blocks as BlocksIcon, BookOpen, Bot, Boxes, Brain, Cable, ChevronDown, ChevronRight, ClipboardList, Database, FileEdit, Folder, FolderOpen, Globe2, House, LibraryBig, LoaderCircle, MessageCircleMore, MoreHorizontal, Pin, PinOff, Plus, RotateCcw, ShieldCheck, SlidersHorizontal, Trash2, UserRound, WandSparkles, Wrench, X } from 'lucide-react'
 import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { type AssistantMode, IconButton, globalSearchKindLabel } from '../fox-shared'
+import { isCompanionWorkspaceView } from '@/features/workspace/types'
 import { NotificationCenter } from './fox-notification-center'
 import { LOCAL_KNOWLEDGE_WORKSPACE_VIEWS } from '../workbench'
 import { userFacingCause } from '@/features/chat/send-failure-notice'
@@ -86,6 +87,10 @@ export function Sidebar({
   activeView,
   activeEntityId,
   activeDocumentId,
+  notificationHost,
+  enabledTaskCount,
+  notificationsOpen = false,
+  onCloseNotifications,
 }: {
   collapsed: boolean
   assistantMode: AssistantMode
@@ -126,6 +131,10 @@ export function Sidebar({
   activeView: WorkspaceView
   activeEntityId?: string | null
   activeDocumentId?: string | null
+  enabledTaskCount?: number
+  notificationHost?: HTMLElement | null
+  notificationsOpen?: boolean
+  onCloseNotifications?: () => void
 }) {
   const { preferences: shortcutPreferences } = useShortcutPreferences()
   const contactsContext = useContacts()
@@ -148,7 +157,7 @@ export function Sidebar({
   const [lifecycleView, setLifecycleView] = useState<'active' | 'archived' | 'trash'>('active')
   const [profileMenuOpen, setProfileMenuOpen] = useState(false)
   const [profileDialogOpen, setProfileDialogOpen] = useState(false)
-  const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [collapsedBellHost, setCollapsedBellHost] = useState<HTMLSpanElement | null>(null)
   const searchInputRef = useRef<HTMLInputElement | null>(null)
   // Element that had focus when the global search opened; restored on close so
   // keyboard users keep their place (Radix's default resolves to <body> here
@@ -222,8 +231,10 @@ export function Sidebar({
     : [...conversationItems]).sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || (b.lastMessageAt || b.createdAt) - (a.lastMessageAt || a.createdAt)), [conversationItems, lifecycleView])
   const toggleSearch = () => changeSearchOpen(!searchOpen)
   const changeNotificationsOpen = (open: boolean) => {
-    setNotificationsOpen(open)
-    if (open) changeSearchOpen(false)
+    if (open) {
+      changeSearchOpen(false)
+      onNavigate('notifications')
+    } else onCloseNotifications?.()
   }
   const groupedSearchResults = Array.from((searchResults ?? []).reduce((groups, item) => {
     const group = groups.get(item.kind) ?? []
@@ -253,29 +264,27 @@ export function Sidebar({
   const knowledgeDetailViews: WorkspaceView[] = ['knowledge-detail', 'knowledge-graph']
   const selectedMode: AssistantMode = LOCAL_KNOWLEDGE_WORKSPACE_VIEWS.includes(activeView) || knowledgeViews.includes(activeView)
     ? 'knowledge'
-    : activeView === 'companions' ? 'companions' : 'work'
+    : isCompanionWorkspaceView(activeView) ? 'companions' : 'work'
   const sidebarMode = SETTINGS_WORKSPACE_VIEWS.includes(activeView)
     ? 'settings'
     : LOCAL_KNOWLEDGE_WORKSPACE_VIEWS.includes(activeView) || knowledgeViews.includes(activeView)
       ? 'local-knowledge'
-    : activeView === 'companions'
+    : isCompanionWorkspaceView(activeView)
       ? 'companions'
-    : activeView === 'agent-detail'
+    : activeView === 'agent-detail' && (activeDocumentId ?? 'home') !== 'home'
       ? 'agent'
     : knowledgeDetailViews.includes(activeView)
       ? 'knowledge'
       : 'chat'
   const showSidebarUtilities = sidebarMode === 'chat' || sidebarMode === 'companions' || sidebarMode === 'local-knowledge'
   const goBack = () => {
-    if (sidebarMode === 'agent') onNavigate('agents')
+    if (activeView === 'settings-plugin-detail') onNavigate('settings-extensions', activeDocumentId ?? undefined)
+    else if (sidebarMode === 'agent') onNavigate('agent-detail', activeEntityId ?? undefined, { documentId: 'home' })
     else if (sidebarMode === 'knowledge') {
       const route = remoteKnowledgeBackRoute(activeView, activeEntityId)
       onNavigate(route.view, route.entityId)
     } else onExitManagement()
   }
-  useEffect(() => {
-    if (!showSidebarUtilities) setNotificationsOpen(false)
-  }, [showSidebarUtilities])
   const agentSection = activeDocumentId ?? 'home'
   const agentContextItems = [
     { section: 'home', label: '专家介绍', icon: House },
@@ -467,7 +476,7 @@ export function Sidebar({
     setAllProjectsOpen])
 
   return (
-    <SidebarMotion className={`fox-sidebar ${collapsed ? 'is-collapsed' : ''} ${!['chat', 'companions', 'local-knowledge'].includes(sidebarMode) ? 'is-management' : ''} ${notificationsOpen ? 'is-notifications' : ''}`}>
+    <SidebarMotion className={`fox-sidebar ${collapsed ? 'is-collapsed' : ''} ${!['chat', 'companions', 'local-knowledge'].includes(sidebarMode) ? 'is-management' : ''}`}>
       {/* Chat and 资料库 have nothing left in this strip once collapsed, and
           keeping a row-height block there would push the rail's first icon down
           away from the title bar. */}
@@ -480,7 +489,7 @@ export function Sidebar({
         <AnimatedIconTrigger><button type="button" className={`fox-sidebar-mode-switch ${selectedMode === 'companions' ? 'is-active' : ''}`} aria-label="伙伴" title="伙伴" onClick={() => onModeChange('companions')}><CatPaw /></button></AnimatedIconTrigger>
         <AnimatedIconTrigger><button type="button" className={`fox-sidebar-mode-switch ${selectedMode === 'knowledge' ? 'is-active' : ''}`} aria-label="资料" title="资料" onClick={() => onModeChange('knowledge')}><BookCopy /></button></AnimatedIconTrigger>
         <AnimatedIconTrigger><button type="button" className="fox-sidebar-search-trigger" onClick={toggleSearch} aria-label="搜索" title={searchTitle}><Search size={16} /></button></AnimatedIconTrigger>
-        <AnimatedIconTrigger><button type="button" className={`fox-sidebar-search-trigger ${notificationsOpen ? 'is-active' : ''}`} onClick={() => changeNotificationsOpen(!notificationsOpen)} aria-label="通知" title="通知" aria-pressed={notificationsOpen}><Bell size={16} /></button></AnimatedIconTrigger>
+        <span className="fox-sidebar-bell-slot" ref={setCollapsedBellHost} />
       </div>}
 
       {/* In management views the compact strip keeps only the way back: a
@@ -507,18 +516,18 @@ export function Sidebar({
       {sidebarMode === 'chat' && <div className="fox-sidebar-primary">
         <SidebarMotionItem><button className="fox-sidebar-command" type="button" aria-label="新建对话" aria-current={newChatActive ? 'page' : undefined} onClick={onNewChat}><MessageCirclePlus size={18} /><span>新建对话</span>{newConversationShortcut && <kbd>{newConversationShortcut}</kbd>}</button></SidebarMotionItem>
         <SidebarMotionItem><button className={`fox-sidebar-command starts-destination-group ${agentViews.includes(activeView) ? 'is-active' : ''}`} type="button" aria-label="专家" aria-current={agentViews.includes(activeView) ? 'page' : undefined} onClick={() => onNavigate('agents')}><Users size={18} /><span>专家</span></button></SidebarMotionItem>
-        <SidebarMotionItem><button className={`fox-sidebar-command ${activeView === 'plugins' ? 'is-active' : ''}`} type="button" aria-label="插件" aria-current={activeView === 'plugins' ? 'page' : undefined} onClick={() => onNavigate('plugins')}><Blocks size={18} /><span>插件</span></button></SidebarMotionItem>
+        <SidebarMotionItem><button className={`fox-sidebar-command ${activeView === 'plugins' || activeView === 'plugin-detail' ? 'is-active' : ''}`} type="button" aria-label="插件" aria-current={activeView === 'plugins' || activeView === 'plugin-detail' ? 'page' : undefined} onClick={() => onNavigate('plugins')}><Blocks size={18} /><span>插件</span></button></SidebarMotionItem>
       </div>}
 
-      {!notificationsOpen && collapsed && sidebarMode === 'chat' && <WorkCompanionSidebar activeId={activeConversationId} collapsed onOpenCompanions={companionId => companionId ? onNavigate('companions', companionId) : onModeChange('companions')} />}
-      {!notificationsOpen && collapsed && sidebarMode === 'companions' && <CompanionSidebar activeId={activeConversationId} collapsed />}
-      {!notificationsOpen && collapsed && sidebarMode === 'chat' && <SidebarCollapsedMenus projects={projectGroups} conversations={visibleConversations} indicators={runIndicators} onOpen={onOpenConversation} />}
+      {collapsed && sidebarMode === 'chat' && <WorkCompanionSidebar activeId={activeConversationId} collapsed onOpenCompanions={companionId => companionId ? onNavigate('companions', companionId) : onModeChange('companions')} />}
+      {collapsed && sidebarMode === 'companions' && <CompanionSidebar activeId={activeView === 'companions' ? activeConversationId : undefined} collapsed view={activeView} navigate={onNavigate} enabledTaskCount={enabledTaskCount} />}
+      {collapsed && sidebarMode === 'chat' && <SidebarCollapsedMenus projects={projectGroups} conversations={visibleConversations} indicators={runIndicators} onOpen={onOpenConversation} />}
 
-      {sidebarMode === 'chat' || sidebarMode === 'companions' ? <>{!notificationsOpen && (
+      {sidebarMode === 'chat' || sidebarMode === 'companions' ? (
         <div className={`fox-sidebar-list-pane ${sidebarMode === 'companions' ? 'is-companions' : ''}`} hidden={collapsed}>
-        {sidebarMode === 'companions' ? <CompanionSidebar activeId={activeConversationId} scroll /> : conversationList}
+        {sidebarMode === 'companions' ? <CompanionSidebar activeId={activeView === 'companions' ? activeConversationId : undefined} scroll view={activeView} navigate={onNavigate} enabledTaskCount={enabledTaskCount} /> : conversationList}
         </div>
-      )}</> : sidebarMode === 'local-knowledge' ? <LocalKnowledgeSidebarNavigation collapsed={collapsed} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} navigate={onNavigate} hideLibrary={notificationsOpen} onCreate={() => { if (onCreateLocalKnowledge) onCreateLocalKnowledge(); else onNavigate('local-knowledge') }} /> : !notificationsOpen ? <>
+      ) : sidebarMode === 'local-knowledge' ? <LocalKnowledgeSidebarNavigation collapsed={collapsed} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} navigate={onNavigate} onCreate={() => { if (onCreateLocalKnowledge) onCreateLocalKnowledge(); else onNavigate('local-knowledge') }} /> : <>
         <div className={`fox-sidebar-primary fox-context-sidebar-nav ${sidebarMode === 'settings' ? 'is-settings' : ''}`} data-sidebar-motion-group={sidebarMode === 'settings' || undefined}>
           {sidebarMode === 'agent'
             ? agentContextItems.map(({ section, label, icon: Icon }) => <SidebarMotionItem key={section}><button className={`fox-sidebar-command ${agentSection === section ? 'is-active' : ''}`} type="button" aria-label={label} aria-current={agentSection === section ? 'page' : undefined} onClick={() => onNavigate('agent-detail', activeEntityId ?? undefined, { documentId: section })}><Icon size={16} /><span>{label}</span></button></SidebarMotionItem>)
@@ -533,13 +542,15 @@ export function Sidebar({
             navigate={onNavigate}
           /></Suspense>
         )}
-      </> : null}
+      </>}
 
       <NotificationCenter
         onNavigate={onNavigate}
         open={notificationsOpen}
         onOpenChange={changeNotificationsOpen}
-        showTrigger={showSidebarUtilities && !collapsed}
+        showTrigger={showSidebarUtilities && (!collapsed || !!collapsedBellHost)}
+        triggerHost={collapsed ? collapsedBellHost : null}
+        panelHost={notificationHost}
         activeView={activeView}
         activeEntityId={activeEntityId}
         activeConversationId={activeConversationId}

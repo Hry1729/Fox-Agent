@@ -201,3 +201,17 @@ export function transcriptFromSession(session, fallbackMessages) {
     ? restored
     : fallback
 }
+
+export function previousTurnComputedData(session, transcript) {
+  const manager = session.nativeManager
+  let entry = manager?.getLeafEntry()
+  let index = transcript.length
+  while (manager ? entry : index > 0) {
+    const message = manager ? entry.message : transcript[--index]
+    if (message?.role === 'user' || entry?.type === 'compaction') break
+    if (message?.role === 'toolResult' && !message.isError
+      && ['attachment_compute', 'compute_job_result'].includes(message.toolName)) return true
+    if (manager) entry = entry.parentId ? manager.getEntry(entry.parentId) : undefined
+  }
+  return false
+}

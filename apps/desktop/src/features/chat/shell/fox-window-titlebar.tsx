@@ -1,6 +1,6 @@
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuPortal, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent, DropdownMenuSeparator, DropdownMenuShortcut, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { ClipboardPaste, Copy, FolderOpen, Minus, Redo2, Sparkles, Undo2, X, ZoomIn, ZoomOut } from 'lucide-react'
+import { ClipboardPaste, Copy, FolderOpen, Minus, Redo2, RotateCcw, Sparkles, Undo2, X, ZoomIn, ZoomOut } from 'lucide-react'
 import { AlignLeft, AnimatedIconTrigger, ArrowLeft, ArrowRight, Maximize, MessageCirclePlus, Minimize, PanelLeft, Settings } from '@/components/fox-ui/animated-icons'
 import { memo, useEffect, useState, type ReactNode } from 'react'
 import { detectShortcutPlatform, formatShortcut, type ShortcutActionId } from '@/features/settings/shortcut-model'
@@ -10,13 +10,14 @@ import { publishTitlebarHeight, WINDOW_CHROME_ATTR } from '@/components/ui/windo
 /** Keep in sync with `.fox-window-titlebar { height }` and the shell grid row. */
 export const WINDOW_TITLEBAR_HEIGHT_PX = 30
 
-function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSettings, onAbout, onToggleSidebar, onZoom, canGoBack = false, canGoForward = false, onGoBack, onGoForward }: {
+function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSettings, onAbout, onToggleSidebar, onResetSidebarWidth, onZoom, canGoBack = false, canGoForward = false, onGoBack, onGoForward }: {
   leftSidebarCollapsed: boolean
   onNewChat: () => void
   onOpenProject: () => void
   onSettings: () => void
   onAbout: () => void
   onToggleSidebar: () => void
+  onResetSidebarWidth?: () => void
   onZoom: (delta: number) => void
   canGoBack?: boolean
   canGoForward?: boolean
@@ -79,16 +80,16 @@ function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSett
       <div className="fox-window-product" data-tauri-drag-region>
         <img src="/app-icon.png" alt="" />
         <div className="fox-titlebar-sidebar-controls" aria-label="标题栏控制">
-          <AppMenu onNewChat={onNewChat} onOpenProject={onOpenProject} onSettings={onSettings} onAbout={onAbout} leftSidebarCollapsed={leftSidebarCollapsed} onToggleSidebar={onToggleSidebar} onZoom={onZoom} onClose={() => void windowAction('close')} shortcutHint={shortcutHint} />
-          <AnimatedIconTrigger><button type="button" aria-label={leftSidebarCollapsed ? '展开左侧边栏' : '收起左侧边栏'} title={leftSidebarCollapsed ? '展开左侧边栏' : '收起左侧边栏'} aria-pressed={!leftSidebarCollapsed} onClick={onToggleSidebar}><PanelLeft /></button></AnimatedIconTrigger>
-          <AnimatedIconTrigger animateOnHover={canGoBack} animateOnTap={canGoBack}><button type="button" aria-label="后退" title="后退" disabled={!canGoBack} onClick={onGoBack}><ArrowLeft /></button></AnimatedIconTrigger>
-          <AnimatedIconTrigger animateOnHover={canGoForward} animateOnTap={canGoForward}><button type="button" aria-label="前进" title="前进" disabled={!canGoForward} onClick={onGoForward}><ArrowRight /></button></AnimatedIconTrigger>
+          <AppMenu onNewChat={onNewChat} onOpenProject={onOpenProject} onSettings={onSettings} onAbout={onAbout} leftSidebarCollapsed={leftSidebarCollapsed} onToggleSidebar={onToggleSidebar} onResetSidebarWidth={onResetSidebarWidth} onZoom={onZoom} onClose={() => void windowAction('close')} shortcutHint={shortcutHint} />
+          <AnimatedIconTrigger animateOnHover={false}><button type="button" aria-label={leftSidebarCollapsed ? '展开左侧边栏' : '收起左侧边栏'} title={leftSidebarCollapsed ? '展开左侧边栏' : '收起左侧边栏'} aria-pressed={!leftSidebarCollapsed} onClick={onToggleSidebar}><PanelLeft /></button></AnimatedIconTrigger>
+          <AnimatedIconTrigger animateOnHover={false} animateOnTap={canGoBack}><button type="button" aria-label="后退" title="后退" disabled={!canGoBack} onClick={onGoBack}><ArrowLeft /></button></AnimatedIconTrigger>
+          <AnimatedIconTrigger animateOnHover={false} animateOnTap={canGoForward}><button type="button" aria-label="前进" title="前进" disabled={!canGoForward} onClick={onGoForward}><ArrowRight /></button></AnimatedIconTrigger>
         </div>
       </div>
       <div className="fox-window-controls">
         <button type="button" aria-label="最小化" onClick={() => void windowAction('minimize')}><Minus /></button>
-        <AnimatedIconTrigger><button type="button" aria-label={maximized ? '还原窗口' : '最大化'} title={maximized ? '还原窗口' : '最大化'} onClick={() => void windowAction('maximize')}>{maximized ? <Minimize /> : <Maximize />}</button></AnimatedIconTrigger>
-        <button type="button" className="is-close" aria-label="关闭" onClick={() => void windowAction('close')}><X /></button>
+        <AnimatedIconTrigger animateOnHover={false}><button type="button" aria-label={maximized ? '还原窗口' : '最大化'} title={maximized ? '还原窗口' : '最大化'} onClick={() => void windowAction('maximize')}>{maximized ? <Minimize /> : <Maximize />}</button></AnimatedIconTrigger>
+        <button type="button" aria-label="关闭" onClick={() => void windowAction('close')}><X /></button>
       </div>
     </header>
   )
@@ -96,20 +97,21 @@ function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSett
 
 export const MemoizedWindowTitlebar = memo(WindowTitlebar)
 
-function AppMenu({ leftSidebarCollapsed, onNewChat, onOpenProject, onSettings, onAbout, onToggleSidebar, onZoom, onClose, shortcutHint }: {
+function AppMenu({ leftSidebarCollapsed, onNewChat, onOpenProject, onSettings, onAbout, onToggleSidebar, onResetSidebarWidth, onZoom, onClose, shortcutHint }: {
   leftSidebarCollapsed: boolean
   onNewChat: () => void
   onOpenProject: () => void
   onSettings: () => void
   onAbout: () => void
   onToggleSidebar: () => void
+  onResetSidebarWidth?: () => void
   onZoom: (delta: number) => void
   onClose: () => void
   shortcutHint: (actionId: ShortcutActionId) => ReactNode
 }) {
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild><AnimatedIconTrigger><button type="button" className="fox-titlebar-menu-trigger" aria-label="应用菜单" title="应用菜单"><AlignLeft /></button></AnimatedIconTrigger></DropdownMenuTrigger>
+      <AnimatedIconTrigger animateOnHover={false}><DropdownMenuTrigger asChild><button type="button" className="fox-titlebar-menu-trigger" aria-label="应用菜单" title="应用菜单"><AlignLeft /></button></DropdownMenuTrigger></AnimatedIconTrigger>
       <DropdownMenuContent align="start" sideOffset={5} className="fox-window-menu-content fox-app-menu">
         <DropdownMenuSub><DropdownMenuSubTrigger>文件</DropdownMenuSubTrigger><DropdownMenuPortal><DropdownMenuSubContent className="fox-window-menu-content" collisionPadding={8}>
         <DropdownMenuItem onSelect={onNewChat}><MessageCirclePlus />新建对话{shortcutHint('new-conversation')}</DropdownMenuItem>
@@ -125,6 +127,7 @@ function AppMenu({ leftSidebarCollapsed, onNewChat, onOpenProject, onSettings, o
         </DropdownMenuSubContent></DropdownMenuPortal></DropdownMenuSub>
         <DropdownMenuSub><DropdownMenuSubTrigger>视图</DropdownMenuSubTrigger><DropdownMenuPortal><DropdownMenuSubContent className="fox-window-menu-content" collisionPadding={8}>
         <DropdownMenuItem onSelect={onToggleSidebar}><PanelLeft />{leftSidebarCollapsed ? '显示侧栏' : '隐藏侧栏'}{shortcutHint('toggle-sidebar')}</DropdownMenuItem>
+        {onResetSidebarWidth && <DropdownMenuItem onSelect={onResetSidebarWidth}><RotateCcw />恢复左栏默认宽度</DropdownMenuItem>}
         <DropdownMenuItem onSelect={() => onZoom(0.1)}><ZoomIn />放大<DropdownMenuShortcut>Ctrl +</DropdownMenuShortcut></DropdownMenuItem>
         <DropdownMenuItem onSelect={() => onZoom(-0.1)}><ZoomOut />缩小<DropdownMenuShortcut>Ctrl -</DropdownMenuShortcut></DropdownMenuItem>
         </DropdownMenuSubContent></DropdownMenuPortal></DropdownMenuSub>

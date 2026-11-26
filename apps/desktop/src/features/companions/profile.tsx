@@ -102,12 +102,15 @@ export function ContactSettings() {
   if (!ctx) return null
   const act = async (f: () => Promise<unknown>) => { try { await f(); await ctx.refresh(); await refresh() } catch (e) { showContactError(e) } }
   const archived = ctx.list.companions.filter(c => c.archivedAt && !c.deletingAt)
-  return <section className="fox-contact-panel"><h3>已归档的联系人</h3>
-    {!archived.length && <p>暂无归档联系人。</p>}{archived.map(c => <div className="fox-contact-entry" key={c.id}>{c.displayName} <Button variant="outline" size="sm" onClick={() => void act(async () => { const restored = await contacts.restore(c.id); if (restored.displayName !== c.displayName) toast.info('恢复为 ' + restored.displayName) })}>恢复</Button></div>)}
-    {ctx.list.pendingDeletions.length > 0 && <section className="fox-contact-section"><h3>删除未完成</h3>{ctx.list.pendingDeletions.map(item => <p key={item.companionId}>{item.displayName} {item.error}<Button onClick={() => void act(() => contacts.resume(item.companionId))}>继续删除</Button></p>)}</section>}
-    <section className="fox-contact-section"><h3>删除后保留的工作目录</h3>{error && <button type="button" onClick={() => void refresh()}>{error} · 重试</button>}
-      {!error && !retained.length && <p>暂无保留目录。</p>}{retained.map(item => <div key={item.companionId}><p>{item.displayName} · {item.workspacePath}</p><div className="fox-contact-actions">
+  return <>
+    <SettingsRow title="已归档的联系人" align="start"><div>
+      {!archived.length && <span>暂无归档联系人</span>}{archived.map(c => <div className="fox-contact-entry" key={c.id}>{c.displayName} <Button variant="outline" size="sm" onClick={() => void act(async () => { const restored = await contacts.restore(c.id); if (restored.displayName !== c.displayName) toast.info('恢复为 ' + restored.displayName) })}>恢复</Button></div>)}
+    </div></SettingsRow>
+    {ctx.list.pendingDeletions.length > 0 && <SettingsRow title="删除未完成" align="start"><div>{ctx.list.pendingDeletions.map(item => <p key={item.companionId}>{item.displayName} {item.error}<Button onClick={() => void act(() => contacts.resume(item.companionId))}>继续删除</Button></p>)}</div></SettingsRow>}
+    <SettingsRow title="删除后保留的工作目录" align="start"><div className="min-w-0 break-all">{error && <button type="button" onClick={() => void refresh()}>{error} · 重试</button>}
+      {!error && !retained.length && <span>暂无保留目录</span>}{retained.map(item => <div key={item.companionId}><p>{item.displayName} · {item.workspacePath}</p><div className="fox-contact-actions">
         <Button size="sm" variant="outline" onClick={() => void act(() => direct('companion_retained_open', { companionId: item.companionId }))}>打开文件夹</Button>
-        <Button size="sm" variant="ghost" onClick={() => void act(() => direct('companion_retained_dismiss', { companionId: item.companionId }))}>从列表移除</Button></div></div>)}</section>
-  </section>
+        <Button size="sm" variant="ghost" onClick={() => void act(() => direct('companion_retained_dismiss', { companionId: item.companionId }))}>从列表移除</Button></div></div>)}
+    </div></SettingsRow>
+  </>
 }

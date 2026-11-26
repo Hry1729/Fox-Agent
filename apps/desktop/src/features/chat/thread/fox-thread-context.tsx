@@ -21,10 +21,6 @@ export interface FoxThreadContextValue {
   eventsByRun: Map<string, RunEventRecord[]>
   /** Committed contact bubbles by run id (C00/K1). */
   contactBubblesByRun?: Map<string, ContactBubbleRecord[]>
-  /** Live Kernel preview replies by run id, already carrying the durable
-   * `<runId>:kernel:<checkpoint>:response` identity (K1). The run's persisted
-   * assistant row renders them; the preview rows themselves stay empty. */
-  contactKernelPreviewsByRun?: Map<string, { id: string; text: string; createdAt: number }[]>
   /** C07: committed user bubbles of the loaded window (id == message id). */
   contactUserBubbleIds?: Set<string>
   /** C07: the user's favorites / reactions by durable bubble id. */

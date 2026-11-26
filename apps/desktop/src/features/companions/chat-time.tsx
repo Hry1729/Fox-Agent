@@ -38,10 +38,10 @@ export function ContactTimeGroups({ children }: { children: ReactNode }) {
       const source = message.metadata?.custom?.fox as FoxThreadMessage | undefined
       if (!source) return []
       const run = source.runId ?? source.id
-      return visibleContactReplies(source, fox.eventsByRun.get(run) ?? [], fox.contactBubblesByRun?.get(run), fox.contactKernelPreviewsByRun?.get(run))
+      return visibleContactReplies(source, fox.eventsByRun.get(run) ?? [], fox.contactBubblesByRun?.get(run))
     })
     return contactTimeGroups(rows)
-  }, [messages, fox.contactChat, fox.eventsByRun, fox.contactBubblesByRun, fox.contactKernelPreviewsByRun])
+  }, [messages, fox.contactChat, fox.eventsByRun, fox.contactBubblesByRun])
   return <ContactTimeContext.Provider value={groups}>{children}</ContactTimeContext.Provider>
 }
 

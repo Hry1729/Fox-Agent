@@ -32,8 +32,9 @@
 //!   the user's messages are already Fox messages;
 //! * the stop reason decides the terminal ([`terminal_for_stop_reason`]).
 
+use crate::port::AgentBackend;
 use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Fox tool name for an ACP `ToolKind`. Names are the ones the desktop
 /// activity view already recognises (`run-activity-presentation.ts`).
@@ -145,6 +146,7 @@ fn is_terminal_placeholder(text: &str) -> bool {
 /// run (a new turn starts a new projector).
 #[derive(Debug, Default)]
 pub struct AcpProjector {
+    backend: Option<AgentBackend>,
     message_started: bool,
     message_completed: bool,
     tools: BTreeMap<String, ToolState>,
@@ -153,6 +155,8 @@ pub struct AcpProjector {
     notices: Vec<Value>,
     delivered: bool,
     cancel_requested: bool,
+    codex_compactions: BTreeSet<String>,
+    completed_compactions: BTreeSet<String>,
 }
 
 /// Kind of a backend status line that is not part of the answer, or `None`.
@@ -331,6 +335,10 @@ impl AcpProjector {
         Self::default()
     }
 
+    pub fn for_backend(backend: AgentBackend) -> Self {
+        Self { backend: Some(backend), ..Self::default() }
+    }
+
     /// Whether the assistant message was started (for tests and the Host).
     pub fn message_started(&self) -> bool {
         self.message_started
@@ -365,11 +373,14 @@ impl AcpProjector {
             None => {
                 let _ = first_seen_as_call;
                 let kind = update.get("kind").and_then(Value::as_str);
+                let input = tool_input(update);
+                let fox_mcp = input["server"] == crate::backends::codex::HOST_MCP_SERVER_NAME
+                    && input["tool"].is_string();
                 out.push(json!({
                     "type": "tool.started",
                     "toolCallId": id,
-                    "tool": fox_tool_name(kind),
-                    "input": tool_input(update),
+                    "tool": if fox_mcp { "agent_tool" } else { fox_tool_name(kind) },
+                    "input": input,
                 }));
                 self.tools.insert(id.to_owned(), ToolState::Running);
                 let progress = self.progress.entry(id.to_owned()).or_default();
@@ -473,6 +484,9 @@ impl AcpProjector {
             out.push(json!({"type":"agent_backend.diagnostic","kind":"backend_status","update":update}));
             return out;
         }
+        if let Some(event) = self.compaction_completed(kind, update) {
+            out.push(event);
+        }
         match kind {
             "agent_message_chunk" => {
                 if let Some(text) = update.get("content").and_then(text_of_content) {
@@ -491,12 +505,61 @@ impl AcpProjector {
             "tool_call" => self.tool_at(update, true, now, &mut out),
             "tool_call_update" => self.tool_at(update, false, now, &mut out),
             "plan" => out.push(json!({ "type": "plan.updated", "entries": update.get("entries").cloned().unwrap_or(json!([])) })),
+            "session_info_update" if self.backend == Some(AgentBackend::Codex) => {
+                if let Some(goal) = update.pointer("/_meta/jetbrains/air/goal") {
+                    if goal.is_null() || (goal["objective"].is_string() && goal["status"].is_string()) {
+                        if !self.message_started {
+                            self.message_started = true;
+                            out.push(json!({"type": "message.started"}));
+                        }
+                        out.push(json!({"type": "agent_goal.updated", "goal": goal}));
+                    }
+                }
+            }
             // History replay of the user's own text: already a Fox message.
             "user_message_chunk" => {}
             "" => {}
             other => out.push(json!({ "type": "agent_backend.update", "kind": other, "update": update })),
         }
         out
+    }
+
+    fn compaction_completed(&mut self, kind: &str, update: &Value) -> Option<Value> {
+        let id = match kind {
+            "compaction_update" => update["compactionId"].as_str(),
+            "tool_call" | "tool_call_update" => update["toolCallId"].as_str(),
+            _ => None,
+        }.filter(|id| !id.is_empty())?;
+        // Codex's standard ACP renderer omits AIR metadata. Its native
+        // compaction reporter still opens a think call with this fixed title.
+        if self.backend == Some(AgentBackend::Codex) && kind == "tool_call"
+            && update["kind"] == "think" && update["title"] == "Compact conversation"
+            && update["status"] == "in_progress"
+        {
+            self.codex_compactions.insert(id.to_owned());
+        }
+        if update["status"] != "completed" {
+            return None;
+        }
+        let pi = update.pointer("/_meta/fox/piCompaction").filter(|value| value.is_object());
+        let source = if pi.is_some() {
+            "pi_native_rpc"
+        } else if kind == "compaction_update" || self.codex_compactions.remove(id)
+            || update.pointer("/_meta/jetbrains/air/contextCompaction/version").and_then(Value::as_u64) == Some(1)
+        {
+            "codex_acp"
+        } else {
+            return None;
+        };
+        if !self.completed_compactions.insert(id.to_owned()) {
+            return None;
+        }
+        let mut event = json!({"type":"context.compaction.completed","source":source,"compactionId":id});
+        if let Some(pi) = pi {
+            event["reason"] = pi["reason"].clone();
+            event["tokensBefore"] = pi["tokensBefore"].clone();
+        }
+        Some(event)
     }
 
     /// Move backend status lines out of `text` into diagnostics: an
@@ -732,6 +795,65 @@ pub fn auto_permission(mode: ExecutionMode, request: &Value, options: &[Permissi
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn codex_compaction_reports_are_counted_once_per_native_id() {
+        let mut projector = super::AcpProjector::new();
+        let started = serde_json::json!({
+            "sessionUpdate": "compaction_update", "compactionId": "native-one", "status": "in_progress"
+        });
+        assert!(!projector.project(&started).iter().any(|event| event["type"] == "context.compaction.completed"));
+        let mut completed = started;
+        completed["status"] = "completed".into();
+        assert_eq!(projector.project(&completed)[0], serde_json::json!({
+            "type": "context.compaction.completed", "source": "codex_acp", "compactionId": "native-one"
+        }));
+        let tool_report = |id: &str| serde_json::json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": id, "status": "completed",
+            "_meta": {"jetbrains":{"air":{"contextCompaction":{"version":1}}}}
+        });
+        assert!(!projector.project(&tool_report("native-one")).iter()
+            .any(|event| event["type"] == "context.compaction.completed"));
+        assert_eq!(projector.project(&tool_report("native-two"))[0]["compactionId"], "native-two");
+    }
+
+    #[test]
+    fn codex_standard_compaction_requires_a_matching_native_call() {
+        let start = serde_json::json!({
+            "sessionUpdate": "tool_call", "toolCallId": "native", "status": "in_progress",
+            "kind": "think", "title": "Compact conversation"
+        });
+        let complete = |id| serde_json::json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": id, "status": "completed"
+        });
+        let emitted = |events: &[Value]| events.iter().any(|event| event["type"] == "context.compaction.completed");
+        let mut codex = AcpProjector::for_backend(AgentBackend::Codex);
+        assert!(!emitted(&codex.project(&start)));
+        assert!(!emitted(&codex.project(&complete("other"))));
+        assert!(emitted(&codex.project(&complete("native"))));
+        assert!(!emitted(&codex.project(&complete("native"))));
+        let mut deepseek = AcpProjector::for_backend(AgentBackend::Deepseek);
+        deepseek.project(&start);
+        assert!(!emitted(&deepseek.project(&complete("native"))));
+    }
+
+    #[test]
+    fn pi_rpc_completed_compaction_projects_context_event() {
+        let mut projector = super::AcpProjector::new();
+        let events = projector.project(&serde_json::json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "pi-one",
+            "status": "completed",
+            "_meta": {"fox":{"piCompaction":{"reason":"threshold","tokensBefore":23456}}}
+        }));
+        assert_eq!(events[0], serde_json::json!({
+            "type": "context.compaction.completed",
+            "source": "pi_native_rpc",
+            "compactionId": "pi-one",
+            "reason": "threshold",
+            "tokensBefore": 23456
+        }));
+    }
+
     use super::*;
 
     fn chunk(kind: &str, text: &str) -> Value {
@@ -791,6 +913,20 @@ mod tests {
     }
 
     #[test]
+    fn codex_native_goal_updates_open_a_read_only_progress_message() {
+        let mut projector = AcpProjector::for_backend(AgentBackend::Codex);
+        let update = |goal: Value| json!({
+            "sessionUpdate": "session_info_update", "_meta": {"jetbrains": {"air": {"goal": goal}}}
+        });
+        let goal = json!({"objective": "Check the index", "status": "active"});
+        assert_eq!(projector.project(&update(goal.clone())), [
+            json!({"type": "message.started"}), json!({"type": "agent_goal.updated", "goal": goal}),
+        ]);
+        assert_eq!(projector.project(&update(Value::Null)), [json!({"type": "agent_goal.updated", "goal": null})]);
+        assert_eq!(types(&projector.finish()), ["message.completed"]);
+    }
+
+    #[test]
     fn tool_cards_start_once_update_and_end_with_error_flag() {
         let mut projector = AcpProjector::new();
         let call = json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Read a.txt", "kind": "read",
@@ -811,6 +947,22 @@ mod tests {
         assert!(projector.running_tools().is_empty());
         let late = projector.project(&json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed" }));
         assert_eq!(types(&late), ["agent_backend.update"], "nothing reopens an ended card");
+    }
+
+    #[test]
+    fn codex_fox_mcp_call_is_not_projected_as_bash() {
+        let mut projector = AcpProjector::new();
+        let call = json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "mcp-1",
+            "title": "mcp.fox_host_business_tools.search_knowledge",
+            "kind": "execute",
+            "status": "in_progress",
+            "rawInput": {"server": crate::backends::codex::HOST_MCP_SERVER_NAME, "tool": "search_knowledge", "arguments": {}}
+        });
+        let events = projector.project(&call);
+        assert_eq!(events[0]["tool"], "agent_tool");
+        assert_eq!(events[0]["input"]["tool"], "search_knowledge");
     }
 
     fn output_update(id: &str, key: &str, data: &str) -> Value {

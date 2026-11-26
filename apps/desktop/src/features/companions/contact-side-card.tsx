@@ -52,11 +52,12 @@ const PERMISSION_OPTIONS: Array<[ProjectRecord['permissionMode'], string, Lucide
  * memory, capabilities, favorites, notes, files, workspace, and a settings subview
  * for the profile editing / template / grants / pin-archive-delete the old profile
  * page owned — so redesigning the page never removed a feature. */
-export function ContactSideCard({ contact, detail, onClose, onResetContext, search }: {
+export function ContactSideCard({ contact, detail, onClose, onResetContext, search, hidden }: {
   contact: Companion
   detail: ConversationDetail | null
   onClose: () => void
   onResetContext: () => void
+  hidden?: boolean
   /** Shared search instance: 「在对话中查找」 opens the topbar search panel. */
   search?: ContactChatSearch
 }) {
@@ -123,7 +124,7 @@ export function ContactSideCard({ contact, detail, onClose, onResetContext, sear
   const heading = view === 'capabilities' ? '可用能力' : view === 'favorites' ? '收藏' : view === 'notes' ? '笔记' : view === 'settings' ? '联系人设置' : view === 'tasks' ? '定时任务' : '联系人资料'
   const resetBlocked = Boolean(detail?.contextResetBlockedReason || contact.activeRunStatus)
   const permission = ctx?.permission ?? 'ask'
-  return <aside className="fox-contact-side-card" role="complementary" aria-label={`${contact.displayName} 资料卡`}>
+  return <aside className="fox-contact-side-card" role="complementary" aria-label={`${contact.displayName} 资料卡`} hidden={hidden}>
     <header className={`fox-contact-side-card-head${view === 'main' ? ' is-main' : ''}`}>
       {view !== 'main' && <button type="button" className="fox-contact-side-card-control" aria-label="返回详情" title="返回详情" onClick={() => setView('main')}><ArrowLeft size={16} /></button>}
       <h2>{heading}</h2>

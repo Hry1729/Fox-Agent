@@ -42,7 +42,15 @@ impl Database {
             let event: Value = serde_json::from_str(&body).map_err(|_| invalid("invalid context usage event"))?;
             if kind == "context.usage" {
                 return Ok(event["usedTokens"].as_u64().zip(event["limitTokens"].as_u64().filter(|limit| *limit > 0))
-                    .map(|(used, limit)| json!({"usedTokens": used, "limitTokens": limit, "source": "session"})));
+                    .map(|(used, limit)| {
+                        let mut window = json!({"usedTokens": used, "limitTokens": limit, "source": "session"});
+                        for key in ["systemTokens", "toolsTokens"] {
+                            if let Some(tokens) = event[key].as_u64() {
+                                window[key] = json!(tokens);
+                            }
+                        }
+                        window
+                    }));
             }
             let limit: Option<u64> = connection.query_row(
                 "SELECT json_extract(event_json, '$.contextWindow') FROM run_events

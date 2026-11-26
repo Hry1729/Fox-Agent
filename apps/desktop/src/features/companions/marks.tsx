@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { Bell, BriefcaseBusiness, Check, FileText, FolderOpen, Sparkles, UserPlus, Users, CornerDownLeft, MoreHorizontal, Quote, Reply, SmilePlus, Star, X } from 'lucide-react'
 import { useAuiState } from '@assistant-ui/react'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { copyMessageResponse } from '@/components/assistant-ui/elements/message-actions'
 import { FoxCopyMessageButton, FoxMarkUnreadButton } from '@/features/chat/thread/fox-message-actions'
-import { StreamingText } from '@/features/chat/components/StreamingText'
-import type { CompanionGuide, ContactBubbleMarkRecord, ContactMessageQuoteRecord } from '@/features/conversations/model/types'
+import type { ContactBubbleMarkRecord, ContactMessageQuoteRecord } from '@/features/conversations/model/types'
+import type { ContactReply } from './chat-message-model'
 import { contacts, REACTIONS, type Companion, type FavoriteEntry } from './api'
 import { ContactAvatar } from './chat-controls'
 import { ContactAnswerChoice, ContactDecision } from './chat-decision'
@@ -89,22 +89,14 @@ function ReactionChip({ reaction, busy, onClear }: { reaction: string; busy: boo
     aria-label={`已回应 ${reaction}，点击取消`} title="点击取消这个表情" onClick={onClear}>{reaction}</button>
 }
 
-export interface ContactReply {
-  id: string
-  text: string
-  createdAt: number
-  /** Present only for a committed bubble; a live draft has none. */
-  deliveryOrder?: number
-  guide?: CompanionGuide
-}
+const ContactReplyText = lazy(() => import('./contact-reply-text'))
 
-/** One contact reply: bubble, the user's marks and the hover action row. A live
- * draft or replaceable preview offers copy only — nothing permanent attaches to
- * an identity that is not in `contact_bubbles` yet. */
-export function ContactReplyBubble({ contact, reply, initialMark }: {
+/** Permanent marks require a committed contact bubble. */
+export function ContactReplyBubble({ contact, reply, initialMark, hasReport = false }: {
   contact?: Companion
   reply: ContactReply
   initialMark?: ContactBubbleMarkRecord
+  hasReport?: boolean
 }) {
   const ctx = useContacts()
   const durable = reply.deliveryOrder != null && Boolean(contact)
@@ -124,12 +116,18 @@ export function ContactReplyBubble({ contact, reply, initialMark }: {
     try { await ctx.sendPrompt(message) } finally { setGuideBusy(false) }
   }
   const favorite = () => contact && run(() => contacts.favorite(contact.id, reply.id, !mark?.favoritedAt))
-  const react = (reaction: string) => contact && run(() => contacts.react(contact.id, reply.id, reaction))
+  const react = (reaction: string) => contact && run(async () => {
+    const updated = await contacts.react(contact.id, reply.id, reaction)
+    ctx?.onReplyReaction?.(contact.conversationId, reply.id, updated.reaction ?? null)
+    return updated
+  })
   return <section className={`fox-contact-message ${guide && (firstUserText === undefined || selectedIndex >= 0) ? 'has-guide' : ''}`} data-contact-message-id={reply.id}
     data-menu-open={openMenu ? 'true' : undefined}
     data-bubble-id={durable ? reply.id : undefined}
     data-delivery-order={durable ? reply.deliveryOrder : undefined}>
-    <div className="fox-contact-bubble"><StreamingText text={reply.text} streaming={false} className="fox-answer-response" /></div>
+    <div className="fox-contact-bubble-list">
+      <Suspense fallback={null}><ContactReplyText text={reply.text} hasReport={hasReport} /></Suspense>
+    </div>
     {guide && (firstUserText === undefined
       ? <div className="fox-companion-guide"><strong>{guide.title}</strong><div>{guide.options.map((option, index) => { const Icon = (contact?.isDefault ? [option.label.startsWith('伙伴们') ? Users : Sparkles, UserPlus, Bell, FolderOpen] : [FolderOpen, FileText, Bell, BriefcaseBusiness])[index % 4]; return <button type="button" key={option.label} disabled={guideBusy || !ctx?.sendPrompt} onClick={() => void sendGuide(option.message)}><Icon size={15} /><span>{option.label}</span></button> })}</div></div>
       : selectedIndex >= 0

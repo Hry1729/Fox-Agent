@@ -1,0 +1,43 @@
+.fox-detail-prompt-cards {
+  display: grid;
+  gap: var(--fox-space-l);
+  padding: clamp(14px, 3cqi, 28px);
+  border: 1px solid var(--fox-border);
+  border-radius: var(--fox-radius-large);
+  background:
+    radial-gradient(ellipse 68% 85% at 14% 18%, color-mix(in oklch, var(--chart-1) 44%, transparent), transparent 65%),
+    radial-gradient(ellipse 60% 80% at 88% 82%, color-mix(in oklch, var(--chart-3) 32%, transparent), transparent 68%),
+    color-mix(in oklch, var(--fox-accent-soft) 60%, var(--card));
+}
+
+.dark .fox-detail-prompt-cards {
+  background:
+    radial-gradient(ellipse 68% 85% at 14% 18%, color-mix(in oklch, var(--brand) 22%, transparent), transparent 65%),
+    radial-gradient(ellipse 60% 80% at 88% 82%, color-mix(in oklch, var(--chart-3) 18%, transparent), transparent 68%),
+    var(--fox-accent-surface);
+}
+
+.fox-detail-prompt-card {
+  width: min(100%, 540px);
+  justify-self: center;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--fox-space-l);
+  padding: var(--fox-space-l) var(--fox-space-xl);
+  text-align: start;
+  overflow-wrap: anywhere;
+  font-size: var(--fox-type-chrome);
+  border: 1px solid var(--fox-border);
+  border-radius: var(--fox-radius-card);
+  background: var(--fox-card);
+  box-shadow: var(--fox-shadow-sm);
+}
+
+.fox-detail-prompt-card:enabled:hover { border-color: var(--fox-border-strong); }
+.fox-detail-prompt-card:disabled { color: var(--fox-muted); }
+.fox-detail-prompt-mention { display: inline-flex; align-items: center; gap: var(--fox-space-xs); margin-inline-end: var(--fox-space-s); color: var(--brand); font-weight: 600; vertical-align: middle; }
+.fox-detail-prompt-mention :is(img, .fox-extension-mark) { width: 18px; height: 18px; border-radius: 50%; border: 0; background: transparent; }
+.fox-detail-prompt-mention .fox-extension-mark svg { width: 15px; height: 15px; }
+.fox-detail-prompt-arrow { width: var(--fox-control-sm); height: var(--fox-control-sm); flex: none; display: grid; place-items: center; border-radius: 50%; background: var(--fox-panel); color: var(--fox-muted); }
+.fox-detail-prompt-card:enabled:hover .fox-detail-prompt-arrow { background: var(--primary); color: var(--primary-foreground); }

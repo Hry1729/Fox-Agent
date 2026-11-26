@@ -252,6 +252,12 @@ mod tests {
     #[test]
     fn switching_imported_pi_to_fox_preserves_native_config_in_private_backup() {
         let (_dir, real, state, home, selected) = fixture();
+        let native_settings = real.home.join(onboarding::PI_SETTINGS);
+        let mut settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&native_settings).unwrap()).unwrap();
+        let preferences = serde_json::json!({"defaultTools": ["-bash", "+ls"], "theme": "dark"});
+        settings.as_object_mut().unwrap().extend(preferences.as_object().unwrap().clone());
+        std::fs::write(&native_settings, serde_json::to_vec(&settings).unwrap()).unwrap();
         Snapshot::capture(AgentBackend::Pi, &real, &selected).unwrap().remember(&state).unwrap();
         prepare(AgentBackend::Pi, &state, &home, Some(&real)).unwrap();
         assert_eq!(status(AgentBackend::Pi, &state, &home, Some(&real)).unwrap().current, "native");
@@ -262,8 +268,13 @@ mod tests {
         let backup = std::fs::read_dir(home.join(onboarding::BACKUP_DIR)).unwrap().next().unwrap().unwrap().path();
         for relative in [onboarding::PI_AUTH, onboarding::PI_MODELS, onboarding::PI_SETTINGS] {
             assert_eq!(std::fs::read(backup.join(relative)).unwrap(), std::fs::read(real.home.join(relative)).unwrap());
-            assert!(!home.join(relative).exists());
         }
+        assert!(!home.join(onboarding::PI_AUTH).exists());
+        assert!(!home.join(onboarding::PI_MODELS).exists());
+        let read_settings = || -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(home.join(onboarding::PI_SETTINGS)).unwrap()).unwrap()
+        };
+        assert_eq!(read_settings(), preferences);
         let login = crate::unified_login::UnifiedLogin {
             provider_name: "Fox fixture".into(), base_url: "https://example.com/v1".into(),
             api_type: "openai-completions".into(), model: "fox-model".into(),
@@ -275,6 +286,10 @@ mod tests {
         assert_eq!(native.provider.as_deref(), Some("fox"));
         assert_eq!(native.model.as_deref(), Some("fox-model"));
         assert_eq!(status(AgentBackend::Pi, &state, &home, Some(&real)).unwrap().current, "fox");
+        assert_eq!(read_settings()["defaultTools"], preferences["defaultTools"]);
+        assert_eq!(read_settings()["theme"], preferences["theme"]);
+        crate::unified_login::remove_managed(AgentBackend::Pi, &home).unwrap();
+        assert_eq!(read_settings(), preferences);
         onboarding::import_into(AgentBackend::Pi, &real, &selected,
             &[onboarding::ImportTarget { project: "project".into(), label: "project".into(), home: home.clone() }],
             onboarding::ImportOptions { overwrite: true, backup_stamp: "back-to-native" }).unwrap();
